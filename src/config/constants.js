@@ -26,6 +26,7 @@ module.exports = {
     PHARMACY: 'pharmacy',
     HARDWARE: 'hardware',
     COSMETICS: 'cosmetics',
+    BOOKSHOP: 'bookshop',
     OTHER: 'other'
   },
 

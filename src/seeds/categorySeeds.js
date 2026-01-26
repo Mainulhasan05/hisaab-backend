@@ -2,7 +2,7 @@
  * Category & Subcategory Seed Data
  * Auto-seeded per shop type during onboarding
  *
- * Shop types: cloth, grocery, electronics, pharmacy, hardware, cosmetics, other
+ * Shop types: cloth, grocery, electronics, pharmacy, hardware, cosmetics, bookshop, other
  * Each category has: name (English), nameBn (Bengali), icon, order, subcategories[]
  */
 
@@ -825,6 +825,109 @@ const CATEGORY_SEEDS = {
         { name: 'Hair Brush & Comb', nameBn: 'চিরুনি/ব্রাশ', order: 7 },
         { name: 'Eyelash Curler', nameBn: 'আইল্যাশ কার্লার', order: 8 },
         { name: 'Tweezers', nameBn: 'টুইজার', order: 9 },
+      ],
+    },
+  ],
+
+  // ==========================================
+  // বইয়ের দোকান (Book Shop)
+  // ==========================================
+  bookshop: [
+    {
+      name: 'Textbooks',
+      nameBn: 'পাঠ্যবই',
+      icon: 'book-open',
+      order: 1,
+      subcategories: [
+        { name: 'Primary', nameBn: 'প্রাথমিক', order: 1 },
+        { name: 'Secondary', nameBn: 'মাধ্যমিক', order: 2 },
+        { name: 'Higher Secondary', nameBn: 'উচ্চ মাধ্যমিক', order: 3 },
+        { name: 'University', nameBn: 'বিশ্ববিদ্যালয়', order: 4 },
+      ],
+    },
+    {
+      name: 'Notebooks & Copies',
+      nameBn: 'নোটবুক ও খাতা',
+      icon: 'notebook',
+      order: 2,
+      subcategories: [
+        { name: 'Exercise Copy', nameBn: 'এক্সারসাইজ খাতা', order: 1 },
+        { name: 'Drawing Copy', nameBn: 'ড্রয়িং খাতা', order: 2 },
+        { name: 'Lab Copy', nameBn: 'ল্যাব খাতা', order: 3 },
+        { name: 'Practical Copy', nameBn: 'প্র্যাকটিক্যাল খাতা', order: 4 },
+      ],
+    },
+    {
+      name: 'Stationery',
+      nameBn: 'স্টেশনারি',
+      icon: 'pen',
+      order: 3,
+      subcategories: [
+        { name: 'Pen', nameBn: 'কলম', order: 1 },
+        { name: 'Pencil', nameBn: 'পেন্সিল', order: 2 },
+        { name: 'Eraser', nameBn: 'রাবার', order: 3 },
+        { name: 'Sharpener', nameBn: 'শার্পনার', order: 4 },
+        { name: 'Scale', nameBn: 'স্কেল', order: 5 },
+      ],
+    },
+    {
+      name: 'Fiction/Novels',
+      nameBn: 'গল্প/উপন্যাস',
+      icon: 'book',
+      order: 4,
+      subcategories: [
+        { name: 'Bengali Literature', nameBn: 'বাংলা সাহিত্য', order: 1 },
+        { name: 'Translated', nameBn: 'অনুবাদ', order: 2 },
+        { name: 'Children\'s Literature', nameBn: 'শিশু সাহিত্য', order: 3 },
+        { name: 'Islamic Books', nameBn: 'ইসলামিক বই', order: 4 },
+      ],
+    },
+    {
+      name: 'Reference Books',
+      nameBn: 'রেফারেন্স বই',
+      icon: 'library',
+      order: 5,
+      subcategories: [
+        { name: 'Dictionary', nameBn: 'অভিধান', order: 1 },
+        { name: 'Encyclopedia', nameBn: 'এনসাইক্লোপিডিয়া', order: 2 },
+        { name: 'Guide Book', nameBn: 'গাইড বই', order: 3 },
+        { name: 'Question Bank', nameBn: 'প্রশ্নব্যাংক', order: 4 },
+      ],
+    },
+    {
+      name: 'Bags & Accessories',
+      nameBn: 'ব্যাগ ও এক্সেসরিজ',
+      icon: 'backpack',
+      order: 6,
+      subcategories: [
+        { name: 'School Bag', nameBn: 'স্কুল ব্যাগ', order: 1 },
+        { name: 'Tiffin Box', nameBn: 'টিফিন বক্স', order: 2 },
+        { name: 'Water Bottle', nameBn: 'পানির বোতল', order: 3 },
+        { name: 'Pencil Box', nameBn: 'পেন্সিল বক্স', order: 4 },
+      ],
+    },
+    {
+      name: 'Art & Craft',
+      nameBn: 'আর্ট ও ক্রাফট',
+      icon: 'palette',
+      order: 7,
+      subcategories: [
+        { name: 'Color', nameBn: 'রং', order: 1 },
+        { name: 'Brush', nameBn: 'তুলি', order: 2 },
+        { name: 'Craft Paper', nameBn: 'ক্রাফট পেপার', order: 3 },
+        { name: 'Glue', nameBn: 'গ্লু', order: 4 },
+      ],
+    },
+    {
+      name: 'Religious Books',
+      nameBn: 'ধর্মীয় বই',
+      icon: 'book-marked',
+      order: 8,
+      subcategories: [
+        { name: 'Quran', nameBn: 'কুরআন', order: 1 },
+        { name: 'Hadith', nameBn: 'হাদিস', order: 2 },
+        { name: 'Islamic Books', nameBn: 'ইসলামিক বই', order: 3 },
+        { name: 'Others', nameBn: 'অন্যান্য', order: 4 },
       ],
     },
   ],

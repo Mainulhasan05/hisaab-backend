@@ -261,6 +261,8 @@ class ProductService {
     await StockTransaction.create({
       shop: shopId,
       product: productId,
+      productName: product.name,
+      productCode: product.code,
       variantId: variantId || null,
       type: type === 'set' ? 'adjustment' : (quantity > 0 ? 'purchase' : 'adjustment'),
       quantity: type === 'set' ? newStock - previousStock : quantity,
