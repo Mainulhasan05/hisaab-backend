@@ -10,10 +10,12 @@ const smsRoutes = require('./sms.routes');
 const reportRoutes = require('./report.routes');
 const auditRoutes = require('./audit.routes');
 const adminRoutes = require('./admin.routes');
+const categoryRoutes = require('./category.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
 router.use('/products', productRoutes);
+router.use('/categories', categoryRoutes);
 router.use('/customers', customerRoutes);
 router.use('/sales', saleRoutes);
 router.use('/sms', smsRoutes);
@@ -31,6 +33,7 @@ router.get('/', (req, res) => {
     endpoints: {
       auth: '/api/auth',
       products: '/api/products',
+      categories: '/api/categories',
       customers: '/api/customers',
       sales: '/api/sales',
       sms: '/api/sms',
