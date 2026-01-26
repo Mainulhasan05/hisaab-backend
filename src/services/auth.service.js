@@ -7,6 +7,7 @@ const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS, USER_ROLES, TRIAL_PERIOD_DAYS } = require('../config/constants');
 const { getDefaultPermissions } = require('../config/permissions');
 const { normalizePhone } = require('../utils/phone.util');
+const { seedCategories } = require('../seeds/categorySeeder');
 
 class AuthService {
   /**
@@ -45,6 +46,13 @@ class AuthService {
         expiresAt: new Date(Date.now() + TRIAL_PERIOD_DAYS * 24 * 60 * 60 * 1000)
       }
     });
+
+    // Seed default categories for this shop type
+    try {
+      await seedCategories(shop._id, shopType || 'other');
+    } catch (error) {
+      console.error('Failed to seed categories:', error.message);
+    }
 
     // Create owner user
     const user = await User.create({
