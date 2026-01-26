@@ -183,6 +183,8 @@ class SaleService {
       await StockTransaction.create({
         shop: shopId,
         product: product._id,
+        productName: product.name,
+        productCode: product.code,
         variantId: item.variantId || null,
         type: 'sale',
         quantity: -item.quantity,

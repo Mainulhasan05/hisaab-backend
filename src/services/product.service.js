@@ -246,12 +246,24 @@ class ProductService {
         throw new AppError('ভেরিয়েন্ট পাওয়া যায়নি', 'Variant not found', 404);
       }
       previousStock = variant.stock;
-      variant.stock = type === 'set' ? quantity : variant.stock + quantity;
+      if (type === 'set') {
+        variant.stock = quantity;
+      } else if (type === 'subtract') {
+        variant.stock = variant.stock - quantity;
+      } else {
+        variant.stock = variant.stock + quantity;
+      }
       newStock = variant.stock;
     } else {
       // Update main product stock
       previousStock = product.stock;
-      product.stock = type === 'set' ? quantity : product.stock + quantity;
+      if (type === 'set') {
+        product.stock = quantity;
+      } else if (type === 'subtract') {
+        product.stock = product.stock - quantity;
+      } else {
+        product.stock = product.stock + quantity;
+      }
       newStock = product.stock;
     }
 
