@@ -1,0 +1,158 @@
+/**
+ * Application Constants
+ * Central place for all constant values used across the application
+ */
+
+module.exports = {
+  // User Roles
+  USER_ROLES: {
+    OWNER: 'owner',
+    MANAGER: 'manager',
+    STAFF: 'staff'
+  },
+
+  // Admin Roles
+  ADMIN_ROLES: {
+    SUPER_ADMIN: 'super_admin',
+    ADMIN: 'admin',
+    SUPPORT: 'support'
+  },
+
+  // Shop Types
+  SHOP_TYPES: {
+    CLOTH: 'cloth',
+    GROCERY: 'grocery',
+    ELECTRONICS: 'electronics',
+    PHARMACY: 'pharmacy',
+    HARDWARE: 'hardware',
+    COSMETICS: 'cosmetics',
+    OTHER: 'other'
+  },
+
+  // Subscription Plans
+  SUBSCRIPTION_PLANS: {
+    TRIAL: 'trial',
+    STANDARD: 'standard',
+    PREMIUM: 'premium'
+  },
+
+  // Subscription Status
+  SUBSCRIPTION_STATUS: {
+    ACTIVE: 'active',
+    EXPIRED: 'expired',
+    SUSPENDED: 'suspended'
+  },
+
+  // Payment Methods
+  PAYMENT_METHODS: {
+    CASH: 'cash',
+    BKASH: 'bkash',
+    NAGAD: 'nagad',
+    CARD: 'card',
+    BANK: 'bank'
+  },
+
+  // Sale Status
+  SALE_STATUS: {
+    COMPLETED: 'completed',
+    PARTIAL: 'partial',
+    UNPAID: 'unpaid',
+    CANCELLED: 'cancelled'
+  },
+
+  // Payment Types
+  PAYMENT_TYPES: {
+    SALE_PAYMENT: 'sale_payment',
+    DUE_COLLECTION: 'due_collection',
+    REFUND: 'refund'
+  },
+
+  // Stock Transaction Types
+  STOCK_TRANSACTION_TYPES: {
+    PURCHASE: 'purchase',
+    SALE: 'sale',
+    ADJUSTMENT: 'adjustment',
+    RETURN: 'return',
+    DAMAGE: 'damage'
+  },
+
+  // SMS Types
+  SMS_TYPES: {
+    SINGLE: 'single',
+    BULK: 'bulk',
+    DYNAMIC: 'dynamic'
+  },
+
+  // SMS Status
+  SMS_STATUS: {
+    PENDING: 'pending',
+    SENT: 'sent',
+    DELIVERED: 'delivered',
+    PARTIAL: 'partial',
+    FAILED: 'failed'
+  },
+
+  // Audit Actions (English and Bengali)
+  AUDIT_ACTIONS: {
+    // Auth
+    USER_REGISTER: { en: 'user_register', bn: 'নিবন্ধন' },
+    USER_LOGIN: { en: 'user_login', bn: 'লগইন' },
+    USER_LOGOUT: { en: 'user_logout', bn: 'লগআউট' },
+    PASSWORD_CHANGE: { en: 'password_change', bn: 'পাসওয়ার্ড পরিবর্তন' },
+
+    // Products
+    PRODUCT_CREATE: { en: 'product_create', bn: 'নতুন পণ্য যোগ' },
+    PRODUCT_UPDATE: { en: 'product_update', bn: 'পণ্য সম্পাদনা' },
+    PRODUCT_DELETE: { en: 'product_delete', bn: 'পণ্য মুছে ফেলা' },
+    STOCK_UPDATE: { en: 'stock_update', bn: 'স্টক আপডেট' },
+
+    // Sales
+    SALE_CREATE: { en: 'sale_create', bn: 'নতুন বিক্রয়' },
+    SALE_UPDATE: { en: 'sale_update', bn: 'বিক্রয় সম্পাদনা' },
+    SALE_CANCEL: { en: 'sale_cancel', bn: 'বিক্রয় বাতিল' },
+    PAYMENT_RECEIVED: { en: 'payment_received', bn: 'পেমেন্ট গ্রহণ' },
+
+    // Customers
+    CUSTOMER_CREATE: { en: 'customer_create', bn: 'নতুন কাস্টমার যোগ' },
+    CUSTOMER_UPDATE: { en: 'customer_update', bn: 'কাস্টমার তথ্য সম্পাদনা' },
+    CUSTOMER_DELETE: { en: 'customer_delete', bn: 'কাস্টমার মুছে ফেলা' },
+    DUE_COLLECTION: { en: 'due_collection', bn: 'বাকি আদায়' },
+
+    // Team
+    TEAM_MEMBER_ADD: { en: 'team_member_add', bn: 'টিম মেম্বার যোগ' },
+    TEAM_MEMBER_UPDATE: { en: 'team_member_update', bn: 'টিম মেম্বার সম্পাদনা' },
+    TEAM_MEMBER_REMOVE: { en: 'team_member_remove', bn: 'টিম মেম্বার সরানো' },
+
+    // SMS
+    SMS_SENT: { en: 'sms_sent', bn: 'এসএমএস পাঠানো' },
+
+    // Shop Settings
+    SHOP_UPDATE: { en: 'shop_update', bn: 'দোকান তথ্য সম্পাদনা' },
+    SETTINGS_UPDATE: { en: 'settings_update', bn: 'সেটিংস আপডেট' }
+  },
+
+  // Pagination Defaults
+  PAGINATION: {
+    DEFAULT_PAGE: 1,
+    DEFAULT_LIMIT: 20,
+    MAX_LIMIT: 100
+  },
+
+  // Trial Period (in days)
+  TRIAL_PERIOD_DAYS: 14,
+
+  // JWT Token Expiry
+  JWT_EXPIRES_IN: '30d',
+
+  // OTP Settings
+  OTP: {
+    LENGTH: 6,
+    EXPIRES_IN_MINUTES: 5
+  },
+
+  // Default Settings
+  DEFAULT_SETTINGS: {
+    CURRENCY: 'BDT',
+    LOW_STOCK_THRESHOLD: 5
+  }
+};

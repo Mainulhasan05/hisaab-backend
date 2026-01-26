@@ -1,0 +1,175 @@
+const mongoose = require('mongoose');
+const { SHOP_TYPES, SUBSCRIPTION_PLANS, SUBSCRIPTION_STATUS, DEFAULT_SETTINGS } = require('../config/constants');
+
+const shopSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: [true, 'দোকানের নাম দিন'],
+    trim: true,
+    maxlength: [100, 'দোকানের নাম ১০০ অক্ষরের বেশি হতে পারবে না']
+  },
+  slug: {
+    type: String,
+    unique: true,
+    lowercase: true,
+    trim: true
+  },
+  type: {
+    type: String,
+    enum: {
+      values: Object.values(SHOP_TYPES),
+      message: 'অবৈধ দোকানের ধরন'
+    },
+    default: SHOP_TYPES.OTHER
+  },
+  address: {
+    type: String,
+    trim: true,
+    maxlength: [500, 'ঠিকানা ৫০০ অক্ষরের বেশি হতে পারবে না']
+  },
+  phone: {
+    type: String,
+    trim: true
+  },
+  owner: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  subscription: {
+    plan: {
+      type: String,
+      enum: Object.values(SUBSCRIPTION_PLANS),
+      default: SUBSCRIPTION_PLANS.TRIAL
+    },
+    status: {
+      type: String,
+      enum: Object.values(SUBSCRIPTION_STATUS),
+      default: SUBSCRIPTION_STATUS.ACTIVE
+    },
+    startedAt: {
+      type: Date,
+      default: Date.now
+    },
+    expiresAt: {
+      type: Date
+    }
+  },
+  settings: {
+    currency: {
+      type: String,
+      default: DEFAULT_SETTINGS.CURRENCY
+    },
+    lowStockThreshold: {
+      type: Number,
+      default: DEFAULT_SETTINGS.LOW_STOCK_THRESHOLD
+    },
+    invoicePrefix: {
+      type: String,
+      default: 'INV'
+    },
+    taxEnabled: {
+      type: Boolean,
+      default: false
+    },
+    taxRate: {
+      type: Number,
+      default: 0
+    }
+  },
+  stats: {
+    totalProducts: {
+      type: Number,
+      default: 0
+    },
+    totalCustomers: {
+      type: Number,
+      default: 0
+    },
+    totalSales: {
+      type: Number,
+      default: 0
+    },
+    totalRevenue: {
+      type: Number,
+      default: 0
+    }
+  },
+  logo: {
+    type: String
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  }
+}, {
+  timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true }
+});
+
+// Indexes
+shopSchema.index({ slug: 1 }, { unique: true });
+shopSchema.index({ owner: 1 });
+shopSchema.index({ 'subscription.status': 1 });
+shopSchema.index({ isActive: 1 });
+shopSchema.index({ createdAt: -1 });
+
+// Generate slug before saving
+shopSchema.pre('save', function(next) {
+  if (this.isModified('name') || !this.slug) {
+    // Create slug from name
+    let slug = this.name
+      .toLowerCase()
+      .replace(/[^\w\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .trim();
+
+    // Add random suffix for uniqueness
+    const randomSuffix = Math.random().toString(36).substring(2, 8);
+    this.slug = `${slug}-${randomSuffix}`;
+  }
+  next();
+});
+
+// Set trial expiration
+shopSchema.pre('save', function(next) {
+  if (this.isNew && this.subscription.plan === SUBSCRIPTION_PLANS.TRIAL) {
+    const trialDays = 14;
+    this.subscription.expiresAt = new Date(Date.now() + trialDays * 24 * 60 * 60 * 1000);
+  }
+  next();
+});
+
+// Virtual: Check if subscription is valid
+shopSchema.virtual('isSubscriptionValid').get(function() {
+  if (this.subscription.status !== SUBSCRIPTION_STATUS.ACTIVE) {
+    return false;
+  }
+  if (this.subscription.expiresAt && this.subscription.expiresAt < new Date()) {
+    return false;
+  }
+  return true;
+});
+
+// Virtual: Days remaining in subscription
+shopSchema.virtual('subscriptionDaysRemaining').get(function() {
+  if (!this.subscription.expiresAt) return null;
+  const diff = this.subscription.expiresAt - new Date();
+  return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
+});
+
+// Static: Find by slug
+shopSchema.statics.findBySlug = function(slug) {
+  return this.findOne({ slug, isActive: true });
+};
+
+// Method: Update stats
+shopSchema.methods.updateStats = async function(field, increment = 1) {
+  const updateField = `stats.${field}`;
+  await this.updateOne({ $inc: { [updateField]: increment } });
+};
+
+const Shop = mongoose.model('Shop', shopSchema);
+
+module.exports = Shop;

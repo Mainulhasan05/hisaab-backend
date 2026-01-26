@@ -1,0 +1,242 @@
+const AuthService = require('../services/auth.service');
+const ApiResponse = require('../utils/response.util');
+const asyncHandler = require('../utils/asyncHandler.util');
+
+/**
+ * @desc    Register new shop with owner
+ * @route   POST /api/auth/register
+ * @access  Public
+ */
+const register = asyncHandler(async (req, res) => {
+  const result = await AuthService.register(req.body, req);
+
+  return ApiResponse.created(res, {
+    data: result,
+    message: 'Registration successful. Please verify your phone number.',
+    messageBn: 'নিবন্ধন সফল। অনুগ্রহ করে ফোন নম্বর যাচাই করুন।'
+  });
+});
+
+/**
+ * @desc    Send OTP for verification
+ * @route   POST /api/auth/send-otp
+ * @access  Public
+ */
+const sendOTP = asyncHandler(async (req, res) => {
+  const result = await AuthService.sendOTP(req.body.phone);
+
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'OTP sent successfully',
+    messageBn: 'ওটিপি পাঠানো হয়েছে'
+  });
+});
+
+/**
+ * @desc    Verify OTP
+ * @route   POST /api/auth/verify-otp
+ * @access  Public
+ */
+const verifyOTP = asyncHandler(async (req, res) => {
+  const result = await AuthService.verifyOTP(req.body.phone, req.body.otp);
+
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Phone verified successfully',
+    messageBn: 'ফোন নম্বর যাচাই সফল'
+  });
+});
+
+/**
+ * @desc    Login user
+ * @route   POST /api/auth/login
+ * @access  Public
+ */
+const login = asyncHandler(async (req, res) => {
+  const result = await AuthService.login(req.body, req);
+
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Login successful',
+    messageBn: 'লগইন সফল'
+  });
+});
+
+/**
+ * @desc    Logout user
+ * @route   POST /api/auth/logout
+ * @access  Private
+ */
+const logout = asyncHandler(async (req, res) => {
+  // JWT is stateless, client should remove token
+  // Optionally implement token blacklisting here
+
+  return ApiResponse.success(res, {
+    message: 'Logout successful',
+    messageBn: 'লগআউট সফল'
+  });
+});
+
+/**
+ * @desc    Get current user profile
+ * @route   GET /api/auth/me
+ * @access  Private
+ */
+const getMe = asyncHandler(async (req, res) => {
+  const user = await AuthService.getMe(req.user._id);
+
+  return ApiResponse.success(res, {
+    data: { user, shop: req.shop },
+    message: 'Profile retrieved',
+    messageBn: 'প্রোফাইল পাওয়া গেছে'
+  });
+});
+
+/**
+ * @desc    Change password
+ * @route   POST /api/auth/change-password
+ * @access  Private
+ */
+const changePassword = asyncHandler(async (req, res) => {
+  const result = await AuthService.changePassword(req.user._id, req.body, req);
+
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Password changed successfully',
+    messageBn: 'পাসওয়ার্ড পরিবর্তন সফল'
+  });
+});
+
+/**
+ * @desc    Admin login
+ * @route   POST /api/auth/admin/login
+ * @access  Public
+ */
+const adminLogin = asyncHandler(async (req, res) => {
+  const result = await AuthService.adminLogin(req.body, req);
+
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Admin login successful',
+    messageBn: 'অ্যাডমিন লগইন সফল'
+  });
+});
+
+/**
+ * @desc    Create team member
+ * @route   POST /api/auth/team
+ * @access  Private (Owner only)
+ */
+const createTeamMember = asyncHandler(async (req, res) => {
+  const user = await AuthService.createTeamMember(
+    req.shop._id,
+    req.user._id,
+    req.body,
+    req
+  );
+
+  return ApiResponse.created(res, {
+    data: { user },
+    message: 'Team member created successfully',
+    messageBn: 'টিম মেম্বার যোগ করা হয়েছে'
+  });
+});
+
+/**
+ * @desc    Get team members
+ * @route   GET /api/auth/team
+ * @access  Private (Owner/Manager)
+ */
+const getTeamMembers = asyncHandler(async (req, res) => {
+  const User = require('../models/User.model');
+
+  const members = await User.find({
+    shop: req.shop._id,
+    _id: { $ne: req.user._id }
+  }).select('-password').sort({ createdAt: -1 });
+
+  return ApiResponse.success(res, {
+    data: { members },
+    message: 'Team members retrieved',
+    messageBn: 'টিম মেম্বার লিস্ট'
+  });
+});
+
+/**
+ * @desc    Update team member
+ * @route   PUT /api/auth/team/:id
+ * @access  Private (Owner only)
+ */
+const updateTeamMember = asyncHandler(async (req, res) => {
+  const User = require('../models/User.model');
+
+  const member = await User.findOne({
+    _id: req.params.id,
+    shop: req.shop._id,
+    role: { $ne: 'owner' }
+  });
+
+  if (!member) {
+    return ApiResponse.notFound(res, {
+      message: 'Team member not found',
+      messageBn: 'টিম মেম্বার পাওয়া যায়নি'
+    });
+  }
+
+  const { name, role, permissions, isActive } = req.body;
+
+  if (name) member.name = name;
+  if (role) member.role = role;
+  if (permissions) member.permissions = permissions;
+  if (typeof isActive === 'boolean') member.isActive = isActive;
+
+  await member.save();
+
+  return ApiResponse.success(res, {
+    data: { member },
+    message: 'Team member updated',
+    messageBn: 'টিম মেম্বার আপডেট হয়েছে'
+  });
+});
+
+/**
+ * @desc    Delete team member
+ * @route   DELETE /api/auth/team/:id
+ * @access  Private (Owner only)
+ */
+const deleteTeamMember = asyncHandler(async (req, res) => {
+  const User = require('../models/User.model');
+
+  const member = await User.findOneAndDelete({
+    _id: req.params.id,
+    shop: req.shop._id,
+    role: { $ne: 'owner' }
+  });
+
+  if (!member) {
+    return ApiResponse.notFound(res, {
+      message: 'Team member not found',
+      messageBn: 'টিম মেম্বার পাওয়া যায়নি'
+    });
+  }
+
+  return ApiResponse.success(res, {
+    message: 'Team member deleted',
+    messageBn: 'টিম মেম্বার মুছে ফেলা হয়েছে'
+  });
+});
+
+module.exports = {
+  register,
+  sendOTP,
+  verifyOTP,
+  login,
+  logout,
+  getMe,
+  changePassword,
+  adminLogin,
+  createTeamMember,
+  getTeamMembers,
+  updateTeamMember,
+  deleteTeamMember
+};

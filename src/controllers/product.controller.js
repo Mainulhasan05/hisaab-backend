@@ -1,0 +1,104 @@
+const productService = require('../services/product.service');
+const ApiResponse = require('../utils/response.util');
+const asyncHandler = require('../utils/asyncHandler.util');
+
+// Get all products
+exports.getProducts = asyncHandler(async (req, res) => {
+  const result = await productService.getProducts(req.shop._id, req.query);
+  return ApiResponse.paginated(res, {
+    ...result,
+    message: 'Products retrieved successfully',
+    messageBn: 'পণ্য তালিকা সফলভাবে লোড হয়েছে',
+  });
+});
+
+// Get single product
+exports.getProduct = asyncHandler(async (req, res) => {
+  const product = await productService.getProductById(req.shop._id, req.params.id);
+  return ApiResponse.success(res, {
+    data: product,
+    message: 'Product retrieved successfully',
+    messageBn: 'পণ্য সফলভাবে লোড হয়েছে',
+  });
+});
+
+// Get product by barcode/code
+exports.getProductByCode = asyncHandler(async (req, res) => {
+  const product = await productService.getProductByCode(req.shop._id, req.params.code);
+  return ApiResponse.success(res, {
+    data: product,
+    message: 'Product retrieved successfully',
+    messageBn: 'পণ্য সফলভাবে লোড হয়েছে',
+  });
+});
+
+// Create product
+exports.createProduct = asyncHandler(async (req, res) => {
+  const product = await productService.createProduct(req.shop._id, req.user._id, req.body);
+  return ApiResponse.success(res, {
+    data: product,
+    message: 'Product created successfully',
+    messageBn: 'পণ্য সফলভাবে যোগ করা হয়েছে',
+    statusCode: 201,
+  });
+});
+
+// Update product
+exports.updateProduct = asyncHandler(async (req, res) => {
+  const product = await productService.updateProduct(req.shop._id, req.user._id, req.params.id, req.body);
+  return ApiResponse.success(res, {
+    data: product,
+    message: 'Product updated successfully',
+    messageBn: 'পণ্য সফলভাবে আপডেট করা হয়েছে',
+  });
+});
+
+// Delete product
+exports.deleteProduct = asyncHandler(async (req, res) => {
+  await productService.deleteProduct(req.shop._id, req.user._id, req.params.id);
+  return ApiResponse.success(res, {
+    message: 'Product deleted successfully',
+    messageBn: 'পণ্য সফলভাবে মুছে ফেলা হয়েছে',
+  });
+});
+
+// Update stock
+exports.updateStock = asyncHandler(async (req, res) => {
+  const product = await productService.updateStock(req.shop._id, req.user._id, req.params.id, req.body);
+  return ApiResponse.success(res, {
+    data: product,
+    message: 'Stock updated successfully',
+    messageBn: 'স্টক সফলভাবে আপডেট করা হয়েছে',
+  });
+});
+
+// Get low stock products
+exports.getLowStock = asyncHandler(async (req, res) => {
+  const limit = parseInt(req.query.limit) || 10;
+  const products = await productService.getLowStockProducts(req.shop._id, limit);
+  return ApiResponse.success(res, {
+    data: products,
+    message: 'Low stock products retrieved successfully',
+    messageBn: 'কম স্টক পণ্য সফলভাবে লোড হয়েছে',
+  });
+});
+
+// Get stock transactions
+exports.getStockTransactions = asyncHandler(async (req, res) => {
+  const result = await productService.getStockTransactions(req.shop._id, req.params.id, req.query);
+  return ApiResponse.paginated(res, {
+    ...result,
+    message: 'Stock transactions retrieved successfully',
+    messageBn: 'স্টক লেনদেন সফলভাবে লোড হয়েছে',
+  });
+});
+
+// Bulk update stock
+exports.bulkUpdateStock = asyncHandler(async (req, res) => {
+  const results = await productService.bulkUpdateStock(req.shop._id, req.user._id, req.body.updates);
+  return ApiResponse.success(res, {
+    data: results,
+    message: 'Bulk stock update completed',
+    messageBn: 'বাল্ক স্টক আপডেট সম্পন্ন হয়েছে',
+  });
+});

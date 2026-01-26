@@ -1,0 +1,184 @@
+const jwt = require('jsonwebtoken');
+const User = require('../models/User.model');
+const Admin = require('../models/Admin.model');
+const Shop = require('../models/Shop.model');
+const ApiResponse = require('../utils/response.util');
+const asyncHandler = require('../utils/asyncHandler.util');
+
+/**
+ * Protect routes - Verify JWT token
+ */
+const protect = asyncHandler(async (req, res, next) => {
+  let token;
+
+  // Get token from Authorization header
+  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+    token = req.headers.authorization.split(' ')[1];
+  }
+
+  if (!token) {
+    return ApiResponse.unauthorized(res, {
+      message: 'Please log in to access this resource',
+      messageBn: 'এই রিসোর্স অ্যাক্সেস করতে লগইন করুন'
+    });
+  }
+
+  try {
+    // Verify token
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    // Check if it's an admin token
+    if (decoded.isAdmin) {
+      const admin = await Admin.findById(decoded.id);
+
+      if (!admin) {
+        return ApiResponse.unauthorized(res, {
+          message: 'Admin not found',
+          messageBn: 'অ্যাডমিন পাওয়া যায়নি'
+        });
+      }
+
+      if (!admin.isActive) {
+        return ApiResponse.unauthorized(res, {
+          message: 'Admin account is deactivated',
+          messageBn: 'অ্যাডমিন অ্যাকাউন্ট নিষ্ক্রিয়'
+        });
+      }
+
+      // Check if password changed after token was issued
+      if (admin.changedPasswordAfter(decoded.iat)) {
+        return ApiResponse.unauthorized(res, {
+          message: 'Password changed. Please log in again',
+          messageBn: 'পাসওয়ার্ড পরিবর্তন হয়েছে। পুনরায় লগইন করুন'
+        });
+      }
+
+      req.admin = admin;
+      req.isAdmin = true;
+      return next();
+    }
+
+    // Regular user token
+    const user = await User.findById(decoded.id).populate('shop');
+
+    if (!user) {
+      return ApiResponse.unauthorized(res, {
+        message: 'User not found',
+        messageBn: 'ইউজার পাওয়া যায়নি'
+      });
+    }
+
+    if (!user.isActive) {
+      return ApiResponse.unauthorized(res, {
+        message: 'Your account is deactivated',
+        messageBn: 'আপনার অ্যাকাউন্ট নিষ্ক্রিয়'
+      });
+    }
+
+    // Check if password changed after token was issued
+    if (user.changedPasswordAfter(decoded.iat)) {
+      return ApiResponse.unauthorized(res, {
+        message: 'Password changed. Please log in again',
+        messageBn: 'পাসওয়ার্ড পরিবর্তন হয়েছে। পুনরায় লগইন করুন'
+      });
+    }
+
+    // Check shop status
+    if (user.shop && !user.shop.isActive) {
+      return ApiResponse.forbidden(res, {
+        message: 'Your shop is deactivated',
+        messageBn: 'আপনার দোকান নিষ্ক্রিয়'
+      });
+    }
+
+    // Check subscription
+    if (user.shop && !user.shop.isSubscriptionValid) {
+      return ApiResponse.forbidden(res, {
+        message: 'Your subscription has expired',
+        messageBn: 'আপনার সাবস্ক্রিপশন মেয়াদ শেষ'
+      });
+    }
+
+    req.user = user;
+    req.shop = user.shop;
+    next();
+  } catch (error) {
+    if (error.name === 'JsonWebTokenError') {
+      return ApiResponse.unauthorized(res, {
+        message: 'Invalid token',
+        messageBn: 'অবৈধ টোকেন'
+      });
+    }
+
+    if (error.name === 'TokenExpiredError') {
+      return ApiResponse.unauthorized(res, {
+        message: 'Token expired. Please log in again',
+        messageBn: 'টোকেন মেয়াদ শেষ। পুনরায় লগইন করুন'
+      });
+    }
+
+    throw error;
+  }
+});
+
+/**
+ * Admin only middleware
+ */
+const adminOnly = asyncHandler(async (req, res, next) => {
+  if (!req.isAdmin) {
+    return ApiResponse.forbidden(res, {
+      message: 'Admin access required',
+      messageBn: 'অ্যাডমিন অ্যাক্সেস প্রয়োজন'
+    });
+  }
+  next();
+});
+
+/**
+ * Super admin only middleware
+ */
+const superAdminOnly = asyncHandler(async (req, res, next) => {
+  if (!req.isAdmin || !req.admin.isSuperAdmin) {
+    return ApiResponse.forbidden(res, {
+      message: 'Super admin access required',
+      messageBn: 'সুপার অ্যাডমিন অ্যাক্সেস প্রয়োজন'
+    });
+  }
+  next();
+});
+
+/**
+ * Shop owner only middleware
+ */
+const ownerOnly = asyncHandler(async (req, res, next) => {
+  if (req.user.role !== 'owner') {
+    return ApiResponse.forbidden(res, {
+      message: 'Shop owner access required',
+      messageBn: 'দোকান মালিকের অ্যাক্সেস প্রয়োজন'
+    });
+  }
+  next();
+});
+
+/**
+ * Restrict to specific roles
+ */
+const restrictTo = (...roles) => {
+  return asyncHandler(async (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return ApiResponse.forbidden(res, {
+        message: 'You do not have permission to perform this action',
+        messageBn: 'এই কাজ করার অনুমতি নেই'
+      });
+    }
+    next();
+  });
+};
+
+module.exports = {
+  protect,
+  adminOnly,
+  superAdminOnly,
+  ownerOnly,
+  restrictTo
+};
