@@ -238,9 +238,6 @@ class SaleService {
     const due = Math.max(0, total - paid);
     const status = due <= 0 ? 'completed' : (paid > 0 ? 'partial' : 'unpaid');
 
-    // Generate invoice number
-    const invoiceNo = await this.generateInvoiceNumber(shopId);
-
     // Handle customer
     let customer = null;
     let finalCustomerName = customerName;
@@ -265,25 +262,39 @@ class SaleService {
       }
     }
 
-    // Create sale
-    const sale = await Sale.create({
-      shop: shopId,
-      invoiceNo,
-      customer: customer?._id,
-      customerName: finalCustomerName,
-      customerPhone: finalCustomerPhone,
-      items: processedItems,
-      subtotal,
-      discount,
-      tax,
-      total,
-      paid,
-      due,
-      paymentMethod,
-      status,
-      notes,
-      createdBy: userId,
-    });
+    // Create sale with retry for invoice number collision
+    let sale;
+    const maxRetries = 3;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const invoiceNo = await this.generateInvoiceNumber(shopId);
+        sale = await Sale.create({
+          shop: shopId,
+          invoiceNo,
+          customer: customer?._id,
+          customerName: finalCustomerName,
+          customerPhone: finalCustomerPhone,
+          items: processedItems,
+          subtotal,
+          discount,
+          tax,
+          total,
+          paid,
+          due,
+          paymentMethod,
+          status,
+          notes,
+          createdBy: userId,
+        });
+        break; // Success — exit retry loop
+      } catch (err) {
+        if (err.code === 11000 && attempt < maxRetries - 1) {
+          // Duplicate invoiceNo — retry with new number
+          continue;
+        }
+        throw err; // Not a duplicate or last attempt — rethrow
+      }
+    }
 
     // Update customer statistics if customer exists
     if (customer) {

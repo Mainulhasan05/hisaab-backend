@@ -28,9 +28,25 @@ const handleCastErrorDB = (err) => {
  * Handle Duplicate Field Error
  */
 const handleDuplicateFieldsDB = (err) => {
-  const value = err.errmsg.match(/(["'])(\\?.)*?\1/)?.[0] || 'value';
-  const message = `Duplicate field value: ${value}. Please use another value.`;
-  const messageBn = `এই তথ্য আগে থেকেই আছে: ${value}। অন্য তথ্য ব্যবহার করুন।`;
+  // Use keyValue for better error messages (shows actual field names)
+  const keyValue = err.keyValue || {};
+  const fields = Object.keys(keyValue).filter(k => k !== 'shop');
+  const fieldName = fields[0] || 'value';
+  const fieldValue = keyValue[fieldName] || '';
+
+  const fieldLabels = {
+    invoiceNo: 'ইনভয়েস নম্বর',
+    code: 'পণ্য কোড',
+    phone: 'ফোন নম্বর',
+    email: 'ইমেইল',
+    barcode: 'বারকোড',
+    slug: 'স্লাগ',
+    name: 'নাম',
+  };
+  const label = fieldLabels[fieldName] || fieldName;
+
+  const message = `Duplicate ${fieldName}: ${fieldValue}. Please use another value.`;
+  const messageBn = `এই ${label} আগে থেকেই আছে: ${fieldValue}। অন্য ${label} ব্যবহার করুন।`;
   return new AppError(message, messageBn, 409);
 };
 
