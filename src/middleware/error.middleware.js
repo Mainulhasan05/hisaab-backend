@@ -113,21 +113,22 @@ const errorHandler = (err, req, res, next) => {
   // Log error
   logger.error(`${err.statusCode} - ${err.message} - ${req.originalUrl} - ${req.method} - ${req.ip}`);
 
-  if (process.env.NODE_ENV === 'development') {
-    return sendErrorDev(err, res);
-  }
-
-  // Production error handling
+  // Handle specific error types (both dev and prod need proper messageBn)
   let error = { ...err };
   error.message = err.message;
   error.messageBn = err.messageBn;
+  error.statusCode = err.statusCode;
+  error.isOperational = err.isOperational;
 
-  // Handle specific error types
   if (err.name === 'CastError') error = handleCastErrorDB(err);
   if (err.code === 11000) error = handleDuplicateFieldsDB(err);
   if (err.name === 'ValidationError') error = handleValidationErrorDB(err);
   if (err.name === 'JsonWebTokenError') error = handleJWTError();
   if (err.name === 'TokenExpiredError') error = handleJWTExpiredError();
+
+  if (process.env.NODE_ENV === 'development') {
+    return sendErrorDev(error, res);
+  }
 
   return sendErrorProd(error, res);
 };

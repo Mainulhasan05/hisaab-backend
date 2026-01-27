@@ -13,6 +13,7 @@ router.post('/', canCreateSales, saleController.createSale);
 router.get('/summary', canViewSales, saleController.getSalesSummary);
 router.get('/today-summary', canViewSales, saleController.getTodaySummary);
 router.get('/recent', canViewSales, saleController.getRecentSales);
+router.get('/:id/payments', canViewSales, saleController.getSalePayments);
 router.get('/:id', canViewSales, saleController.getSale);
 router.patch('/:id/payment', canEditSales, saleController.recordPayment);
 router.post('/:id/cancel', canDeleteSales, saleController.cancelSale);

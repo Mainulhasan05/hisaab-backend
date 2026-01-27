@@ -42,6 +42,16 @@ exports.getCustomerReport = asyncHandler(async (req, res) => {
   });
 });
 
+// Get Daily Business Summary
+exports.getDailySummary = asyncHandler(async (req, res) => {
+  const report = await reportService.getDailySummary(req.shop._id, req.query);
+  return ApiResponse.success(res, {
+    data: report,
+    message: 'Daily summary retrieved successfully',
+    messageBn: 'দৈনিক সারাংশ সফলভাবে লোড হয়েছে',
+  });
+});
+
 // Get Profit & Loss statement
 exports.getProfitLoss = asyncHandler(async (req, res) => {
   const report = await reportService.getProfitLoss(req.shop._id, req.query);

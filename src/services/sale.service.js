@@ -129,7 +129,7 @@ class SaleService {
       .populate('items.product', 'name code');
 
     if (!sale) {
-      throw new AppError('বিক্রয় পাওয়া যায়নি', 'Sale not found', 404);
+      throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }
 
     return sale;
@@ -139,7 +139,8 @@ class SaleService {
   async createSale(shopId, userId, saleData) {
     const {
       items,
-      customerId,
+      customerId: rawCustomerId,
+      customer: rawCustomer,
       customerName,
       customerPhone,
       discount = 0,
@@ -148,6 +149,7 @@ class SaleService {
       paymentMethod = 'cash',
       notes,
     } = saleData;
+    const customerId = rawCustomerId || rawCustomer;
 
     // Validate items and calculate totals
     let subtotal = 0;
@@ -156,7 +158,7 @@ class SaleService {
     for (const item of items) {
       const product = await Product.findOne({ _id: item.productId, shop: shopId });
       if (!product) {
-        throw new AppError(`পণ্য পাওয়া যায়নি: ${item.productId}`, `Product not found: ${item.productId}`, 404);
+        throw new AppError(`Product not found: ${item.productId}`, `পণ্য পাওয়া যায়নি: ${item.productName || item.productId}`, 404);
       }
 
       let unitPrice, variantInfo = {};
@@ -164,12 +166,16 @@ class SaleService {
       if (item.variantId) {
         const variant = product.variants.id(item.variantId);
         if (!variant) {
-          throw new AppError('ভেরিয়েন্ট পাওয়া যায়নি', 'Variant not found', 404);
+          throw new AppError('Variant not found', 'ভেরিয়েন্ট পাওয়া যায়নি', 404);
         }
 
         // Check stock
         if (variant.stock < item.quantity) {
-          throw new AppError(`${product.name} এর স্টক নেই`, `Insufficient stock for ${product.name}`, 400);
+          throw new AppError(
+            `Insufficient stock for ${product.name}. Available: ${variant.stock}`,
+            `${product.name} এর পর্যাপ্ত স্টক নেই। আছে: ${variant.stock}টি, চাই: ${item.quantity}টি`,
+            400
+          );
         }
 
         unitPrice = variant.sellingPrice;
@@ -184,7 +190,11 @@ class SaleService {
       } else {
         // Check stock
         if (product.stock < item.quantity) {
-          throw new AppError(`${product.name} এর স্টক নেই`, `Insufficient stock for ${product.name}`, 400);
+          throw new AppError(
+            `Insufficient stock for ${product.name}. Available: ${product.stock}`,
+            `${product.name} এর পর্যাপ্ত স্টক নেই। আছে: ${product.stock}টি, চাই: ${item.quantity}টি`,
+            400
+          );
         }
 
         unitPrice = product.sellingPrice;
@@ -225,7 +235,7 @@ class SaleService {
     }
 
     const total = subtotal - discount + tax;
-    const due = total - paid;
+    const due = Math.max(0, total - paid);
     const status = due <= 0 ? 'completed' : (paid > 0 ? 'partial' : 'unpaid');
 
     // Generate invoice number
@@ -330,15 +340,15 @@ class SaleService {
 
     const sale = await Sale.findOne({ _id: saleId, shop: shopId });
     if (!sale) {
-      throw new AppError('বিক্রয় পাওয়া যায়নি', 'Sale not found', 404);
+      throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }
 
     if (sale.status === 'cancelled') {
-      throw new AppError('বাতিল বিক্রয়ে পেমেন্ট নেওয়া যাবে না', 'Cannot record payment for cancelled sale', 400);
+      throw new AppError('Cannot record payment for cancelled sale', 'বাতিল বিক্রয়ে পেমেন্ট নেওয়া যাবে না', 400);
     }
 
     if (amount > sale.due) {
-      throw new AppError('পেমেন্টের পরিমাণ বাকির চেয়ে বেশি', 'Payment amount exceeds due balance', 400);
+      throw new AppError('Payment amount exceeds due balance', 'পেমেন্টের পরিমাণ বাকির চেয়ে বেশি', 400);
     }
 
     // Update sale
@@ -393,11 +403,11 @@ class SaleService {
   async cancelSale(shopId, userId, saleId, reason) {
     const sale = await Sale.findOne({ _id: saleId, shop: shopId });
     if (!sale) {
-      throw new AppError('বিক্রয় পাওয়া যায়নি', 'Sale not found', 404);
+      throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }
 
     if (sale.status === 'cancelled') {
-      throw new AppError('বিক্রয় ইতিমধ্যে বাতিল করা হয়েছে', 'Sale is already cancelled', 400);
+      throw new AppError('Sale is already cancelled', 'বিক্রয় ইতিমধ্যে বাতিল করা হয়েছে', 400);
     }
 
     // Restore stock
@@ -503,6 +513,21 @@ class SaleService {
       .lean();
 
     return sales;
+  }
+
+  // Get payments for a sale
+  async getSalePayments(shopId, saleId) {
+    const sale = await Sale.findOne({ _id: saleId, shop: shopId });
+    if (!sale) {
+      throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
+    }
+
+    const payments = await Payment.find({ shop: shopId, sale: saleId })
+      .populate('receivedBy', 'name')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return payments;
   }
 }
 

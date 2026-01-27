@@ -5,6 +5,7 @@ const Payment = require('../models/Payment.model');
 const Expense = require('../models/Expense.model');
 const SalesReturn = require('../models/SalesReturn.model');
 const Purchase = require('../models/Purchase.model');
+const CashRegister = require('../models/CashRegister.model');
 const mongoose = require('mongoose');
 
 class ReportService {
@@ -421,6 +422,282 @@ class ReportService {
       customersWithDue,
       newCustomers,
       summary,
+    };
+  }
+
+  // Get Daily Business Summary
+  async getDailySummary(shopId, options = {}) {
+    const { date } = options;
+    const shopObjId = new mongoose.Types.ObjectId(shopId);
+
+    // Parse the target date
+    const targetDate = date ? new Date(date) : new Date();
+    const startOfDay = new Date(targetDate);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(targetDate);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const dateMatch = { createdAt: { $gte: startOfDay, $lte: endOfDay } };
+    const expenseDateMatch = { date: { $gte: startOfDay, $lte: endOfDay } };
+
+    // Run all aggregations in parallel
+    const [
+      salesAgg,
+      salesByMethod,
+      salesByHour,
+      expenseAgg,
+      expenseByCategory,
+      purchaseAgg,
+      dueCollections,
+      returnsAgg,
+      cashRegister,
+      topProducts,
+      lowStockProducts,
+    ] = await Promise.all([
+      // 1. Sales summary
+      Sale.aggregate([
+        { $match: { shop: shopObjId, status: { $ne: 'cancelled' }, ...dateMatch } },
+        {
+          $group: {
+            _id: null,
+            totalRevenue: { $sum: '$total' },
+            totalProfit: { $sum: '$profit' },
+            totalPaid: { $sum: '$paid' },
+            totalDue: { $sum: '$due' },
+            totalDiscount: { $sum: '$discount' },
+            totalItems: { $sum: { $size: '$items' } },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+
+      // 2. Sales by payment method
+      Sale.aggregate([
+        { $match: { shop: shopObjId, status: { $ne: 'cancelled' }, ...dateMatch } },
+        {
+          $group: {
+            _id: '$paymentMethod',
+            total: { $sum: '$total' },
+            paid: { $sum: '$paid' },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { total: -1 } },
+      ]),
+
+      // 3. Sales by hour (for hourly chart)
+      Sale.aggregate([
+        { $match: { shop: shopObjId, status: { $ne: 'cancelled' }, ...dateMatch } },
+        {
+          $group: {
+            _id: { $hour: '$createdAt' },
+            revenue: { $sum: '$total' },
+            profit: { $sum: '$profit' },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+
+      // 4. Expenses summary
+      Expense.aggregate([
+        { $match: { shop: shopObjId, ...expenseDateMatch } },
+        {
+          $group: {
+            _id: null,
+            totalExpenses: { $sum: '$amount' },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+
+      // 5. Expenses by category
+      Expense.aggregate([
+        { $match: { shop: shopObjId, ...expenseDateMatch } },
+        {
+          $group: {
+            _id: '$category',
+            categoryName: { $first: '$categoryName' },
+            total: { $sum: '$amount' },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { total: -1 } },
+      ]),
+
+      // 6. Purchases summary
+      Purchase.aggregate([
+        { $match: { shop: shopObjId, status: { $ne: 'cancelled' }, ...dateMatch } },
+        {
+          $group: {
+            _id: null,
+            totalPurchases: { $sum: '$totalAmount' },
+            totalPaid: { $sum: '$paid' },
+            totalDue: { $sum: '$due' },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+
+      // 7. Due collections (payments for old dues)
+      Payment.aggregate([
+        {
+          $match: {
+            shop: shopObjId,
+            type: 'due_collection',
+            createdAt: { $gte: startOfDay, $lte: endOfDay },
+          },
+        },
+        {
+          $group: {
+            _id: '$method',
+            total: { $sum: '$amount' },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+
+      // 8. Sales returns
+      SalesReturn.aggregate([
+        { $match: { shop: shopObjId, ...dateMatch } },
+        {
+          $group: {
+            _id: null,
+            totalReturns: { $sum: '$totalAmount' },
+            totalProfitLoss: { $sum: '$profitReduction' },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+
+      // 9. Cash register for this date
+      CashRegister.findOne({
+        shop: shopObjId,
+        date: { $gte: startOfDay, $lte: endOfDay },
+      }).lean(),
+
+      // 10. Top products sold today
+      Sale.aggregate([
+        { $match: { shop: shopObjId, status: { $ne: 'cancelled' }, ...dateMatch } },
+        { $unwind: '$items' },
+        {
+          $group: {
+            _id: '$items.product',
+            productName: { $first: '$items.productName' },
+            totalQuantity: { $sum: '$items.quantity' },
+            totalRevenue: { $sum: '$items.total' },
+          },
+        },
+        { $sort: { totalQuantity: -1 } },
+        { $limit: 10 },
+      ]),
+
+      // 11. Low stock products
+      Product.find({
+        shop: shopObjId,
+        isActive: true,
+        $expr: { $lte: ['$stock', '$minStock'] },
+      })
+        .select('name code stock minStock sellingPrice')
+        .sort({ stock: 1 })
+        .limit(15)
+        .lean(),
+    ]);
+
+    const sales = salesAgg[0] || { totalRevenue: 0, totalProfit: 0, totalPaid: 0, totalDue: 0, totalDiscount: 0, totalItems: 0, count: 0 };
+    const expenses = expenseAgg[0] || { totalExpenses: 0, count: 0 };
+    const purchases = purchaseAgg[0] || { totalPurchases: 0, totalPaid: 0, totalDue: 0, count: 0 };
+    const returns = returnsAgg[0] || { totalReturns: 0, totalProfitLoss: 0, count: 0 };
+
+    // Due collections total
+    const dueCollectionTotal = dueCollections.reduce((sum, d) => sum + d.total, 0);
+    const dueCollectionCount = dueCollections.reduce((sum, d) => sum + d.count, 0);
+
+    // Cash flow
+    const cashIn = sales.totalPaid + dueCollectionTotal;
+    const cashOut = expenses.totalExpenses + purchases.totalPaid + returns.totalReturns;
+    const netCashFlow = cashIn - cashOut;
+
+    // Net earnings for the day
+    const netEarnings = sales.totalProfit - expenses.totalExpenses - returns.totalProfitLoss;
+
+    // Build hourly chart data (0-23 hours)
+    const hourlyData = [];
+    for (let h = 0; h < 24; h++) {
+      const hourData = salesByHour.find((d) => d._id === h);
+      hourlyData.push({
+        hour: h,
+        label: `${h}:00`,
+        revenue: hourData?.revenue || 0,
+        profit: hourData?.profit || 0,
+        orders: hourData?.count || 0,
+      });
+    }
+
+    return {
+      date: startOfDay.toISOString().split('T')[0],
+
+      // Summary
+      netEarnings,
+      netCashFlow,
+
+      // Sales
+      sales: {
+        revenue: sales.totalRevenue,
+        profit: sales.totalProfit,
+        paid: sales.totalPaid,
+        due: sales.totalDue,
+        discount: sales.totalDiscount,
+        items: sales.totalItems,
+        count: sales.count,
+        byMethod: salesByMethod,
+      },
+
+      // Expenses
+      expenses: {
+        total: expenses.totalExpenses,
+        count: expenses.count,
+        byCategory: expenseByCategory,
+      },
+
+      // Purchases
+      purchases: {
+        total: purchases.totalPurchases,
+        paid: purchases.totalPaid,
+        due: purchases.totalDue,
+        count: purchases.count,
+      },
+
+      // Due collections
+      dueCollections: {
+        total: dueCollectionTotal,
+        count: dueCollectionCount,
+        byMethod: dueCollections,
+      },
+
+      // Returns
+      returns: {
+        total: returns.totalReturns,
+        profitLoss: returns.totalProfitLoss,
+        count: returns.count,
+      },
+
+      // Cash flow
+      cashFlow: {
+        cashIn,
+        cashOut,
+        net: netCashFlow,
+      },
+
+      // Cash register
+      cashRegister: cashRegister || null,
+
+      // Charts
+      hourlyData,
+      topProducts,
+
+      // Stock alerts
+      lowStockProducts,
     };
   }
 

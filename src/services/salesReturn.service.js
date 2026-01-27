@@ -18,7 +18,7 @@ class SalesReturnService {
     // 1. Fetch the sale
     const sale = await Sale.findOne({ _id: saleId, shop: shopId });
     if (!sale) {
-      throw new AppError('বিক্রয় পাওয়া যায়নি', 'Sale not found', 404);
+      throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }
 
     // 2. Validate sale status
@@ -320,7 +320,7 @@ class SalesReturnService {
       .populate('createdBy', 'name phone');
 
     if (!salesReturn) {
-      throw new AppError('ফেরত পাওয়া যায়নি', 'Sales return not found', 404);
+      throw new AppError('Sales return not found', 'ফেরত পাওয়া যায়নি', 404);
     }
 
     return salesReturn;
@@ -342,13 +342,13 @@ class SalesReturnService {
   async getReturnableItems(shopId, saleId) {
     const sale = await Sale.findOne({ _id: saleId, shop: shopId });
     if (!sale) {
-      throw new AppError('বিক্রয় পাওয়া যায়নি', 'Sale not found', 404);
+      throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }
 
     if (sale.status === 'cancelled') {
       throw new AppError(
-        'বাতিল বিক্রয় থেকে মাল ফেরত নেওয়া যাবে না',
         'Cannot return from cancelled sale',
+        'বাতিল বিক্রয় থেকে মাল ফেরত নেওয়া যাবে না',
         400
       );
     }

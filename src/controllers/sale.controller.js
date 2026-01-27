@@ -83,3 +83,13 @@ exports.getRecentSales = asyncHandler(async (req, res) => {
     messageBn: 'সাম্প্রতিক বিক্রয় সফলভাবে লোড হয়েছে',
   });
 });
+
+// Get payments for a sale
+exports.getSalePayments = asyncHandler(async (req, res) => {
+  const payments = await saleService.getSalePayments(req.shop._id, req.params.id);
+  return ApiResponse.success(res, {
+    data: payments,
+    message: 'Sale payments fetched',
+    messageBn: 'বিক্রয়ের পেমেন্ট সমূহ পাওয়া গেছে',
+  });
+});
