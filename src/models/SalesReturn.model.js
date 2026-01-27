@@ -1,0 +1,189 @@
+const mongoose = require('mongoose');
+const { PAYMENT_METHODS } = require('../config/constants');
+
+const returnItemSchema = new mongoose.Schema({
+  saleItemId: {
+    type: mongoose.Schema.Types.ObjectId,
+    required: true
+  },
+  product: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Product',
+    required: true
+  },
+  productName: {
+    type: String,
+    required: true
+  },
+  productCode: {
+    type: String
+  },
+  variantId: {
+    type: mongoose.Schema.Types.ObjectId
+  },
+  variantSku: {
+    type: String
+  },
+  variantAttributes: {
+    type: mongoose.Schema.Types.Mixed
+  },
+  quantity: {
+    type: Number,
+    required: [true, 'ফেরতের পরিমাণ দিন'],
+    min: [1, 'পরিমাণ কমপক্ষে ১ হতে হবে']
+  },
+  unitPrice: {
+    type: Number,
+    required: true
+  },
+  buyingPrice: {
+    type: Number,
+    default: 0
+  },
+  discount: {
+    type: Number,
+    default: 0
+  },
+  total: {
+    type: Number,
+    required: true
+  },
+  profitLoss: {
+    type: Number,
+    default: 0
+  },
+  reason: {
+    type: String,
+    trim: true
+  }
+}, { _id: true });
+
+const salesReturnSchema = new mongoose.Schema({
+  shop: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Shop',
+    required: [true, 'দোকান নির্বাচন করুন']
+  },
+  returnNo: {
+    type: String,
+    required: [true, 'রিটার্ন নম্বর দিন']
+  },
+  sale: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Sale',
+    required: [true, 'বিক্রয় নির্বাচন করুন']
+  },
+  invoiceNo: {
+    type: String,
+    required: true
+  },
+  customer: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Customer'
+  },
+  customerName: {
+    type: String,
+    default: 'Walk-in Customer'
+  },
+  customerPhone: {
+    type: String
+  },
+  items: {
+    type: [returnItemSchema],
+    required: [true, 'ফেরতের পণ্য যোগ করুন'],
+    validate: [arr => arr.length > 0, 'অন্তত একটি পণ্য ফেরত দিতে হবে']
+  },
+  totalAmount: {
+    type: Number,
+    required: true,
+    min: [0, 'মোট ০ এর কম হতে পারবে না']
+  },
+  profitReduction: {
+    type: Number,
+    default: 0
+  },
+  refundMethod: {
+    type: String,
+    enum: ['cash', 'adjustment', 'store_credit'],
+    required: [true, 'ফেরতের পদ্ধতি নির্বাচন করুন']
+  },
+  paymentMethod: {
+    type: String,
+    enum: Object.values(PAYMENT_METHODS)
+  },
+  reason: {
+    type: String,
+    maxlength: [500, 'কারণ ৫০০ অক্ষরের বেশি হতে পারবে না']
+  },
+  notes: {
+    type: String,
+    maxlength: [500, 'নোট ৫০০ অক্ষরের বেশি হতে পারবে না']
+  },
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  }
+}, {
+  timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true }
+});
+
+// Indexes
+salesReturnSchema.index({ shop: 1, returnNo: 1 }, { unique: true });
+salesReturnSchema.index({ shop: 1, sale: 1 });
+salesReturnSchema.index({ shop: 1, customer: 1 });
+salesReturnSchema.index({ shop: 1, createdAt: -1 });
+salesReturnSchema.index({ shop: 1, createdBy: 1 });
+
+// Virtual: Item count
+salesReturnSchema.virtual('itemCount').get(function() {
+  return this.items.reduce((sum, item) => sum + item.quantity, 0);
+});
+
+// Static: Generate return number RET-YYYYMMDD-0001
+salesReturnSchema.statics.generateReturnNo = async function(shopId) {
+  const today = new Date();
+  const dateStr = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
+  const prefix = `RET${dateStr}`;
+
+  const lastReturn = await this.findOne({
+    shop: shopId,
+    returnNo: { $regex: `^${prefix}` }
+  }).sort({ returnNo: -1 });
+
+  let sequence = 1;
+  if (lastReturn) {
+    const lastSeq = parseInt(lastReturn.returnNo.slice(-4));
+    sequence = lastSeq + 1;
+  }
+
+  return `${prefix}${String(sequence).padStart(4, '0')}`;
+};
+
+// Static: Get returns summary for date range
+salesReturnSchema.statics.getReturnsSummary = async function(shopId, startDate, endDate) {
+  const match = {
+    shop: new mongoose.Types.ObjectId(shopId),
+    createdAt: { $gte: startDate, $lte: endDate }
+  };
+
+  const summary = await this.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: null,
+        totalReturns: { $sum: '$totalAmount' },
+        totalProfitLoss: { $sum: '$profitReduction' },
+        count: { $sum: 1 }
+      }
+    }
+  ]);
+
+  return summary[0] || { totalReturns: 0, totalProfitLoss: 0, count: 0 };
+};
+
+const SalesReturn = mongoose.model('SalesReturn', salesReturnSchema);
+
+module.exports = SalesReturn;

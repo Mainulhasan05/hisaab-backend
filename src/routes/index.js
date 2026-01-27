@@ -15,6 +15,7 @@ const expenseRoutes = require('./expense.routes');
 const supplierRoutes = require('./supplier.routes');
 const purchaseRoutes = require('./purchase.routes');
 const cashRegisterRoutes = require('./cashRegister.routes');
+const salesReturnRoutes = require('./salesReturn.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
@@ -30,6 +31,7 @@ router.use('/expenses', expenseRoutes);
 router.use('/suppliers', supplierRoutes);
 router.use('/purchases', purchaseRoutes);
 router.use('/cash-register', cashRegisterRoutes);
+router.use('/sales-returns', salesReturnRoutes);
 
 // API Info
 router.get('/', (req, res) => {
@@ -51,7 +53,8 @@ router.get('/', (req, res) => {
       expenses: '/api/expenses',
       suppliers: '/api/suppliers',
       purchases: '/api/purchases',
-      cashRegister: '/api/cash-register'
+      cashRegister: '/api/cash-register',
+      salesReturns: '/api/sales-returns'
     }
   });
 });

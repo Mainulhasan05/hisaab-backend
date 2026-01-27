@@ -137,6 +137,12 @@ const saleSchema = new mongoose.Schema({
   cancelReason: {
     type: String
   },
+  // Return tracking
+  returnedAmount: {
+    type: Number,
+    default: 0,
+    min: [0, 'ফেরত ০ এর কম হতে পারবে না']
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -201,6 +207,16 @@ saleSchema.virtual('isPaid').get(function() {
 // Virtual: Is cancelled
 saleSchema.virtual('isCancelled').get(function() {
   return this.status === SALE_STATUS.CANCELLED;
+});
+
+// Virtual: Has returns
+saleSchema.virtual('hasReturns').get(function() {
+  return (this.returnedAmount || 0) > 0;
+});
+
+// Virtual: Net total (after returns)
+saleSchema.virtual('netTotal').get(function() {
+  return this.total - (this.returnedAmount || 0);
 });
 
 // Static: Generate invoice number

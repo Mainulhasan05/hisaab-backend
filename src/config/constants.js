@@ -141,6 +141,9 @@ module.exports = {
     PURCHASE_CREATE: { en: 'purchase_create', bn: 'নতুন ক্রয়' },
     PURCHASE_CANCEL: { en: 'purchase_cancel', bn: 'ক্রয় বাতিল' },
 
+    // Sales Returns
+    SALES_RETURN_CREATE: { en: 'sales_return_create', bn: 'মাল ফেরত' },
+
     // Cash Register
     CASH_REGISTER_OPEN: { en: 'cash_register_open', bn: 'ক্যাশ রেজিস্টার খোলা' },
     CASH_REGISTER_UPDATE: { en: 'cash_register_update', bn: 'ক্যাশ রেজিস্টার আপডেট' },
@@ -149,6 +152,13 @@ module.exports = {
     // Shop Settings
     SHOP_UPDATE: { en: 'shop_update', bn: 'দোকান তথ্য সম্পাদনা' },
     SETTINGS_UPDATE: { en: 'settings_update', bn: 'সেটিংস আপডেট' }
+  },
+
+  // Sales Return Refund Methods
+  REFUND_METHODS: {
+    CASH: 'cash',
+    ADJUSTMENT: 'adjustment',
+    STORE_CREDIT: 'store_credit'
   },
 
   // Pagination Defaults
