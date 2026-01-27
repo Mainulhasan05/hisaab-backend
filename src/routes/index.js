@@ -11,6 +11,10 @@ const reportRoutes = require('./report.routes');
 const auditRoutes = require('./audit.routes');
 const adminRoutes = require('./admin.routes');
 const categoryRoutes = require('./category.routes');
+const expenseRoutes = require('./expense.routes');
+const supplierRoutes = require('./supplier.routes');
+const purchaseRoutes = require('./purchase.routes');
+const cashRegisterRoutes = require('./cashRegister.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
@@ -22,6 +26,10 @@ router.use('/sms', smsRoutes);
 router.use('/reports', reportRoutes);
 router.use('/audit', auditRoutes);
 router.use('/admin', adminRoutes);
+router.use('/expenses', expenseRoutes);
+router.use('/suppliers', supplierRoutes);
+router.use('/purchases', purchaseRoutes);
+router.use('/cash-register', cashRegisterRoutes);
 
 // API Info
 router.get('/', (req, res) => {
@@ -39,7 +47,11 @@ router.get('/', (req, res) => {
       sms: '/api/sms',
       reports: '/api/reports',
       audit: '/api/audit',
-      admin: '/api/admin'
+      admin: '/api/admin',
+      expenses: '/api/expenses',
+      suppliers: '/api/suppliers',
+      purchases: '/api/purchases',
+      cashRegister: '/api/cash-register'
     }
   });
 });

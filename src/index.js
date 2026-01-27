@@ -11,8 +11,16 @@ process.on('uncaughtException', (err) => {
   process.exit(1);
 });
 
-// Connect to Database
-connectDB();
+// Connect to Database and seed defaults
+connectDB().then(async () => {
+  try {
+    const ExpenseCategory = require('./models/ExpenseCategory.model');
+    await ExpenseCategory.seedDefaults();
+    logger.info('Default expense categories seeded');
+  } catch (err) {
+    logger.warn('Expense category seeding skipped:', err.message);
+  }
+});
 
 // Start Server
 const PORT = process.env.PORT || 5000;

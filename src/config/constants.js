@@ -127,6 +127,25 @@ module.exports = {
     // SMS
     SMS_SENT: { en: 'sms_sent', bn: 'এসএমএস পাঠানো' },
 
+    // Expenses
+    EXPENSE_CREATE: { en: 'expense_create', bn: 'নতুন খরচ যোগ' },
+    EXPENSE_UPDATE: { en: 'expense_update', bn: 'খরচ আপডেট' },
+    EXPENSE_DELETE: { en: 'expense_delete', bn: 'খরচ মুছে ফেলা' },
+
+    // Suppliers
+    SUPPLIER_CREATE: { en: 'supplier_create', bn: 'নতুন সরবরাহকারী যোগ' },
+    SUPPLIER_UPDATE: { en: 'supplier_update', bn: 'সরবরাহকারী আপডেট' },
+    SUPPLIER_DELETE: { en: 'supplier_delete', bn: 'সরবরাহকারী মুছে ফেলা' },
+
+    // Purchases
+    PURCHASE_CREATE: { en: 'purchase_create', bn: 'নতুন ক্রয়' },
+    PURCHASE_CANCEL: { en: 'purchase_cancel', bn: 'ক্রয় বাতিল' },
+
+    // Cash Register
+    CASH_REGISTER_OPEN: { en: 'cash_register_open', bn: 'ক্যাশ রেজিস্টার খোলা' },
+    CASH_REGISTER_UPDATE: { en: 'cash_register_update', bn: 'ক্যাশ রেজিস্টার আপডেট' },
+    CASH_REGISTER_CLOSE: { en: 'cash_register_close', bn: 'ক্যাশ রেজিস্টার বন্ধ' },
+
     // Shop Settings
     SHOP_UPDATE: { en: 'shop_update', bn: 'দোকান তথ্য সম্পাদনা' },
     SETTINGS_UPDATE: { en: 'settings_update', bn: 'সেটিংস আপডেট' }

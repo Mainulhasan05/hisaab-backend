@@ -112,6 +112,16 @@ const canManageCategories = checkPermission(PERMISSIONS.CATEGORIES_MANAGE);
 const canViewStock = checkPermission(PERMISSIONS.STOCK_VIEW);
 const canManageStock = checkPermission(PERMISSIONS.STOCK_MANAGE);
 
+const canViewExpenses = checkPermission(PERMISSIONS.EXPENSES_VIEW);
+const canCreateExpenses = checkPermission(PERMISSIONS.EXPENSES_CREATE);
+const canEditExpenses = checkPermission(PERMISSIONS.EXPENSES_EDIT);
+const canDeleteExpenses = checkPermission(PERMISSIONS.EXPENSES_DELETE);
+
+const canViewPurchases = checkPermission(PERMISSIONS.PURCHASES_VIEW);
+const canCreatePurchases = checkPermission(PERMISSIONS.PURCHASES_CREATE);
+const canEditPurchases = checkPermission(PERMISSIONS.PURCHASES_EDIT);
+const canDeletePurchases = checkPermission(PERMISSIONS.PURCHASES_DELETE);
+
 module.exports = {
   checkPermission,
   checkAnyPermission,
@@ -135,5 +145,13 @@ module.exports = {
   canViewCategories,
   canManageCategories,
   canViewStock,
-  canManageStock
+  canManageStock,
+  canViewExpenses,
+  canCreateExpenses,
+  canEditExpenses,
+  canDeleteExpenses,
+  canViewPurchases,
+  canCreatePurchases,
+  canEditPurchases,
+  canDeletePurchases
 };

@@ -41,7 +41,19 @@ const PERMISSIONS = {
 
   // Stock
   STOCK_VIEW: 'stock_view',
-  STOCK_MANAGE: 'stock_manage'
+  STOCK_MANAGE: 'stock_manage',
+
+  // Expenses
+  EXPENSES_VIEW: 'expenses_view',
+  EXPENSES_CREATE: 'expenses_create',
+  EXPENSES_EDIT: 'expenses_edit',
+  EXPENSES_DELETE: 'expenses_delete',
+
+  // Purchases & Suppliers
+  PURCHASES_VIEW: 'purchases_view',
+  PURCHASES_CREATE: 'purchases_create',
+  PURCHASES_EDIT: 'purchases_edit',
+  PURCHASES_DELETE: 'purchases_delete'
 };
 
 // Permission list as array
@@ -66,7 +78,13 @@ const ROLE_PERMISSIONS = {
     PERMISSIONS.CATEGORIES_VIEW,
     PERMISSIONS.CATEGORIES_MANAGE,
     PERMISSIONS.STOCK_VIEW,
-    PERMISSIONS.STOCK_MANAGE
+    PERMISSIONS.STOCK_MANAGE,
+    PERMISSIONS.EXPENSES_VIEW,
+    PERMISSIONS.EXPENSES_CREATE,
+    PERMISSIONS.EXPENSES_EDIT,
+    PERMISSIONS.PURCHASES_VIEW,
+    PERMISSIONS.PURCHASES_CREATE,
+    PERMISSIONS.PURCHASES_EDIT
   ],
 
   staff: [
@@ -76,7 +94,11 @@ const ROLE_PERMISSIONS = {
     PERMISSIONS.CUSTOMERS_VIEW,
     PERMISSIONS.CUSTOMERS_CREATE,
     PERMISSIONS.CATEGORIES_VIEW,
-    PERMISSIONS.STOCK_VIEW
+    PERMISSIONS.STOCK_VIEW,
+    PERMISSIONS.EXPENSES_VIEW,
+    PERMISSIONS.EXPENSES_CREATE,
+    PERMISSIONS.PURCHASES_VIEW,
+    PERMISSIONS.PURCHASES_CREATE
   ]
 };
 
@@ -101,7 +123,15 @@ const PERMISSION_LABELS = {
   categories_view: { en: 'View Categories', bn: 'ক্যাটাগরি দেখুন' },
   categories_manage: { en: 'Manage Categories', bn: 'ক্যাটাগরি ম্যানেজ করুন' },
   stock_view: { en: 'View Stock', bn: 'স্টক দেখুন' },
-  stock_manage: { en: 'Manage Stock', bn: 'স্টক ম্যানেজ করুন' }
+  stock_manage: { en: 'Manage Stock', bn: 'স্টক ম্যানেজ করুন' },
+  expenses_view: { en: 'View Expenses', bn: 'খরচ দেখুন' },
+  expenses_create: { en: 'Create Expenses', bn: 'খরচ যোগ করুন' },
+  expenses_edit: { en: 'Edit Expenses', bn: 'খরচ সম্পাদনা' },
+  expenses_delete: { en: 'Delete Expenses', bn: 'খরচ মুছুন' },
+  purchases_view: { en: 'View Purchases', bn: 'ক্রয় দেখুন' },
+  purchases_create: { en: 'Create Purchases', bn: 'ক্রয় যোগ করুন' },
+  purchases_edit: { en: 'Edit Purchases', bn: 'ক্রয় সম্পাদনা' },
+  purchases_delete: { en: 'Delete Purchases', bn: 'ক্রয় মুছুন' }
 };
 
 /**
