@@ -1,6 +1,7 @@
 const Purchase = require('../models/Purchase.model');
 const Product = require('../models/Product.model');
 const Supplier = require('../models/Supplier.model');
+const Payment = require('../models/Payment.model');
 const StockTransaction = require('../models/StockTransaction.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
@@ -376,6 +377,85 @@ class PurchaseService {
       month: monthSummary,
       today: todaySummary,
     };
+  }
+  // Record payment for a purchase
+  async recordPayment(shopId, userId, purchaseId, paymentData) {
+    const { amount, method = 'cash', notes } = paymentData;
+
+    const purchase = await Purchase.findOne({ _id: purchaseId, shop: shopId });
+    if (!purchase) {
+      throw new AppError('Purchase not found', 'ক্রয়টি পাওয়া যায়নি', 404);
+    }
+
+    if (purchase.status === 'cancelled') {
+      throw new AppError('Cannot record payment for cancelled purchase', 'বাতিল ক্রয়ে পেমেন্ট দেওয়া যাবে না', 400);
+    }
+
+    if (amount <= 0) {
+      throw new AppError('Payment amount must be greater than 0', 'পেমেন্টের পরিমাণ ০ এর বেশি হতে হবে', 400);
+    }
+
+    if (amount > purchase.due) {
+      throw new AppError('Payment amount exceeds due balance', 'পেমেন্টের পরিমাণ বাকির চেয়ে বেশি', 400);
+    }
+
+    // Update purchase
+    purchase.paid += amount;
+    await purchase.save(); // pre-save hook recalculates due and status
+
+    // Create payment record
+    const payment = await Payment.create({
+      shop: shopId,
+      purchase: purchaseId,
+      amount,
+      method,
+      type: 'purchase_payment',
+      notes,
+      receivedBy: userId,
+    });
+
+    // Update supplier balance if applicable
+    if (purchase.supplier) {
+      await Supplier.findByIdAndUpdate(purchase.supplier, {
+        $inc: { totalDue: -amount },
+      });
+    }
+
+    // Audit log
+    await AuditLog.create({
+      shop: shopId,
+      user: userId,
+      action: 'payment_received',
+      actionBn: 'ক্রয়ের পেমেন্ট',
+      description: `Paid ৳${amount} for purchase ${purchase.invoiceNo}`,
+      descriptionBn: `ক্রয় ${purchase.invoiceNo} এর জন্য ৳${amount} পেমেন্ট`,
+      entity: {
+        type: 'purchase',
+        id: purchase._id,
+        name: purchase.invoiceNo,
+      },
+      changes: {
+        before: { paid: purchase.paid - amount, due: purchase.due + amount },
+        after: { paid: purchase.paid, due: purchase.due },
+      },
+    });
+
+    return { purchase, payment };
+  }
+
+  // Get payments for a purchase
+  async getPurchasePayments(shopId, purchaseId) {
+    const purchase = await Purchase.findOne({ _id: purchaseId, shop: shopId });
+    if (!purchase) {
+      throw new AppError('Purchase not found', 'ক্রয়টি পাওয়া যায়নি', 404);
+    }
+
+    const payments = await Payment.find({ shop: shopId, purchase: purchaseId })
+      .populate('receivedBy', 'name')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return payments;
   }
 }
 

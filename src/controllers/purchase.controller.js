@@ -50,3 +50,31 @@ exports.getSummary = asyncHandler(async (req, res) => {
     messageBn: 'ক্রয়ের সারাংশ লোড হয়েছে',
   });
 });
+
+// Record payment for a purchase
+exports.recordPayment = asyncHandler(async (req, res) => {
+  const result = await purchaseService.recordPayment(
+    req.shop._id,
+    req.user._id,
+    req.params.id,
+    req.body
+  );
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Payment recorded successfully',
+    messageBn: 'পেমেন্ট সফলভাবে রেকর্ড হয়েছে',
+  });
+});
+
+// Get payments for a purchase
+exports.getPurchasePayments = asyncHandler(async (req, res) => {
+  const payments = await purchaseService.getPurchasePayments(
+    req.shop._id,
+    req.params.id
+  );
+  return ApiResponse.success(res, {
+    data: payments,
+    message: 'Purchase payments fetched',
+    messageBn: 'ক্রয়ের পেমেন্ট সমূহ পাওয়া গেছে',
+  });
+});

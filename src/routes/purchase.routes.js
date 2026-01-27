@@ -13,7 +13,9 @@ router.get('/summary', canViewPurchases, purchaseController.getSummary);
 // Purchase CRUD
 router.get('/', canViewPurchases, purchaseController.getPurchases);
 router.post('/', canCreatePurchases, purchaseController.createPurchase);
+router.get('/:id/payments', canViewPurchases, purchaseController.getPurchasePayments);
 router.get('/:id', canViewPurchases, purchaseController.getPurchase);
+router.patch('/:id/payment', canCreatePurchases, purchaseController.recordPayment);
 router.patch('/:id/cancel', canDeletePurchases, purchaseController.cancelPurchase);
 
 module.exports = router;

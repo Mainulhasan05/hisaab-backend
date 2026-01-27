@@ -11,6 +11,10 @@ const paymentSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Sale'
   },
+  purchase: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Purchase'
+  },
   customer: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Customer'
@@ -63,6 +67,7 @@ const paymentSchema = new mongoose.Schema({
 paymentSchema.index({ shop: 1, createdAt: -1 });
 paymentSchema.index({ shop: 1, customer: 1 });
 paymentSchema.index({ shop: 1, sale: 1 });
+paymentSchema.index({ shop: 1, purchase: 1 });
 paymentSchema.index({ shop: 1, method: 1 });
 paymentSchema.index({ shop: 1, type: 1 });
 paymentSchema.index({ shop: 1, receivedBy: 1 });

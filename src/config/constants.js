@@ -64,6 +64,7 @@ module.exports = {
   // Payment Types
   PAYMENT_TYPES: {
     SALE_PAYMENT: 'sale_payment',
+    PURCHASE_PAYMENT: 'purchase_payment',
     DUE_COLLECTION: 'due_collection',
     REFUND: 'refund'
   },
