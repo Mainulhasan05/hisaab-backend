@@ -2,6 +2,9 @@ const Sale = require('../models/Sale.model');
 const Product = require('../models/Product.model');
 const Customer = require('../models/Customer.model');
 const Payment = require('../models/Payment.model');
+const Expense = require('../models/Expense.model');
+const SalesReturn = require('../models/SalesReturn.model');
+const Purchase = require('../models/Purchase.model');
 const mongoose = require('mongoose');
 
 class ReportService {
@@ -418,6 +421,238 @@ class ReportService {
       customersWithDue,
       newCustomers,
       summary,
+    };
+  }
+
+  // Get Profit & Loss statement
+  async getProfitLoss(shopId, options = {}) {
+    const { startDate, endDate } = options;
+    const shopObjId = new mongoose.Types.ObjectId(shopId);
+
+    const dateMatch = {};
+    if (startDate || endDate) {
+      dateMatch.createdAt = {};
+      if (startDate) dateMatch.createdAt.$gte = new Date(startDate);
+      if (endDate) dateMatch.createdAt.$lte = new Date(endDate);
+    }
+
+    const expenseDateMatch = {};
+    if (startDate || endDate) {
+      expenseDateMatch.date = {};
+      if (startDate) expenseDateMatch.date.$gte = new Date(startDate);
+      if (endDate) expenseDateMatch.date.$lte = new Date(endDate);
+    }
+
+    // Run all aggregations in parallel
+    const [
+      salesAgg,
+      expenseAgg,
+      expenseByCategory,
+      returnsAgg,
+      purchaseAgg,
+      dailySales,
+      dailyExpenses,
+    ] = await Promise.all([
+      // 1. Sales: revenue, COGS, profit, count
+      Sale.aggregate([
+        {
+          $match: {
+            shop: shopObjId,
+            status: { $ne: 'cancelled' },
+            ...dateMatch,
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalRevenue: { $sum: '$total' },
+            totalProfit: { $sum: '$profit' },
+            totalPaid: { $sum: '$paid' },
+            totalDue: { $sum: '$due' },
+            totalDiscount: { $sum: '$discount' },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+
+      // 2. Total expenses
+      Expense.aggregate([
+        {
+          $match: {
+            shop: shopObjId,
+            ...expenseDateMatch,
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalExpenses: { $sum: '$amount' },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+
+      // 3. Expenses by category
+      Expense.aggregate([
+        {
+          $match: {
+            shop: shopObjId,
+            ...expenseDateMatch,
+          },
+        },
+        {
+          $group: {
+            _id: '$category',
+            categoryName: { $first: '$categoryName' },
+            total: { $sum: '$amount' },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { total: -1 } },
+      ]),
+
+      // 4. Sales returns
+      SalesReturn.aggregate([
+        {
+          $match: {
+            shop: shopObjId,
+            ...dateMatch,
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalReturns: { $sum: '$totalAmount' },
+            totalProfitLoss: { $sum: '$profitReduction' },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+
+      // 5. Purchases
+      Purchase.aggregate([
+        {
+          $match: {
+            shop: shopObjId,
+            status: { $ne: 'cancelled' },
+            ...dateMatch,
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalPurchases: { $sum: '$totalAmount' },
+            totalPaid: { $sum: '$paid' },
+            totalDue: { $sum: '$due' },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+
+      // 6. Daily sales breakdown (for chart)
+      Sale.aggregate([
+        {
+          $match: {
+            shop: shopObjId,
+            status: { $ne: 'cancelled' },
+            ...dateMatch,
+          },
+        },
+        {
+          $group: {
+            _id: {
+              $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
+            },
+            revenue: { $sum: '$total' },
+            profit: { $sum: '$profit' },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+
+      // 7. Daily expenses breakdown (for chart)
+      Expense.aggregate([
+        {
+          $match: {
+            shop: shopObjId,
+            ...expenseDateMatch,
+          },
+        },
+        {
+          $group: {
+            _id: {
+              $dateToString: { format: '%Y-%m-%d', date: '$date' },
+            },
+            expense: { $sum: '$amount' },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+    ]);
+
+    const sales = salesAgg[0] || { totalRevenue: 0, totalProfit: 0, totalPaid: 0, totalDue: 0, totalDiscount: 0, count: 0 };
+    const expenses = expenseAgg[0] || { totalExpenses: 0, count: 0 };
+    const returns = returnsAgg[0] || { totalReturns: 0, totalProfitLoss: 0, count: 0 };
+    const purchases = purchaseAgg[0] || { totalPurchases: 0, totalPaid: 0, totalDue: 0, count: 0 };
+
+    // COGS = Revenue - Profit (since profit = revenue - COGS - discounts, and revenue already has discounts subtracted)
+    const cogs = sales.totalRevenue - sales.totalProfit;
+
+    // Net profit = Sales profit - Expenses - Returns profit loss
+    const netProfit = sales.totalProfit - expenses.totalExpenses - returns.totalProfitLoss;
+
+    // Merge daily sales and expenses into a single chart dataset
+    const dailyMap = new Map();
+    for (const d of dailySales) {
+      dailyMap.set(d._id, { date: d._id, revenue: d.revenue, profit: d.profit, orders: d.count, expense: 0 });
+    }
+    for (const d of dailyExpenses) {
+      if (dailyMap.has(d._id)) {
+        dailyMap.get(d._id).expense = d.expense;
+      } else {
+        dailyMap.set(d._id, { date: d._id, revenue: 0, profit: 0, orders: 0, expense: d.expense });
+      }
+    }
+    const chartData = Array.from(dailyMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+
+    return {
+      // Summary
+      revenue: sales.totalRevenue,
+      cogs,
+      grossProfit: sales.totalProfit,
+      totalExpenses: expenses.totalExpenses,
+      returnsLoss: returns.totalProfitLoss,
+      netProfit,
+
+      // Details
+      sales: {
+        revenue: sales.totalRevenue,
+        paid: sales.totalPaid,
+        due: sales.totalDue,
+        discount: sales.totalDiscount,
+        count: sales.count,
+        profit: sales.totalProfit,
+      },
+      expenses: {
+        total: expenses.totalExpenses,
+        count: expenses.count,
+        byCategory: expenseByCategory,
+      },
+      returns: {
+        total: returns.totalReturns,
+        profitLoss: returns.totalProfitLoss,
+        count: returns.count,
+      },
+      purchases: {
+        total: purchases.totalPurchases,
+        paid: purchases.totalPaid,
+        due: purchases.totalDue,
+        count: purchases.count,
+      },
+
+      // Chart
+      chartData,
     };
   }
 

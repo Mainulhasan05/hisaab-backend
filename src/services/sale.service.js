@@ -25,23 +25,12 @@ class SaleService {
     return `INV-${datePrefix}-${String(count + 1).padStart(4, '0')}`;
   }
 
-  // Get all sales with filtering, searching, pagination
-  async getSales(shopId, options = {}) {
-    const {
-      page = 1,
-      limit = 20,
-      search,
-      status,
-      customerId,
-      startDate,
-      endDate,
-      sortBy = 'createdAt',
-      sortOrder = 'desc',
-    } = options;
+  // Build query from filters (shared by getSales and getSalesSummary)
+  _buildQuery(shopId, options = {}) {
+    const { search, status, customerId, startDate, endDate, paymentMethod } = options;
 
     const query = { shop: shopId };
 
-    // Search by invoice number or customer name/phone
     if (search) {
       query.$or = [
         { invoiceNo: { $regex: search, $options: 'i' } },
@@ -50,22 +39,37 @@ class SaleService {
       ];
     }
 
-    // Filter by status
     if (status) {
       query.status = status;
     }
 
-    // Filter by customer
     if (customerId) {
       query.customer = customerId;
     }
 
-    // Filter by date range
     if (startDate || endDate) {
       query.createdAt = {};
       if (startDate) query.createdAt.$gte = new Date(startDate);
       if (endDate) query.createdAt.$lte = new Date(endDate);
     }
+
+    if (paymentMethod) {
+      query.paymentMethod = paymentMethod;
+    }
+
+    return query;
+  }
+
+  // Get all sales with filtering, searching, pagination
+  async getSales(shopId, options = {}) {
+    const {
+      page = 1,
+      limit = 20,
+      sortBy = 'createdAt',
+      sortOrder = 'desc',
+    } = options;
+
+    const query = this._buildQuery(shopId, options);
 
     const skip = (page - 1) * limit;
     const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
@@ -90,6 +94,31 @@ class SaleService {
         pages: Math.ceil(total / limit),
       },
     };
+  }
+
+  // Get aggregated summary for filtered sales
+  async getSalesSummary(shopId, options = {}) {
+    const query = this._buildQuery(shopId, options);
+    // Exclude cancelled from summary unless specifically filtering for cancelled
+    if (!options.status) {
+      query.status = { $ne: 'cancelled' };
+    }
+
+    const result = await Sale.aggregate([
+      { $match: query },
+      {
+        $group: {
+          _id: null,
+          totalSales: { $sum: '$total' },
+          totalPaid: { $sum: '$paid' },
+          totalDue: { $sum: '$due' },
+          totalProfit: { $sum: '$profit' },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    return result[0] || { totalSales: 0, totalPaid: 0, totalDue: 0, totalProfit: 0, count: 0 };
   }
 
   // Get single sale by ID

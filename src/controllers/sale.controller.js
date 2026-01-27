@@ -53,6 +53,16 @@ exports.cancelSale = asyncHandler(async (req, res) => {
   });
 });
 
+// Get filtered sales summary (aggregated stats)
+exports.getSalesSummary = asyncHandler(async (req, res) => {
+  const summary = await saleService.getSalesSummary(req.shop._id, req.query);
+  return ApiResponse.success(res, {
+    data: summary,
+    message: 'Sales summary retrieved successfully',
+    messageBn: 'বিক্রয় সারাংশ সফলভাবে লোড হয়েছে',
+  });
+});
+
 // Get today's summary
 exports.getTodaySummary = asyncHandler(async (req, res) => {
   const summary = await saleService.getTodaySummary(req.shop._id);

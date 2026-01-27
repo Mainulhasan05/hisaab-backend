@@ -10,6 +10,7 @@ router.use(protect);
 // Sale routes
 router.get('/', canViewSales, saleController.getSales);
 router.post('/', canCreateSales, saleController.createSale);
+router.get('/summary', canViewSales, saleController.getSalesSummary);
 router.get('/today-summary', canViewSales, saleController.getTodaySummary);
 router.get('/recent', canViewSales, saleController.getRecentSales);
 router.get('/:id', canViewSales, saleController.getSale);

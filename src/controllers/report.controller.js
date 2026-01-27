@@ -42,6 +42,16 @@ exports.getCustomerReport = asyncHandler(async (req, res) => {
   });
 });
 
+// Get Profit & Loss statement
+exports.getProfitLoss = asyncHandler(async (req, res) => {
+  const report = await reportService.getProfitLoss(req.shop._id, req.query);
+  return ApiResponse.success(res, {
+    data: report,
+    message: 'Profit & Loss report retrieved successfully',
+    messageBn: 'লাভ-ক্ষতি রিপোর্ট সফলভাবে লোড হয়েছে',
+  });
+});
+
 // Export report
 exports.exportReport = asyncHandler(async (req, res) => {
   const { type, format } = req.params;

@@ -12,6 +12,7 @@ router.get('/dashboard', reportController.getDashboard);
 router.get('/sales', canViewReports, reportController.getSalesReport);
 router.get('/products', canViewReports, reportController.getProductReport);
 router.get('/customers', canViewReports, reportController.getCustomerReport);
+router.get('/profit-loss', canViewReports, reportController.getProfitLoss);
 router.get('/:type/export/:format', canViewReports, reportController.exportReport);
 
 module.exports = router;
