@@ -234,6 +234,10 @@ const deleteTeamMember = asyncHandler(async (req, res) => {
 const updateShopSettings = asyncHandler(async (req, res) => {
   const Shop = require('../models/Shop.model');
 
+  // Basic shop info fields that can be updated directly
+  const allowedBasicFields = ['name', 'phone', 'address'];
+
+  // Settings fields that go under settings object
   const allowedSettings = [
     'lowStockThreshold',
     'invoicePrefix',
@@ -243,6 +247,15 @@ const updateShopSettings = asyncHandler(async (req, res) => {
   ];
 
   const updates = {};
+
+  // Handle basic fields
+  for (const key of allowedBasicFields) {
+    if (req.body[key] !== undefined) {
+      updates[key] = req.body[key];
+    }
+  }
+
+  // Handle settings fields
   for (const key of allowedSettings) {
     if (req.body[key] !== undefined) {
       updates[`settings.${key}`] = req.body[key];

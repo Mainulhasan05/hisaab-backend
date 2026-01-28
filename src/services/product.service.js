@@ -42,11 +42,14 @@ class ProductService {
       query.isActive = false;
     }
 
-    // Filter low stock items
+    // Filter low stock items (works for both non-variant and variant products)
     if (lowStock === 'true' || lowStock === true) {
-      query.$expr = {
-        $lt: ['$stock', '$minStock'],
-      };
+      query.$or = [
+        // Non-variant products: stock < minStock
+        { hasVariants: { $ne: true }, $expr: { $lt: ['$stock', '$minStock'] } },
+        // Variant products: any variant has stock < product minStock
+        { hasVariants: true, 'variants.stock': { $lt: 5 } }, // Default threshold for variants
+      ];
     }
 
     const skip = (page - 1) * limit;
@@ -248,6 +251,39 @@ class ProductService {
     });
 
     return { success: true };
+  }
+
+  // Toggle product active status
+  async toggleProductStatus(shopId, userId, productId, isActive) {
+    const product = await Product.findOne({ _id: productId, shop: shopId });
+    if (!product) {
+      throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
+    }
+
+    const previousStatus = product.isActive;
+    product.isActive = isActive;
+    await product.save();
+
+    // Create audit log
+    await AuditLog.create({
+      shop: shopId,
+      user: userId,
+      action: isActive ? 'product_activate' : 'product_deactivate',
+      actionBn: isActive ? 'পণ্য সক্রিয় করা' : 'পণ্য নিষ্ক্রিয় করা',
+      description: `${isActive ? 'Activated' : 'Deactivated'} product: ${product.name}`,
+      descriptionBn: `পণ্য ${isActive ? 'সক্রিয়' : 'নিষ্ক্রিয়'} করা হয়েছে: ${product.name}`,
+      entity: {
+        type: 'product',
+        id: product._id,
+        name: product.name,
+      },
+      changes: {
+        before: { isActive: previousStatus },
+        after: { isActive },
+      },
+    });
+
+    return product;
   }
 
   // Update stock

@@ -102,3 +102,25 @@ exports.bulkUpdateStock = asyncHandler(async (req, res) => {
     messageBn: 'বাল্ক স্টক আপডেট সম্পন্ন হয়েছে',
   });
 });
+
+// Toggle product status
+exports.toggleStatus = asyncHandler(async (req, res) => {
+  const { isActive } = req.body;
+  if (isActive === undefined) {
+    return ApiResponse.badRequest(res, {
+      message: 'isActive field is required',
+      messageBn: 'স্ট্যাটাস দিন',
+    });
+  }
+  const product = await productService.toggleProductStatus(
+    req.shop._id,
+    req.user._id,
+    req.params.id,
+    isActive
+  );
+  return ApiResponse.success(res, {
+    data: product,
+    message: isActive ? 'Product activated' : 'Product deactivated',
+    messageBn: isActive ? 'পণ্য সক্রিয় হয়েছে' : 'পণ্য নিষ্ক্রিয় হয়েছে',
+  });
+});

@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const app = require('./app');
 const connectDB = require('./config/database');
+const { initializeRedis, closeConnection: closeRedis } = require('./config/redis.config');
 const logger = require('./utils/logger.util');
 
 // Handle uncaught exceptions
@@ -11,7 +12,7 @@ process.on('uncaughtException', (err) => {
   process.exit(1);
 });
 
-// Connect to Database and seed defaults
+// Connect to Database and initialize services
 connectDB().then(async () => {
   try {
     const ExpenseCategory = require('./models/ExpenseCategory.model');
@@ -20,6 +21,17 @@ connectDB().then(async () => {
   } catch (err) {
     logger.warn('Expense category seeding skipped:', err.message);
   }
+});
+
+// Initialize Redis (with in-memory fallback)
+initializeRedis().then((connected) => {
+  if (connected) {
+    logger.info('Redis cache initialized');
+  } else {
+    logger.info('Using in-memory cache (Redis not available)');
+  }
+}).catch((err) => {
+  logger.warn('Redis initialization error, using in-memory cache:', err.message);
 });
 
 // Start Server
@@ -49,8 +61,9 @@ process.on('unhandledRejection', (err) => {
 });
 
 // Handle SIGTERM
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   logger.info('👋 SIGTERM RECEIVED. Shutting down gracefully');
+  await closeRedis();
   server.close(() => {
     logger.info('💥 Process terminated!');
   });

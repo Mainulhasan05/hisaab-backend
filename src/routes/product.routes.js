@@ -18,6 +18,7 @@ router.get('/:id', canViewProducts, productController.getProduct);
 router.put('/:id', canEditProducts, productController.updateProduct);
 router.delete('/:id', canDeleteProducts, productController.deleteProduct);
 router.patch('/:id/stock', canEditProducts, productController.updateStock);
+router.patch('/:id/status', canEditProducts, productController.toggleStatus);
 router.get('/:id/stock-transactions', canViewProducts, productController.getStockTransactions);
 
 module.exports = router;

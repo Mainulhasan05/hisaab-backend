@@ -7,6 +7,8 @@ const morgan = require('morgan');
 
 const { apiLimiter, authLimiter } = require('./middleware/rateLimiter.middleware');
 const { errorHandler, notFoundHandler } = require('./middleware/error.middleware');
+const { requestContext } = require('./middleware/requestContext.middleware');
+const { getCacheInfo } = require('./config/redis.config');
 const logger = require('./utils/logger.util');
 
 // Create Express app
@@ -42,6 +44,9 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
 
+// Request Context (IP, User Agent, Device info)
+app.use(requestContext);
+
 // Data Sanitization against NoSQL Injection
 app.use(mongoSanitize());
 
@@ -61,11 +66,13 @@ app.use('/api', apiLimiter);
 
 // Health Check Endpoint
 app.get('/health', (req, res) => {
+  const cacheInfo = getCacheInfo();
   res.status(200).json({
     success: true,
     message: 'Server is healthy',
     messageBn: 'সার্ভার সচল আছে',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    cache: cacheInfo
   });
 });
 

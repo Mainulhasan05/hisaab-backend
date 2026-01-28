@@ -16,6 +16,7 @@ const supplierRoutes = require('./supplier.routes');
 const purchaseRoutes = require('./purchase.routes');
 const cashRegisterRoutes = require('./cashRegister.routes');
 const salesReturnRoutes = require('./salesReturn.routes');
+const heartbeatRoutes = require('./heartbeat.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
@@ -32,6 +33,7 @@ router.use('/suppliers', supplierRoutes);
 router.use('/purchases', purchaseRoutes);
 router.use('/cash-register', cashRegisterRoutes);
 router.use('/sales-returns', salesReturnRoutes);
+router.use('/heartbeat', heartbeatRoutes);
 
 // API Info
 router.get('/', (req, res) => {
@@ -54,7 +56,8 @@ router.get('/', (req, res) => {
       suppliers: '/api/suppliers',
       purchases: '/api/purchases',
       cashRegister: '/api/cash-register',
-      salesReturns: '/api/sales-returns'
+      salesReturns: '/api/sales-returns',
+      heartbeat: '/api/heartbeat'
     }
   });
 });
