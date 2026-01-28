@@ -330,12 +330,12 @@ class SaleService {
       user: userId,
       action: 'sale_create',
       actionBn: 'নতুন বিক্রয়',
-      description: `Created sale: ${invoiceNo}, Total: ৳${total}`,
-      descriptionBn: `নতুন বিক্রয়: ${invoiceNo}, মোট: ৳${total}`,
+      description: `Created sale: ${sale.invoiceNo}, Total: ৳${total}`,
+      descriptionBn: `নতুন বিক্রয়: ${sale.invoiceNo}, মোট: ৳${total}`,
       entity: {
         type: 'sale',
         id: sale._id,
-        name: invoiceNo,
+        name: sale.invoiceNo,
       },
       changes: {
         after: sale.toObject(),
