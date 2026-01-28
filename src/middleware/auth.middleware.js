@@ -4,15 +4,24 @@ const Admin = require('../models/Admin.model');
 const Shop = require('../models/Shop.model');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
+const { COOKIE_NAMES } = require('../utils/cookie.util');
 
 /**
  * Protect routes - Verify JWT token
  */
 const protect = asyncHandler(async (req, res, next) => {
-  let token;
+  let token = null;
 
-  // Get token from Authorization header
-  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+  // Priority 1: Check user token cookie
+  if (req.cookies && req.cookies[COOKIE_NAMES.USER_TOKEN]) {
+    token = req.cookies[COOKIE_NAMES.USER_TOKEN];
+  }
+  // Priority 2: Check admin token cookie
+  else if (req.cookies && req.cookies[COOKIE_NAMES.ADMIN_TOKEN]) {
+    token = req.cookies[COOKIE_NAMES.ADMIN_TOKEN];
+  }
+  // Priority 3: Fallback to Authorization header (for mobile apps, API clients)
+  else if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
     token = req.headers.authorization.split(' ')[1];
   }
 

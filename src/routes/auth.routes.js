@@ -12,6 +12,7 @@ router.post('/send-otp', validate(authValidation.sendOTP), authController.sendOT
 router.post('/verify-otp', validate(authValidation.verifyOTP), authController.verifyOTP);
 router.post('/login', validate(authValidation.login), authController.login);
 router.post('/admin/login', validate(authValidation.adminLogin), authController.adminLogin);
+router.post('/admin/logout', authController.adminLogout);
 
 // Protected routes
 router.use(protect);

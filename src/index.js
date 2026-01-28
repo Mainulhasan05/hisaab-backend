@@ -21,6 +21,17 @@ connectDB().then(async () => {
   } catch (err) {
     logger.warn('Expense category seeding skipped:', err.message);
   }
+
+  // Seed super admin
+  try {
+    const { seedSuperAdmin } = require('./seeds/adminSeeder');
+    const result = await seedSuperAdmin();
+    if (result.created) {
+      logger.info('Super admin seeded successfully');
+    }
+  } catch (err) {
+    logger.warn('Super admin seeding skipped:', err.message);
+  }
 });
 
 // Initialize Redis (with in-memory fallback)

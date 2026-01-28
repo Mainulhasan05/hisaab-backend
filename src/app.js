@@ -1,6 +1,7 @@
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 const mongoSanitize = require('express-mongo-sanitize');
 const hpp = require('hpp');
 const morgan = require('morgan');
@@ -43,6 +44,9 @@ app.use(cors(corsOptions));
 // Body Parsing
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+
+// Cookie Parser
+app.use(cookieParser());
 
 // Request Context (IP, User Agent, Device info)
 app.use(requestContext);

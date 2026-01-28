@@ -1,6 +1,12 @@
 const AuthService = require('../services/auth.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
+const {
+  setUserTokenCookie,
+  setAdminTokenCookie,
+  clearUserTokenCookie,
+  clearAdminTokenCookie
+} = require('../utils/cookie.util');
 
 /**
  * @desc    Register new shop with owner
@@ -10,8 +16,14 @@ const asyncHandler = require('../utils/asyncHandler.util');
 const register = asyncHandler(async (req, res) => {
   const result = await AuthService.register(req.body, req);
 
+  // Set httpOnly cookie
+  setUserTokenCookie(res, result.token);
+
+  // Remove token from response data (it's in the cookie now)
+  const { token, ...responseData } = result;
+
   return ApiResponse.created(res, {
-    data: result,
+    data: responseData,
     message: 'Registration successful. Please verify your phone number.',
     messageBn: 'নিবন্ধন সফল। অনুগ্রহ করে ফোন নম্বর যাচাই করুন।'
   });
@@ -55,8 +67,14 @@ const verifyOTP = asyncHandler(async (req, res) => {
 const login = asyncHandler(async (req, res) => {
   const result = await AuthService.login(req.body, req);
 
+  // Set httpOnly cookie
+  setUserTokenCookie(res, result.token);
+
+  // Remove token from response data (it's in the cookie now)
+  const { token, ...responseData } = result;
+
   return ApiResponse.success(res, {
-    data: result,
+    data: responseData,
     message: 'Login successful',
     messageBn: 'লগইন সফল'
   });
@@ -68,8 +86,8 @@ const login = asyncHandler(async (req, res) => {
  * @access  Private
  */
 const logout = asyncHandler(async (req, res) => {
-  // JWT is stateless, client should remove token
-  // Optionally implement token blacklisting here
+  // Clear the httpOnly cookie
+  clearUserTokenCookie(res);
 
   return ApiResponse.success(res, {
     message: 'Logout successful',
@@ -115,8 +133,14 @@ const changePassword = asyncHandler(async (req, res) => {
 const adminLogin = asyncHandler(async (req, res) => {
   const result = await AuthService.adminLogin(req.body, req);
 
+  // Set httpOnly cookie for admin
+  setAdminTokenCookie(res, result.token);
+
+  // Remove token from response data (it's in the cookie now)
+  const { token, ...responseData } = result;
+
   return ApiResponse.success(res, {
-    data: result,
+    data: responseData,
     message: 'Admin login successful',
     messageBn: 'অ্যাডমিন লগইন সফল'
   });
@@ -282,6 +306,21 @@ const updateShopSettings = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * @desc    Admin logout
+ * @route   POST /api/auth/admin/logout
+ * @access  Private (Admin)
+ */
+const adminLogout = asyncHandler(async (req, res) => {
+  // Clear the httpOnly admin cookie
+  clearAdminTokenCookie(res);
+
+  return ApiResponse.success(res, {
+    message: 'Admin logout successful',
+    messageBn: 'অ্যাডমিন লগআউট সফল'
+  });
+});
+
 module.exports = {
   register,
   sendOTP,
@@ -291,6 +330,7 @@ module.exports = {
   getMe,
   changePassword,
   adminLogin,
+  adminLogout,
   createTeamMember,
   getTeamMembers,
   updateTeamMember,
