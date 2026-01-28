@@ -163,18 +163,40 @@ class ProductService {
 
     const beforeData = product.toObject();
 
+    // SECURITY: Prevent direct stock manipulation - must use updateStock endpoint
+    // This ensures all stock changes are tracked in StockTransaction
+    const { stock, ...safeUpdateData } = updateData;
+    if (stock !== undefined) {
+      console.warn(`[SECURITY] Blocked direct stock update attempt for product ${productId} by user ${userId}`);
+    }
+
+    // If variants are being updated, strip out stock from each variant
+    if (safeUpdateData.variants && Array.isArray(safeUpdateData.variants)) {
+      safeUpdateData.variants = safeUpdateData.variants.map(variant => {
+        const { stock: variantStock, ...safeVariant } = variant;
+        // Preserve existing stock for this variant if it exists
+        const existingVariant = product.variants?.find(v =>
+          v._id?.toString() === variant._id?.toString() || v.sku === variant.sku
+        );
+        return {
+          ...safeVariant,
+          stock: existingVariant?.stock ?? 0, // Keep existing stock or default to 0 for new variants
+        };
+      });
+    }
+
     // Check if code is being changed and if it conflicts
-    if (updateData.code && updateData.code !== product.code) {
-      const existingProduct = await Product.findOne({ shop: shopId, code: updateData.code, _id: { $ne: productId } });
+    if (safeUpdateData.code && safeUpdateData.code !== product.code) {
+      const existingProduct = await Product.findOne({ shop: shopId, code: safeUpdateData.code, _id: { $ne: productId } });
       if (existingProduct) {
         throw new AppError('এই কোড দিয়ে ইতিমধ্যে পণ্য আছে', 'Product with this code already exists', 400);
       }
     }
 
-    // Update product
-    Object.assign(product, updateData);
-    if (updateData.variants) {
-      product.hasVariants = updateData.variants.length > 0;
+    // Update product with safe data (stock fields excluded)
+    Object.assign(product, safeUpdateData);
+    if (safeUpdateData.variants) {
+      product.hasVariants = safeUpdateData.variants.length > 0;
     }
     await product.save();
 

@@ -149,6 +149,7 @@ module.exports = {
     CASH_REGISTER_OPEN: { en: 'cash_register_open', bn: 'ক্যাশ রেজিস্টার খোলা' },
     CASH_REGISTER_UPDATE: { en: 'cash_register_update', bn: 'ক্যাশ রেজিস্টার আপডেট' },
     CASH_REGISTER_CLOSE: { en: 'cash_register_close', bn: 'ক্যাশ রেজিস্টার বন্ধ' },
+    CASH_REGISTER_REOPEN: { en: 'cash_register_reopen', bn: 'ক্যাশ রেজিস্টার পুনরায় খোলা' },
 
     // Shop Settings
     SHOP_UPDATE: { en: 'shop_update', bn: 'দোকান তথ্য সম্পাদনা' },

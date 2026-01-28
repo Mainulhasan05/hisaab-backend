@@ -226,6 +226,49 @@ const deleteTeamMember = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * @desc    Update shop settings
+ * @route   PATCH /api/auth/shop/settings
+ * @access  Private (Owner only)
+ */
+const updateShopSettings = asyncHandler(async (req, res) => {
+  const Shop = require('../models/Shop.model');
+
+  const allowedSettings = [
+    'lowStockThreshold',
+    'invoicePrefix',
+    'taxEnabled',
+    'taxRate',
+    'enabledVariantTypes'
+  ];
+
+  const updates = {};
+  for (const key of allowedSettings) {
+    if (req.body[key] !== undefined) {
+      updates[`settings.${key}`] = req.body[key];
+    }
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return ApiResponse.badRequest(res, {
+      message: 'No valid settings provided',
+      messageBn: 'কোন বৈধ সেটিংস প্রদান করা হয়নি'
+    });
+  }
+
+  const shop = await Shop.findByIdAndUpdate(
+    req.shop._id,
+    { $set: updates },
+    { new: true }
+  );
+
+  return ApiResponse.success(res, {
+    data: { shop },
+    message: 'Settings updated successfully',
+    messageBn: 'সেটিংস আপডেট হয়েছে'
+  });
+});
+
 module.exports = {
   register,
   sendOTP,
@@ -238,5 +281,6 @@ module.exports = {
   createTeamMember,
   getTeamMembers,
   updateTeamMember,
-  deleteTeamMember
+  deleteTeamMember,
+  updateShopSettings
 };

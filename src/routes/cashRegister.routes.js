@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { protect } = require('../middleware/auth.middleware');
+const { protect, ownerOnly } = require('../middleware/auth.middleware');
 const { canViewPurchases, canCreatePurchases, canEditPurchases } = require('../middleware/permission.middleware');
 const cashRegisterController = require('../controllers/cashRegister.controller');
 
@@ -18,6 +18,9 @@ router.put('/today', canEditPurchases, cashRegisterController.updateDay);
 
 // Close today's register
 router.post('/close', canEditPurchases, cashRegisterController.closeDay);
+
+// Reopen today's register (owner only)
+router.post('/reopen', ownerOnly, cashRegisterController.reopenDay);
 
 // Get history
 router.get('/history', canViewPurchases, cashRegisterController.getHistory);

@@ -218,17 +218,28 @@ class SaleService {
 
       subtotal += itemTotal;
 
-      // Create stock transaction
+      // Get buying price for cost tracking
+      const buyingPrice = item.variantId
+        ? (product.variants.id(item.variantId)?.buyingPrice || product.buyingPrice)
+        : product.buyingPrice;
+
+      // Create stock transaction with price info
       await StockTransaction.create({
         shop: shopId,
         product: product._id,
         productName: product.name,
         productCode: product.code,
         variantId: item.variantId || null,
+        variantSku: variantInfo.variantSku || null,
+        variantAttributes: variantInfo.variantAttributes || null,
         type: 'sale',
         quantity: -item.quantity,
         previousStock: (item.variantId ? product.variants.id(item.variantId)?.stock : product.stock) + item.quantity,
         newStock: item.variantId ? product.variants.id(item.variantId)?.stock : product.stock,
+        unitCost: buyingPrice || 0,
+        totalCost: (buyingPrice || 0) * item.quantity,
+        unitPrice: unitPrice,
+        totalPrice: itemTotal,
         notes: `Sale item`,
         createdBy: userId,
       });

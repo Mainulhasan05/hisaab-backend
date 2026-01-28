@@ -57,6 +57,14 @@ const stockTransactionSchema = new mongoose.Schema({
     type: Number,
     min: 0
   },
+  unitPrice: {
+    type: Number,
+    min: 0
+  },
+  totalPrice: {
+    type: Number,
+    min: 0
+  },
   reference: {
     type: {
       type: String,

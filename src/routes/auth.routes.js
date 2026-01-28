@@ -29,4 +29,7 @@ router.route('/team/:id')
   .put(ownerOnly, validate(authValidation.updateTeamMember), authController.updateTeamMember)
   .delete(ownerOnly, authController.deleteTeamMember);
 
+// Shop settings (Owner only)
+router.patch('/shop/settings', ownerOnly, authController.updateShopSettings);
+
 module.exports = router;

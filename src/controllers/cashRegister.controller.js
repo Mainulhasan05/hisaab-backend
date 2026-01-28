@@ -76,3 +76,17 @@ exports.getHistory = asyncHandler(async (req, res) => {
     messageBn: 'ক্যাশ রেজিস্টার ইতিহাস',
   });
 });
+
+exports.reopenDay = asyncHandler(async (req, res) => {
+  const { reason } = req.body;
+  const register = await cashRegisterService.reopenRegister(
+    req.shop._id,
+    req.user._id,
+    reason
+  );
+  ApiResponse.success(res, {
+    data: register,
+    message: 'Cash register reopened',
+    messageBn: 'ক্যাশ রেজিস্টার পুনরায় খোলা হয়েছে',
+  });
+});

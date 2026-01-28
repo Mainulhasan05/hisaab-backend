@@ -74,6 +74,10 @@ const shopSchema = new mongoose.Schema({
     taxRate: {
       type: Number,
       default: 0
+    },
+    enabledVariantTypes: {
+      type: [String],
+      default: ['size', 'color']
     }
   },
   stats: {

@@ -310,6 +310,76 @@ class CashRegisterService {
     return register.toJSON();
   }
 
+  // Reopen a closed register (owner only)
+  async reopenRegister(shopId, userId, reason) {
+    const { start, end } = this._dayRange();
+
+    const register = await CashRegister.findOne({
+      shop: shopId,
+      date: { $gte: start, $lte: end },
+    });
+
+    if (!register) {
+      throw new AppError(
+        'আজকের রেজিস্টার পাওয়া যায়নি',
+        'Today\'s register not found',
+        404
+      );
+    }
+
+    if (register.status !== 'closed') {
+      throw new AppError(
+        'রেজিস্টার ইতিমধ্যে খোলা আছে',
+        'Register is already open',
+        400
+      );
+    }
+
+    // Store previous closing data for audit
+    const previousData = {
+      actualClosing: register.actualClosing,
+      difference: register.difference,
+      closedAt: register.closedAt,
+      closedBy: register.closedBy,
+    };
+
+    // Reset closing data
+    register.status = 'open';
+    register.actualClosing = undefined;
+    register.difference = 0;
+    register.closedAt = undefined;
+    register.closedBy = undefined;
+
+    // Recalculate cash flows
+    const flows = await this._calculateCashFlows(shopId, start, end);
+    register.cashIn.sales = flows.sales;
+    register.cashIn.dueCollections = flows.dueCollections;
+    register.cashOut.expenses = flows.expenses;
+    register.cashOut.purchases = flows.purchases;
+
+    await register.save();
+
+    // Audit log
+    await AuditLog.create({
+      shop: shopId,
+      user: userId,
+      action: AUDIT_ACTIONS.CASH_REGISTER_REOPEN.en,
+      actionBn: AUDIT_ACTIONS.CASH_REGISTER_REOPEN.bn,
+      description: `Cash register reopened. Reason: ${reason || 'Not specified'}`,
+      descriptionBn: `ক্যাশ রেজিস্টার পুনরায় খোলা হয়েছে। কারণ: ${reason || 'উল্লেখ নেই'}`,
+      entity: {
+        type: 'cash_register',
+        id: register._id,
+      },
+      changes: {
+        before: previousData,
+        after: { status: 'open', reason },
+      },
+    });
+
+    return register.toJSON();
+  }
+
   // Get register history
   async getHistory(shopId, options = {}) {
     const { page = 1, limit = 10, startDate, endDate } = options;
