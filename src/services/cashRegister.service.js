@@ -93,16 +93,25 @@ class CashRegisterService {
     });
 
     if (!register) {
-      // Auto-set opening from previous day's closing
+      // Check for unclosed previous day
       const previousRegister = await CashRegister.findOne({
         shop: shopId,
         date: { $lt: start },
       }).sort({ date: -1 });
 
+      // Check if previous day is unclosed
+      const unclosedPrevious = previousRegister?.status === 'open' ? {
+        _id: previousRegister._id,
+        date: previousRegister.date,
+        openingBalance: previousRegister.openingBalance,
+        expectedClosing: previousRegister.expectedClosing,
+      } : null;
+
       return {
         exists: false,
         suggestedOpening: previousRegister?.actualClosing ?? previousRegister?.expectedClosing ?? 0,
         previousDate: previousRegister?.date || null,
+        unclosedPrevious,
       };
     }
 
@@ -294,6 +303,61 @@ class CashRegisterService {
       actionBn: AUDIT_ACTIONS.CASH_REGISTER_CLOSE.bn,
       description: `Cash register closed. Expected: ৳${register.expectedClosing}, Actual: ৳${actualClosing}, Diff: ৳${register.difference}`,
       descriptionBn: `ক্যাশ রেজিস্টার বন্ধ। প্রত্যাশিত: ৳${register.expectedClosing}, প্রকৃত: ৳${actualClosing}, পার্থক্য: ৳${register.difference}`,
+      entity: {
+        type: 'cash_register',
+        id: register._id,
+      },
+      changes: {
+        after: {
+          actualClosing,
+          expectedClosing: register.expectedClosing,
+          difference: register.difference,
+        },
+      },
+    });
+
+    return register.toJSON();
+  }
+
+  // Close a previous day's register by ID
+  async closePreviousRegister(shopId, userId, registerId, actualClosing, notes) {
+    const register = await CashRegister.findOne({
+      _id: registerId,
+      shop: shopId,
+    });
+
+    if (!register) {
+      throw new AppError(
+        'রেজিস্টার পাওয়া যায়নি',
+        'Register not found',
+        404
+      );
+    }
+
+    if (register.status === 'closed') {
+      throw new AppError(
+        'এই রেজিস্টার ইতিমধ্যে বন্ধ',
+        'Register is already closed',
+        400
+      );
+    }
+
+    register.actualClosing = actualClosing;
+    register.status = 'closed';
+    register.closedBy = userId;
+    register.closedAt = new Date();
+    if (notes) register.notes = notes;
+
+    await register.save();
+
+    // Audit log
+    await AuditLog.create({
+      shop: shopId,
+      user: userId,
+      action: AUDIT_ACTIONS.CASH_REGISTER_CLOSE.en,
+      actionBn: AUDIT_ACTIONS.CASH_REGISTER_CLOSE.bn,
+      description: `Previous day cash register closed. Date: ${register.date.toLocaleDateString()}, Expected: ৳${register.expectedClosing}, Actual: ৳${actualClosing}, Diff: ৳${register.difference}`,
+      descriptionBn: `আগের দিনের ক্যাশ রেজিস্টার বন্ধ। তারিখ: ${register.date.toLocaleDateString('bn-BD')}, প্রত্যাশিত: ৳${register.expectedClosing}, প্রকৃত: ৳${actualClosing}, পার্থক্য: ৳${register.difference}`,
       entity: {
         type: 'cash_register',
         id: register._id,

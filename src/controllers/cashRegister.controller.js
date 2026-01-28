@@ -90,3 +90,28 @@ exports.reopenDay = asyncHandler(async (req, res) => {
     messageBn: 'ক্যাশ রেজিস্টার পুনরায় খোলা হয়েছে',
   });
 });
+
+exports.closePreviousDay = asyncHandler(async (req, res) => {
+  const { actualClosing, notes } = req.body;
+  const { id } = req.params;
+
+  if (actualClosing == null) {
+    return ApiResponse.badRequest(res, {
+      message: 'Actual closing amount is required',
+      messageBn: 'প্রকৃত ক্যাশ পরিমাণ দিন',
+    });
+  }
+
+  const register = await cashRegisterService.closePreviousRegister(
+    req.shop._id,
+    req.user._id,
+    id,
+    parseFloat(actualClosing),
+    notes
+  );
+  ApiResponse.success(res, {
+    data: register,
+    message: 'Previous day register closed',
+    messageBn: 'আগের দিনের রেজিস্টার বন্ধ হয়েছে',
+  });
+});

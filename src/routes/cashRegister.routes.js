@@ -19,6 +19,9 @@ router.put('/today', canEditPurchases, cashRegisterController.updateDay);
 // Close today's register
 router.post('/close', canEditPurchases, cashRegisterController.closeDay);
 
+// Close a previous day's register
+router.post('/:id/close', canEditPurchases, cashRegisterController.closePreviousDay);
+
 // Reopen today's register (owner only)
 router.post('/reopen', ownerOnly, cashRegisterController.reopenDay);
 
