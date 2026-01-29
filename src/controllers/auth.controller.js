@@ -67,7 +67,10 @@ const verifyOTP = asyncHandler(async (req, res) => {
 const login = asyncHandler(async (req, res) => {
   const result = await AuthService.login(req.body, req);
 
-  // Set httpOnly cookie
+  // Clear admin token cookie if exists (prevent cookie conflict)
+  clearAdminTokenCookie(res);
+
+  // Set httpOnly cookie for user
   setUserTokenCookie(res, result.token);
 
   // Remove token from response data (it's in the cookie now)
@@ -150,6 +153,9 @@ const changePassword = asyncHandler(async (req, res) => {
  */
 const adminLogin = asyncHandler(async (req, res) => {
   const result = await AuthService.adminLogin(req.body, req);
+
+  // Clear user token cookie if exists (prevent cookie conflict)
+  clearUserTokenCookie(res);
 
   // Set httpOnly cookie for admin
   setAdminTokenCookie(res, result.token);

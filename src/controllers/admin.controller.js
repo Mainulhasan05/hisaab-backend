@@ -1,12 +1,15 @@
 const adminService = require('../services/admin.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
-const { setAdminTokenCookie, clearAdminTokenCookie } = require('../utils/cookie.util');
+const { setAdminTokenCookie, clearAdminTokenCookie, clearUserTokenCookie } = require('../utils/cookie.util');
 
 // Admin login
 exports.login = asyncHandler(async (req, res) => {
   const { phone, password } = req.body;
   const result = await adminService.login(phone, password);
+
+  // Clear user token cookie if exists (prevent cookie conflict)
+  clearUserTokenCookie(res);
 
   // Set admin token cookie for browser authentication
   setAdminTokenCookie(res, result.token);
