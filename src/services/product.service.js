@@ -8,8 +8,8 @@ class ProductService {
   // Get all products with filtering, searching, pagination
   async getProducts(shopId, options = {}) {
     const {
-      page = 1,
-      limit = 20,
+      page,
+      limit,
       search,
       category,
       status,
@@ -17,6 +17,10 @@ class ProductService {
       sortBy = 'createdAt',
       sortOrder = 'desc',
     } = options;
+
+    // Ensure valid integers with proper defaults (handles 'null', undefined, NaN)
+    const pageNum = parseInt(page) || 1;
+    const limitNum = parseInt(limit) || 20;
 
     const query = { shop: shopId };
 
@@ -52,7 +56,7 @@ class ProductService {
       ];
     }
 
-    const skip = (page - 1) * limit;
+    const skip = (pageNum - 1) * limitNum;
     const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
 
     const [products, total] = await Promise.all([
@@ -60,7 +64,7 @@ class ProductService {
         .populate('category', 'name nameBn')
         .sort(sort)
         .skip(skip)
-        .limit(parseInt(limit))
+        .limit(limitNum)
         .lean(),
       Product.countDocuments(query),
     ]);
@@ -68,10 +72,10 @@ class ProductService {
     return {
       data: products,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: pageNum,
+        limit: limitNum,
         total,
-        pages: Math.ceil(total / limit),
+        pages: Math.ceil(total / limitNum),
       },
     };
   }

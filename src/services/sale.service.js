@@ -206,22 +206,23 @@ class SaleService {
       const itemDiscount = item.discount || 0;
       const itemTotal = (unitPrice * item.quantity) - itemDiscount;
 
+      // Get buying price for profit calculation and cost tracking
+      const buyingPrice = item.variantId
+        ? (product.variants.id(item.variantId)?.buyingPrice || product.buyingPrice || 0)
+        : (product.buyingPrice || 0);
+
       processedItems.push({
         product: product._id,
         productName: product.name,
         ...variantInfo,
         quantity: item.quantity,
         unitPrice,
+        buyingPrice, // Include buying price for profit calculation
         discount: itemDiscount,
         total: itemTotal,
       });
 
       subtotal += itemTotal;
-
-      // Get buying price for cost tracking
-      const buyingPrice = item.variantId
-        ? (product.variants.id(item.variantId)?.buyingPrice || product.buyingPrice)
-        : product.buyingPrice;
 
       // Create stock transaction with price info
       await StockTransaction.create({
