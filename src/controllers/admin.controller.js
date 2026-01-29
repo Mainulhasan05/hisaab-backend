@@ -113,6 +113,36 @@ exports.allocateSMS = asyncHandler(async (req, res) => {
   });
 });
 
+// Get SMS logs (all shops)
+exports.getSMSLogs = asyncHandler(async (req, res) => {
+  const result = await adminService.getSMSLogs(req.query);
+  return ApiResponse.paginated(res, {
+    ...result,
+    message: 'SMS logs retrieved successfully',
+    messageBn: 'এসএমএস লগ সফলভাবে লোড হয়েছে',
+  });
+});
+
+// Get SMS allocation history
+exports.getSMSAllocations = asyncHandler(async (req, res) => {
+  const result = await adminService.getSMSAllocations(req.query);
+  return ApiResponse.paginated(res, {
+    ...result,
+    message: 'SMS allocations retrieved successfully',
+    messageBn: 'এসএমএস বরাদ্দ তালিকা সফলভাবে লোড হয়েছে',
+  });
+});
+
+// Get SMS stats
+exports.getSMSStats = asyncHandler(async (req, res) => {
+  const stats = await adminService.getSMSStats();
+  return ApiResponse.success(res, {
+    data: stats,
+    message: 'SMS stats retrieved successfully',
+    messageBn: 'এসএমএস পরিসংখ্যান সফলভাবে লোড হয়েছে',
+  });
+});
+
 // Get audit logs
 exports.getAuditLogs = asyncHandler(async (req, res) => {
   const result = await adminService.getAuditLogs(req.query);
@@ -131,5 +161,45 @@ exports.createAdmin = asyncHandler(async (req, res) => {
     message: 'Admin created successfully',
     messageBn: 'অ্যাডমিন সফলভাবে তৈরি হয়েছে',
     statusCode: 201,
+  });
+});
+
+// Get all customers (admin level)
+exports.getAllCustomers = asyncHandler(async (req, res) => {
+  const result = await adminService.getAllCustomers(req.query);
+  return ApiResponse.paginated(res, {
+    ...result,
+    message: 'Customers retrieved successfully',
+    messageBn: 'কাস্টমার তালিকা লোড হয়েছে',
+  });
+});
+
+// Get all sales (admin level)
+exports.getAllSales = asyncHandler(async (req, res) => {
+  const result = await adminService.getAllSales(req.query);
+  return ApiResponse.paginated(res, {
+    ...result,
+    message: 'Sales retrieved successfully',
+    messageBn: 'বিক্রয় তালিকা লোড হয়েছে',
+  });
+});
+
+// Restrict/suspend shop
+exports.restrictShop = asyncHandler(async (req, res) => {
+  const shop = await adminService.restrictShop(req.admin._id, req.params.id, req.body);
+  return ApiResponse.success(res, {
+    data: shop,
+    message: req.body.action === 'suspend' ? 'Shop suspended' : 'Shop activated',
+    messageBn: req.body.action === 'suspend' ? 'দোকান স্থগিত করা হয়েছে' : 'দোকান সক্রিয় করা হয়েছে',
+  });
+});
+
+// Get online users
+exports.getOnlineUsers = asyncHandler(async (req, res) => {
+  const result = await adminService.getOnlineUsers(req.query);
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Online users retrieved',
+    messageBn: 'অনলাইন ইউজার তালিকা লোড হয়েছে',
   });
 });

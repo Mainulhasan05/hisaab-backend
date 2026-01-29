@@ -78,6 +78,25 @@ const shopSchema = new mongoose.Schema({
     enabledVariantTypes: {
       type: [String],
       default: ['size', 'color']
+    },
+    // SMS settings
+    smsSettings: {
+      autoSendOnSale: {
+        type: Boolean,
+        default: false
+      },
+      autoSendOnDuePayment: {
+        type: Boolean,
+        default: false
+      },
+      sendToCustomersWithPhone: {
+        type: Boolean,
+        default: true
+      },
+      minSaleAmountForSms: {
+        type: Number,
+        default: 0
+      }
     }
   },
   stats: {

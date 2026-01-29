@@ -354,6 +354,19 @@ class SaleService {
       },
     });
 
+    // Send SMS receipt (non-blocking - runs in background)
+    // This doesn't wait for SMS to be sent, returns immediately
+    const SMSService = require('./sms.service');
+    SMSService.sendSaleReceiptAsync(shopId, userId, {
+      invoiceNumber: sale.invoiceNo,
+      total,
+      paid,
+      due,
+      customerId: customer?._id,
+      customerName: finalCustomerName,
+      customerPhone: finalCustomerPhone,
+    });
+
     return sale;
   }
 

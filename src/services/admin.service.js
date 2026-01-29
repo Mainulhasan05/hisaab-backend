@@ -150,8 +150,19 @@ class AdminService {
       Shop.countDocuments(query),
     ]);
 
+    // Fetch SMS quotas for all shops
+    const shopIds = shops.map(s => s._id);
+    const smsQuotas = await SMSQuota.find({ shop: { $in: shopIds } }).lean();
+    const quotaMap = new Map(smsQuotas.map(q => [q.shop.toString(), q]));
+
+    // Merge SMS quota data with shops
+    const shopsWithQuota = shops.map(shop => ({
+      ...shop,
+      smsQuota: quotaMap.get(shop._id.toString()) || null,
+    }));
+
     return {
-      data: shops,
+      data: shopsWithQuota,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -432,6 +443,283 @@ class AdminService {
     });
 
     return smsQuota;
+  }
+
+  // Get all SMS logs (admin level - all shops)
+  async getSMSLogs(options = {}) {
+    const { page = 1, limit = 50, shopId, status, type } = options;
+    const SMSLog = require('../models/SMSLog.model');
+
+    const query = {};
+    if (shopId) query.shop = shopId;
+    if (status) query.status = status;
+    if (type) query.type = type;
+
+    const skip = (page - 1) * limit;
+
+    const [logs, total] = await Promise.all([
+      SMSLog.find(query)
+        .populate('shop', 'name')
+        .populate('sentBy', 'name phone')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      SMSLog.countDocuments(query),
+    ]);
+
+    return {
+      data: logs,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  // Get SMS allocation history (all shops)
+  async getSMSAllocations(options = {}) {
+    const { page = 1, limit = 50, shopId } = options;
+
+    const query = {};
+    if (shopId) query.shop = shopId;
+
+    const skip = (page - 1) * limit;
+
+    const [quotas, total] = await Promise.all([
+      SMSQuota.find(query)
+        .populate('shop', 'name phone')
+        .populate('allocations.allocatedBy', 'name')
+        .sort({ updatedAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      SMSQuota.countDocuments(query),
+    ]);
+
+    // Flatten allocations from all shops
+    const allocations = [];
+    quotas.forEach(quota => {
+      if (quota.allocations && quota.allocations.length > 0) {
+        quota.allocations.forEach(alloc => {
+          allocations.push({
+            ...alloc,
+            shop: quota.shop,
+            shopQuota: {
+              totalQuota: quota.totalQuota,
+              usedQuota: quota.usedQuota,
+              remainingQuota: quota.remainingQuota,
+            },
+          });
+        });
+      }
+    });
+
+    // Sort by date descending
+    allocations.sort((a, b) => new Date(b.allocatedAt) - new Date(a.allocatedAt));
+
+    return {
+      data: allocations.slice(skip, skip + parseInt(limit)),
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: allocations.length,
+        pages: Math.ceil(allocations.length / limit),
+      },
+    };
+  }
+
+  // Get SMS stats summary
+  async getSMSStats() {
+    const quotaSummary = await SMSQuota.getQuotaSummary();
+
+    const SMSLog = require('../models/SMSLog.model');
+
+    // Get today's SMS stats
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const todayStats = await SMSLog.aggregate([
+      { $match: { createdAt: { $gte: today } } },
+      {
+        $group: {
+          _id: null,
+          totalSent: { $sum: '$sentCount' },
+          totalDelivered: { $sum: '$deliveredCount' },
+          totalFailed: { $sum: '$failedCount' },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    return {
+      ...quotaSummary,
+      today: todayStats[0] || { totalSent: 0, totalDelivered: 0, totalFailed: 0, count: 0 },
+    };
+  }
+
+  // Get all customers across all shops (admin level)
+  async getAllCustomers(options = {}) {
+    const Customer = require('../models/Customer.model');
+    const { page = 1, limit = 50, shopId, search, hasDue } = options;
+
+    const query = {};
+    if (shopId) query.shop = shopId;
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { phone: { $regex: search, $options: 'i' } },
+      ];
+    }
+    if (hasDue === 'true') query.totalDue = { $gt: 0 };
+
+    const skip = (page - 1) * limit;
+
+    const [customers, total] = await Promise.all([
+      Customer.find(query)
+        .populate('shop', 'name phone')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      Customer.countDocuments(query),
+    ]);
+
+    return {
+      data: customers,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  // Get all sales across all shops (admin level)
+  async getAllSales(options = {}) {
+    const { page = 1, limit = 50, shopId, status, startDate, endDate, minAmount, maxAmount } = options;
+
+    const query = {};
+    if (shopId) query.shop = shopId;
+    if (status) query.status = status;
+    if (startDate && endDate) {
+      query.createdAt = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      };
+    }
+    if (minAmount) query.total = { ...query.total, $gte: parseInt(minAmount) };
+    if (maxAmount) query.total = { ...query.total, $lte: parseInt(maxAmount) };
+
+    const skip = (page - 1) * limit;
+
+    const [sales, total] = await Promise.all([
+      Sale.find(query)
+        .populate('shop', 'name phone')
+        .populate('customer', 'name phone')
+        .populate('createdBy', 'name')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      Sale.countDocuments(query),
+    ]);
+
+    return {
+      data: sales,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  // Restrict/suspend shop account
+  async restrictShop(adminId, shopId, restrictionData) {
+    const { action, reason } = restrictionData;
+
+    const shop = await Shop.findById(shopId);
+    if (!shop) {
+      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
+    }
+
+    if (action === 'suspend') {
+      shop.subscription.status = 'suspended';
+      shop.isActive = false;
+    } else if (action === 'activate') {
+      shop.subscription.status = 'active';
+      shop.isActive = true;
+    }
+
+    await shop.save();
+
+    // Create audit log
+    await AuditLog.create({
+      admin: adminId,
+      shop: shop._id,
+      action: action === 'suspend' ? 'shop_suspend' : 'shop_activate',
+      actionBn: action === 'suspend' ? 'দোকান স্থগিত' : 'দোকান সক্রিয়',
+      description: `Shop ${shop.name} ${action === 'suspend' ? 'suspended' : 'activated'}. Reason: ${reason || 'N/A'}`,
+      descriptionBn: `${shop.name} ${action === 'suspend' ? 'স্থগিত' : 'সক্রিয়'} করা হয়েছে। কারণ: ${reason || 'উল্লেখ নেই'}`,
+      entity: {
+        type: 'shop',
+        id: shop._id,
+        name: shop.name,
+      },
+    });
+
+    return shop;
+  }
+
+  // Get online users (from cache/heartbeat tracking)
+  async getOnlineUsers(options = {}) {
+    const onlineTrackingService = require('./onlineTracking.service');
+    const cacheService = require('./cache.service');
+    const { shopId } = options;
+
+    let onlineUsers = [];
+
+    if (shopId) {
+      // Get online users for specific shop
+      onlineUsers = await onlineTrackingService.getShopOnlineUsers(shopId);
+    } else {
+      // Get all online users from cache
+      const allUserIds = await cacheService.sMembers('online:users');
+
+      for (const userId of allUserIds) {
+        const userData = await cacheService.get(`online:user:${userId}`);
+        if (userData) {
+          onlineUsers.push(userData);
+        }
+      }
+    }
+
+    // Enrich with user details from DB
+    if (onlineUsers.length > 0) {
+      const userIds = onlineUsers.map(u => u.userId);
+      const users = await User.find({ _id: { $in: userIds } })
+        .select('name phone role')
+        .populate('shop', 'name')
+        .lean();
+
+      const userMap = new Map(users.map(u => [u._id.toString(), u]));
+
+      onlineUsers = onlineUsers.map(ou => ({
+        ...ou,
+        user: userMap.get(ou.userId) || null,
+      }));
+    }
+
+    return {
+      data: onlineUsers,
+      count: onlineUsers.length,
+      timestamp: Date.now(),
+    };
   }
 
   // Get audit logs (system level)

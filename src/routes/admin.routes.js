@@ -20,6 +20,16 @@ router.get('/shops', adminController.getShops);
 router.get('/shops/:id', adminController.getShopDetails);
 router.patch('/shops/:id/status', adminController.updateShopStatus);
 router.patch('/shops/:id/subscription', adminController.updateShopSubscription);
+router.post('/shops/:id/restrict', adminController.restrictShop);
+
+// Customers (all shops)
+router.get('/customers', adminController.getAllCustomers);
+
+// Sales (all shops)
+router.get('/sales', adminController.getAllSales);
+
+// Online users (from heartbeat)
+router.get('/online-users', adminController.getOnlineUsers);
 
 // Payments
 router.get('/payments', adminController.getPayments);
@@ -27,6 +37,9 @@ router.post('/payments', adminController.recordPayment);
 
 // SMS
 router.post('/sms/allocate', adminController.allocateSMS);
+router.get('/sms/logs', adminController.getSMSLogs);
+router.get('/sms/allocations', adminController.getSMSAllocations);
+router.get('/sms/stats', adminController.getSMSStats);
 
 // Audit logs
 router.get('/audit-logs', adminController.getAuditLogs);

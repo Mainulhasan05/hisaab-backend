@@ -387,6 +387,113 @@ class SMSService {
   }
 
   /**
+   * Send sale receipt SMS (non-blocking - runs async in background)
+   * This method returns immediately and sends SMS in the background
+   */
+  sendSaleReceiptAsync(shopId, userId, saleData) {
+    const Shop = require('../models/Shop.model');
+    const Customer = require('../models/Customer.model');
+
+    // Run in background (non-blocking) using setImmediate
+    setImmediate(async () => {
+      try {
+        // Get shop with settings
+        const shop = await Shop.findById(shopId);
+        if (!shop) {
+          logger.warn(`SMS: Shop not found for sale receipt: ${shopId}`);
+          return;
+        }
+
+        // Check if auto SMS is enabled
+        const smsSettings = shop.settings?.smsSettings || {};
+        if (!smsSettings.autoSendOnSale) {
+          logger.info(`SMS: Auto-send disabled for shop ${shop.name}`);
+          return;
+        }
+
+        // Check minimum sale amount
+        if (smsSettings.minSaleAmountForSms > 0 && saleData.total < smsSettings.minSaleAmountForSms) {
+          logger.info(`SMS: Sale amount ${saleData.total} below minimum ${smsSettings.minSaleAmountForSms}`);
+          return;
+        }
+
+        // Get customer phone
+        let customerPhone = saleData.customerPhone;
+        let customerName = saleData.customerName || 'গ্রাহক';
+
+        if (!customerPhone && saleData.customerId) {
+          const customer = await Customer.findById(saleData.customerId);
+          if (customer) {
+            customerPhone = customer.phone;
+            customerName = customer.name;
+          }
+        }
+
+        // Check if we should send (customer has phone)
+        if (!customerPhone) {
+          logger.info(`SMS: No phone number for customer in sale ${saleData.invoiceNumber}`);
+          return;
+        }
+
+        // Check SMS quota
+        const quota = await SMSQuota.findOne({ shop: shopId });
+        if (!quota || !quota.isEnabled || quota.remainingQuota < 1) {
+          logger.warn(`SMS: Insufficient quota for shop ${shop.name}`);
+          return;
+        }
+
+        // Build message
+        const message = `${shop.name}\nবিল: ${saleData.invoiceNumber}\nমোট: ৳${saleData.total}\nপেমেন্ট: ৳${saleData.paid || 0}\nবাকি: ৳${saleData.due || 0}\nধন্যবাদ!`;
+
+        // Send SMS
+        await this.sendSingle(shopId, userId, customerPhone, message, saleData.customerId);
+        logger.info(`SMS: Sale receipt sent for ${saleData.invoiceNumber} to ${customerPhone}`);
+
+      } catch (error) {
+        logger.error(`SMS: Failed to send sale receipt: ${error.message}`);
+        // Don't throw - this is background processing
+      }
+    });
+
+    // Return immediately - SMS sends in background
+    return { queued: true };
+  }
+
+  /**
+   * Send payment receipt SMS (non-blocking)
+   */
+  sendPaymentReceiptAsync(shopId, userId, paymentData) {
+    const Shop = require('../models/Shop.model');
+    const Customer = require('../models/Customer.model');
+
+    setImmediate(async () => {
+      try {
+        const shop = await Shop.findById(shopId);
+        if (!shop) return;
+
+        const smsSettings = shop.settings?.smsSettings || {};
+        if (!smsSettings.autoSendOnDuePayment) return;
+
+        const customer = await Customer.findById(paymentData.customerId);
+        if (!customer || !customer.phone) return;
+
+        const quota = await SMSQuota.findOne({ shop: shopId });
+        if (!quota || !quota.isEnabled || quota.remainingQuota < 1) return;
+
+        const message = `${customer.name},\n৳${paymentData.amount} পেমেন্ট পাওয়া গেছে।\nবর্তমান বকেয়া: ৳${customer.totalDue}\nধন্যবাদ - ${shop.name}`;
+
+        await this.sendSingle(shopId, userId, customer.phone, message, customer._id);
+        logger.info(`SMS: Payment receipt sent to ${customer.phone}`);
+
+      } catch (error) {
+        logger.error(`SMS: Failed to send payment receipt: ${error.message}`);
+      }
+    });
+
+    return { queued: true };
+  }
+
+  /**
    * Get SMS templates
    */
   getTemplates() {
