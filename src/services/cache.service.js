@@ -369,25 +369,101 @@ class CacheService {
   }
 
   /**
-   * Get cache statistics
+   * Get cache statistics for admin dashboard
    */
   async getStats() {
+    const { getCacheInfo } = require('../config/redis.config');
+    const cacheInfo = getCacheInfo();
+
     const stats = {
-      backend: isConnected() ? 'redis' : 'memory',
-      memorySize: memoryCache.size
+      backend: cacheInfo.backend,
+      redisEnabled: cacheInfo.redisEnabled,
+      redisConnected: cacheInfo.redisConnected,
+      memoryCacheSize: cacheInfo.memoryCacheSize,
+      timestamp: Date.now(),
     };
 
     if (isConnected()) {
       try {
         const client = getClient();
-        const info = await client.info('stats');
-        stats.redisInfo = info;
+
+        // Get comprehensive Redis info
+        const [infoStats, infoMemory, infoClients, dbSize] = await Promise.all([
+          client.info('stats'),
+          client.info('memory'),
+          client.info('clients'),
+          client.dbSize(),
+        ]);
+
+        // Parse Redis info sections
+        const parseInfo = (info) => {
+          const result = {};
+          info.split('\r\n').forEach(line => {
+            if (line && !line.startsWith('#')) {
+              const [key, value] = line.split(':');
+              if (key && value) {
+                result[key] = isNaN(value) ? value : parseFloat(value);
+              }
+            }
+          });
+          return result;
+        };
+
+        const statsData = parseInfo(infoStats);
+        const memoryData = parseInfo(infoMemory);
+        const clientsData = parseInfo(infoClients);
+
+        stats.redis = {
+          // Key stats
+          totalKeys: dbSize,
+
+          // Memory
+          usedMemory: memoryData.used_memory,
+          usedMemoryHuman: memoryData.used_memory_human,
+          usedMemoryPeak: memoryData.used_memory_peak,
+          usedMemoryPeakHuman: memoryData.used_memory_peak_human,
+
+          // Connections
+          connectedClients: clientsData.connected_clients,
+
+          // Operations
+          totalCommandsProcessed: statsData.total_commands_processed,
+          opsPerSec: statsData.instantaneous_ops_per_sec,
+
+          // Cache hits/misses
+          keyspaceHits: statsData.keyspace_hits,
+          keyspaceMisses: statsData.keyspace_misses,
+          hitRate: statsData.keyspace_hits && statsData.keyspace_misses
+            ? ((statsData.keyspace_hits / (statsData.keyspace_hits + statsData.keyspace_misses)) * 100).toFixed(2)
+            : 0,
+
+          // Uptime
+          uptimeInSeconds: statsData.uptime_in_seconds,
+          uptimeInDays: statsData.uptime_in_days,
+        };
       } catch (error) {
         logger.error('Error getting Redis stats:', error.message);
+        stats.redisError = error.message;
       }
     }
 
     return stats;
+  }
+
+  /**
+   * Test Redis connection
+   */
+  async ping() {
+    if (isConnected()) {
+      try {
+        const client = getClient();
+        const result = await client.ping();
+        return { success: true, response: result };
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    }
+    return { success: false, error: 'Redis not connected' };
   }
 }
 

@@ -44,18 +44,25 @@ class ApiResponse {
 
   /**
    * Send paginated response
+   * Supports both: { page, limit, total } OR { pagination: { page, limit, total } }
    */
   static paginated(res, {
     data,
     page,
     limit,
     total,
+    pagination,
     message = 'Success',
     messageBn = 'সফল'
   }) {
-    const pages = Math.ceil(total / limit);
-    const currentPage = parseInt(page);
-    const currentLimit = parseInt(limit);
+    // Support both direct params and nested pagination object
+    const pPage = page ?? pagination?.page ?? 1;
+    const pLimit = limit ?? pagination?.limit ?? 20;
+    const pTotal = total ?? pagination?.total ?? 0;
+
+    const currentPage = parseInt(pPage) || 1;
+    const currentLimit = parseInt(pLimit) || 20;
+    const pages = Math.ceil(pTotal / currentLimit) || 0;
 
     return res.status(200).json({
       success: true,
@@ -66,7 +73,7 @@ class ApiResponse {
       pagination: {
         page: currentPage,
         limit: currentLimit,
-        total,
+        total: pTotal,
         pages,
         hasNext: currentPage < pages,
         hasPrev: currentPage > 1

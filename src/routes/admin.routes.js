@@ -31,6 +31,9 @@ router.get('/sales', adminController.getAllSales);
 // Online users (from heartbeat)
 router.get('/online-users', adminController.getOnlineUsers);
 
+// Cache/Redis stats
+router.get('/cache-stats', adminController.getCacheStats);
+
 // Payments
 router.get('/payments', adminController.getPayments);
 router.post('/payments', adminController.recordPayment);

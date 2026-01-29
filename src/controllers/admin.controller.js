@@ -203,3 +203,14 @@ exports.getOnlineUsers = asyncHandler(async (req, res) => {
     messageBn: 'অনলাইন ইউজার তালিকা লোড হয়েছে',
   });
 });
+
+// Get Redis/cache stats
+exports.getCacheStats = asyncHandler(async (req, res) => {
+  const cacheService = require('../services/cache.service');
+  const stats = await cacheService.getStats();
+  return ApiResponse.success(res, {
+    data: stats,
+    message: 'Cache stats retrieved',
+    messageBn: 'ক্যাশ পরিসংখ্যান লোড হয়েছে',
+  });
+});
