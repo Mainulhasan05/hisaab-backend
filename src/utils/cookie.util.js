@@ -13,10 +13,14 @@ const COOKIE_NAMES = {
 const getCookieOptions = (maxAge) => {
   const isProduction = process.env.NODE_ENV === 'production';
 
+  // For cross-origin requests (frontend on different domain than backend):
+  // - sameSite: 'none' allows cookies to be sent cross-origin
+  // - secure: true is REQUIRED when sameSite is 'none'
+  // Both frontend and backend must use HTTPS in production
   return {
     httpOnly: true,
-    secure: isProduction, // Only HTTPS in production
-    sameSite: isProduction ? 'strict' : 'lax',
+    secure: isProduction, // HTTPS required in production
+    sameSite: isProduction ? 'none' : 'lax', // 'none' for cross-origin in production
     maxAge: maxAge, // in milliseconds
     path: '/'
   };
@@ -49,8 +53,11 @@ const setAdminTokenCookie = (res, token, maxAgeDays = 7) => {
  * @param {Object} res - Express response object
  */
 const clearUserTokenCookie = (res) => {
+  const isProduction = process.env.NODE_ENV === 'production';
   res.cookie(COOKIE_NAMES.USER_TOKEN, '', {
     httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'lax',
     expires: new Date(0),
     path: '/'
   });
@@ -61,8 +68,11 @@ const clearUserTokenCookie = (res) => {
  * @param {Object} res - Express response object
  */
 const clearAdminTokenCookie = (res) => {
+  const isProduction = process.env.NODE_ENV === 'production';
   res.cookie(COOKIE_NAMES.ADMIN_TOKEN, '', {
     httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'lax',
     expires: new Date(0),
     path: '/'
   });
