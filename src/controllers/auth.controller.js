@@ -101,6 +101,24 @@ const logout = asyncHandler(async (req, res) => {
  * @access  Private
  */
 const getMe = asyncHandler(async (req, res) => {
+  // Handle admin token
+  if (req.isAdmin && req.admin) {
+    return ApiResponse.success(res, {
+      data: {
+        admin: {
+          _id: req.admin._id,
+          name: req.admin.name,
+          phone: req.admin.phone,
+          role: req.admin.role,
+          isSuperAdmin: req.admin.isSuperAdmin
+        }
+      },
+      message: 'Admin profile retrieved',
+      messageBn: 'অ্যাডমিন প্রোফাইল পাওয়া গেছে'
+    });
+  }
+
+  // Handle regular user token
   const user = await AuthService.getMe(req.user._id);
 
   return ApiResponse.success(res, {
