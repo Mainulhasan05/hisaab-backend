@@ -1,13 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const adminController = require('../controllers/admin.controller');
-const { adminOnly } = require('../middleware/auth.middleware');
+const { protect, adminOnly } = require('../middleware/auth.middleware');
 
 // Public admin routes
 router.post('/login', adminController.login);
 
 // Protected admin routes (require admin authentication)
-router.use(adminOnly);
+// protect: verifies token and sets req.isAdmin
+// adminOnly: checks that user is admin
+router.use(protect, adminOnly);
 
 // Stats
 router.get('/stats', adminController.getStats);
