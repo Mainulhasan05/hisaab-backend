@@ -1,15 +1,29 @@
 const adminService = require('../services/admin.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
+const { setAdminTokenCookie, clearAdminTokenCookie } = require('../utils/cookie.util');
 
 // Admin login
 exports.login = asyncHandler(async (req, res) => {
   const { phone, password } = req.body;
   const result = await adminService.login(phone, password);
+
+  // Set admin token cookie for browser authentication
+  setAdminTokenCookie(res, result.token);
+
   return ApiResponse.success(res, {
     data: result,
     message: 'Login successful',
     messageBn: 'লগইন সফল হয়েছে',
+  });
+});
+
+// Admin logout
+exports.logout = asyncHandler(async (req, res) => {
+  clearAdminTokenCookie(res);
+  return ApiResponse.success(res, {
+    message: 'Logout successful',
+    messageBn: 'লগআউট সফল হয়েছে',
   });
 });
 

@@ -5,6 +5,7 @@ const { protect, adminOnly } = require('../middleware/auth.middleware');
 
 // Public admin routes
 router.post('/login', adminController.login);
+router.post('/logout', adminController.logout);
 
 // Protected admin routes (require admin authentication)
 // protect: verifies token and sets req.isAdmin
