@@ -214,3 +214,13 @@ exports.getCacheStats = asyncHandler(async (req, res) => {
     messageBn: 'ক্যাশ পরিসংখ্যান লোড হয়েছে',
   });
 });
+
+// Update shop settings (admin level)
+exports.updateShopSettings = asyncHandler(async (req, res) => {
+  const shop = await adminService.updateShopSettings(req.admin._id, req.params.id, req.body);
+  return ApiResponse.success(res, {
+    data: shop,
+    message: 'Shop settings updated successfully',
+    messageBn: 'দোকানের সেটিংস সফলভাবে আপডেট হয়েছে',
+  });
+});

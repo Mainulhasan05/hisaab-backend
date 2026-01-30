@@ -728,7 +728,10 @@ class AdminService {
 
     const query = {};
     if (shopId) query.shop = shopId;
-    if (action) query.action = action;
+    // Support prefix-based action filtering (e.g., "product" matches "product_create", "product_update")
+    if (action) {
+      query.action = { $regex: `^${action}`, $options: 'i' };
+    }
     if (userId) query.user = userId;
 
     const skip = (page - 1) * limit;
@@ -754,6 +757,61 @@ class AdminService {
         pages: Math.ceil(total / limit),
       },
     };
+  }
+
+  // Update shop settings (admin level)
+  async updateShopSettings(adminId, shopId, settingsData) {
+    const shop = await Shop.findById(shopId);
+    if (!shop) {
+      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
+    }
+
+    const previousSettings = { ...shop.settings.toObject() };
+
+    // Update allowed settings
+    if (settingsData.enabledVariantTypes !== undefined) {
+      shop.settings.enabledVariantTypes = settingsData.enabledVariantTypes;
+    }
+    if (settingsData.taxEnabled !== undefined) {
+      shop.settings.taxEnabled = settingsData.taxEnabled;
+    }
+    if (settingsData.taxRate !== undefined) {
+      shop.settings.taxRate = settingsData.taxRate;
+    }
+    if (settingsData.lowStockThreshold !== undefined) {
+      shop.settings.lowStockThreshold = settingsData.lowStockThreshold;
+    }
+    if (settingsData.invoicePrefix !== undefined) {
+      shop.settings.invoicePrefix = settingsData.invoicePrefix;
+    }
+    if (settingsData.smsSettings !== undefined) {
+      shop.settings.smsSettings = {
+        ...shop.settings.smsSettings,
+        ...settingsData.smsSettings,
+      };
+    }
+
+    await shop.save();
+
+    // Create audit log
+    await AuditLog.create({
+      admin: adminId,
+      action: 'shop_settings_update',
+      actionBn: 'দোকানের সেটিংস আপডেট',
+      description: `Updated settings for ${shop.name}`,
+      descriptionBn: `${shop.name} এর সেটিংস আপডেট করা হয়েছে`,
+      entity: {
+        type: 'shop',
+        id: shop._id,
+        name: shop.name,
+      },
+      changes: {
+        before: previousSettings,
+        after: shop.settings.toObject(),
+      },
+    });
+
+    return shop;
   }
 
   // Create admin user
