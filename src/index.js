@@ -32,6 +32,15 @@ connectDB().then(async () => {
   } catch (err) {
     logger.warn('Super admin seeding skipped:', err.message);
   }
+
+  // Seed default page content
+  try {
+    const PageContent = require('./models/PageContent.model');
+    await PageContent.seedDefaults();
+    logger.info('Default page content seeded');
+  } catch (err) {
+    logger.warn('Page content seeding skipped:', err.message);
+  }
 });
 
 // Initialize Redis (with in-memory fallback)

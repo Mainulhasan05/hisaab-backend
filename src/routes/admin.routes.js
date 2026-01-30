@@ -14,6 +14,8 @@ router.use(protect, adminOnly);
 
 // Stats
 router.get('/stats', adminController.getStats);
+router.get('/top-performers', adminController.getTopPerformers);
+router.get('/system-metrics', adminController.getSystemMetrics);
 
 // Shops management
 router.get('/shops', adminController.getShops);

@@ -197,8 +197,11 @@ exports.restrictShop = asyncHandler(async (req, res) => {
 // Get online users
 exports.getOnlineUsers = asyncHandler(async (req, res) => {
   const result = await adminService.getOnlineUsers(req.query);
+  // Flatten response structure - data is the array, count is at top level
   return ApiResponse.success(res, {
-    data: result,
+    data: result.data,
+    count: result.count,
+    timestamp: result.timestamp,
     message: 'Online users retrieved',
     messageBn: 'অনলাইন ইউজার তালিকা লোড হয়েছে',
   });
@@ -212,6 +215,26 @@ exports.getCacheStats = asyncHandler(async (req, res) => {
     data: stats,
     message: 'Cache stats retrieved',
     messageBn: 'ক্যাশ পরিসংখ্যান লোড হয়েছে',
+  });
+});
+
+// Get top performers (shops, products, active shops)
+exports.getTopPerformers = asyncHandler(async (req, res) => {
+  const performers = await adminService.getTopPerformers();
+  return ApiResponse.success(res, {
+    data: performers,
+    message: 'Top performers retrieved',
+    messageBn: 'সেরা পারফর্মার তালিকা লোড হয়েছে',
+  });
+});
+
+// Get system metrics (database, server info)
+exports.getSystemMetrics = asyncHandler(async (req, res) => {
+  const metrics = await adminService.getSystemMetrics();
+  return ApiResponse.success(res, {
+    data: metrics,
+    message: 'System metrics retrieved',
+    messageBn: 'সিস্টেম মেট্রিক্স লোড হয়েছে',
   });
 });
 

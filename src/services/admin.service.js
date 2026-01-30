@@ -47,67 +47,318 @@ class AdminService {
 
   // Get admin statistics
   async getStats() {
+    // Date helpers
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const yesterdayStart = new Date(todayStart);
+    yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+
     const [
       totalShops,
       activeShops,
       trialShops,
       expiredShops,
+      suspendedShops,
       totalUsers,
+      todayNewShops,
+      todayNewUsers,
     ] = await Promise.all([
       Shop.countDocuments(),
       Shop.countDocuments({ 'subscription.status': 'active' }),
       Shop.countDocuments({ 'subscription.plan': 'trial' }),
       Shop.countDocuments({ 'subscription.status': 'expired' }),
+      Shop.countDocuments({ 'subscription.status': 'suspended' }),
       User.countDocuments({ isActive: true }),
+      Shop.countDocuments({ createdAt: { $gte: todayStart } }),
+      User.countDocuments({ createdAt: { $gte: todayStart } }),
     ]);
 
-    // Calculate revenue (last 30 days)
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-    // Get month's start
-    const monthStart = new Date();
-    monthStart.setDate(1);
-    monthStart.setHours(0, 0, 0, 0);
-
-    // Calculate total revenue from subscription payments
-    const revenueResult = await Payment.aggregate([
-      {
-        $match: {
-          type: 'subscription',
-        },
-      },
+    // Today's sales stats across all shops
+    const todaySalesResult = await Sale.aggregate([
+      { $match: { createdAt: { $gte: todayStart }, status: { $ne: 'cancelled' } } },
       {
         $group: {
           _id: null,
-          totalRevenue: { $sum: '$amount' },
+          totalSales: { $sum: 1 },
+          totalRevenue: { $sum: '$grandTotal' },
+          totalItems: { $sum: { $size: '$items' } },
         },
       },
+    ]);
+
+    // Yesterday's sales for comparison
+    const yesterdaySalesResult = await Sale.aggregate([
+      { $match: { createdAt: { $gte: yesterdayStart, $lt: todayStart }, status: { $ne: 'cancelled' } } },
+      { $group: { _id: null, totalRevenue: { $sum: '$grandTotal' } } },
+    ]);
+
+    // This month's sales
+    const monthSalesResult = await Sale.aggregate([
+      { $match: { createdAt: { $gte: monthStart }, status: { $ne: 'cancelled' } } },
+      {
+        $group: {
+          _id: null,
+          totalSales: { $sum: 1 },
+          totalRevenue: { $sum: '$grandTotal' },
+        },
+      },
+    ]);
+
+    // Subscription revenue
+    const revenueResult = await Payment.aggregate([
+      { $match: { type: 'subscription' } },
+      { $group: { _id: null, totalRevenue: { $sum: '$amount' } } },
     ]);
 
     const monthlyRevenueResult = await Payment.aggregate([
-      {
-        $match: {
-          type: 'subscription',
-          createdAt: { $gte: monthStart },
-        },
+      { $match: { type: 'subscription', createdAt: { $gte: monthStart } } },
+      { $group: { _id: null, monthlyRevenue: { $sum: '$amount' } } },
+    ]);
+
+    // Today's new customers across all shops
+    const Customer = require('../models/Customer.model');
+    const todayNewCustomers = await Customer.countDocuments({ createdAt: { $gte: todayStart } });
+
+    // Calculate growth percentages
+    const todayRevenue = todaySalesResult[0]?.totalRevenue || 0;
+    const yesterdayRevenue = yesterdaySalesResult[0]?.totalRevenue || 0;
+    const revenueGrowth = yesterdayRevenue > 0
+      ? Math.round(((todayRevenue - yesterdayRevenue) / yesterdayRevenue) * 100)
+      : 0;
+
+    // Today's new products across all shops
+    const Product = require('../models/Product.model');
+    const todayNewProducts = await Product.countDocuments({ createdAt: { $gte: todayStart } });
+
+    return {
+      // Shop stats
+      totalShops,
+      activeShops,
+      trialShops,
+      expiredShops,
+      suspendedShops,
+      totalUsers,
+
+      // Today's stats (formatted for dashboard display)
+      today: {
+        sales: todaySalesResult[0]?.totalSales || 0,
+        salesAmount: todaySalesResult[0]?.totalRevenue || 0,
+        customers: todayNewCustomers,
+        products: todayNewProducts,
+        shops: todayNewShops,
+        users: todayNewUsers,
+        itemsSold: todaySalesResult[0]?.totalItems || 0,
       },
+
+      // Legacy fields (for backward compatibility)
+      todayNewShops,
+      todayNewUsers,
+      todayNewCustomers,
+      todaySalesCount: todaySalesResult[0]?.totalSales || 0,
+      todaySalesRevenue: todaySalesResult[0]?.totalRevenue || 0,
+      todayItemsSold: todaySalesResult[0]?.totalItems || 0,
+
+      // Month stats
+      monthSalesCount: monthSalesResult[0]?.totalSales || 0,
+      monthSalesRevenue: monthSalesResult[0]?.totalRevenue || 0,
+
+      // Subscription revenue
+      totalRevenue: revenueResult[0]?.totalRevenue || 0,
+      monthlyRevenue: monthlyRevenueResult[0]?.monthlyRevenue || 0,
+
+      // Growth
+      revenueGrowth,
+    };
+  }
+
+  // Get top performers (shops, products)
+  async getTopPerformers() {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    // Top 5 shops by sales revenue (last 30 days)
+    const topShops = await Sale.aggregate([
+      { $match: { createdAt: { $gte: thirtyDaysAgo }, status: { $ne: 'cancelled' } } },
       {
         $group: {
-          _id: null,
-          monthlyRevenue: { $sum: '$amount' },
+          _id: '$shop',
+          totalRevenue: { $sum: '$grandTotal' },
+          totalSales: { $sum: 1 },
+        },
+      },
+      { $sort: { totalRevenue: -1 } },
+      { $limit: 5 },
+      {
+        $lookup: {
+          from: 'shops',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'shopDetails',
+        },
+      },
+      { $unwind: '$shopDetails' },
+      {
+        $project: {
+          _id: 1,
+          name: '$shopDetails.name',
+          address: '$shopDetails.address',
+          totalRevenue: 1,
+          totalSales: 1,
+        },
+      },
+    ]);
+
+    // Top 5 products by quantity sold (last 30 days)
+    const topProducts = await Sale.aggregate([
+      { $match: { createdAt: { $gte: thirtyDaysAgo }, status: { $ne: 'cancelled' } } },
+      { $unwind: '$items' },
+      {
+        $group: {
+          _id: '$items.product',
+          totalQuantity: { $sum: '$items.quantity' },
+          totalRevenue: { $sum: { $multiply: ['$items.price', '$items.quantity'] } },
+          name: { $first: '$items.productName' },
+        },
+      },
+      { $sort: { totalQuantity: -1 } },
+      { $limit: 5 },
+    ]);
+
+    // Most active shops (by number of transactions today)
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const mostActiveToday = await Sale.aggregate([
+      { $match: { createdAt: { $gte: todayStart } } },
+      {
+        $group: {
+          _id: '$shop',
+          salesCount: { $sum: 1 },
+        },
+      },
+      { $sort: { salesCount: -1 } },
+      { $limit: 5 },
+      {
+        $lookup: {
+          from: 'shops',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'shopDetails',
+        },
+      },
+      { $unwind: '$shopDetails' },
+      {
+        $project: {
+          _id: 1,
+          name: '$shopDetails.name',
+          salesCount: 1,
         },
       },
     ]);
 
     return {
-      totalShops,
-      activeShops,
-      trialShops,
-      expiredShops,
-      totalUsers,
-      totalRevenue: revenueResult[0]?.totalRevenue || 0,
-      monthlyRevenue: monthlyRevenueResult[0]?.monthlyRevenue || 0,
+      topShops,
+      topProducts,
+      mostActiveToday,
+    };
+  }
+
+  // Get system metrics
+  async getSystemMetrics() {
+    const Product = require('../models/Product.model');
+    const Customer = require('../models/Customer.model');
+    const Expense = require('../models/Expense.model');
+
+    // Helper to format bytes
+    const formatBytes = (bytes) => {
+      if (bytes === 0) return '0 B';
+      const k = 1024;
+      const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    };
+
+    // Helper to format uptime
+    const formatUptime = (seconds) => {
+      const days = Math.floor(seconds / 86400);
+      const hours = Math.floor((seconds % 86400) / 3600);
+      const mins = Math.floor((seconds % 3600) / 60);
+      if (days > 0) return `${days}d ${hours}h ${mins}m`;
+      if (hours > 0) return `${hours}h ${mins}m`;
+      return `${mins}m`;
+    };
+
+    const [
+      totalProducts,
+      totalCustomers,
+      totalSales,
+      totalExpenses,
+      totalAuditLogs,
+    ] = await Promise.all([
+      Product.countDocuments(),
+      Customer.countDocuments(),
+      Sale.countDocuments(),
+      Expense.countDocuments(),
+      AuditLog.countDocuments(),
+    ]);
+
+    // Database stats
+    const dbStats = await mongoose.connection.db.stats();
+
+    // Get collection sizes
+    const collections = await mongoose.connection.db.listCollections().toArray();
+    const collectionStats = [];
+
+    for (const col of collections.slice(0, 10)) { // Top 10 collections
+      try {
+        const stats = await mongoose.connection.db.collection(col.name).stats();
+        collectionStats.push({
+          name: col.name,
+          count: stats.count,
+          size: formatBytes(stats.size),
+          sizeRaw: stats.size,
+          avgObjSize: stats.avgObjSize,
+        });
+      } catch (e) {
+        // Skip if can't get stats
+      }
+    }
+
+    // Sort by size
+    collectionStats.sort((a, b) => b.sizeRaw - a.sizeRaw);
+
+    // Format memory usage
+    const memUsage = process.memoryUsage();
+
+    return {
+      database: {
+        name: dbStats.db,
+        collections: dbStats.collections,
+        dataSize: formatBytes(dbStats.dataSize),
+        storageSize: formatBytes(dbStats.storageSize),
+        indexes: dbStats.indexes,
+        indexSize: formatBytes(dbStats.indexSize),
+      },
+      counts: {
+        shops: await Shop.countDocuments(),
+        users: await User.countDocuments(),
+        products: totalProducts,
+        customers: totalCustomers,
+        sales: totalSales,
+        expenses: totalExpenses,
+        auditLogs: totalAuditLogs,
+      },
+      topCollections: collectionStats.slice(0, 5),
+      serverTime: new Date(),
+      nodeVersion: process.version,
+      memoryUsage: {
+        heapUsed: formatBytes(memUsage.heapUsed),
+        heapTotal: formatBytes(memUsage.heapTotal),
+        rss: formatBytes(memUsage.rss),
+        external: formatBytes(memUsage.external),
+      },
+      uptime: formatUptime(process.uptime()),
     };
   }
 
