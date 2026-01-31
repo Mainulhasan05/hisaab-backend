@@ -4,16 +4,23 @@
  *
  * Environment Variables:
  * - USE_REDIS=true/false (enable/disable Redis, default: false)
- * - REDIS_HOST=your-redis-host.com
- * - REDIS_PORT=6379 (default: 6379)
- * - REDIS_USERNAME=default (optional)
- * - REDIS_PASSWORD=your-password
+ *
+ * Connection Modes (checked in order):
+ * 1. Unix Socket (for shared hosting):
+ *    - REDIS_SOCKET=/home/user/.redis/redis.sock
+ *
+ * 2. Host:Port (for VPS/Redis Cloud):
+ *    - REDIS_HOST=your-redis-host.com
+ *    - REDIS_PORT=6379 (default: 6379)
+ *    - REDIS_USERNAME=default (optional)
+ *    - REDIS_PASSWORD=your-password
  */
 
 const logger = require('../utils/logger.util');
 
 let redisClient = null;
 let isRedisConnected = false;
+let connectionMode = 'none'; // 'socket', 'tcp', or 'none'
 
 // In-memory cache as fallback
 const memoryCache = new Map();
@@ -29,33 +36,53 @@ function isRedisEnabled() {
 
 /**
  * Build Redis connection config from environment variables
+ * Supports both Unix socket and TCP (host:port) connections
  */
 function getRedisConfig() {
+  const socketPath = process.env.REDIS_SOCKET;
   const host = process.env.REDIS_HOST;
   const port = parseInt(process.env.REDIS_PORT, 10) || 6379;
   const username = process.env.REDIS_USERNAME;
   const password = process.env.REDIS_PASSWORD;
 
-  if (!host) {
-    return null;
+  const reconnectStrategy = (retries) => {
+    if (retries > 10) {
+      logger.warn('Redis max reconnection attempts reached, falling back to memory');
+      return false;
+    }
+    return Math.min(retries * 100, 3000);
+  };
+
+  // Priority 1: Unix Socket (for shared hosting)
+  if (socketPath) {
+    connectionMode = 'socket';
+    return {
+      socket: {
+        path: socketPath,
+        reconnectStrategy,
+        connectTimeout: 10000
+      }
+    };
   }
 
-  return {
-    socket: {
-      host,
-      port,
-      reconnectStrategy: (retries) => {
-        if (retries > 10) {
-          logger.warn('Redis max reconnection attempts reached, falling back to memory');
-          return false;
-        }
-        return Math.min(retries * 100, 3000);
+  // Priority 2: TCP connection (for VPS/Redis Cloud)
+  if (host) {
+    connectionMode = 'tcp';
+    return {
+      socket: {
+        host,
+        port,
+        reconnectStrategy,
+        connectTimeout: 10000
       },
-      connectTimeout: 10000
-    },
-    username: username || undefined,
-    password: password || undefined
-  };
+      username: username || undefined,
+      password: password || undefined
+    };
+  }
+
+  // No valid config
+  connectionMode = 'none';
+  return null;
 }
 
 /**
@@ -72,14 +99,17 @@ async function initializeRedis() {
   const config = getRedisConfig();
 
   if (!config) {
-    logger.warn('Redis enabled but REDIS_HOST not configured, using in-memory cache');
+    logger.warn('Redis enabled but no REDIS_SOCKET or REDIS_HOST configured, using in-memory cache');
     return false;
   }
 
   try {
     const redis = require('redis');
 
-    logger.info(`Connecting to Redis at ${process.env.REDIS_HOST}:${process.env.REDIS_PORT || 6379}...`);
+    const connectionInfo = connectionMode === 'socket'
+      ? `Unix socket: ${process.env.REDIS_SOCKET}`
+      : `TCP: ${process.env.REDIS_HOST}:${process.env.REDIS_PORT || 6379}`;
+    logger.info(`Connecting to Redis via ${connectionInfo}...`);
 
     redisClient = redis.createClient(config);
 
@@ -175,6 +205,7 @@ function getCacheInfo() {
     backend: isConnected() ? 'redis' : 'memory',
     redisEnabled: isRedisEnabled(),
     redisConnected: isConnected(),
+    connectionMode, // 'socket', 'tcp', or 'none'
     memoryCacheSize: memoryCache.size
   };
 }
