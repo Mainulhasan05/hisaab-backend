@@ -91,12 +91,12 @@ const smsLogSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Indexes
-smsLogSchema.index({ shop: 1, createdAt: -1 });
-smsLogSchema.index({ shop: 1, status: 1 });
-smsLogSchema.index({ shop: 1, type: 1 });
-smsLogSchema.index({ shop: 1, sentBy: 1 });
-smsLogSchema.index({ transactionId: 1 });
+// Indexes - Optimized for scalability
+smsLogSchema.index({ shop: 1, createdAt: -1 }); // Main listing
+smsLogSchema.index({ transactionId: 1 }, { sparse: true }); // Webhook status updates
+
+// TTL Index - Auto-delete logs older than 60 days
+smsLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 60 * 24 * 60 * 60 }); // 60 days
 
 // Virtual: Total recipients
 smsLogSchema.virtual('totalRecipients').get(function() {

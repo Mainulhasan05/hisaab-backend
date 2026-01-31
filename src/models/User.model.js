@@ -71,11 +71,9 @@ const userSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Compound unique index: phone + shop (same phone can exist in different shops)
-userSchema.index({ phone: 1, shop: 1 }, { unique: true });
-userSchema.index({ shop: 1 });
-userSchema.index({ role: 1 });
-userSchema.index({ isActive: 1 });
+// Indexes - Optimized for scalability
+userSchema.index({ phone: 1, shop: 1 }, { unique: true }); // Phone + shop login lookup
+userSchema.index({ shop: 1, isActive: 1 }); // Shop users list
 
 // Normalize phone before saving
 userSchema.pre('save', function(next) {

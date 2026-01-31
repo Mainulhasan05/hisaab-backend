@@ -56,12 +56,13 @@ const auditLogSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Indexes
-auditLogSchema.index({ shop: 1, createdAt: -1 });
-auditLogSchema.index({ shop: 1, action: 1 });
-auditLogSchema.index({ shop: 1, user: 1, createdAt: -1 });
-auditLogSchema.index({ admin: 1, createdAt: -1 });
-auditLogSchema.index({ 'entity.type': 1, 'entity.id': 1 });
+// Indexes - Optimized for scalability
+auditLogSchema.index({ shop: 1, createdAt: -1 }); // Main listing with date sort
+auditLogSchema.index({ admin: 1, createdAt: -1 }); // Admin audit trail
+
+// TTL Index - Auto-delete logs older than 90 days to prevent unbounded growth
+// For compliance, export/archive logs before deletion if needed
+auditLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 90 * 24 * 60 * 60 }); // 90 days
 
 // Static: Create audit log
 auditLogSchema.statics.log = async function({

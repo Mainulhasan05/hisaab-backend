@@ -143,17 +143,15 @@ const productSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Indexes
-productSchema.index({ shop: 1, code: 1 }, { unique: true });
-productSchema.index({ shop: 1, barcode: 1 }, { sparse: true });
-productSchema.index({ shop: 1, category: 1 });
-productSchema.index({ shop: 1, subcategory: 1 });
-productSchema.index({ shop: 1, 'variants.sku': 1 });
-productSchema.index({ shop: 1, 'variants.barcode': 1 }, { sparse: true });
-productSchema.index({ shop: 1, name: 'text', nameBn: 'text' });
-productSchema.index({ shop: 1, isActive: 1 });
-productSchema.index({ shop: 1, stock: 1 });
-productSchema.index({ shop: 1, createdAt: -1 });
+// Indexes - Optimized for scalability
+// Essential indexes only - removed redundant and rarely-used indexes
+productSchema.index({ shop: 1, code: 1 }, { unique: true }); // Product code lookup
+productSchema.index({ shop: 1, barcode: 1 }, { sparse: true }); // Barcode scan
+productSchema.index({ shop: 1, category: 1, isActive: 1 }); // Category listing with active filter
+productSchema.index({ shop: 1, 'variants.sku': 1 }, { sparse: true }); // Variant SKU lookup
+productSchema.index({ shop: 1, 'variants.barcode': 1 }, { sparse: true }); // Variant barcode scan
+productSchema.index({ shop: 1, createdAt: -1 }); // Listing by date
+// Note: Text search removed for scalability - use regex or external search (Elasticsearch) for large datasets
 
 // Virtual: Is low stock
 productSchema.virtual('isLowStock').get(function() {

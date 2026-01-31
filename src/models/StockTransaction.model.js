@@ -92,12 +92,9 @@ const stockTransactionSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Indexes
-stockTransactionSchema.index({ shop: 1, product: 1, createdAt: -1 });
-stockTransactionSchema.index({ shop: 1, type: 1 });
-stockTransactionSchema.index({ shop: 1, createdAt: -1 });
-stockTransactionSchema.index({ shop: 1, 'reference.id': 1 });
-stockTransactionSchema.index({ shop: 1, createdBy: 1 });
+// Indexes - Optimized for scalability
+stockTransactionSchema.index({ shop: 1, product: 1, createdAt: -1 }); // Product stock history
+stockTransactionSchema.index({ shop: 1, createdAt: -1 }); // Main listing
 
 // Virtual: Is stock in
 stockTransactionSchema.virtual('isStockIn').get(function() {

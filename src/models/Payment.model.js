@@ -63,14 +63,11 @@ const paymentSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Indexes
-paymentSchema.index({ shop: 1, createdAt: -1 });
-paymentSchema.index({ shop: 1, customer: 1 });
-paymentSchema.index({ shop: 1, sale: 1 });
-paymentSchema.index({ shop: 1, purchase: 1 });
-paymentSchema.index({ shop: 1, method: 1 });
-paymentSchema.index({ shop: 1, type: 1 });
-paymentSchema.index({ shop: 1, receivedBy: 1 });
+// Indexes - Optimized for scalability
+paymentSchema.index({ shop: 1, createdAt: -1 }); // Main listing
+paymentSchema.index({ shop: 1, customer: 1, createdAt: -1 }); // Customer payment history
+paymentSchema.index({ shop: 1, sale: 1 }); // Sale payments lookup
+paymentSchema.index({ shop: 1, purchase: 1 }, { sparse: true }); // Purchase payments
 
 // Virtual: Is refund
 paymentSchema.virtual('isRefund').get(function() {

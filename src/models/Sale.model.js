@@ -154,13 +154,11 @@ const saleSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Indexes
-saleSchema.index({ shop: 1, invoiceNo: 1 }, { unique: true });
-saleSchema.index({ shop: 1, customer: 1 });
-saleSchema.index({ shop: 1, createdAt: -1 });
-saleSchema.index({ shop: 1, status: 1 });
-saleSchema.index({ shop: 1, createdBy: 1 });
-saleSchema.index({ shop: 1, paymentMethod: 1 });
+// Indexes - Optimized for scalability
+saleSchema.index({ shop: 1, invoiceNo: 1 }, { unique: true }); // Invoice lookup
+saleSchema.index({ shop: 1, customer: 1, createdAt: -1 }); // Customer purchase history
+saleSchema.index({ shop: 1, createdAt: -1 }); // Main listing, reports, date-based queries
+saleSchema.index({ shop: 1, status: 1, createdAt: -1 }); // Due/pending sales with date sort
 
 // Calculate totals before saving
 saleSchema.pre('save', function(next) {

@@ -64,12 +64,11 @@ const customerSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Compound unique index: phone + shop
-customerSchema.index({ shop: 1, phone: 1 }, { unique: true });
-customerSchema.index({ shop: 1 });
-customerSchema.index({ shop: 1, totalDue: -1 });
-customerSchema.index({ shop: 1, name: 'text' });
-customerSchema.index({ shop: 1, createdAt: -1 });
+// Indexes - Optimized for scalability
+customerSchema.index({ shop: 1, phone: 1 }, { unique: true }); // Phone lookup
+customerSchema.index({ shop: 1, totalDue: -1 }); // Due customers list
+customerSchema.index({ shop: 1, createdAt: -1 }); // Listing by date
+// Note: Text search removed - use regex for name search or implement Elasticsearch
 
 // Normalize phone before saving
 customerSchema.pre('save', function(next) {

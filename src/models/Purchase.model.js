@@ -107,12 +107,10 @@ const purchaseSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Indexes
-purchaseSchema.index({ shop: 1, date: -1 });
-purchaseSchema.index({ shop: 1, supplier: 1 });
-purchaseSchema.index({ shop: 1, status: 1 });
-purchaseSchema.index({ shop: 1, createdAt: -1 });
-purchaseSchema.index({ shop: 1, invoiceNo: 1 }, { sparse: true });
+// Indexes - Optimized for scalability
+purchaseSchema.index({ shop: 1, date: -1 }); // Date-based listing
+purchaseSchema.index({ shop: 1, supplier: 1, date: -1 }); // Supplier purchase history
+purchaseSchema.index({ shop: 1, invoiceNo: 1 }, { unique: true, sparse: true }); // Invoice lookup
 
 // Pre-save: calculate due and status
 purchaseSchema.pre('save', function(next) {

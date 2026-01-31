@@ -51,11 +51,9 @@ const supplierSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Indexes
-supplierSchema.index({ shop: 1, name: 1 }, { unique: true });
-supplierSchema.index({ shop: 1, phone: 1 }, { sparse: true });
-supplierSchema.index({ shop: 1, isActive: 1 });
-supplierSchema.index({ shop: 1, createdAt: -1 });
+// Indexes - Optimized for scalability
+supplierSchema.index({ shop: 1, name: 1 }, { unique: true }); // Name lookup
+supplierSchema.index({ shop: 1, createdAt: -1 }); // Listing by date
 
 // Static: Search suppliers
 supplierSchema.statics.searchSuppliers = function(shopId, query, options = {}) {

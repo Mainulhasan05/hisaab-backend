@@ -45,10 +45,9 @@ const expenseSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Indexes
-expenseSchema.index({ shop: 1, date: -1 });
-expenseSchema.index({ shop: 1, category: 1 });
-expenseSchema.index({ shop: 1, createdAt: -1 });
+// Indexes - Optimized for scalability
+expenseSchema.index({ shop: 1, date: -1 }); // Date-based listing and reports
+expenseSchema.index({ shop: 1, category: 1, date: -1 }); // Category-wise expenses
 
 // Static: Get summary by category for a date range
 expenseSchema.statics.getSummaryByCategory = async function(shopId, startDate, endDate) {
