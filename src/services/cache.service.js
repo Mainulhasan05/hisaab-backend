@@ -465,6 +465,220 @@ class CacheService {
     }
     return { success: false, error: 'Redis not connected' };
   }
+
+  /**
+   * List all keys with optional pattern filtering
+   * @param {string} pattern - Pattern to match (default: '*')
+   * @param {number} limit - Max keys to return (default: 100)
+   */
+  async listKeys(pattern = '*', limit = 100) {
+    const keys = [];
+
+    if (isConnected()) {
+      try {
+        const client = getClient();
+        const allKeys = await client.keys(pattern);
+
+        // Get TTL for each key (limited)
+        for (const key of allKeys.slice(0, limit)) {
+          const ttl = await client.ttl(key);
+          const type = await client.type(key);
+          keys.push({
+            key,
+            type,
+            ttl: ttl === -1 ? 'no expiry' : ttl === -2 ? 'expired' : `${ttl}s`,
+            ttlSeconds: ttl,
+          });
+        }
+
+        return {
+          backend: 'redis',
+          total: allKeys.length,
+          showing: keys.length,
+          keys,
+        };
+      } catch (error) {
+        logger.error('Error listing keys:', error.message);
+        throw error;
+      }
+    }
+
+    // Memory cache fallback
+    for (const [key] of memoryCache.entries()) {
+      if (pattern === '*' || key.includes(pattern.replace(/\*/g, ''))) {
+        const expiry = memoryCacheTTL.get(key);
+        const ttlMs = expiry ? expiry - Date.now() : -1;
+        keys.push({
+          key,
+          type: 'string',
+          ttl: ttlMs <= 0 ? 'expired' : `${Math.round(ttlMs / 1000)}s`,
+          ttlSeconds: Math.round(ttlMs / 1000),
+        });
+        if (keys.length >= limit) break;
+      }
+    }
+
+    return {
+      backend: 'memory',
+      total: memoryCache.size,
+      showing: keys.length,
+      keys,
+    };
+  }
+
+  /**
+   * Get details of a specific key
+   * @param {string} key - Cache key
+   */
+  async getKeyDetails(key) {
+    if (isConnected()) {
+      try {
+        const client = getClient();
+        const [type, ttl, value] = await Promise.all([
+          client.type(key),
+          client.ttl(key),
+          client.get(key),
+        ]);
+
+        let parsedValue = value;
+        let size = value ? Buffer.byteLength(value, 'utf8') : 0;
+
+        try {
+          parsedValue = JSON.parse(value);
+        } catch {
+          // Keep as string if not JSON
+        }
+
+        return {
+          key,
+          type,
+          ttl: ttl === -1 ? 'no expiry' : ttl === -2 ? 'not found' : `${ttl}s`,
+          ttlSeconds: ttl,
+          size: this._formatBytes(size),
+          sizeBytes: size,
+          value: parsedValue,
+        };
+      } catch (error) {
+        logger.error('Error getting key details:', error.message);
+        throw error;
+      }
+    }
+
+    // Memory cache fallback
+    const value = memoryCache.get(key);
+    const expiry = memoryCacheTTL.get(key);
+    const ttlMs = expiry ? expiry - Date.now() : -1;
+
+    let parsedValue = value;
+    try {
+      parsedValue = JSON.parse(value);
+    } catch {
+      // Keep as string
+    }
+
+    return {
+      key,
+      type: 'string',
+      ttl: ttlMs <= 0 ? 'expired' : `${Math.round(ttlMs / 1000)}s`,
+      ttlSeconds: Math.round(ttlMs / 1000),
+      size: value ? this._formatBytes(Buffer.byteLength(value, 'utf8')) : '0 B',
+      sizeBytes: value ? Buffer.byteLength(value, 'utf8') : 0,
+      value: parsedValue,
+    };
+  }
+
+  /**
+   * Flush all cache data
+   */
+  async flushAll() {
+    if (isConnected()) {
+      try {
+        const client = getClient();
+        await client.flushDb();
+        logger.info('Redis cache flushed');
+        return { success: true, backend: 'redis', message: 'Cache flushed successfully' };
+      } catch (error) {
+        logger.error('Error flushing Redis:', error.message);
+        throw error;
+      }
+    }
+
+    // Memory cache fallback
+    memoryCache.clear();
+    memoryCacheTTL.clear();
+    logger.info('Memory cache flushed');
+    return { success: true, backend: 'memory', message: 'Memory cache flushed successfully' };
+  }
+
+  /**
+   * Get grouped cache summary by key prefix
+   */
+  async getCacheSummary() {
+    const summary = {
+      byPrefix: {},
+      totalKeys: 0,
+      totalSize: 0,
+    };
+
+    if (isConnected()) {
+      try {
+        const client = getClient();
+        const allKeys = await client.keys('*');
+        summary.totalKeys = allKeys.length;
+
+        // Group by prefix (first part before ':')
+        for (const key of allKeys) {
+          const prefix = key.split(':')[0];
+          if (!summary.byPrefix[prefix]) {
+            summary.byPrefix[prefix] = { count: 0, keys: [] };
+          }
+          summary.byPrefix[prefix].count++;
+          if (summary.byPrefix[prefix].keys.length < 5) {
+            summary.byPrefix[prefix].keys.push(key);
+          }
+        }
+
+        // Get memory info
+        const memInfo = await client.info('memory');
+        const memMatch = memInfo.match(/used_memory:(\d+)/);
+        if (memMatch) {
+          summary.totalSize = parseInt(memMatch[1], 10);
+          summary.totalSizeHuman = this._formatBytes(summary.totalSize);
+        }
+      } catch (error) {
+        logger.error('Error getting cache summary:', error.message);
+        throw error;
+      }
+    } else {
+      // Memory cache
+      summary.totalKeys = memoryCache.size;
+      for (const [key, value] of memoryCache.entries()) {
+        const prefix = key.split(':')[0];
+        if (!summary.byPrefix[prefix]) {
+          summary.byPrefix[prefix] = { count: 0, keys: [] };
+        }
+        summary.byPrefix[prefix].count++;
+        if (summary.byPrefix[prefix].keys.length < 5) {
+          summary.byPrefix[prefix].keys.push(key);
+        }
+        summary.totalSize += Buffer.byteLength(value, 'utf8');
+      }
+      summary.totalSizeHuman = this._formatBytes(summary.totalSize);
+    }
+
+    return summary;
+  }
+
+  /**
+   * Helper to format bytes
+   */
+  _formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
 }
 
 module.exports = new CacheService();

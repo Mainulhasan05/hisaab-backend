@@ -34,7 +34,16 @@ router.get('/sales', adminController.getAllSales);
 // Online users (from heartbeat)
 router.get('/online-users', adminController.getOnlineUsers);
 
-// Cache/Redis stats
+// Cache/Redis management
+router.get('/cache/stats', adminController.getCacheStats);
+router.get('/cache/summary', adminController.getCacheSummary);
+router.get('/cache/keys', adminController.listCacheKeys);
+router.get('/cache/keys/:key(*)', adminController.getCacheKeyDetails);
+router.delete('/cache/keys/:key(*)', adminController.deleteCacheKey);
+router.post('/cache/delete-pattern', adminController.deleteCachePattern);
+router.post('/cache/flush', adminController.flushCache);
+
+// Legacy route (keep for backward compatibility)
 router.get('/cache-stats', adminController.getCacheStats);
 
 // Payments

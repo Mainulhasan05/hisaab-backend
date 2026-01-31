@@ -1,13 +1,30 @@
 const Category = require('../models/Category.model');
 const Product = require('../models/Product.model');
 const { AppError } = require('../middleware/error.middleware');
+const cacheService = require('./cache.service');
+const { KEYS, getTTL } = require('../config/cacheKeys');
 
 class CategoryService {
+  /**
+   * Invalidate category cache for a shop
+   */
+  async invalidateCache(shopId) {
+    await cacheService.delete(KEYS.CATEGORIES(shopId));
+  }
+
   /**
    * Get all categories with subcategories for a shop
    */
   async getCategories(shopId) {
+    // Try cache first
+    const cacheKey = KEYS.CATEGORIES(shopId);
+    const cached = await cacheService.get(cacheKey);
+    if (cached) return cached;
+
     const categories = await Category.getCategoriesWithSubcategories(shopId);
+
+    // Cache the result
+    await cacheService.set(cacheKey, categories, getTTL.categories);
     return categories;
   }
 
@@ -47,6 +64,10 @@ class CategoryService {
     };
 
     const category = await Category.create(categoryData);
+
+    // Invalidate cache
+    await this.invalidateCache(shopId);
+
     return category;
   }
 
@@ -71,6 +92,10 @@ class CategoryService {
     });
 
     await category.save();
+
+    // Invalidate cache
+    await this.invalidateCache(shopId);
+
     return category;
   }
 
@@ -110,6 +135,9 @@ class CategoryService {
 
     category.isActive = false;
     await category.save();
+
+    // Invalidate cache
+    await this.invalidateCache(shopId);
   }
 }
 

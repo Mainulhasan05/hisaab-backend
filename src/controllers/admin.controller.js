@@ -218,6 +218,77 @@ exports.getCacheStats = asyncHandler(async (req, res) => {
   });
 });
 
+// Get cache summary grouped by prefix
+exports.getCacheSummary = asyncHandler(async (req, res) => {
+  const cacheService = require('../services/cache.service');
+  const summary = await cacheService.getCacheSummary();
+  return ApiResponse.success(res, {
+    data: summary,
+    message: 'Cache summary retrieved',
+    messageBn: 'ক্যাশ সারাংশ লোড হয়েছে',
+  });
+});
+
+// List cache keys with pattern
+exports.listCacheKeys = asyncHandler(async (req, res) => {
+  const cacheService = require('../services/cache.service');
+  const { pattern = '*', limit = 100 } = req.query;
+  const result = await cacheService.listKeys(pattern, parseInt(limit));
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Cache keys retrieved',
+    messageBn: 'ক্যাশ কী তালিকা লোড হয়েছে',
+  });
+});
+
+// Get details of a specific cache key
+exports.getCacheKeyDetails = asyncHandler(async (req, res) => {
+  const cacheService = require('../services/cache.service');
+  const { key } = req.params;
+  const details = await cacheService.getKeyDetails(key);
+  return ApiResponse.success(res, {
+    data: details,
+    message: 'Cache key details retrieved',
+    messageBn: 'ক্যাশ কী বিস্তারিত লোড হয়েছে',
+  });
+});
+
+// Delete a specific cache key
+exports.deleteCacheKey = asyncHandler(async (req, res) => {
+  const cacheService = require('../services/cache.service');
+  const { key } = req.params;
+  await cacheService.delete(key);
+  return ApiResponse.success(res, {
+    message: 'Cache key deleted',
+    messageBn: 'ক্যাশ কী মুছে ফেলা হয়েছে',
+  });
+});
+
+// Delete cache keys by pattern
+exports.deleteCachePattern = asyncHandler(async (req, res) => {
+  const cacheService = require('../services/cache.service');
+  const { pattern } = req.body;
+  if (!pattern) {
+    return ApiResponse.error(res, { message: 'Pattern is required', messageBn: 'প্যাটার্ন প্রয়োজন' }, 400);
+  }
+  await cacheService.deletePattern(pattern);
+  return ApiResponse.success(res, {
+    message: `Cache keys matching "${pattern}" deleted`,
+    messageBn: `"${pattern}" প্যাটার্নের ক্যাশ কী মুছে ফেলা হয়েছে`,
+  });
+});
+
+// Flush all cache
+exports.flushCache = asyncHandler(async (req, res) => {
+  const cacheService = require('../services/cache.service');
+  const result = await cacheService.flushAll();
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Cache flushed successfully',
+    messageBn: 'সম্পূর্ণ ক্যাশ মুছে ফেলা হয়েছে',
+  });
+});
+
 // Get top performers (shops, products, active shops)
 exports.getTopPerformers = asyncHandler(async (req, res) => {
   const performers = await adminService.getTopPerformers();

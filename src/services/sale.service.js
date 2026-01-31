@@ -6,8 +6,24 @@ const StockTransaction = require('../models/StockTransaction.model');
 const Shop = require('../models/Shop.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
+const cacheService = require('./cache.service');
+const { KEYS } = require('../config/cacheKeys');
 
 class SaleService {
+  // Invalidate related caches when sales data changes
+  async invalidateCache(shopId) {
+    const today = new Date().toISOString().split('T')[0];
+    await Promise.all([
+      cacheService.delete(KEYS.DASHBOARD_STATS(shopId)),
+      cacheService.delete(KEYS.DAILY_SUMMARY(shopId, today)),
+      cacheService.deletePattern(KEYS.PROFIT_LOSS(shopId, '*', '*')),
+      cacheService.deletePattern(KEYS.SALES_REPORT(shopId, '*', '*', '*')),
+      // Admin caches too since they aggregate all shops
+      cacheService.delete(KEYS.ADMIN_STATS()),
+      cacheService.delete(KEYS.ADMIN_TOP_PERFORMERS()),
+    ]);
+  }
+
   // Generate invoice number
   async generateInvoiceNumber(shopId) {
     const today = new Date();
@@ -367,6 +383,9 @@ class SaleService {
       customerPhone: finalCustomerPhone,
     });
 
+    // Invalidate related caches
+    this.invalidateCache(shopId).catch(() => {}); // Non-blocking
+
     return sale;
   }
 
@@ -431,6 +450,9 @@ class SaleService {
         after: { paid: sale.paid, due: sale.due },
       },
     });
+
+    // Invalidate related caches
+    this.invalidateCache(shopId).catch(() => {}); // Non-blocking
 
     return { sale, payment };
   }
@@ -508,6 +530,9 @@ class SaleService {
         name: sale.invoiceNo,
       },
     });
+
+    // Invalidate related caches
+    this.invalidateCache(shopId).catch(() => {}); // Non-blocking
 
     return sale;
   }

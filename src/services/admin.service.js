@@ -9,6 +9,8 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { AppError } = require('../middleware/error.middleware');
+const cacheService = require('./cache.service');
+const { KEYS, getTTL } = require('../config/cacheKeys');
 
 class AdminService {
   // Admin login
@@ -47,6 +49,11 @@ class AdminService {
 
   // Get admin statistics
   async getStats() {
+    // Try cache first
+    const cacheKey = KEYS.ADMIN_STATS();
+    const cached = await cacheService.get(cacheKey);
+    if (cached) return cached;
+
     // Date helpers
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -131,7 +138,7 @@ class AdminService {
     const Product = require('../models/Product.model');
     const todayNewProducts = await Product.countDocuments({ createdAt: { $gte: todayStart } });
 
-    return {
+    const result = {
       // Shop stats
       totalShops,
       activeShops,
@@ -170,10 +177,19 @@ class AdminService {
       // Growth
       revenueGrowth,
     };
+
+    // Cache the result
+    await cacheService.set(cacheKey, result, getTTL.adminStats);
+    return result;
   }
 
   // Get top performers (shops, products)
   async getTopPerformers() {
+    // Try cache first
+    const cacheKey = KEYS.ADMIN_TOP_PERFORMERS();
+    const cached = await cacheService.get(cacheKey);
+    if (cached) return cached;
+
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
@@ -257,15 +273,24 @@ class AdminService {
       },
     ]);
 
-    return {
+    const result = {
       topShops,
       topProducts,
       mostActiveToday,
     };
+
+    // Cache the result
+    await cacheService.set(cacheKey, result, getTTL.adminTopPerformers);
+    return result;
   }
 
   // Get system metrics
   async getSystemMetrics() {
+    // Try cache first
+    const cacheKey = KEYS.ADMIN_SYSTEM_METRICS();
+    const cached = await cacheService.get(cacheKey);
+    if (cached) return cached;
+
     const Product = require('../models/Product.model');
     const Customer = require('../models/Customer.model');
     const Expense = require('../models/Expense.model');
@@ -331,7 +356,7 @@ class AdminService {
     // Format memory usage
     const memUsage = process.memoryUsage();
 
-    return {
+    const result = {
       database: {
         name: dbStats.db,
         collections: dbStats.collections,
@@ -360,6 +385,10 @@ class AdminService {
       },
       uptime: formatUptime(process.uptime()),
     };
+
+    // Cache the result
+    await cacheService.set(cacheKey, result, getTTL.adminSystemMetrics);
+    return result;
   }
 
   // Get all shops with filtering

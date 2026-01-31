@@ -7,10 +7,16 @@ const SalesReturn = require('../models/SalesReturn.model');
 const Purchase = require('../models/Purchase.model');
 const CashRegister = require('../models/CashRegister.model');
 const mongoose = require('mongoose');
+const cacheService = require('./cache.service');
+const { KEYS, getTTL } = require('../config/cacheKeys');
 
 class ReportService {
   // Get dashboard statistics
   async getDashboardStats(shopId) {
+    // Try cache first
+    const cacheKey = KEYS.DASHBOARD_STATS(shopId);
+    const cached = await cacheService.get(cacheKey);
+    if (cached) return cached;
     const today = new Date();
     const startOfDay = new Date(today);
     startOfDay.setHours(0, 0, 0, 0);
@@ -137,7 +143,7 @@ class ReportService {
     const todaySales = todaySalesResult[0] || { totalSales: 0, totalPaid: 0, totalDue: 0, count: 0 };
     const totalDue = customerDueResult[0]?.totalDue || 0;
 
-    return {
+    const result = {
       todaySales: todaySales.totalSales,
       todayProfit: todayProfit,
       todayOrders: todaySales.count,
@@ -149,6 +155,10 @@ class ReportService {
       topProducts,
       salesChart,
     };
+
+    // Cache the result
+    await cacheService.set(cacheKey, result, getTTL.dashboardStats);
+    return result;
   }
 
   // Calculate profit for date range
@@ -428,6 +438,13 @@ class ReportService {
   // Get Daily Business Summary
   async getDailySummary(shopId, options = {}) {
     const { date } = options;
+    const dateStr = date || new Date().toISOString().split('T')[0];
+
+    // Try cache first
+    const cacheKey = KEYS.DAILY_SUMMARY(shopId, dateStr);
+    const cached = await cacheService.get(cacheKey);
+    if (cached) return cached;
+
     const shopObjId = new mongoose.Types.ObjectId(shopId);
 
     // Parse the target date
@@ -634,7 +651,7 @@ class ReportService {
       });
     }
 
-    return {
+    const result = {
       date: startOfDay.toISOString().split('T')[0],
 
       // Summary
@@ -699,11 +716,21 @@ class ReportService {
       // Stock alerts
       lowStockProducts,
     };
+
+    // Cache the result
+    await cacheService.set(cacheKey, result, getTTL.dailySummary);
+    return result;
   }
 
   // Get Profit & Loss statement
   async getProfitLoss(shopId, options = {}) {
     const { startDate, endDate } = options;
+
+    // Try cache first
+    const cacheKey = KEYS.PROFIT_LOSS(shopId, startDate, endDate);
+    const cached = await cacheService.get(cacheKey);
+    if (cached) return cached;
+
     const shopObjId = new mongoose.Types.ObjectId(shopId);
 
     const dateMatch = {};
@@ -893,7 +920,7 @@ class ReportService {
     }
     const chartData = Array.from(dailyMap.values()).sort((a, b) => a.date.localeCompare(b.date));
 
-    return {
+    const result = {
       // Summary
       revenue: sales.totalRevenue,
       cogs,
@@ -931,6 +958,10 @@ class ReportService {
       // Chart
       chartData,
     };
+
+    // Cache the result
+    await cacheService.set(cacheKey, result, getTTL.profitLoss);
+    return result;
   }
 
   // Export report (placeholder - implement actual export logic)
