@@ -170,16 +170,12 @@ class ProductService {
 
     const beforeData = product.toObject();
 
-    // SECURITY: Prevent direct stock manipulation - must use updateStock endpoint
-    // This ensures all stock changes are tracked in StockTransaction
-    const { stock, ...safeUpdateData } = updateData;
-    if (stock !== undefined) {
-      console.warn(`[SECURITY] Blocked direct stock update attempt for product ${productId} by user ${userId}`);
-    }
+    // Separate stock from other update data so we can handle it via updateStock
+    const { stock, variants: variantsWithStock, ...safeUpdateData } = updateData;
 
-    // If variants are being updated, strip out stock from each variant
-    if (safeUpdateData.variants && Array.isArray(safeUpdateData.variants)) {
-      safeUpdateData.variants = safeUpdateData.variants.map(variant => {
+    // If variants are being updated, preserve existing stock for each variant
+    if (variantsWithStock && Array.isArray(variantsWithStock)) {
+      safeUpdateData.variants = variantsWithStock.map(variant => {
         const { stock: variantStock, ...safeVariant } = variant;
         // Preserve existing stock for this variant if it exists
         const existingVariant = product.variants?.find(v =>
@@ -200,14 +196,14 @@ class ProductService {
       }
     }
 
-    // Update product with safe data (stock fields excluded)
+    // Update product with safe data (stock handled separately below)
     Object.assign(product, safeUpdateData);
     if (safeUpdateData.variants) {
       product.hasVariants = safeUpdateData.variants.length > 0;
     }
     await product.save();
 
-    // Create audit log
+    // Create audit log for general product update
     await AuditLog.create({
       shop: shopId,
       user: userId,
@@ -225,6 +221,16 @@ class ProductService {
         after: product.toObject(),
       },
     });
+
+    // If stock was provided and this is a non-variant product, update stock through
+    // the proper channel so it's tracked in StockTransaction
+    if (stock !== undefined && stock !== null && !product.hasVariants) {
+      return await this.updateStock(shopId, userId, productId, {
+        quantity: parseInt(stock) || 0,
+        type: 'set',
+        notes: 'পণ্য সম্পাদনা থেকে স্টক আপডেট',
+      });
+    }
 
     return product;
   }
