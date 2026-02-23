@@ -215,7 +215,8 @@ class AuthService {
     }
 
     // Check subscription — auto-update DB status if expired but still marked active
-    if (!shop.isSubscriptionValid) {
+    const subscriptionExpired = !shop.isSubscriptionValid;
+    if (subscriptionExpired) {
       if (
         shop.subscription &&
         shop.subscription.status === 'active' &&
@@ -225,11 +226,7 @@ class AuthService {
         shop.subscription.status = 'expired';
         shop.save().catch(() => {});
       }
-      throw new AppError(
-        'Subscription expired. Please contact support to renew.',
-        'আপনার সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে। পুনরায় সক্রিয় করতে সাপোর্টে যোগাযোগ করুন।',
-        403
-      );
+      // Do NOT throw — allow login so users can still view their data (read-only mode)
     }
 
     // Update last login
@@ -240,7 +237,7 @@ class AuthService {
       shop: user.shop,
       user: user._id,
       action: AUDIT_ACTIONS.USER_LOGIN.en,
-      description: `User ${user.name} logged in`,
+      description: `User ${user.name} logged in${subscriptionExpired ? ' (subscription expired — read-only mode)' : ''}`,
       req
     });
 
@@ -250,7 +247,12 @@ class AuthService {
     return {
       user: user.toJSON(),
       shop: shop.toJSON(),
-      token
+      token,
+      // Inform the frontend that the subscription is expired (read-only mode)
+      ...(subscriptionExpired && {
+        subscriptionExpired: true,
+        subscriptionMessage: 'আপনার সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে। আপনি ডেটা দেখতে পারবেন, কিন্তু পরিবর্তন করতে পারবেন না। পুনরায় সক্রিয় করতে সাপোর্টে যোগাযোগ করুন।',
+      }),
     };
   }
 

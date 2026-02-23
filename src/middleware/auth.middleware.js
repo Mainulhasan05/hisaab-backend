@@ -113,10 +113,19 @@ const protect = asyncHandler(async (req, res, next) => {
           'subscription.status': 'expired',
         }).catch(() => {}); // fire-and-forget, don't block the response
       }
-      return ApiResponse.forbidden(res, {
-        message: 'Your subscription has expired. Please contact support to renew.',
-        messageBn: 'আপনার সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে। পুনরায় সক্রিয় করতে সাপোর্টে যোগাযোগ করুন।',
-        code: 'SUBSCRIPTION_EXPIRED'
+
+      // Read-only grace mode: GET requests are allowed so users can still view their data
+      if (req.method === 'GET') {
+        req.user = user;
+        req.shop = user.shop;
+        req.subscriptionExpired = true; // Route handlers can check this if needed
+        return next();
+      }
+
+      // All write operations are blocked with 402 Payment Required
+      return ApiResponse.paymentRequired(res, {
+        message: 'Your subscription has expired. You can still view your data, but cannot make changes. Please contact support to renew.',
+        messageBn: 'আপনার সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে। আপনি ডেটা দেখতে পারবেন, কিন্তু পরিবর্তন করতে পারবেন না। পুনরায় সক্রিয় করতে সাপোর্টে যোগাযোগ করুন।',
       });
     }
 

@@ -126,9 +126,30 @@ class ApiResponse {
    */
   static forbidden(res, {
     message = 'Access forbidden',
-    messageBn = 'প্রবেশ নিষিদ্ধ'
+    messageBn = 'প্রবেশ নিষিদ্ধ',
+    code = null
   }) {
-    return this.error(res, { message, messageBn, statusCode: 403 });
+    const body = { success: false, statusCode: 403, message, messageBn, timestamp: new Date().toISOString() };
+    if (code) body.code = code;
+    return res.status(403).json(body);
+  }
+
+  /**
+   * Send payment required response (402) — used for expired subscriptions
+   */
+  static paymentRequired(res, {
+    message = 'Subscription required',
+    messageBn = 'সাবস্ক্রিপশন নবায়ন প্রয়োজন',
+    code = 'SUBSCRIPTION_EXPIRED'
+  }) {
+    return res.status(402).json({
+      success: false,
+      statusCode: 402,
+      message,
+      messageBn,
+      code,
+      timestamp: new Date().toISOString()
+    });
   }
 
   /**
