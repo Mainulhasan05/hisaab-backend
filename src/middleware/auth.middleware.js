@@ -102,9 +102,21 @@ const protect = asyncHandler(async (req, res, next) => {
 
     // Check subscription
     if (user.shop && !user.shop.isSubscriptionValid) {
+      // Auto-update DB status to 'expired' if it's still showing 'active' but the date has passed
+      if (
+        user.shop.subscription &&
+        user.shop.subscription.status === 'active' &&
+        user.shop.subscription.expiresAt &&
+        user.shop.subscription.expiresAt < new Date()
+      ) {
+        Shop.findByIdAndUpdate(user.shop._id, {
+          'subscription.status': 'expired',
+        }).catch(() => {}); // fire-and-forget, don't block the response
+      }
       return ApiResponse.forbidden(res, {
-        message: 'Your subscription has expired',
-        messageBn: 'আপনার সাবস্ক্রিপশন মেয়াদ শেষ'
+        message: 'Your subscription has expired. Please contact support to renew.',
+        messageBn: 'আপনার সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে। পুনরায় সক্রিয় করতে সাপোর্টে যোগাযোগ করুন।',
+        code: 'SUBSCRIPTION_EXPIRED'
       });
     }
 

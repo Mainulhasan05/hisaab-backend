@@ -403,9 +403,22 @@ class AdminService {
     } = options;
 
     const query = {};
+    const now = new Date();
 
-    // Filter by subscription status
-    if (status) {
+    // Filter by subscription status — expired includes shops with status='active' but past expiresAt
+    if (status === 'expired') {
+      query.$or = [
+        { 'subscription.status': 'expired' },
+        { 'subscription.status': 'active', 'subscription.expiresAt': { $lt: now } },
+      ];
+    } else if (status === 'active') {
+      query['subscription.status'] = 'active';
+      query.$or = [
+        { 'subscription.expiresAt': { $gt: now } },
+        { 'subscription.expiresAt': null },
+        { 'subscription.expiresAt': { $exists: false } },
+      ];
+    } else if (status) {
       query['subscription.status'] = status;
     }
 
@@ -435,11 +448,23 @@ class AdminService {
     const smsQuotas = await SMSQuota.find({ shop: { $in: shopIds } }).lean();
     const quotaMap = new Map(smsQuotas.map(q => [q.shop.toString(), q]));
 
-    // Merge SMS quota data with shops
-    const shopsWithQuota = shops.map(shop => ({
-      ...shop,
-      smsQuota: quotaMap.get(shop._id.toString()) || null,
-    }));
+    // Merge SMS quota data with shops, compute effective status
+    const shopsWithQuota = shops.map(shop => {
+      // Compute effective status: active in DB but past expiresAt = effectively expired
+      let effectiveStatus = shop.subscription?.status || 'trial';
+      if (
+        effectiveStatus === 'active' &&
+        shop.subscription?.expiresAt &&
+        new Date(shop.subscription.expiresAt) < now
+      ) {
+        effectiveStatus = 'expired';
+      }
+      return {
+        ...shop,
+        effectiveStatus,
+        smsQuota: quotaMap.get(shop._id.toString()) || null,
+      };
+    });
 
     return {
       data: shopsWithQuota,

@@ -157,7 +157,7 @@ shopSchema.pre('save', function(next) {
 
 // Set trial expiration
 shopSchema.pre('save', function(next) {
-  if (this.isNew && this.subscription.plan === SUBSCRIPTION_PLANS.TRIAL) {
+  if (this.isNew && this.subscription && this.subscription.plan === SUBSCRIPTION_PLANS.TRIAL) {
     const trialDays = 14;
     this.subscription.expiresAt = new Date(Date.now() + trialDays * 24 * 60 * 60 * 1000);
   }
@@ -166,10 +166,11 @@ shopSchema.pre('save', function(next) {
 
 // Virtual: Check if subscription is valid
 shopSchema.virtual('isSubscriptionValid').get(function() {
-  if (this.subscription.status !== SUBSCRIPTION_STATUS.ACTIVE) {
+  const sub = this.subscription;
+  if (!sub || sub.status !== SUBSCRIPTION_STATUS.ACTIVE) {
     return false;
   }
-  if (this.subscription.expiresAt && this.subscription.expiresAt < new Date()) {
+  if (sub.expiresAt && sub.expiresAt < new Date()) {
     return false;
   }
   return true;
@@ -177,8 +178,9 @@ shopSchema.virtual('isSubscriptionValid').get(function() {
 
 // Virtual: Days remaining in subscription
 shopSchema.virtual('subscriptionDaysRemaining').get(function() {
-  if (!this.subscription.expiresAt) return null;
-  const diff = this.subscription.expiresAt - new Date();
+  const sub = this.subscription;
+  if (!sub || !sub.expiresAt) return null;
+  const diff = sub.expiresAt - new Date();
   return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
 });
 

@@ -214,11 +214,20 @@ class AuthService {
       );
     }
 
-    // Check subscription
+    // Check subscription — auto-update DB status if expired but still marked active
     if (!shop.isSubscriptionValid) {
+      if (
+        shop.subscription &&
+        shop.subscription.status === 'active' &&
+        shop.subscription.expiresAt &&
+        shop.subscription.expiresAt < new Date()
+      ) {
+        shop.subscription.status = 'expired';
+        shop.save().catch(() => {});
+      }
       throw new AppError(
-        'Subscription expired',
-        'সাবস্ক্রিপশন মেয়াদ শেষ',
+        'Subscription expired. Please contact support to renew.',
+        'আপনার সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে। পুনরায় সক্রিয় করতে সাপোর্টে যোগাযোগ করুন।',
         403
       );
     }
