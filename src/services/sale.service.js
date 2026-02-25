@@ -9,6 +9,17 @@ const { AppError } = require('../middleware/error.middleware');
 const cacheService = require('./cache.service');
 const { KEYS } = require('../config/cacheKeys');
 
+// Bangladesh is UTC+6
+const BD_OFFSET_MS = 6 * 60 * 60 * 1000;
+function getBangladeshTodayRange() {
+  const bdNow = new Date(Date.now() + BD_OFFSET_MS);
+  const dateStr = bdNow.toISOString().split('T')[0];
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const startOfDay = new Date(Date.UTC(year, month - 1, day) - BD_OFFSET_MS);
+  const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000 - 1);
+  return { startOfDay, endOfDay, dateStr };
+}
+
 class SaleService {
   // Invalidate related caches when sales data changes
   async invalidateCache(shopId) {
@@ -26,12 +37,9 @@ class SaleService {
 
   // Generate invoice number
   async generateInvoiceNumber(shopId) {
-    const today = new Date();
-    const datePrefix = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
-
-    // Get count of sales today
-    const startOfDay = new Date(today.setHours(0, 0, 0, 0));
-    const endOfDay = new Date(today.setHours(23, 59, 59, 999));
+    const { startOfDay, endOfDay, dateStr } = getBangladeshTodayRange();
+    // Date prefix from Bangladesh local date
+    const datePrefix = dateStr.replace(/-/g, '');
 
     const count = await Sale.countDocuments({
       shop: shopId,
@@ -539,9 +547,7 @@ class SaleService {
 
   // Get today's sales summary
   async getTodaySummary(shopId) {
-    const today = new Date();
-    const startOfDay = new Date(today.setHours(0, 0, 0, 0));
-    const endOfDay = new Date(today.setHours(23, 59, 59, 999));
+    const { startOfDay, endOfDay } = getBangladeshTodayRange();
 
     const result = await Sale.aggregate([
       {

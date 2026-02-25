@@ -25,14 +25,12 @@ class ProductService {
     const query = { shop: shopId };
 
     // Search by name or code
-    if (search) {
-      query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { code: { $regex: search, $options: 'i' } },
-        { 'variants.sku': { $regex: search, $options: 'i' } },
-        { 'variants.barcode': { $regex: search, $options: 'i' } },
-      ];
-    }
+    const searchOr = search ? [
+      { name: { $regex: search, $options: 'i' } },
+      { code: { $regex: search, $options: 'i' } },
+      { 'variants.sku': { $regex: search, $options: 'i' } },
+      { 'variants.barcode': { $regex: search, $options: 'i' } },
+    ] : null;
 
     // Filter by category
     if (category) {
@@ -47,13 +45,18 @@ class ProductService {
     }
 
     // Filter low stock items (works for both non-variant and variant products)
-    if (lowStock === 'true' || lowStock === true) {
-      query.$or = [
-        // Non-variant products: stock < minStock
-        { hasVariants: { $ne: true }, $expr: { $lt: ['$stock', '$minStock'] } },
-        // Variant products: any variant has stock < product minStock
-        { hasVariants: true, 'variants.stock': { $lt: 5 } }, // Default threshold for variants
-      ];
+    const lowStockOr = (lowStock === 'true' || lowStock === true) ? [
+      { hasVariants: { $ne: true }, $expr: { $lt: ['$stock', '$minStock'] } },
+      { hasVariants: true, 'variants.stock': { $lt: 5 } },
+    ] : null;
+
+    // Combine search and lowStock filters — use $and when both are active to avoid $or overwrite
+    if (searchOr && lowStockOr) {
+      query.$and = [{ $or: searchOr }, { $or: lowStockOr }];
+    } else if (searchOr) {
+      query.$or = searchOr;
+    } else if (lowStockOr) {
+      query.$or = lowStockOr;
     }
 
     const skip = (pageNum - 1) * limitNum;

@@ -10,6 +10,24 @@ const mongoose = require('mongoose');
 const cacheService = require('./cache.service');
 const { KEYS, getTTL } = require('../config/cacheKeys');
 
+// Bangladesh is UTC+6. All dates from frontend are in Bangladesh local time.
+const BD_OFFSET_MS = 6 * 60 * 60 * 1000;
+
+// Get current date string in Bangladesh time ("YYYY-MM-DD")
+function getBangladeshTodayStr() {
+  const bdNow = new Date(Date.now() + BD_OFFSET_MS);
+  return bdNow.toISOString().split('T')[0];
+}
+
+// Convert a Bangladesh date string ("YYYY-MM-DD") to UTC start/end timestamps
+function getBangladeshDayRange(dateStr) {
+  const [year, month, day] = dateStr.split('-').map(Number);
+  // Bangladesh midnight = UTC midnight minus 6 hours (BD is UTC+6)
+  const startOfDay = new Date(Date.UTC(year, month - 1, day) - BD_OFFSET_MS);
+  const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000 - 1);
+  return { startOfDay, endOfDay };
+}
+
 class ReportService {
   // Get dashboard statistics
   async getDashboardStats(shopId) {
@@ -17,11 +35,7 @@ class ReportService {
     const cacheKey = KEYS.DASHBOARD_STATS(shopId);
     const cached = await cacheService.get(cacheKey);
     if (cached) return cached;
-    const today = new Date();
-    const startOfDay = new Date(today);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(today);
-    endOfDay.setHours(23, 59, 59, 999);
+    const { startOfDay, endOfDay } = getBangladeshDayRange(getBangladeshTodayStr());
 
     // Get today's sales
     const todaySalesResult = await Sale.aggregate([
@@ -438,7 +452,8 @@ class ReportService {
   // Get Daily Business Summary
   async getDailySummary(shopId, options = {}) {
     const { date } = options;
-    const dateStr = date || new Date().toISOString().split('T')[0];
+    // Use Bangladesh today if no date provided
+    const dateStr = date || getBangladeshTodayStr();
 
     // Try cache first
     const cacheKey = KEYS.DAILY_SUMMARY(shopId, dateStr);
@@ -447,12 +462,8 @@ class ReportService {
 
     const shopObjId = new mongoose.Types.ObjectId(shopId);
 
-    // Parse the target date
-    const targetDate = date ? new Date(date) : new Date();
-    const startOfDay = new Date(targetDate);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(targetDate);
-    endOfDay.setHours(23, 59, 59, 999);
+    // Parse date as Bangladesh local time (UTC+6) to get correct UTC boundaries
+    const { startOfDay, endOfDay } = getBangladeshDayRange(dateStr);
 
     const dateMatch = { createdAt: { $gte: startOfDay, $lte: endOfDay } };
     const expenseDateMatch = { date: { $gte: startOfDay, $lte: endOfDay } };
