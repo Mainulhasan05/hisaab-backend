@@ -535,7 +535,8 @@ class AdminService {
 
     const previousStatus = shop.subscription.status;
     shop.subscription.status = status;
-    shop.isActive = status === 'active';
+    // Only suspended shops should be deactivated — trial/active/expired shops remain accessible
+    shop.isActive = status !== 'suspended';
     await shop.save();
 
     // Create audit log
