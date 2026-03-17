@@ -67,7 +67,6 @@ const adminSchema = new mongoose.Schema({
 });
 
 // Indexes
-adminSchema.index({ phone: 1 }, { unique: true });
 adminSchema.index({ role: 1 });
 adminSchema.index({ isActive: 1 });
 

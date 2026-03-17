@@ -10,7 +10,7 @@ const logger = require('../utils/logger.util');
 // Default super admin credentials
 // IMPORTANT: Change these in production via environment variables
 const DEFAULT_SUPER_ADMIN = {
-  phone: process.env.SUPER_ADMIN_PHONE || '01700000000',
+  phone: process.env.SUPER_ADMIN_PHONE || '01757995016',
   password: process.env.SUPER_ADMIN_PASSWORD || 'Admin@123456',
   name: process.env.SUPER_ADMIN_NAME || 'Super Admin',
   email: process.env.SUPER_ADMIN_EMAIL || 'admin@hisaab.com',

@@ -865,6 +865,68 @@ class AdminService {
     };
   }
 
+  // Get all users (shop owners + staff) across all shops (admin level)
+  async getAllUsers(options = {}) {
+    const User = require('../models/User.model');
+    const { page = 1, limit = 30, shopId, search, role } = options;
+
+    const query = {};
+    if (shopId) query.shop = shopId;
+    if (role) query.role = role;
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { phone: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const [users, total] = await Promise.all([
+      User.find(query)
+        .populate('shop', 'name phone subscription.status subscription.plan isActive')
+        .select('-password -otp -permissions')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      User.countDocuments(query),
+    ]);
+
+    return {
+      data: users,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / parseInt(limit)),
+      },
+    };
+  }
+
+  // Impersonate a user — generates a user JWT WITHOUT creating an audit log
+  async impersonateUser(userId) {
+    const User = require('../models/User.model');
+    const Shop = require('../models/Shop.model');
+
+    const user = await User.findById(userId).select('-password -otp');
+    if (!user) {
+      const err = new Error('User not found');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const shop = await Shop.findById(user.shop).lean();
+    if (!shop) {
+      const err = new Error('Shop not found');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const token = user.generateToken();
+    return { token, user, shop };
+  }
+
   // Get all customers across all shops (admin level)
   async getAllCustomers(options = {}) {
     const Customer = require('../models/Customer.model');

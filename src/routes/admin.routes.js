@@ -25,6 +25,10 @@ router.patch('/shops/:id/subscription', adminController.updateShopSubscription);
 router.patch('/shops/:id/settings', adminController.updateShopSettings);
 router.post('/shops/:id/restrict', adminController.restrictShop);
 
+// Users (all shops) — list + impersonation
+router.get('/users', adminController.getAllUsers);
+router.post('/users/:id/impersonate', adminController.impersonateUser);
+
 // Customers (all shops)
 router.get('/customers', adminController.getAllCustomers);
 

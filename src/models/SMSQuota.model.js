@@ -67,8 +67,7 @@ const smsQuotaSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Indexes
-smsQuotaSchema.index({ shop: 1 }, { unique: true });
+// Index: shop is already unique via the field definition
 
 // Calculate remaining quota before saving
 smsQuotaSchema.pre('save', function(next) {

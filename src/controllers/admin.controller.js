@@ -164,6 +164,29 @@ exports.createAdmin = asyncHandler(async (req, res) => {
   });
 });
 
+// Get all users across all shops (admin level)
+exports.getAllUsers = asyncHandler(async (req, res) => {
+  const result = await adminService.getAllUsers(req.query);
+  return ApiResponse.paginated(res, {
+    ...result,
+    message: 'Users retrieved successfully',
+    messageBn: 'ইউজার তালিকা লোড হয়েছে',
+  });
+});
+
+// Impersonate a user — sets user cookie so browser logs in as that user
+// Intentionally NOT logged in audit logs
+exports.impersonateUser = asyncHandler(async (req, res) => {
+  const { setUserTokenCookie } = require('../utils/cookie.util');
+  const result = await adminService.impersonateUser(req.params.id);
+  setUserTokenCookie(res, result.token);
+  return ApiResponse.success(res, {
+    data: { user: result.user, shop: result.shop },
+    message: 'Impersonation token set',
+    messageBn: 'ইউজার সেশন সেট হয়েছে',
+  });
+});
+
 // Get all customers (admin level)
 exports.getAllCustomers = asyncHandler(async (req, res) => {
   const result = await adminService.getAllCustomers(req.query);

@@ -131,7 +131,6 @@ const shopSchema = new mongoose.Schema({
 });
 
 // Indexes
-shopSchema.index({ slug: 1 }, { unique: true });
 shopSchema.index({ owner: 1 });
 shopSchema.index({ 'subscription.status': 1 });
 shopSchema.index({ isActive: 1 });
