@@ -103,11 +103,19 @@ const sendErrorDev = (err, res) => {
 const sendErrorProd = (err, res) => {
   // Operational, trusted error: send message to client
   if (err.isOperational) {
-    return ApiResponse.error(res, {
+    const response = {
+      success: false,
+      statusCode: err.statusCode,
       message: err.message,
       messageBn: err.messageBn || 'কিছু সমস্যা হয়েছে',
-      statusCode: err.statusCode
-    });
+      timestamp: new Date().toISOString()
+    };
+
+    // Pass through custom error codes and data for frontend handling
+    if (err.code) response.code = err.code;
+    if (err.phone) response.phone = err.phone;
+
+    return res.status(err.statusCode).json(response);
   }
 
   // Programming or other unknown error: don't leak error details
@@ -135,6 +143,8 @@ const errorHandler = (err, req, res, next) => {
   error.messageBn = err.messageBn;
   error.statusCode = err.statusCode;
   error.isOperational = err.isOperational;
+  if (err.code) error.code = err.code;
+  if (err.phone) error.phone = err.phone;
 
   if (err.name === 'CastError') error = handleCastErrorDB(err);
   if (err.code === 11000) error = handleDuplicateFieldsDB(err);

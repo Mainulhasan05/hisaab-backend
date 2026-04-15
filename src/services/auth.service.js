@@ -72,6 +72,7 @@ class AuthService {
     // Generate OTP for verification
     const otp = user.generateOTP();
     await user.save();
+    console.log(`[DEV] Registration OTP for ${normalizedPhone}: ${otp}`);
 
     // Send OTP via SMS
     try {
@@ -119,6 +120,7 @@ class AuthService {
 
     const otp = user.generateOTP();
     await user.save();
+    console.log(`[DEV] Resend OTP for ${normalizedPhone}: ${otp}`);
 
     // Send OTP via SMS
     await SMSService.sendOTP(normalizedPhone, otp);
@@ -202,6 +204,29 @@ class AuthService {
         'ফোন নম্বর বা পাসওয়ার্ড ভুল',
         401
       );
+    }
+
+    // Check if phone is verified
+    if (!user.isPhoneVerified) {
+      // Generate and send a new OTP so user can verify
+      const otp = user.generateOTP();
+      await user.save();
+      console.log(`[DEV] Login OTP for ${normalizedPhone}: ${otp}`);
+
+      try {
+        await SMSService.sendOTP(normalizedPhone, otp);
+      } catch (error) {
+        console.error('Failed to send OTP:', error);
+      }
+
+      const err = new AppError(
+        'Phone number not verified. A new OTP has been sent.',
+        'ফোন নম্বর যাচাই করা হয়নি। নতুন ওটিপি পাঠানো হয়েছে।',
+        403
+      );
+      err.code = 'PHONE_NOT_VERIFIED';
+      err.phone = normalizedPhone;
+      throw err;
     }
 
     // Check if shop is active
