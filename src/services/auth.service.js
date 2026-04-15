@@ -72,7 +72,6 @@ class AuthService {
     // Generate OTP for verification
     const otp = user.generateOTP();
     await user.save();
-    console.log(`[DEV] Registration OTP for ${normalizedPhone}: ${otp}`);
 
     // Send OTP via SMS
     try {
@@ -120,7 +119,6 @@ class AuthService {
 
     const otp = user.generateOTP();
     await user.save();
-    console.log(`[DEV] Resend OTP for ${normalizedPhone}: ${otp}`);
 
     // Send OTP via SMS
     await SMSService.sendOTP(normalizedPhone, otp);
@@ -211,7 +209,6 @@ class AuthService {
       // Generate and send a new OTP so user can verify
       const otp = user.generateOTP();
       await user.save();
-      console.log(`[DEV] Login OTP for ${normalizedPhone}: ${otp}`);
 
       try {
         await SMSService.sendOTP(normalizedPhone, otp);
