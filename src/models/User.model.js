@@ -59,7 +59,8 @@ const userSchema = new mongoose.Schema({
   },
   otp: {
     code: String,
-    expiresAt: Date
+    expiresAt: Date,
+    sentAt: Date
   },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
@@ -151,9 +152,22 @@ userSchema.methods.generateOTP = function() {
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
   this.otp = {
     code: otp,
-    expiresAt: new Date(Date.now() + 5 * 60 * 1000) // 5 minutes
+    expiresAt: new Date(Date.now() + 5 * 60 * 1000), // 5 minutes
+    sentAt: new Date()
   };
   return otp;
+};
+
+// Check if user has a valid (non-expired) OTP
+userSchema.methods.hasValidOTP = function() {
+  return this.otp && this.otp.code && this.otp.expiresAt > new Date();
+};
+
+// Check if OTP can be resent (60-second cooldown)
+userSchema.methods.canResendOTP = function() {
+  if (!this.otp || !this.otp.sentAt) return true;
+  const cooldown = 60 * 1000; // 60 seconds
+  return (Date.now() - new Date(this.otp.sentAt).getTime()) >= cooldown;
 };
 
 // Verify OTP

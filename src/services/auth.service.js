@@ -117,6 +117,18 @@ class AuthService {
       );
     }
 
+    // Rate limit: 60-second cooldown between OTP sends
+    if (!user.canResendOTP()) {
+      const secondsLeft = Math.ceil(
+        (60 * 1000 - (Date.now() - new Date(user.otp.sentAt).getTime())) / 1000
+      );
+      throw new AppError(
+        `Please wait ${secondsLeft} seconds before requesting a new OTP`,
+        `অনুগ্রহ করে ${secondsLeft} সেকেন্ড পর আবার ওটিপি নিন`,
+        429
+      );
+    }
+
     const otp = user.generateOTP();
     await user.save();
 
@@ -206,19 +218,27 @@ class AuthService {
 
     // Check if phone is verified
     if (!user.isPhoneVerified) {
-      // Generate and send a new OTP so user can verify
-      const otp = user.generateOTP();
-      await user.save();
+      let otpMessage = 'ফোন নম্বর যাচাই করা হয়নি।';
 
-      try {
-        await SMSService.sendOTP(normalizedPhone, otp);
-      } catch (error) {
-        console.error('Failed to send OTP:', error);
+      // Only send a new OTP if there's no active one
+      if (!user.hasValidOTP()) {
+        const otp = user.generateOTP();
+        await user.save();
+
+        try {
+          await SMSService.sendOTP(normalizedPhone, otp);
+          otpMessage = 'ফোন নম্বর যাচাই করা হয়নি। নতুন ওটিপি পাঠানো হয়েছে।';
+        } catch (error) {
+          console.error('Failed to send OTP:', error);
+          otpMessage = 'ফোন নম্বর যাচাই করা হয়নি। ওটিপি পাঠাতে সমস্যা হয়েছে।';
+        }
+      } else {
+        otpMessage = 'ফোন নম্বর যাচাই করা হয়নি। আগের ওটিপি ব্যবহার করুন অথবা নতুন ওটিপি নিন।';
       }
 
       const err = new AppError(
-        'Phone number not verified. A new OTP has been sent.',
-        'ফোন নম্বর যাচাই করা হয়নি। নতুন ওটিপি পাঠানো হয়েছে।',
+        'Phone number not verified.',
+        otpMessage,
         403
       );
       err.code = 'PHONE_NOT_VERIFIED';
