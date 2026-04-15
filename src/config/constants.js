@@ -4,13 +4,6 @@
  */
 
 module.exports = {
-  // User Roles
-  USER_ROLES: {
-    OWNER: 'owner',
-    MANAGER: 'manager',
-    STAFF: 'staff'
-  },
-
   // Admin Roles
   ADMIN_ROLES: {
     SUPER_ADMIN: 'super_admin',

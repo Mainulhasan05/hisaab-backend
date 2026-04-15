@@ -1,8 +1,6 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { USER_ROLES } = require('../config/constants');
-const { PERMISSION_LIST, getDefaultPermissions } = require('../config/permissions');
 const { normalizePhone } = require('../utils/phone.util');
 
 const userSchema = new mongoose.Schema({
@@ -28,18 +26,17 @@ const userSchema = new mongoose.Schema({
     ref: 'Shop',
     required: [true, 'দোকান নির্বাচন করুন']
   },
-  role: {
-    type: String,
-    enum: {
-      values: Object.values(USER_ROLES),
-      message: 'অবৈধ ভূমিকা'
-    },
-    default: USER_ROLES.STAFF
+  // ── RBAC fields ──
+  isOwner: {
+    type: Boolean,
+    default: false
   },
-  permissions: [{
-    type: String,
-    enum: PERMISSION_LIST
-  }],
+  role: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Role',
+    default: null
+  },
+  // ── End RBAC ──
   avatar: {
     type: String
   },
@@ -72,9 +69,9 @@ const userSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Indexes - Optimized for scalability
-userSchema.index({ phone: 1, shop: 1 }, { unique: true }); // Phone + shop login lookup
-userSchema.index({ shop: 1, isActive: 1 }); // Shop users list
+// Indexes
+userSchema.index({ phone: 1, shop: 1 }, { unique: true });
+userSchema.index({ shop: 1, isActive: 1 });
 
 // Normalize phone before saving
 userSchema.pre('save', function(next) {
@@ -99,30 +96,32 @@ userSchema.pre('save', async function(next) {
   next();
 });
 
-// Set default permissions based on role
-userSchema.pre('save', function(next) {
-  if (this.isNew && (!this.permissions || this.permissions.length === 0)) {
-    this.permissions = getDefaultPermissions(this.role);
-  }
-  next();
-});
-
 // Compare password
 userSchema.methods.comparePassword = async function(candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
-// Generate JWT Token
+/**
+ * Generate JWT Token with embedded permissions
+ * Owner gets permissions: null (bypasses all checks)
+ * Employee gets the full permissions object from their Role
+ */
 userSchema.methods.generateToken = function() {
-  return jwt.sign(
-    {
-      id: this._id,
-      shop: this.shop,
-      role: this.role
-    },
-    process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
-  );
+  const payload = {
+    id: this._id,
+    shop: this.shop._id || this.shop,
+    isOwner: this.isOwner,
+    permissions: null, // default for owners
+  };
+
+  // If not owner and role is populated with permissions, embed them
+  if (!this.isOwner && this.role && typeof this.role === 'object' && this.role.permissions) {
+    payload.permissions = this.role.permissions;
+  }
+
+  return jwt.sign(payload, process.env.JWT_SECRET, {
+    expiresIn: process.env.JWT_EXPIRES_IN || '30d'
+  });
 };
 
 // Check if password changed after token was issued
@@ -132,19 +131,6 @@ userSchema.methods.changedPasswordAfter = function(jwtTimestamp) {
     return jwtTimestamp < changedTimestamp;
   }
   return false;
-};
-
-// Check if user has a specific permission
-userSchema.methods.hasPermission = function(permission) {
-  // Owner has all permissions
-  if (this.role === USER_ROLES.OWNER) return true;
-  return this.permissions.includes(permission);
-};
-
-// Check if user has any of the permissions
-userSchema.methods.hasAnyPermission = function(permissions) {
-  if (this.role === USER_ROLES.OWNER) return true;
-  return permissions.some(p => this.permissions.includes(p));
 };
 
 // Generate OTP

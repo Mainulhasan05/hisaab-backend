@@ -1,11 +1,12 @@
 const User = require('../models/User.model');
+const Role = require('../models/Role.model');
 const Shop = require('../models/Shop.model');
 const Admin = require('../models/Admin.model');
 const AuditLog = require('../models/AuditLog.model');
 const SMSService = require('./sms.service');
 const { AppError } = require('../middleware/error.middleware');
-const { AUDIT_ACTIONS, USER_ROLES, TRIAL_PERIOD_DAYS } = require('../config/constants');
-const { getDefaultPermissions } = require('../config/permissions');
+const { AUDIT_ACTIONS, TRIAL_PERIOD_DAYS } = require('../config/constants');
+const { ROLE_PRESETS } = require('../config/permissions');
 const { normalizePhone } = require('../utils/phone.util');
 const { seedCategories } = require('../seeds/categorySeeder');
 
@@ -16,13 +17,12 @@ class AuthService {
   async register(data, req) {
     const { phone, password, name, shopName, shopType, shopAddress, shopPhone } = data;
 
-    // Normalize phone
     const normalizedPhone = normalizePhone(phone);
 
     // Check if phone already exists as owner
     const existingOwner = await User.findOne({
       phone: normalizedPhone,
-      role: USER_ROLES.OWNER
+      isOwner: true
     });
 
     if (existingOwner) {
@@ -54,14 +54,21 @@ class AuthService {
       console.error('Failed to seed categories:', error.message);
     }
 
-    // Create owner user
+    // Seed default roles for the shop
+    try {
+      await this.seedDefaultRoles(shop._id);
+    } catch (error) {
+      console.error('Failed to seed default roles:', error.message);
+    }
+
+    // Create owner user — isOwner: true, no role needed
     const user = await User.create({
       phone: normalizedPhone,
       password,
       name,
       shop: shop._id,
-      role: USER_ROLES.OWNER,
-      permissions: getDefaultPermissions(USER_ROLES.OWNER),
+      isOwner: true,
+      role: null,
       isPhoneVerified: false
     });
 
@@ -103,6 +110,25 @@ class AuthService {
   }
 
   /**
+   * Seed default roles (Manager, Cashier) for a new shop
+   */
+  async seedDefaultRoles(shopId) {
+    const roleDocs = [];
+    for (const [key, preset] of Object.entries(ROLE_PRESETS)) {
+      roleDocs.push({
+        shop: shopId,
+        name: preset.name,
+        permissions: preset.permissions,
+        isDefault: true,
+        isActive: true,
+      });
+    }
+    await Role.insertMany(roleDocs, { ordered: false }).catch(() => {
+      // Ignore duplicate key errors (roles already seeded)
+    });
+  }
+
+  /**
    * Send OTP for phone verification
    */
   async sendOTP(phone) {
@@ -114,6 +140,14 @@ class AuthService {
         'User not found',
         'ইউজার পাওয়া যায়নি',
         404
+      );
+    }
+
+    if (user.isPhoneVerified) {
+      throw new AppError(
+        'Phone already verified',
+        'ফোন নম্বর ইতোমধ্যে যাচাই করা হয়েছে',
+        400
       );
     }
 
@@ -192,7 +226,7 @@ class AuthService {
       // Owner login - find owner by phone
       user = await User.findOne({
         phone: normalizedPhone,
-        role: USER_ROLES.OWNER,
+        isOwner: true,
         isActive: true
       }).populate('shop');
     }
@@ -256,7 +290,7 @@ class AuthService {
       );
     }
 
-    // Check subscription — auto-update DB status if expired but still marked active
+    // Check subscription
     const subscriptionExpired = !shop.isSubscriptionValid;
     if (subscriptionExpired) {
       if (
@@ -268,7 +302,11 @@ class AuthService {
         shop.subscription.status = 'expired';
         shop.save().catch(() => {});
       }
-      // Do NOT throw — allow login so users can still view their data (read-only mode)
+    }
+
+    // Populate role for employees (to embed permissions in JWT)
+    if (!user.isOwner && user.role) {
+      await user.populate('role');
     }
 
     // Update last login
@@ -283,17 +321,23 @@ class AuthService {
       req
     });
 
-    // Generate token
+    // Generate token (permissions embedded via populated role)
     const token = user.generateToken();
+
+    // Build permissions response for frontend
+    let permissions = null;
+    if (!user.isOwner && user.role && user.role.permissions) {
+      permissions = user.role.permissions;
+    }
 
     return {
       user: user.toJSON(),
       shop: shop.toJSON(),
+      permissions,
       token,
-      // Inform the frontend that the subscription is expired (read-only mode)
       ...(subscriptionExpired && {
         subscriptionExpired: true,
-        subscriptionMessage: 'আপনার সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে। আপনি ডেটা দেখতে পারবেন, কিন্তু পরিবর্তন করতে পারবেন না। পুনরায় সক্রিয় করতে সাপোর্টে যোগাযোগ করুন।',
+        subscriptionMessage: 'আপনার সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে। আপনি ডেটা দেখতে পারবেন, কিন্তু পরিবর্তন করতে পারবেন না।',
       }),
     };
   }
@@ -302,7 +346,7 @@ class AuthService {
    * Get current user profile
    */
   async getMe(userId) {
-    const user = await User.findById(userId).populate('shop');
+    const user = await User.findById(userId).populate('shop').populate('role');
 
     if (!user) {
       throw new AppError(
@@ -312,7 +356,13 @@ class AuthService {
       );
     }
 
-    return user;
+    // Build permissions for frontend
+    let permissions = null;
+    if (!user.isOwner && user.role && user.role.permissions) {
+      permissions = user.role.permissions;
+    }
+
+    return { user, permissions };
   }
 
   /**
@@ -398,50 +448,6 @@ class AuthService {
       admin: admin.toJSON(),
       token
     };
-  }
-
-  /**
-   * Create team member
-   */
-  async createTeamMember(shopId, ownerId, data, req) {
-    const { phone, password, name, role, permissions } = data;
-    const normalizedPhone = normalizePhone(phone);
-
-    // Check if phone already exists in this shop
-    const existingUser = await User.findByPhoneAndShop(normalizedPhone, shopId);
-    if (existingUser) {
-      throw new AppError(
-        'Phone number already registered in this shop',
-        'এই ফোন নম্বর এই দোকানে ইতোমধ্যে নিবন্ধিত',
-        409
-      );
-    }
-
-    const user = await User.create({
-      phone: normalizedPhone,
-      password,
-      name,
-      shop: shopId,
-      role: role || USER_ROLES.STAFF,
-      permissions: permissions || getDefaultPermissions(role || USER_ROLES.STAFF),
-      isPhoneVerified: true, // Owner verified
-      createdBy: ownerId
-    });
-
-    // Update shop stats
-    await Shop.findByIdAndUpdate(shopId, { $inc: { 'stats.totalUsers': 1 } });
-
-    // Log action
-    await AuditLog.log({
-      shop: shopId,
-      user: ownerId,
-      action: AUDIT_ACTIONS.TEAM_MEMBER_ADD.en,
-      description: `Team member ${name} added`,
-      entity: { type: 'user', id: user._id, name },
-      req
-    });
-
-    return user;
   }
 }
 

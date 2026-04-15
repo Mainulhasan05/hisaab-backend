@@ -2,16 +2,14 @@ const express = require('express');
 const router = express.Router();
 const smsController = require('../controllers/sms.controller');
 const { protect } = require('../middleware/auth.middleware');
-const { canSendSMS } = require('../middleware/permission.middleware');
+const { rbac } = require('../middleware/permission.middleware');
 
-// All routes require authentication
 router.use(protect);
 
-// SMS routes
-router.get('/quota', smsController.getQuota);
-router.get('/history', smsController.getHistory);
-router.get('/templates', smsController.getTemplates);
-router.post('/send', canSendSMS, smsController.sendSMS);
-router.post('/send-due-reminder', canSendSMS, smsController.sendDueReminder);
+router.get('/quota', rbac('sms', 'view'), smsController.getQuota);
+router.get('/history', rbac('sms', 'view'), smsController.getHistory);
+router.get('/templates', rbac('sms', 'view'), smsController.getTemplates);
+router.post('/send', rbac('sms', 'create'), smsController.sendSMS);
+router.post('/send-due-reminder', rbac('sms', 'create'), smsController.sendDueReminder);
 
 module.exports = router;

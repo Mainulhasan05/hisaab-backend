@@ -2,16 +2,14 @@ const express = require('express');
 const router = express.Router();
 const categoryController = require('../controllers/category.controller');
 const { protect } = require('../middleware/auth.middleware');
-const { canViewCategories, canManageCategories } = require('../middleware/permission.middleware');
+const { rbac } = require('../middleware/permission.middleware');
 
-// All routes require authentication
 router.use(protect);
 
-// Category routes
-router.get('/', canViewCategories, categoryController.getCategories);
-router.post('/', canManageCategories, categoryController.createCategory);
-router.get('/:id', canViewCategories, categoryController.getCategory);
-router.put('/:id', canManageCategories, categoryController.updateCategory);
-router.delete('/:id', canManageCategories, categoryController.deleteCategory);
+router.get('/', rbac('categories', 'view'), categoryController.getCategories);
+router.post('/', rbac('categories', 'create'), categoryController.createCategory);
+router.get('/:id', rbac('categories', 'view'), categoryController.getCategory);
+router.put('/:id', rbac('categories', 'update'), categoryController.updateCategory);
+router.delete('/:id', rbac('categories', 'delete'), categoryController.deleteCategory);
 
 module.exports = router;

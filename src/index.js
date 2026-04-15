@@ -5,6 +5,9 @@ const connectDB = require('./config/database');
 const { initializeRedis, closeConnection: closeRedis } = require('./config/redis.config');
 const logger = require('./utils/logger.util');
 
+// Register all models early so Mongoose can resolve populate refs
+require('./models/Role.model');
+
 // Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
   logger.error('UNCAUGHT EXCEPTION! 💥 Shutting down...');

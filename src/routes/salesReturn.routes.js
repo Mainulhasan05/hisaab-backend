@@ -1,24 +1,16 @@
 const express = require('express');
 const router = express.Router();
 const { protect } = require('../middleware/auth.middleware');
-const { canViewSales, canEditSales } = require('../middleware/permission.middleware');
+const { rbac } = require('../middleware/permission.middleware');
 const salesReturnController = require('../controllers/salesReturn.controller');
 
-// All routes require authentication
 router.use(protect);
 
-// Returns list & create
-router.get('/', canViewSales, salesReturnController.getReturns);
-router.post('/', canEditSales, salesReturnController.createReturn);
-
-// Summary
-router.get('/summary', canViewSales, salesReturnController.getReturnsSummary);
-
-// Sale-specific returns
-router.get('/sale/:saleId', canViewSales, salesReturnController.getReturnsBySale);
-router.get('/sale/:saleId/returnable', canViewSales, salesReturnController.getReturnableItems);
-
-// Single return
-router.get('/:id', canViewSales, salesReturnController.getReturn);
+router.get('/', rbac('sales', 'view'), salesReturnController.getReturns);
+router.post('/', rbac('sales', 'update'), salesReturnController.createReturn);
+router.get('/summary', rbac('sales', 'view'), salesReturnController.getReturnsSummary);
+router.get('/sale/:saleId', rbac('sales', 'view'), salesReturnController.getReturnsBySale);
+router.get('/sale/:saleId/returnable', rbac('sales', 'view'), salesReturnController.getReturnableItems);
+router.get('/:id', rbac('sales', 'view'), salesReturnController.getReturn);
 
 module.exports = router;

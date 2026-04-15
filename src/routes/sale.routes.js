@@ -2,20 +2,18 @@ const express = require('express');
 const router = express.Router();
 const saleController = require('../controllers/sale.controller');
 const { protect } = require('../middleware/auth.middleware');
-const { canViewSales, canCreateSales, canEditSales, canDeleteSales } = require('../middleware/permission.middleware');
+const { rbac } = require('../middleware/permission.middleware');
 
-// All routes require authentication
 router.use(protect);
 
-// Sale routes
-router.get('/', canViewSales, saleController.getSales);
-router.post('/', canCreateSales, saleController.createSale);
-router.get('/summary', canViewSales, saleController.getSalesSummary);
-router.get('/today-summary', canViewSales, saleController.getTodaySummary);
-router.get('/recent', canViewSales, saleController.getRecentSales);
-router.get('/:id/payments', canViewSales, saleController.getSalePayments);
-router.get('/:id', canViewSales, saleController.getSale);
-router.patch('/:id/payment', canEditSales, saleController.recordPayment);
-router.post('/:id/cancel', canDeleteSales, saleController.cancelSale);
+router.get('/', rbac('sales', 'view'), saleController.getSales);
+router.post('/', rbac('sales', 'create'), saleController.createSale);
+router.get('/summary', rbac('sales', 'view'), saleController.getSalesSummary);
+router.get('/today-summary', rbac('sales', 'view'), saleController.getTodaySummary);
+router.get('/recent', rbac('sales', 'view'), saleController.getRecentSales);
+router.get('/:id/payments', rbac('sales', 'view'), saleController.getSalePayments);
+router.get('/:id', rbac('sales', 'view'), saleController.getSale);
+router.patch('/:id/payment', rbac('sales', 'update'), saleController.recordPayment);
+router.post('/:id/cancel', rbac('sales', 'delete'), saleController.cancelSale);
 
 module.exports = router;

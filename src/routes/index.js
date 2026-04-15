@@ -19,6 +19,8 @@ const salesReturnRoutes = require('./salesReturn.routes');
 const heartbeatRoutes = require('./heartbeat.routes');
 const contactRoutes = require('./contact.routes');
 const pageContentRoutes = require('./pageContent.routes');
+const roleRoutes = require('./role.routes');
+const staffRoutes = require('./staff.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
@@ -38,6 +40,8 @@ router.use('/sales-returns', salesReturnRoutes);
 router.use('/heartbeat', heartbeatRoutes);
 router.use('/contact', contactRoutes);
 router.use('/pages', pageContentRoutes);
+router.use('/roles', roleRoutes);
+router.use('/staff', staffRoutes);
 
 // API Info
 router.get('/', (req, res) => {

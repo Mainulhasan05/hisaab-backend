@@ -1,31 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const { protect, ownerOnly } = require('../middleware/auth.middleware');
-const { canViewPurchases, canCreatePurchases, canEditPurchases } = require('../middleware/permission.middleware');
+const { rbac } = require('../middleware/permission.middleware');
 const cashRegisterController = require('../controllers/cashRegister.controller');
 
-// All routes require authentication
 router.use(protect);
 
-// Get today's register
-router.get('/today', canViewPurchases, cashRegisterController.getToday);
-
-// Open today's register
-router.post('/open', canCreatePurchases, cashRegisterController.openDay);
-
-// Update today's register (manual entries)
-router.put('/today', canEditPurchases, cashRegisterController.updateDay);
-
-// Close today's register
-router.post('/close', canEditPurchases, cashRegisterController.closeDay);
-
-// Close a previous day's register
-router.post('/:id/close', canEditPurchases, cashRegisterController.closePreviousDay);
-
-// Reopen today's register (owner only)
+router.get('/today', rbac('cash_register', 'view'), cashRegisterController.getToday);
+router.post('/open', rbac('cash_register', 'create'), cashRegisterController.openDay);
+router.put('/today', rbac('cash_register', 'update'), cashRegisterController.updateDay);
+router.post('/close', rbac('cash_register', 'update'), cashRegisterController.closeDay);
+router.post('/:id/close', rbac('cash_register', 'update'), cashRegisterController.closePreviousDay);
 router.post('/reopen', ownerOnly, cashRegisterController.reopenDay);
-
-// Get history
-router.get('/history', canViewPurchases, cashRegisterController.getHistory);
+router.get('/history', rbac('cash_register', 'view'), cashRegisterController.getHistory);
 
 module.exports = router;

@@ -2,23 +2,22 @@ const express = require('express');
 const router = express.Router();
 const expenseController = require('../controllers/expense.controller');
 const { protect } = require('../middleware/auth.middleware');
-const { canViewExpenses, canCreateExpenses, canEditExpenses, canDeleteExpenses } = require('../middleware/permission.middleware');
+const { rbac } = require('../middleware/permission.middleware');
 
-// All routes require authentication
 router.use(protect);
 
 // Expense categories
-router.get('/categories', canViewExpenses, expenseController.getCategories);
-router.post('/categories', canCreateExpenses, expenseController.createCategory);
-router.delete('/categories/:id', canDeleteExpenses, expenseController.deleteCategory);
+router.get('/categories', rbac('expenses', 'view'), expenseController.getCategories);
+router.post('/categories', rbac('expenses', 'create'), expenseController.createCategory);
+router.delete('/categories/:id', rbac('expenses', 'delete'), expenseController.deleteCategory);
 
 // Expense summary
-router.get('/summary', canViewExpenses, expenseController.getSummary);
+router.get('/summary', rbac('expenses', 'view'), expenseController.getSummary);
 
 // Expense CRUD
-router.get('/', canViewExpenses, expenseController.getExpenses);
-router.post('/', canCreateExpenses, expenseController.createExpense);
-router.put('/:id', canEditExpenses, expenseController.updateExpense);
-router.delete('/:id', canDeleteExpenses, expenseController.deleteExpense);
+router.get('/', rbac('expenses', 'view'), expenseController.getExpenses);
+router.post('/', rbac('expenses', 'create'), expenseController.createExpense);
+router.put('/:id', rbac('expenses', 'update'), expenseController.updateExpense);
+router.delete('/:id', rbac('expenses', 'delete'), expenseController.deleteExpense);
 
 module.exports = router;

@@ -131,6 +131,11 @@ const protect = asyncHandler(async (req, res, next) => {
 
     req.user = user;
     req.shop = user.shop;
+
+    // Inject RBAC data from JWT payload (no additional DB lookup needed)
+    req.user.isOwner = decoded.isOwner === true;
+    req.user.permissions = decoded.permissions || null;
+
     next();
   } catch (error) {
     if (error.name === 'JsonWebTokenError') {
@@ -181,7 +186,7 @@ const superAdminOnly = asyncHandler(async (req, res, next) => {
  * Shop owner only middleware
  */
 const ownerOnly = asyncHandler(async (req, res, next) => {
-  if (req.user.role !== 'owner') {
+  if (!req.user || !req.user.isOwner) {
     return ApiResponse.forbidden(res, {
       message: 'Shop owner access required',
       messageBn: 'দোকান মালিকের অ্যাক্সেস প্রয়োজন'

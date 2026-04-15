@@ -1,17 +1,20 @@
 const ApiResponse = require('../utils/response.util');
-const { PERMISSIONS } = require('../config/permissions');
+const { MODULES } = require('../config/permissions');
 
 /**
- * Check if user has specific permission
+ * RBAC Middleware Factory
+ * Usage: rbac('products', 'view'), rbac('sales', 'create'), etc.
+ *
+ * - Admins bypass all checks
+ * - Owners bypass all checks (isOwner === true)
+ * - Employees are checked against their embedded JWT permissions
  */
-const checkPermission = (permission) => {
+const rbac = (module, action) => {
   return (req, res, next) => {
-    // Admins have all permissions
-    if (req.isAdmin) {
-      return next();
-    }
+    // Platform admins bypass everything
+    if (req.isAdmin) return next();
 
-    // Check user permission
+    // Must be authenticated
     if (!req.user) {
       return ApiResponse.unauthorized(res, {
         message: 'Authentication required',
@@ -19,139 +22,54 @@ const checkPermission = (permission) => {
       });
     }
 
-    if (!req.user.hasPermission(permission)) {
-      return ApiResponse.forbidden(res, {
-        message: 'You do not have permission to perform this action',
-        messageBn: 'এই কাজ করার অনুমতি নেই'
-      });
+    // Owner bypasses all RBAC checks
+    if (req.user.isOwner) return next();
+
+    // Employee — check permissions from JWT
+    const perms = req.user.permissions;
+
+    if (perms && perms[module] && perms[module][action] === true) {
+      return next();
     }
 
-    next();
+    // Get module label for user-friendly error
+    const moduleLabel = MODULES[module]?.label || module;
+    const actionLabels = { view: 'দেখার', create: 'তৈরি করার', update: 'সম্পাদনা করার', delete: 'মুছে ফেলার' };
+    const actionLabel = actionLabels[action] || action;
+
+    return ApiResponse.forbidden(res, {
+      message: `You do not have permission to ${action} ${module}`,
+      messageBn: `আপনার ${moduleLabel} ${actionLabel} অনুমতি নেই`
+    });
   };
 };
 
 /**
- * Check if user has any of the permissions
+ * Owner-only middleware
+ * For routes that should ONLY be accessible by the tenant owner
+ * (managing roles, managing staff, deleting sensitive data)
  */
-const checkAnyPermission = (...permissions) => {
-  return (req, res, next) => {
-    if (req.isAdmin) {
-      return next();
-    }
+const ownerOnly = (req, res, next) => {
+  if (req.isAdmin) return next();
 
-    if (!req.user) {
-      return ApiResponse.unauthorized(res, {
-        message: 'Authentication required',
-        messageBn: 'লগইন করুন'
-      });
-    }
+  if (!req.user) {
+    return ApiResponse.unauthorized(res, {
+      message: 'Authentication required',
+      messageBn: 'লগইন করুন'
+    });
+  }
 
-    if (!req.user.hasAnyPermission(permissions)) {
-      return ApiResponse.forbidden(res, {
-        message: 'You do not have permission to perform this action',
-        messageBn: 'এই কাজ করার অনুমতি নেই'
-      });
-    }
+  if (!req.user.isOwner) {
+    return ApiResponse.forbidden(res, {
+      message: 'Only the shop owner can perform this action',
+      messageBn: 'শুধুমাত্র দোকান মালিক এই কাজ করতে পারবেন'
+    });
+  }
 
-    next();
-  };
+  next();
 };
-
-/**
- * Check if user has all permissions
- */
-const checkAllPermissions = (...permissions) => {
-  return (req, res, next) => {
-    if (req.isAdmin) {
-      return next();
-    }
-
-    if (!req.user) {
-      return ApiResponse.unauthorized(res, {
-        message: 'Authentication required',
-        messageBn: 'লগইন করুন'
-      });
-    }
-
-    const hasAll = permissions.every(p => req.user.hasPermission(p));
-    if (!hasAll) {
-      return ApiResponse.forbidden(res, {
-        message: 'You do not have all required permissions',
-        messageBn: 'সব প্রয়োজনীয় অনুমতি নেই'
-      });
-    }
-
-    next();
-  };
-};
-
-// Pre-built permission middlewares
-const canViewProducts = checkPermission(PERMISSIONS.PRODUCTS_VIEW);
-const canCreateProducts = checkPermission(PERMISSIONS.PRODUCTS_CREATE);
-const canEditProducts = checkPermission(PERMISSIONS.PRODUCTS_EDIT);
-const canDeleteProducts = checkPermission(PERMISSIONS.PRODUCTS_DELETE);
-
-const canViewSales = checkPermission(PERMISSIONS.SALES_VIEW);
-const canCreateSales = checkPermission(PERMISSIONS.SALES_CREATE);
-const canEditSales = checkPermission(PERMISSIONS.SALES_EDIT);
-const canDeleteSales = checkPermission(PERMISSIONS.SALES_DELETE);
-
-const canViewCustomers = checkPermission(PERMISSIONS.CUSTOMERS_VIEW);
-const canCreateCustomers = checkPermission(PERMISSIONS.CUSTOMERS_CREATE);
-const canEditCustomers = checkPermission(PERMISSIONS.CUSTOMERS_EDIT);
-const canDeleteCustomers = checkPermission(PERMISSIONS.CUSTOMERS_DELETE);
-
-const canViewReports = checkPermission(PERMISSIONS.REPORTS_VIEW);
-const canEditSettings = checkPermission(PERMISSIONS.SETTINGS_EDIT);
-const canManageTeam = checkPermission(PERMISSIONS.TEAM_MANAGE);
-const canSendSMS = checkPermission(PERMISSIONS.SMS_SEND);
-
-const canViewCategories = checkPermission(PERMISSIONS.CATEGORIES_VIEW);
-const canManageCategories = checkPermission(PERMISSIONS.CATEGORIES_MANAGE);
-
-const canViewStock = checkPermission(PERMISSIONS.STOCK_VIEW);
-const canManageStock = checkPermission(PERMISSIONS.STOCK_MANAGE);
-
-const canViewExpenses = checkPermission(PERMISSIONS.EXPENSES_VIEW);
-const canCreateExpenses = checkPermission(PERMISSIONS.EXPENSES_CREATE);
-const canEditExpenses = checkPermission(PERMISSIONS.EXPENSES_EDIT);
-const canDeleteExpenses = checkPermission(PERMISSIONS.EXPENSES_DELETE);
-
-const canViewPurchases = checkPermission(PERMISSIONS.PURCHASES_VIEW);
-const canCreatePurchases = checkPermission(PERMISSIONS.PURCHASES_CREATE);
-const canEditPurchases = checkPermission(PERMISSIONS.PURCHASES_EDIT);
-const canDeletePurchases = checkPermission(PERMISSIONS.PURCHASES_DELETE);
 
 module.exports = {
-  checkPermission,
-  checkAnyPermission,
-  checkAllPermissions,
-  canViewProducts,
-  canCreateProducts,
-  canEditProducts,
-  canDeleteProducts,
-  canViewSales,
-  canCreateSales,
-  canEditSales,
-  canDeleteSales,
-  canViewCustomers,
-  canCreateCustomers,
-  canEditCustomers,
-  canDeleteCustomers,
-  canViewReports,
-  canEditSettings,
-  canManageTeam,
-  canSendSMS,
-  canViewCategories,
-  canManageCategories,
-  canViewStock,
-  canManageStock,
-  canViewExpenses,
-  canCreateExpenses,
-  canEditExpenses,
-  canDeleteExpenses,
-  canViewPurchases,
-  canCreatePurchases,
-  canEditPurchases,
-  canDeletePurchases
+  rbac,
+  ownerOnly,
 };

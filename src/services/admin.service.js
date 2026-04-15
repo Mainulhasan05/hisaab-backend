@@ -480,7 +480,7 @@ class AdminService {
   // Get shop details
   async getShopDetails(shopId) {
     const shop = await Shop.findById(shopId)
-      .populate('owner', 'name phone role');
+      .populate('owner', 'name phone isOwner');
 
     if (!shop) {
       throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);

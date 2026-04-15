@@ -3,6 +3,7 @@ module.exports = {
   Admin: require('./Admin.model'),
   Shop: require('./Shop.model'),
   User: require('./User.model'),
+  Role: require('./Role.model'),
   Customer: require('./Customer.model'),
   Category: require('./Category.model'),
   Product: require('./Product.model'),

@@ -122,10 +122,10 @@ const getMe = asyncHandler(async (req, res) => {
   }
 
   // Handle regular user token
-  const user = await AuthService.getMe(req.user._id);
+  const result = await AuthService.getMe(req.user._id);
 
   return ApiResponse.success(res, {
-    data: { user, shop: req.shop },
+    data: { user: result.user, shop: req.shop, permissions: result.permissions },
     message: 'Profile retrieved',
     messageBn: 'প্রোফাইল পাওয়া গেছে'
   });
@@ -221,7 +221,7 @@ const updateTeamMember = asyncHandler(async (req, res) => {
   const member = await User.findOne({
     _id: req.params.id,
     shop: req.shop._id,
-    role: { $ne: 'owner' }
+    isOwner: false
   });
 
   if (!member) {
@@ -258,7 +258,7 @@ const deleteTeamMember = asyncHandler(async (req, res) => {
   const member = await User.findOneAndDelete({
     _id: req.params.id,
     shop: req.shop._id,
-    role: { $ne: 'owner' }
+    isOwner: false
   });
 
   if (!member) {

@@ -1,183 +1,147 @@
 /**
- * Permission Definitions
- * Granular permissions for role-based access control
+ * Permission Definitions — Module × Action Matrix
+ * Each module has a set of allowed actions (boolean flags)
  */
 
-// All available permissions
-const PERMISSIONS = {
-  // Products
-  PRODUCTS_VIEW: 'products_view',
-  PRODUCTS_CREATE: 'products_create',
-  PRODUCTS_EDIT: 'products_edit',
-  PRODUCTS_DELETE: 'products_delete',
-
-  // Sales
-  SALES_VIEW: 'sales_view',
-  SALES_CREATE: 'sales_create',
-  SALES_EDIT: 'sales_edit',
-  SALES_DELETE: 'sales_delete',
-
-  // Customers
-  CUSTOMERS_VIEW: 'customers_view',
-  CUSTOMERS_CREATE: 'customers_create',
-  CUSTOMERS_EDIT: 'customers_edit',
-  CUSTOMERS_DELETE: 'customers_delete',
-
-  // Reports
-  REPORTS_VIEW: 'reports_view',
-
-  // Settings
-  SETTINGS_EDIT: 'settings_edit',
-
-  // Team Management
-  TEAM_MANAGE: 'team_manage',
-
-  // SMS
-  SMS_SEND: 'sms_send',
-
-  // Categories
-  CATEGORIES_VIEW: 'categories_view',
-  CATEGORIES_MANAGE: 'categories_manage',
-
-  // Stock
-  STOCK_VIEW: 'stock_view',
-  STOCK_MANAGE: 'stock_manage',
-
-  // Expenses
-  EXPENSES_VIEW: 'expenses_view',
-  EXPENSES_CREATE: 'expenses_create',
-  EXPENSES_EDIT: 'expenses_edit',
-  EXPENSES_DELETE: 'expenses_delete',
-
-  // Purchases & Suppliers
-  PURCHASES_VIEW: 'purchases_view',
-  PURCHASES_CREATE: 'purchases_create',
-  PURCHASES_EDIT: 'purchases_edit',
-  PURCHASES_DELETE: 'purchases_delete'
+// All modules and their available actions
+const MODULES = {
+  products:      { key: 'products',      label: 'পণ্য',              labelEn: 'Products',        actions: ['view', 'create', 'update', 'delete'] },
+  categories:    { key: 'categories',    label: 'ক্যাটাগরি',          labelEn: 'Categories',      actions: ['view', 'create', 'update', 'delete'] },
+  sales:         { key: 'sales',         label: 'বিক্রয়',            labelEn: 'Sales',           actions: ['view', 'create', 'update', 'delete'] },
+  customers:     { key: 'customers',     label: 'কাস্টমার',          labelEn: 'Customers',       actions: ['view', 'create', 'update', 'delete'] },
+  purchases:     { key: 'purchases',     label: 'ক্রয়',              labelEn: 'Purchases',       actions: ['view', 'create', 'update', 'delete'] },
+  suppliers:     { key: 'suppliers',     label: 'সরবরাহকারী',        labelEn: 'Suppliers',       actions: ['view', 'create', 'update', 'delete'] },
+  expenses:      { key: 'expenses',      label: 'খরচ',               labelEn: 'Expenses',        actions: ['view', 'create', 'update', 'delete'] },
+  cash_register: { key: 'cash_register', label: 'ক্যাশ রেজিস্টার',    labelEn: 'Cash Register',   actions: ['view', 'create', 'update', 'delete'] },
+  reports:       { key: 'reports',       label: 'রিপোর্ট',            labelEn: 'Reports',         actions: ['view'] },
+  settings:      { key: 'settings',      label: 'সেটিংস',            labelEn: 'Settings',        actions: ['view', 'update'] },
+  sms:           { key: 'sms',           label: 'এসএমএস',            labelEn: 'SMS',             actions: ['view', 'create'] },
+  staff:         { key: 'staff',         label: 'স্টাফ ম্যানেজমেন্ট', labelEn: 'Staff Management', actions: ['view', 'create', 'update', 'delete'] },
 };
 
-// Permission list as array
-const PERMISSION_LIST = Object.values(PERMISSIONS);
-
-// Default permissions by role
-const ROLE_PERMISSIONS = {
-  owner: [...PERMISSION_LIST], // Owner has all permissions
-
-  manager: [
-    PERMISSIONS.PRODUCTS_VIEW,
-    PERMISSIONS.PRODUCTS_CREATE,
-    PERMISSIONS.PRODUCTS_EDIT,
-    PERMISSIONS.SALES_VIEW,
-    PERMISSIONS.SALES_CREATE,
-    PERMISSIONS.SALES_EDIT,
-    PERMISSIONS.CUSTOMERS_VIEW,
-    PERMISSIONS.CUSTOMERS_CREATE,
-    PERMISSIONS.CUSTOMERS_EDIT,
-    PERMISSIONS.REPORTS_VIEW,
-    PERMISSIONS.SMS_SEND,
-    PERMISSIONS.CATEGORIES_VIEW,
-    PERMISSIONS.CATEGORIES_MANAGE,
-    PERMISSIONS.STOCK_VIEW,
-    PERMISSIONS.STOCK_MANAGE,
-    PERMISSIONS.EXPENSES_VIEW,
-    PERMISSIONS.EXPENSES_CREATE,
-    PERMISSIONS.EXPENSES_EDIT,
-    PERMISSIONS.PURCHASES_VIEW,
-    PERMISSIONS.PURCHASES_CREATE,
-    PERMISSIONS.PURCHASES_EDIT
-  ],
-
-  staff: [
-    PERMISSIONS.PRODUCTS_VIEW,
-    PERMISSIONS.SALES_VIEW,
-    PERMISSIONS.SALES_CREATE,
-    PERMISSIONS.CUSTOMERS_VIEW,
-    PERMISSIONS.CUSTOMERS_CREATE,
-    PERMISSIONS.CATEGORIES_VIEW,
-    PERMISSIONS.STOCK_VIEW,
-    PERMISSIONS.EXPENSES_VIEW,
-    PERMISSIONS.EXPENSES_CREATE,
-    PERMISSIONS.PURCHASES_VIEW,
-    PERMISSIONS.PURCHASES_CREATE
-  ]
-};
-
-// Permission descriptions (Bengali)
-const PERMISSION_LABELS = {
-  products_view: { en: 'View Products', bn: 'পণ্য দেখুন' },
-  products_create: { en: 'Create Products', bn: 'পণ্য যোগ করুন' },
-  products_edit: { en: 'Edit Products', bn: 'পণ্য সম্পাদনা' },
-  products_delete: { en: 'Delete Products', bn: 'পণ্য মুছুন' },
-  sales_view: { en: 'View Sales', bn: 'বিক্রয় দেখুন' },
-  sales_create: { en: 'Create Sales', bn: 'বিক্রয় করুন' },
-  sales_edit: { en: 'Edit Sales', bn: 'বিক্রয় সম্পাদনা' },
-  sales_delete: { en: 'Delete Sales', bn: 'বিক্রয় মুছুন' },
-  customers_view: { en: 'View Customers', bn: 'কাস্টমার দেখুন' },
-  customers_create: { en: 'Create Customers', bn: 'কাস্টমার যোগ করুন' },
-  customers_edit: { en: 'Edit Customers', bn: 'কাস্টমার সম্পাদনা' },
-  customers_delete: { en: 'Delete Customers', bn: 'কাস্টমার মুছুন' },
-  reports_view: { en: 'View Reports', bn: 'রিপোর্ট দেখুন' },
-  settings_edit: { en: 'Edit Settings', bn: 'সেটিংস সম্পাদনা' },
-  team_manage: { en: 'Manage Team', bn: 'টিম ম্যানেজ করুন' },
-  sms_send: { en: 'Send SMS', bn: 'এসএমএস পাঠান' },
-  categories_view: { en: 'View Categories', bn: 'ক্যাটাগরি দেখুন' },
-  categories_manage: { en: 'Manage Categories', bn: 'ক্যাটাগরি ম্যানেজ করুন' },
-  stock_view: { en: 'View Stock', bn: 'স্টক দেখুন' },
-  stock_manage: { en: 'Manage Stock', bn: 'স্টক ম্যানেজ করুন' },
-  expenses_view: { en: 'View Expenses', bn: 'খরচ দেখুন' },
-  expenses_create: { en: 'Create Expenses', bn: 'খরচ যোগ করুন' },
-  expenses_edit: { en: 'Edit Expenses', bn: 'খরচ সম্পাদনা' },
-  expenses_delete: { en: 'Delete Expenses', bn: 'খরচ মুছুন' },
-  purchases_view: { en: 'View Purchases', bn: 'ক্রয় দেখুন' },
-  purchases_create: { en: 'Create Purchases', bn: 'ক্রয় যোগ করুন' },
-  purchases_edit: { en: 'Edit Purchases', bn: 'ক্রয় সম্পাদনা' },
-  purchases_delete: { en: 'Delete Purchases', bn: 'ক্রয় মুছুন' }
-};
+// List of all module keys
+const MODULE_KEYS = Object.keys(MODULES);
 
 /**
- * Check if a user has a specific permission
+ * Build a full permissions object with all flags set to a given value
  */
-const hasPermission = (userPermissions, requiredPermission) => {
-  if (!userPermissions || !Array.isArray(userPermissions)) {
-    return false;
+const buildPermissions = (defaultValue = false) => {
+  const perms = {};
+  for (const [key, mod] of Object.entries(MODULES)) {
+    perms[key] = {};
+    for (const action of mod.actions) {
+      perms[key][action] = defaultValue;
+    }
   }
-  return userPermissions.includes(requiredPermission);
+  return perms;
 };
 
 /**
- * Check if a user has any of the required permissions
+ * Build a permissions object from a specific config
+ * @param {Object} config - { module: [action, ...], ... }
  */
-const hasAnyPermission = (userPermissions, requiredPermissions) => {
-  if (!userPermissions || !Array.isArray(userPermissions)) {
-    return false;
+const buildPermissionsFromConfig = (config) => {
+  const perms = buildPermissions(false);
+  for (const [mod, actions] of Object.entries(config)) {
+    if (perms[mod]) {
+      for (const action of actions) {
+        if (perms[mod][action] !== undefined) {
+          perms[mod][action] = true;
+        }
+      }
+    }
   }
-  return requiredPermissions.some(perm => userPermissions.includes(perm));
+  return perms;
+};
+
+// ── Preset role definitions ──
+const ROLE_PRESETS = {
+  manager: {
+    name: 'ম্যানেজার',
+    nameEn: 'Manager',
+    permissions: buildPermissionsFromConfig({
+      products:      ['view', 'create', 'update'],
+      categories:    ['view', 'create', 'update'],
+      sales:         ['view', 'create', 'update'],
+      customers:     ['view', 'create', 'update'],
+      purchases:     ['view', 'create', 'update'],
+      suppliers:     ['view', 'create', 'update'],
+      expenses:      ['view', 'create', 'update'],
+      cash_register: ['view', 'create', 'update'],
+      reports:       ['view'],
+      settings:      ['view'],
+      sms:           ['view', 'create'],
+      staff:         ['view'],
+    }),
+  },
+  cashier: {
+    name: 'ক্যাশিয়ার',
+    nameEn: 'Cashier',
+    permissions: buildPermissionsFromConfig({
+      products:      ['view'],
+      categories:    ['view'],
+      sales:         ['view', 'create'],
+      customers:     ['view', 'create'],
+      purchases:     ['view'],
+      suppliers:     ['view'],
+      expenses:      ['view'],
+      cash_register: ['view', 'create'],
+      reports:       ['view'],
+      settings:      [],
+      sms:           [],
+      staff:         [],
+    }),
+  },
 };
 
 /**
- * Check if a user has all of the required permissions
+ * Check a permission: perms[module][action]
  */
-const hasAllPermissions = (userPermissions, requiredPermissions) => {
-  if (!userPermissions || !Array.isArray(userPermissions)) {
-    return false;
-  }
-  return requiredPermissions.every(perm => userPermissions.includes(perm));
+const checkPerm = (permissions, module, action) => {
+  if (!permissions || !permissions[module]) return false;
+  return permissions[module][action] === true;
 };
 
-/**
- * Get default permissions for a role
- */
-const getDefaultPermissions = (role) => {
-  return ROLE_PERMISSIONS[role] || [];
+// ── Legacy compatibility exports ──
+// These map old flat permission strings to new module×action pairs
+// Used during migration only
+const LEGACY_PERMISSION_MAP = {
+  'products_view':     { module: 'products', action: 'view' },
+  'products_create':   { module: 'products', action: 'create' },
+  'products_edit':     { module: 'products', action: 'update' },
+  'products_delete':   { module: 'products', action: 'delete' },
+  'sales_view':        { module: 'sales', action: 'view' },
+  'sales_create':      { module: 'sales', action: 'create' },
+  'sales_edit':        { module: 'sales', action: 'update' },
+  'sales_delete':      { module: 'sales', action: 'delete' },
+  'customers_view':    { module: 'customers', action: 'view' },
+  'customers_create':  { module: 'customers', action: 'create' },
+  'customers_edit':    { module: 'customers', action: 'update' },
+  'customers_delete':  { module: 'customers', action: 'delete' },
+  'reports_view':      { module: 'reports', action: 'view' },
+  'settings_edit':     { module: 'settings', action: 'update' },
+  'team_manage':       { module: 'staff', action: 'view' },
+  'sms_send':          { module: 'sms', action: 'create' },
+  'categories_view':   { module: 'categories', action: 'view' },
+  'categories_manage': { module: 'categories', action: 'update' },
+  'stock_view':        { module: 'products', action: 'view' },
+  'stock_manage':      { module: 'products', action: 'update' },
+  'expenses_view':     { module: 'expenses', action: 'view' },
+  'expenses_create':   { module: 'expenses', action: 'create' },
+  'expenses_edit':     { module: 'expenses', action: 'update' },
+  'expenses_delete':   { module: 'expenses', action: 'delete' },
+  'purchases_view':    { module: 'purchases', action: 'view' },
+  'purchases_create':  { module: 'purchases', action: 'create' },
+  'purchases_edit':    { module: 'purchases', action: 'update' },
+  'purchases_delete':  { module: 'purchases', action: 'delete' },
 };
 
 module.exports = {
-  PERMISSIONS,
-  PERMISSION_LIST,
-  ROLE_PERMISSIONS,
-  PERMISSION_LABELS,
-  hasPermission,
-  hasAnyPermission,
-  hasAllPermissions,
-  getDefaultPermissions
+  MODULES,
+  MODULE_KEYS,
+  ROLE_PRESETS,
+  buildPermissions,
+  buildPermissionsFromConfig,
+  checkPerm,
+  LEGACY_PERMISSION_MAP,
 };
