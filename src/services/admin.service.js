@@ -64,7 +64,7 @@ class AdminService {
     const [
       totalShops,
       activeShops,
-      trialShops,
+      paidShops,
       expiredShops,
       suspendedShops,
       totalUsers,
@@ -73,7 +73,7 @@ class AdminService {
     ] = await Promise.all([
       Shop.countDocuments(),
       Shop.countDocuments({ 'subscription.status': 'active' }),
-      Shop.countDocuments({ 'subscription.plan': 'trial' }),
+      Shop.countDocuments({ 'subscription.plan': 'paid' }),
       Shop.countDocuments({ 'subscription.status': 'expired' }),
       Shop.countDocuments({ 'subscription.status': 'suspended' }),
       User.countDocuments({ isActive: true }),
@@ -142,7 +142,7 @@ class AdminService {
       // Shop stats
       totalShops,
       activeShops,
-      trialShops,
+      paidShops,
       expiredShops,
       suspendedShops,
       totalUsers,
@@ -560,17 +560,16 @@ class AdminService {
     return shop;
   }
 
-  // Update shop subscription
-  async updateShopSubscription(adminId, shopId, plan, expiresAt) {
+  // Update shop subscription (admin sets expiry directly)
+  async updateShopSubscription(adminId, shopId, expiresAt) {
     const shop = await Shop.findById(shopId);
     if (!shop) {
       throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
     }
 
-    const previousPlan = shop.subscription.plan;
     const previousExpiry = shop.subscription.expiresAt;
 
-    shop.subscription.plan = plan;
+    shop.subscription.plan = 'paid';
     shop.subscription.expiresAt = new Date(expiresAt);
     shop.subscription.status = 'active';
     shop.isActive = true;
@@ -581,16 +580,16 @@ class AdminService {
       admin: adminId,
       action: 'subscription_update',
       actionBn: 'সাবস্ক্রিপশন আপডেট',
-      description: `Updated subscription for ${shop.name}: ${previousPlan} → ${plan}`,
-      descriptionBn: `${shop.name} এর সাবস্ক্রিপশন আপডেট: ${previousPlan} → ${plan}`,
+      description: `Updated subscription for ${shop.name}: expires ${new Date(expiresAt).toLocaleDateString()}`,
+      descriptionBn: `${shop.name} এর সাবস্ক্রিপশন আপডেট করা হয়েছে`,
       entity: {
         type: 'shop',
         id: shop._id,
         name: shop.name,
       },
       changes: {
-        before: { plan: previousPlan, expiresAt: previousExpiry },
-        after: { plan, expiresAt },
+        before: { expiresAt: previousExpiry },
+        after: { expiresAt },
       },
     });
 
@@ -629,9 +628,9 @@ class AdminService {
     };
   }
 
-  // Record subscription payment
+  // Record subscription payment (flat ১০০০৳/month)
   async recordSubscriptionPayment(adminId, paymentData) {
-    const { shopId, amount, plan, method, transactionId, notes } = paymentData;
+    const { shopId, amount, months = 1, method, transactionId, notes } = paymentData;
 
     const shop = await Shop.findById(shopId);
     if (!shop) {
@@ -645,26 +644,11 @@ class AdminService {
       method,
       transactionId,
       type: 'subscription',
-      notes: `Subscription: ${plan}. ${notes || ''}`,
+      notes: `Subscription: ${months} month(s). ${notes || ''}`,
       receivedBy: adminId,
     });
 
-    // Calculate new expiry date
-    let months;
-    switch (plan) {
-      case 'monthly':
-        months = 1;
-        break;
-      case 'quarterly':
-        months = 3;
-        break;
-      case 'yearly':
-        months = 12;
-        break;
-      default:
-        months = 1;
-    }
-
+    // Calculate new expiry date (extend from current expiry or now)
     const currentExpiry = shop.subscription.expiresAt > new Date()
       ? shop.subscription.expiresAt
       : new Date();
@@ -672,7 +656,7 @@ class AdminService {
     newExpiry.setMonth(newExpiry.getMonth() + months);
 
     // Update shop subscription
-    shop.subscription.plan = plan === 'yearly' ? 'premium' : 'standard';
+    shop.subscription.plan = 'paid';
     shop.subscription.expiresAt = newExpiry;
     shop.subscription.status = 'active';
     shop.isActive = true;
@@ -683,8 +667,8 @@ class AdminService {
       admin: adminId,
       action: 'payment_recorded',
       actionBn: 'পেমেন্ট রেকর্ড',
-      description: `Recorded payment ৳${amount} for ${shop.name}`,
-      descriptionBn: `${shop.name} এর জন্য ৳${amount} পেমেন্ট রেকর্ড করা হয়েছে`,
+      description: `Recorded payment ৳${amount} for ${shop.name} (${months} month(s))`,
+      descriptionBn: `${shop.name} এর জন্য ৳${amount} পেমেন্ট রেকর্ড করা হয়েছে (${months} মাস)`,
       entity: {
         type: 'shop',
         id: shop._id,

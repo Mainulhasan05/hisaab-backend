@@ -71,10 +71,10 @@ exports.updateShopStatus = asyncHandler(async (req, res) => {
   });
 });
 
-// Update shop subscription
+// Update shop subscription (flat rate — admin sets expiry only)
 exports.updateShopSubscription = asyncHandler(async (req, res) => {
-  const { plan, expiresAt } = req.body;
-  const shop = await adminService.updateShopSubscription(req.admin._id, req.params.id, plan, expiresAt);
+  const { expiresAt } = req.body;
+  const shop = await adminService.updateShopSubscription(req.admin._id, req.params.id, expiresAt);
   return ApiResponse.success(res, {
     data: shop,
     message: 'Subscription updated successfully',

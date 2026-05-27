@@ -23,11 +23,9 @@ module.exports = {
     OTHER: 'other'
   },
 
-  // Subscription Plans
+  // Subscription Plans — Single flat plan, all features included
   SUBSCRIPTION_PLANS: {
-    TRIAL: 'trial',
-    STANDARD: 'standard',
-    PREMIUM: 'premium'
+    PAID: 'paid'
   },
 
   // Subscription Status
@@ -163,8 +161,8 @@ module.exports = {
     MAX_LIMIT: 100
   },
 
-  // Trial Period (in days)
-  TRIAL_PERIOD_DAYS: 14,
+  // Subscription Price (BDT/month)
+  SUBSCRIPTION_PRICE: 1000,
 
   // JWT Token Expiry
   JWT_EXPIRES_IN: '30d',

@@ -39,7 +39,7 @@ const shopSchema = new mongoose.Schema({
     plan: {
       type: String,
       enum: Object.values(SUBSCRIPTION_PLANS),
-      default: SUBSCRIPTION_PLANS.TRIAL
+      default: SUBSCRIPTION_PLANS.PAID
     },
     status: {
       type: String,
@@ -52,6 +52,10 @@ const shopSchema = new mongoose.Schema({
     },
     expiresAt: {
       type: Date
+    },
+    monthlyPrice: {
+      type: Number,
+      default: 1000
     }
   },
   settings: {
@@ -154,14 +158,7 @@ shopSchema.pre('save', function(next) {
   next();
 });
 
-// Set trial expiration
-shopSchema.pre('save', function(next) {
-  if (this.isNew && this.subscription && this.subscription.plan === SUBSCRIPTION_PLANS.TRIAL) {
-    const trialDays = 14;
-    this.subscription.expiresAt = new Date(Date.now() + trialDays * 24 * 60 * 60 * 1000);
-  }
-  next();
-});
+// Note: No trial auto-expiry — admin controls expiry dates manually
 
 // Virtual: Check if subscription is valid
 shopSchema.virtual('isSubscriptionValid').get(function() {
