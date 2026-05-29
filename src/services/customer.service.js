@@ -316,6 +316,57 @@ class CustomerService {
     return customers;
   }
 
+  // Get customer leaderboard (sortable by purchaseCount, totalPurchases, totalDue)
+  async getCustomerLeaderboard(shopId, options = {}) {
+    const {
+      page = 1,
+      limit = 20,
+      sortBy = 'purchaseCount',
+      sortOrder = 'desc',
+      search,
+    } = options;
+
+    const allowedSortFields = ['purchaseCount', 'totalPurchases', 'totalDue', 'lastPurchase', 'createdAt'];
+    const sortField = allowedSortFields.includes(sortBy) ? sortBy : 'purchaseCount';
+
+    const query = { shop: shopId, isActive: true };
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { phone: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const skip = (page - 1) * limit;
+    const sort = { [sortField]: sortOrder === 'asc' ? 1 : -1 };
+
+    const [customers, total] = await Promise.all([
+      Customer.find(query)
+        .select('name phone totalPurchases totalPaid totalDue purchaseCount lastPurchase tags createdAt')
+        .sort(sort)
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      Customer.countDocuments(query),
+    ]);
+
+    // Add rank
+    const ranked = customers.map((c, i) => ({
+      ...c,
+      rank: skip + i + 1,
+    }));
+
+    return {
+      data: ranked,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    };
+  }
+
   // Bulk import customers
   async bulkImportCustomers(shopId, userId, customers) {
     const results = [];

@@ -975,6 +975,342 @@ class ReportService {
     return result;
   }
 
+  // Get Date-wise Summary for a month (scrollable table)
+  async getDateWiseSummary(shopId, options = {}) {
+    const { month } = options; // format: 'YYYY-MM'
+    const shopObjId = new mongoose.Types.ObjectId(shopId);
+
+    // Determine start and end of the month in BD time
+    let year, mon;
+    if (month) {
+      [year, mon] = month.split('-').map(Number);
+    } else {
+      const bdNow = new Date(Date.now() + BD_OFFSET_MS);
+      year = bdNow.getFullYear();
+      mon = bdNow.getMonth() + 1;
+    }
+
+    // First and last day of month in BD timezone
+    const startOfMonth = new Date(Date.UTC(year, mon - 1, 1) - BD_OFFSET_MS);
+    const lastDay = new Date(year, mon, 0).getDate(); // last day of month
+    const endOfMonth = new Date(Date.UTC(year, mon - 1, lastDay + 1) - BD_OFFSET_MS - 1);
+
+    // Run sales and expenses aggregations in parallel
+    const [dailySales, dailyExpenses] = await Promise.all([
+      Sale.aggregate([
+        {
+          $match: {
+            shop: shopObjId,
+            status: { $ne: 'cancelled' },
+            createdAt: { $gte: startOfMonth, $lte: endOfMonth },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              $dateToString: {
+                format: '%Y-%m-%d',
+                date: '$createdAt',
+                timezone: '+06:00',
+              },
+            },
+            totalSales: { $sum: '$total' },
+            totalProfit: { $sum: '$profit' },
+            totalPaid: { $sum: '$paid' },
+            totalDue: { $sum: '$due' },
+            orderCount: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+
+      Expense.aggregate([
+        {
+          $match: {
+            shop: shopObjId,
+            date: { $gte: startOfMonth, $lte: endOfMonth },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              $dateToString: {
+                format: '%Y-%m-%d',
+                date: '$date',
+                timezone: '+06:00',
+              },
+            },
+            totalExpenses: { $sum: '$amount' },
+            expenseCount: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+    ]);
+
+    // Build the days array for the entire month
+    const days = [];
+    let monthTotalSales = 0;
+    let monthTotalExpenses = 0;
+    let monthTotalProfit = 0;
+    let monthTotalOrders = 0;
+
+    for (let d = 1; d <= lastDay; d++) {
+      const dateStr = `${year}-${String(mon).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      const salesData = dailySales.find((s) => s._id === dateStr);
+      const expenseData = dailyExpenses.find((e) => e._id === dateStr);
+
+      const sales = salesData?.totalSales || 0;
+      const expenses = expenseData?.totalExpenses || 0;
+      const profit = salesData?.totalProfit || 0;
+      const orders = salesData?.orderCount || 0;
+      const netEarnings = profit - expenses;
+
+      monthTotalSales += sales;
+      monthTotalExpenses += expenses;
+      monthTotalProfit += profit;
+      monthTotalOrders += orders;
+
+      days.push({
+        date: dateStr,
+        sales,
+        expenses,
+        profit,
+        paid: salesData?.totalPaid || 0,
+        due: salesData?.totalDue || 0,
+        orderCount: orders,
+        expenseCount: expenseData?.expenseCount || 0,
+        netEarnings,
+      });
+    }
+
+    return {
+      month: `${year}-${String(mon).padStart(2, '0')}`,
+      days,
+      monthTotal: {
+        sales: monthTotalSales,
+        expenses: monthTotalExpenses,
+        profit: monthTotalProfit,
+        netEarnings: monthTotalProfit - monthTotalExpenses,
+        orderCount: monthTotalOrders,
+      },
+    };
+  }
+
+  // Get all sales for a specific date (drill-down)
+  async getSalesByDate(shopId, dateStr) {
+    const shopObjId = new mongoose.Types.ObjectId(shopId);
+    const { startOfDay, endOfDay } = getBangladeshDayRange(dateStr);
+
+    const [sales, summary, expenseTotal] = await Promise.all([
+      Sale.find({
+        shop: shopObjId,
+        createdAt: { $gte: startOfDay, $lte: endOfDay },
+      })
+        .populate('customer', 'name phone')
+        .populate('createdBy', 'name')
+        .sort({ createdAt: -1 })
+        .lean(),
+
+      Sale.aggregate([
+        {
+          $match: {
+            shop: shopObjId,
+            status: { $ne: 'cancelled' },
+            createdAt: { $gte: startOfDay, $lte: endOfDay },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalSales: { $sum: '$total' },
+            totalProfit: { $sum: '$profit' },
+            totalPaid: { $sum: '$paid' },
+            totalDue: { $sum: '$due' },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+
+      Expense.aggregate([
+        {
+          $match: {
+            shop: shopObjId,
+            date: { $gte: startOfDay, $lte: endOfDay },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: '$amount' },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    const summaryData = summary[0] || {
+      totalSales: 0,
+      totalProfit: 0,
+      totalPaid: 0,
+      totalDue: 0,
+      count: 0,
+    };
+    const expenseData = expenseTotal[0] || { total: 0, count: 0 };
+
+    return {
+      date: dateStr,
+      sales,
+      summary: {
+        ...summaryData,
+        totalExpenses: expenseData.total,
+        expenseCount: expenseData.count,
+        netEarnings: summaryData.totalProfit - expenseData.total,
+        averageOrderValue:
+          summaryData.count > 0
+            ? Math.round(summaryData.totalSales / summaryData.count)
+            : 0,
+      },
+    };
+  }
+
+  // Get trending products (7-day vs previous 7-day comparison)
+  async getTrendingProducts(shopId, options = {}) {
+    const { period = 7, limit = 20 } = options;
+    const shopObjId = new mongoose.Types.ObjectId(shopId);
+
+    const now = new Date();
+    const currentStart = new Date(now);
+    currentStart.setDate(now.getDate() - period);
+    const previousStart = new Date(currentStart);
+    previousStart.setDate(currentStart.getDate() - period);
+
+    // Get sales for current period and previous period
+    const [currentPeriod, previousPeriod] = await Promise.all([
+      Sale.aggregate([
+        {
+          $match: {
+            shop: shopObjId,
+            status: { $ne: 'cancelled' },
+            createdAt: { $gte: currentStart, $lte: now },
+          },
+        },
+        { $unwind: '$items' },
+        {
+          $group: {
+            _id: '$items.product',
+            productName: { $first: '$items.productName' },
+            totalQuantity: { $sum: '$items.quantity' },
+            totalRevenue: { $sum: '$items.total' },
+            salesCount: { $sum: 1 },
+          },
+        },
+        { $sort: { totalQuantity: -1 } },
+      ]),
+
+      Sale.aggregate([
+        {
+          $match: {
+            shop: shopObjId,
+            status: { $ne: 'cancelled' },
+            createdAt: { $gte: previousStart, $lt: currentStart },
+          },
+        },
+        { $unwind: '$items' },
+        {
+          $group: {
+            _id: '$items.product',
+            productName: { $first: '$items.productName' },
+            totalQuantity: { $sum: '$items.quantity' },
+            totalRevenue: { $sum: '$items.total' },
+          },
+        },
+      ]),
+    ]);
+
+    // Create lookup map for previous period
+    const previousMap = new Map();
+    for (const p of previousPeriod) {
+      previousMap.set(p._id.toString(), p);
+    }
+
+    // Calculate trends
+    const products = currentPeriod.map((curr) => {
+      const prev = previousMap.get(curr._id.toString());
+      const prevQty = prev?.totalQuantity || 0;
+      const prevRevenue = prev?.totalRevenue || 0;
+
+      let growthPercent = 0;
+      if (prevQty > 0) {
+        growthPercent = ((curr.totalQuantity - prevQty) / prevQty) * 100;
+      } else if (curr.totalQuantity > 0) {
+        growthPercent = 100; // New entry
+      }
+
+      let trend = 'stable';
+      if (!prev) trend = 'new';
+      else if (growthPercent > 10) trend = 'rising';
+      else if (growthPercent < -10) trend = 'declining';
+
+      return {
+        productId: curr._id,
+        productName: curr.productName,
+        currentPeriodQty: curr.totalQuantity,
+        previousPeriodQty: prevQty,
+        currentRevenue: curr.totalRevenue,
+        previousRevenue: prevRevenue,
+        growthPercent: Math.round(growthPercent),
+        velocity: Math.round((curr.totalQuantity / period) * 10) / 10,
+        salesCount: curr.salesCount,
+        trend,
+      };
+    });
+
+    // Also check for declining products (were in previous but not in current)
+    const currentIds = new Set(currentPeriod.map((c) => c._id.toString()));
+    const declining = previousPeriod
+      .filter((p) => !currentIds.has(p._id.toString()))
+      .map((prev) => ({
+        productId: prev._id,
+        productName: prev.productName,
+        currentPeriodQty: 0,
+        previousPeriodQty: prev.totalQuantity,
+        currentRevenue: 0,
+        previousRevenue: prev.totalRevenue,
+        growthPercent: -100,
+        velocity: 0,
+        salesCount: 0,
+        trend: 'declining',
+      }));
+
+    // Merge and sort
+    const all = [...products, ...declining];
+
+    // Separate by category
+    const trending = all
+      .filter((p) => p.trend === 'rising' || p.trend === 'new')
+      .sort((a, b) => b.growthPercent - a.growthPercent)
+      .slice(0, limit);
+
+    const declinedList = all
+      .filter((p) => p.trend === 'declining')
+      .sort((a, b) => a.growthPercent - b.growthPercent)
+      .slice(0, limit);
+
+    const topSelling = all
+      .sort((a, b) => b.currentPeriodQty - a.currentPeriodQty)
+      .slice(0, limit);
+
+    return {
+      period,
+      currentPeriodLabel: `Last ${period} days`,
+      previousPeriodLabel: `Previous ${period} days`,
+      trending,
+      declining: declinedList,
+      topSelling,
+    };
+  }
+
   // Export report (placeholder - implement actual export logic)
   async exportReport(shopId, type, format, options) {
     // This would generate actual PDF/Excel/CSV files

@@ -62,6 +62,44 @@ exports.getProfitLoss = asyncHandler(async (req, res) => {
   });
 });
 
+// Get Date-wise Summary (monthly table)
+exports.getDateWiseSummary = asyncHandler(async (req, res) => {
+  const report = await reportService.getDateWiseSummary(req.shop._id, req.query);
+  return ApiResponse.success(res, {
+    data: report,
+    message: 'Date-wise summary retrieved successfully',
+    messageBn: 'তারিখ অনুসারে সারাংশ সফলভাবে লোড হয়েছে',
+  });
+});
+
+// Get sales for a specific date (drill-down)
+exports.getSalesByDate = asyncHandler(async (req, res) => {
+  const { date } = req.params;
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return ApiResponse.error(res, {
+      message: 'Invalid date format. Use YYYY-MM-DD',
+      messageBn: 'তারিখের ফরম্যাট সঠিক নয়। YYYY-MM-DD ব্যবহার করুন',
+      statusCode: 400,
+    });
+  }
+  const report = await reportService.getSalesByDate(req.shop._id, date);
+  return ApiResponse.success(res, {
+    data: report,
+    message: 'Sales for date retrieved successfully',
+    messageBn: 'নির্দিষ্ট তারিখের বিক্রি সফলভাবে লোড হয়েছে',
+  });
+});
+
+// Get trending products
+exports.getTrendingProducts = asyncHandler(async (req, res) => {
+  const report = await reportService.getTrendingProducts(req.shop._id, req.query);
+  return ApiResponse.success(res, {
+    data: report,
+    message: 'Trending products retrieved successfully',
+    messageBn: 'ট্রেন্ডিং পণ্য সফলভাবে লোড হয়েছে',
+  });
+});
+
 // Export report
 exports.exportReport = asyncHandler(async (req, res) => {
   const { type, format } = req.params;

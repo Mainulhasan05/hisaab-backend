@@ -103,6 +103,16 @@ exports.getTopCustomers = asyncHandler(async (req, res) => {
   });
 });
 
+// Get customer leaderboard
+exports.getCustomerLeaderboard = asyncHandler(async (req, res) => {
+  const result = await customerService.getCustomerLeaderboard(req.shop._id, req.query);
+  return ApiResponse.paginated(res, {
+    ...result,
+    message: 'Customer leaderboard retrieved successfully',
+    messageBn: 'কাস্টমার লিডারবোর্ড সফলভাবে লোড হয়েছে',
+  });
+});
+
 // Bulk import customers
 exports.bulkImport = asyncHandler(async (req, res) => {
   const results = await customerService.bulkImportCustomers(req.shop._id, req.user._id, req.body.customers);

@@ -13,6 +13,9 @@ router.get('/products', rbac('reports', 'view'), reportController.getProductRepo
 router.get('/customers', rbac('reports', 'view'), reportController.getCustomerReport);
 router.get('/profit-loss', rbac('reports', 'view'), reportController.getProfitLoss);
 router.get('/daily-summary', reportController.getDailySummary);
+router.get('/date-wise', rbac('reports', 'view'), reportController.getDateWiseSummary);
+router.get('/date-wise/:date', rbac('reports', 'view'), reportController.getSalesByDate);
+router.get('/trending-products', rbac('reports', 'view'), reportController.getTrendingProducts);
 router.get('/:type/export/:format', rbac('reports', 'view'), reportController.exportReport);
 
 module.exports = router;
