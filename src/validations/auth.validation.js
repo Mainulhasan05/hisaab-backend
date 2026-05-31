@@ -73,6 +73,16 @@ const updateTeamMember = Joi.object({
   isActive: Joi.boolean()
 });
 
+const updateProfile = Joi.object({
+  name: Joi.string().trim().min(2).max(100).messages({
+    'string.min': 'Name must be at least 2 characters',
+    'string.max': 'Name cannot exceed 100 characters'
+  }),
+  avatar: Joi.string().uri().allow('').messages({
+    'string.uri': 'Avatar must be a valid URL'
+  })
+});
+
 module.exports = {
   register,
   sendOTP,
@@ -81,5 +91,6 @@ module.exports = {
   changePassword,
   adminLogin,
   createTeamMember,
-  updateTeamMember
+  updateTeamMember,
+  updateProfile
 };

@@ -92,6 +92,7 @@ module.exports = {
     USER_LOGIN: { en: 'user_login', bn: 'লগইন' },
     USER_LOGOUT: { en: 'user_logout', bn: 'লগআউট' },
     PASSWORD_CHANGE: { en: 'password_change', bn: 'পাসওয়ার্ড পরিবর্তন' },
+    PROFILE_UPDATE: { en: 'profile_update', bn: 'প্রোফাইল আপডেট' },
 
     // Products
     PRODUCT_CREATE: { en: 'product_create', bn: 'নতুন পণ্য যোগ' },

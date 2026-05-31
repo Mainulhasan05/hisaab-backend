@@ -345,6 +345,21 @@ const adminLogout = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * @desc    Update user profile
+ * @route   PATCH /api/auth/profile
+ * @access  Private
+ */
+const updateProfile = asyncHandler(async (req, res) => {
+  const result = await AuthService.updateProfile(req.user._id, req.body, req);
+
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Profile updated successfully',
+    messageBn: 'প্রোফাইল আপডেট সফল হয়েছে'
+  });
+});
+
 module.exports = {
   register,
   sendOTP,
@@ -359,5 +374,6 @@ module.exports = {
   getTeamMembers,
   updateTeamMember,
   deleteTeamMember,
-  updateShopSettings
+  updateShopSettings,
+  updateProfile
 };

@@ -449,6 +449,38 @@ class AuthService {
       token
     };
   }
+
+  /**
+   * Update user profile (name, avatar)
+   */
+  async updateProfile(userId, data, req) {
+    const { name, avatar } = data;
+
+    const user = await User.findById(userId).populate('shop');
+    if (!user) {
+      throw new AppError(
+        'User not found',
+        'ইউজার পাওয়া যায়নি',
+        404
+      );
+    }
+
+    if (name !== undefined) user.name = name;
+    if (avatar !== undefined) user.avatar = avatar;
+
+    await user.save();
+
+    // Log action
+    await AuditLog.log({
+      shop: user.shop?._id || user.shop,
+      user: user._id,
+      action: AUDIT_ACTIONS.PROFILE_UPDATE.en,
+      description: `User profile updated: ${name || user.name}`,
+      req
+    });
+
+    return { user: user.toJSON() };
+  }
 }
 
 module.exports = new AuthService();

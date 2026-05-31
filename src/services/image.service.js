@@ -5,30 +5,28 @@ const path = require('path');
 
 const { AppError } = require('../middleware/error.middleware');
 
-const IMGBB_JSON_URL = 'https://imgbb.com/json';
-const IMGBB_OFFICIAL_API_URL = 'https://api.imgbb.com/1/upload';
+const IMGBB_UPLOAD_URL = 'https://api.imgbb.com/1/upload';
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SIZE = 32 * 1024 * 1024;
 const DEFAULT_ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'];
 
 class ImageService {
-  getCredentials() {
+  getApiKey() {
     const apiKey = process.env.IMGBB_API_KEY;
-    const authToken = process.env.IMGBB_AUTH_TOKEN;
 
-    if (!apiKey && !authToken) {
+    if (!apiKey) {
       throw new AppError(
         'Image upload service is not configured',
-        'ইমেজ আপলোড সার্ভিস কনফিগার করা হয়নি',
+        'Image upload service is not configured',
         503
       );
     }
 
-    return { apiKey, authToken, useOfficialApi: Boolean(apiKey) };
+    return apiKey;
   }
 
   isConfigured() {
-    return Boolean(process.env.IMGBB_API_KEY || process.env.IMGBB_AUTH_TOKEN);
+    return Boolean(process.env.IMGBB_API_KEY);
   }
 
   getUploadConfig() {
@@ -51,23 +49,19 @@ class ImageService {
       : DEFAULT_ALLOWED_TYPES;
   }
 
-  generateTimestamp() {
-    return Math.floor(Date.now() / 1000).toString();
-  }
-
   validateImage(file, options = {}) {
     const maxSize = options.maxSize || this.getMaxSize();
     const allowedTypes = options.allowedTypes || this.getAllowedTypes();
 
     if (!file) {
-      throw new AppError('No image file provided', 'কোনো ইমেজ ফাইল দেওয়া হয়নি', 400);
+      throw new AppError('No image file provided', 'No image file provided', 400);
     }
 
     const fileSize = file.size || (file.buffer ? file.buffer.length : 0);
     if (fileSize > maxSize) {
       throw new AppError(
         `File too large. Maximum size is ${Math.round(maxSize / 1024 / 1024)}MB`,
-        `ফাইল খুব বড়। সর্বোচ্চ সাইজ ${Math.round(maxSize / 1024 / 1024)}MB`,
+        `File too large. Maximum size is ${Math.round(maxSize / 1024 / 1024)}MB`,
         413
       );
     }
@@ -76,7 +70,7 @@ class ImageService {
     if (mimeType && !allowedTypes.includes(mimeType)) {
       throw new AppError(
         `Invalid file type. Allowed: ${allowedTypes.join(', ')}`,
-        'অবৈধ ফাইল টাইপ',
+        `Invalid file type. Allowed: ${allowedTypes.join(', ')}`,
         415
       );
     }
@@ -86,27 +80,22 @@ class ImageService {
 
   async uploadFromPath(filePath, options = {}) {
     if (!fs.existsSync(filePath)) {
-      throw new AppError(`File not found: ${filePath}`, 'ফাইল পাওয়া যায়নি', 404);
+      throw new AppError(`File not found: ${filePath}`, `File not found: ${filePath}`, 404);
     }
 
-    const result = await this.uploadWithClient(async (credentials) => {
-      if (credentials.useOfficialApi) {
-        const buffer = fs.readFileSync(filePath);
-        return this.uploadOfficial(buffer.toString('base64'), path.parse(filePath).name, options, credentials.apiKey);
-      }
-
-      const formData = this.createLegacyForm(options);
-      formData.append('source', fs.createReadStream(filePath));
-      formData.append('type', 'file');
-      return axios.post(IMGBB_JSON_URL, formData, this.getAxiosConfig(formData));
-    });
+    const buffer = fs.readFileSync(filePath);
+    const result = await this.uploadWithClient(
+      buffer.toString('base64'),
+      path.parse(filePath).name,
+      options
+    );
 
     return this.parseResponse(result.data);
   }
 
   async uploadFromBuffer(buffer, filename = 'image.jpg', options = {}) {
     if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
-      throw new AppError('Invalid image buffer', 'অবৈধ ইমেজ ডেটা', 400);
+      throw new AppError('Invalid image buffer', 'Invalid image buffer', 400);
     }
 
     this.validateImage({
@@ -116,26 +105,18 @@ class ImageService {
       size: buffer.length,
     }, options);
 
-    const result = await this.uploadWithClient(async (credentials) => {
-      if (credentials.useOfficialApi) {
-        return this.uploadOfficial(buffer.toString('base64'), path.parse(filename).name, options, credentials.apiKey);
-      }
-
-      const formData = this.createLegacyForm(options);
-      formData.append('source', buffer, {
-        filename,
-        contentType: options.mimeType || 'image/jpeg',
-      });
-      formData.append('type', 'file');
-      return axios.post(IMGBB_JSON_URL, formData, this.getAxiosConfig(formData));
-    });
+    const result = await this.uploadWithClient(
+      buffer.toString('base64'),
+      path.parse(filename).name,
+      options
+    );
 
     return this.parseResponse(result.data);
   }
 
   async uploadFromBase64(base64String, filename = 'image.jpg', options = {}) {
     if (!base64String || typeof base64String !== 'string') {
-      throw new AppError('Base64 image is required', 'Base64 ইমেজ প্রয়োজন', 400);
+      throw new AppError('Base64 image is required', 'Base64 image is required', 400);
     }
 
     const cleanBase64 = base64String.includes(',') ? base64String.split(',')[1] : base64String;
@@ -144,26 +125,16 @@ class ImageService {
 
   async uploadFromUrl(imageUrl, options = {}) {
     if (!imageUrl || typeof imageUrl !== 'string') {
-      throw new AppError('Image URL is required', 'ইমেজ URL প্রয়োজন', 400);
+      throw new AppError('Image URL is required', 'Image URL is required', 400);
     }
 
-    const result = await this.uploadWithClient(async (credentials) => {
-      if (credentials.useOfficialApi) {
-        return this.uploadOfficial(imageUrl, null, options, credentials.apiKey);
-      }
-
-      const formData = this.createLegacyForm(options);
-      formData.append('source', imageUrl);
-      formData.append('type', 'url');
-      return axios.post(IMGBB_JSON_URL, formData, this.getAxiosConfig(formData));
-    });
-
+    const result = await this.uploadWithClient(imageUrl, null, options);
     return this.parseResponse(result.data);
   }
 
   async uploadFromMulter(file, options = {}) {
     if (!file) {
-      throw new AppError('No image file provided', 'কোনো ইমেজ ফাইল দেওয়া হয়নি', 400);
+      throw new AppError('No image file provided', 'No image file provided', 400);
     }
 
     this.validateImage(file, options);
@@ -185,78 +156,64 @@ class ImageService {
       }
     }
 
-    throw new AppError('Invalid image file object', 'অবৈধ ইমেজ ফাইল', 400);
+    throw new AppError('Invalid image file object', 'Invalid image file object', 400);
   }
 
   async uploadManyFromMulter(files = [], options = {}) {
     if (!Array.isArray(files) || files.length === 0) {
-      throw new AppError('No image files provided', 'কোনো ইমেজ ফাইল দেওয়া হয়নি', 400);
+      throw new AppError('No image files provided', 'No image files provided', 400);
     }
 
     return Promise.all(files.map((file) => this.uploadFromMulter(file, options)));
   }
 
-  async uploadOfficial(image, name, options, apiKey) {
-    const formData = new FormData();
-    formData.append('image', image);
-    if (name) formData.append('name', name);
-    if (options.expiration) formData.append('expiration', options.expiration.toString());
-
-    return axios.post(`${IMGBB_OFFICIAL_API_URL}?key=${apiKey}`, formData, this.getAxiosConfig(formData));
-  }
-
-  createLegacyForm(options) {
-    const credentials = this.getCredentials();
-    const formData = new FormData();
-
-    formData.append('action', 'upload');
-    formData.append('timestamp', this.generateTimestamp());
-    formData.append('auth_token', credentials.authToken);
-    if (options.expiration) formData.append('expiration', options.expiration.toString());
-
-    return formData;
-  }
-
-  getAxiosConfig(formData) {
-    return {
-      headers: formData.getHeaders(),
-      timeout: DEFAULT_TIMEOUT_MS,
-    };
-  }
-
-  async uploadWithClient(callback) {
+  async uploadWithClient(image, name, options = {}) {
     try {
-      return await callback(this.getCredentials());
+      const formData = new FormData();
+      formData.append('image', image);
+      if (name) formData.append('name', name);
+
+      return await axios.post(IMGBB_UPLOAD_URL, formData, {
+        headers: formData.getHeaders(),
+        params: {
+          key: this.getApiKey(),
+          ...(options.expiration ? { expiration: options.expiration } : {}),
+        },
+        timeout: DEFAULT_TIMEOUT_MS,
+      });
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
   parseResponse(data) {
-    if (data.status_code === 200 || data.success) {
+    if (data.status === 200 || data.status_code === 200 || data.success) {
       const image = data.data || data.image || data;
+      const imageFile = image.image || image;
 
       return {
         success: true,
+        id: image.id || data.id,
+        title: image.title || image.name,
         url: image.url || image.display_url,
+        urlViewer: image.url_viewer,
         displayUrl: image.display_url || image.url,
         thumbnail: image.thumb?.url || image.thumbnail?.url,
         medium: image.medium?.url,
         deleteUrl: image.delete_url || data.delete_url,
-        id: image.id || data.id,
-        title: image.title || image.name,
         width: image.width,
         height: image.height,
         size: image.size,
-        mime: image.mime || image.type,
-        extension: image.extension,
+        mime: imageFile.mime || image.mime || image.type,
+        extension: imageFile.extension || image.extension,
+        filename: imageFile.filename,
         raw: data,
       };
     }
 
     throw new AppError(
       data.error?.message || data.message || 'Image upload failed',
-      'ইমেজ আপলোড ব্যর্থ হয়েছে',
+      'Image upload failed',
       502
     );
   }
@@ -269,14 +226,14 @@ class ImageService {
     if (error.response) {
       const data = error.response.data;
       const message = data?.error?.message || data?.message || 'Image upload failed';
-      return new AppError(`Image upload failed: ${message}`, 'ইমেজ আপলোড ব্যর্থ হয়েছে', 502);
+      return new AppError(`Image upload failed: ${message}`, 'Image upload failed', 502);
     }
 
     if (error.code === 'ECONNABORTED') {
-      return new AppError('Image upload timed out. Please try again.', 'ইমেজ আপলোড টাইম আউট হয়েছে', 504);
+      return new AppError('Image upload timed out. Please try again.', 'Image upload timed out. Please try again.', 504);
     }
 
-    return new AppError(error.message || 'Image upload failed', 'ইমেজ আপলোড ব্যর্থ হয়েছে', 500);
+    return new AppError(error.message || 'Image upload failed', 'Image upload failed', 500);
   }
 }
 

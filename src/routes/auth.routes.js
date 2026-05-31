@@ -20,6 +20,7 @@ router.use(protect);
 router.post('/logout', authController.logout);
 router.get('/me', authController.getMe);
 router.post('/change-password', validate(authValidation.changePassword), authController.changePassword);
+router.patch('/profile', validate(authValidation.updateProfile), authController.updateProfile);
 
 // Team management (Owner only)
 router.route('/team')
