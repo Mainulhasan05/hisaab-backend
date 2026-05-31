@@ -8,7 +8,12 @@
     "dev": "nodemon src/index.js",
     "test": "jest"
   },
-  "keywords": ["pos", "saas", "inventory", "accounting"],
+  "keywords": [
+    "pos",
+    "saas",
+    "inventory",
+    "accounting"
+  ],
   "author": "Hisaab",
   "license": "ISC",
   "type": "commonjs",
@@ -21,12 +26,14 @@
     "express": "^4.18.2",
     "express-mongo-sanitize": "^2.2.0",
     "express-rate-limit": "^7.1.5",
+    "form-data": "^4.0.5",
     "helmet": "^7.1.0",
     "hpp": "^0.2.3",
     "joi": "^17.12.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.0.3",
     "morgan": "^1.10.0",
+    "multer": "^2.0.2",
     "redis": "^4.6.12",
     "winston": "^3.11.0"
   },

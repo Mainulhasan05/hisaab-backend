@@ -22,6 +22,7 @@ const pageContentRoutes = require('./pageContent.routes');
 const roleRoutes = require('./role.routes');
 const staffRoutes = require('./staff.routes');
 const couponRoutes = require('./coupon.routes');
+const imageRoutes = require('./image.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
@@ -44,6 +45,7 @@ router.use('/pages', pageContentRoutes);
 router.use('/roles', roleRoutes);
 router.use('/staff', staffRoutes);
 router.use('/coupons', couponRoutes);
+router.use('/images', imageRoutes);
 
 // API Info
 router.get('/', (req, res) => {
@@ -70,7 +72,8 @@ router.get('/', (req, res) => {
       heartbeat: '/api/heartbeat',
       contact: '/api/contact',
       pages: '/api/pages',
-      coupons: '/api/coupons'
+      coupons: '/api/coupons',
+      images: '/api/images'
     }
   });
 });

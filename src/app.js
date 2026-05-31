@@ -42,8 +42,9 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 // Body Parsing
-app.use(express.json({ limit: '10kb' }));
-app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+const bodyLimit = process.env.REQUEST_BODY_LIMIT || '10mb';
+app.use(express.json({ limit: bodyLimit }));
+app.use(express.urlencoded({ extended: true, limit: bodyLimit }));
 
 // Cookie Parser
 app.use(cookieParser());
