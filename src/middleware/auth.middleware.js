@@ -12,16 +12,28 @@ const { COOKIE_NAMES } = require('../utils/cookie.util');
 const protect = asyncHandler(async (req, res, next) => {
   let token = null;
 
-  // Priority 1: Check user token cookie
-  if (req.cookies && req.cookies[COOKIE_NAMES.USER_TOKEN]) {
-    token = req.cookies[COOKIE_NAMES.USER_TOKEN];
+  // Determine if this is an admin route (prefer admin cookie for these)
+  const isAdminRoute = req.originalUrl.startsWith('/api/admin') ||
+    req.originalUrl.startsWith('/api/pages') ||
+    req.originalUrl.startsWith('/api/contact');
+
+  if (isAdminRoute) {
+    // For admin routes: prefer admin token, fall back to user token
+    if (req.cookies && req.cookies[COOKIE_NAMES.ADMIN_TOKEN]) {
+      token = req.cookies[COOKIE_NAMES.ADMIN_TOKEN];
+    } else if (req.cookies && req.cookies[COOKIE_NAMES.USER_TOKEN]) {
+      token = req.cookies[COOKIE_NAMES.USER_TOKEN];
+    }
+  } else {
+    // For user routes: prefer user token, fall back to admin token
+    if (req.cookies && req.cookies[COOKIE_NAMES.USER_TOKEN]) {
+      token = req.cookies[COOKIE_NAMES.USER_TOKEN];
+    } else if (req.cookies && req.cookies[COOKIE_NAMES.ADMIN_TOKEN]) {
+      token = req.cookies[COOKIE_NAMES.ADMIN_TOKEN];
+    }
   }
-  // Priority 2: Check admin token cookie
-  else if (req.cookies && req.cookies[COOKIE_NAMES.ADMIN_TOKEN]) {
-    token = req.cookies[COOKIE_NAMES.ADMIN_TOKEN];
-  }
-  // Priority 3: Fallback to Authorization header (for mobile apps, API clients)
-  else if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+  // Fallback to Authorization header (for mobile apps, API clients)
+  if (!token && req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
     token = req.headers.authorization.split(' ')[1];
   }
 
