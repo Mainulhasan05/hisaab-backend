@@ -118,12 +118,16 @@ const sendErrorProd = (err, res) => {
     return res.status(err.statusCode).json(response);
   }
 
-  // Programming or other unknown error: don't leak error details
+  // Programming or other unknown error: log it and return actual message for debugging
   logger.error('ERROR 💥:', err);
 
-  return ApiResponse.serverError(res, {
-    message: 'Something went wrong!',
-    messageBn: 'কিছু সমস্যা হয়েছে!'
+  return res.status(err.statusCode || 500).json({
+    success: false,
+    statusCode: err.statusCode || 500,
+    message: err.message || 'Something went wrong!',
+    messageBn: err.messageBn || 'কিছু সমস্যা হয়েছে!',
+    errors: null,
+    timestamp: new Date().toISOString()
   });
 };
 
