@@ -83,15 +83,20 @@ class CacheService {
 
   /**
    * Delete keys matching a pattern
+   * Uses SCAN instead of KEYS to avoid blocking Redis
    * @param {string} pattern - Pattern to match (e.g., 'user:*')
    */
   async deletePattern(pattern) {
     if (isConnected()) {
       try {
         const client = getClient();
-        const keys = await client.keys(pattern);
-        if (keys.length > 0) {
-          await client.del(keys);
+        // Use SCAN cursor to find matching keys without blocking Redis
+        const keysToDelete = [];
+        for await (const key of client.scanIterator({ MATCH: pattern, COUNT: 100 })) {
+          keysToDelete.push(key);
+        }
+        if (keysToDelete.length > 0) {
+          await client.del(keysToDelete);
         }
       } catch (error) {
         logger.error('Redis DEL pattern error:', error.message);

@@ -179,13 +179,22 @@ class SaleService {
     let subtotal = 0;
     const processedItems = [];
 
+    // --- BATCH: Fetch all products in a single query ---
+    const productIds = [...new Set(items.map(item => item.productId))];
+    const products = await Product.find({ _id: { $in: productIds }, shop: shopId });
+    const productMap = new Map(products.map(p => [p._id.toString(), p]));
+
+    // Prepare bulk operations
+    const bulkStockOps = [];
+    const stockTransactions = [];
+
     for (const item of items) {
-      const product = await Product.findOne({ _id: item.productId, shop: shopId });
+      const product = productMap.get(item.productId?.toString());
       if (!product) {
         throw new AppError(`Product not found: ${item.productId}`, `পণ্য পাওয়া যায়নি: ${item.productName || item.productId}`, 404);
       }
 
-      let unitPrice, variantInfo = {};
+      let unitPrice, buyingPrice, variantInfo = {};
 
       if (item.variantId) {
         const variant = product.variants.id(item.variantId);
@@ -203,14 +212,45 @@ class SaleService {
         }
 
         unitPrice = variant.sellingPrice;
+        buyingPrice = variant.buyingPrice || product.buyingPrice || 0;
         variantInfo = {
           variantId: variant._id,
           variantSku: variant.sku,
           variantAttributes: variant.attributes,
         };
 
-        // Reduce stock
+        const previousStock = variant.stock;
+        // Track stock change in memory for validation of subsequent items of same product
         variant.stock -= item.quantity;
+
+        // Queue bulkWrite operation for variant stock
+        bulkStockOps.push({
+          updateOne: {
+            filter: { _id: product._id, 'variants._id': variant._id },
+            update: { $inc: { 'variants.$.stock': -item.quantity } },
+          },
+        });
+
+        // Queue stock transaction
+        stockTransactions.push({
+          shop: shopId,
+          product: product._id,
+          productName: product.name,
+          productCode: product.code,
+          variantId: variant._id,
+          variantSku: variant.sku,
+          variantAttributes: variant.attributes,
+          type: 'sale',
+          quantity: -item.quantity,
+          previousStock,
+          newStock: variant.stock,
+          unitCost: buyingPrice,
+          totalCost: buyingPrice * item.quantity,
+          unitPrice,
+          totalPrice: 0, // will be set below
+          notes: 'Sale item',
+          createdBy: userId,
+        });
       } else {
         // Check stock
         if (product.stock < item.quantity) {
@@ -222,18 +262,47 @@ class SaleService {
         }
 
         unitPrice = product.sellingPrice;
-        product.stock -= item.quantity;
-      }
+        buyingPrice = product.buyingPrice || 0;
 
-      await product.save();
+        const previousStock = product.stock;
+        // Track stock change in memory for validation of subsequent items of same product
+        product.stock -= item.quantity;
+
+        // Queue bulkWrite operation for product stock
+        bulkStockOps.push({
+          updateOne: {
+            filter: { _id: product._id },
+            update: { $inc: { stock: -item.quantity } },
+          },
+        });
+
+        // Queue stock transaction
+        stockTransactions.push({
+          shop: shopId,
+          product: product._id,
+          productName: product.name,
+          productCode: product.code,
+          variantId: null,
+          variantSku: null,
+          variantAttributes: null,
+          type: 'sale',
+          quantity: -item.quantity,
+          previousStock,
+          newStock: product.stock,
+          unitCost: buyingPrice,
+          totalCost: buyingPrice * item.quantity,
+          unitPrice,
+          totalPrice: 0, // will be set below
+          notes: 'Sale item',
+          createdBy: userId,
+        });
+      }
 
       const itemDiscount = item.discount || 0;
       const itemTotal = (unitPrice * item.quantity) - itemDiscount;
 
-      // Get buying price for profit calculation and cost tracking
-      const buyingPrice = item.variantId
-        ? (product.variants.id(item.variantId)?.buyingPrice || product.buyingPrice || 0)
-        : (product.buyingPrice || 0);
+      // Update totalPrice in the last queued stock transaction
+      stockTransactions[stockTransactions.length - 1].totalPrice = itemTotal;
 
       processedItems.push({
         product: product._id,
@@ -241,33 +310,22 @@ class SaleService {
         ...variantInfo,
         quantity: item.quantity,
         unitPrice,
-        buyingPrice, // Include buying price for profit calculation
+        buyingPrice,
         discount: itemDiscount,
         total: itemTotal,
       });
 
       subtotal += itemTotal;
+    }
 
-      // Create stock transaction with price info
-      await StockTransaction.create({
-        shop: shopId,
-        product: product._id,
-        productName: product.name,
-        productCode: product.code,
-        variantId: item.variantId || null,
-        variantSku: variantInfo.variantSku || null,
-        variantAttributes: variantInfo.variantAttributes || null,
-        type: 'sale',
-        quantity: -item.quantity,
-        previousStock: (item.variantId ? product.variants.id(item.variantId)?.stock : product.stock) + item.quantity,
-        newStock: item.variantId ? product.variants.id(item.variantId)?.stock : product.stock,
-        unitCost: buyingPrice || 0,
-        totalCost: (buyingPrice || 0) * item.quantity,
-        unitPrice: unitPrice,
-        totalPrice: itemTotal,
-        notes: `Sale item`,
-        createdBy: userId,
-      });
+    // --- BATCH: Execute all stock updates in one bulkWrite ---
+    if (bulkStockOps.length > 0) {
+      await Product.bulkWrite(bulkStockOps);
+    }
+
+    // --- BATCH: Insert all stock transactions in one call ---
+    if (stockTransactions.length > 0) {
+      await StockTransaction.insertMany(stockTransactions);
     }
 
     const total = subtotal - discount + tax;
@@ -476,35 +534,56 @@ class SaleService {
       throw new AppError('Sale is already cancelled', 'বিক্রয় ইতিমধ্যে বাতিল করা হয়েছে', 400);
     }
 
-    // Restore stock
-    for (const item of sale.items) {
-      const product = await Product.findById(item.product);
-      if (product) {
-        if (item.variantId) {
-          const variant = product.variants.id(item.variantId);
-          if (variant) {
-            variant.stock += item.quantity;
-          }
-        } else {
-          product.stock += item.quantity;
-        }
-        await product.save();
+    // --- BATCH: Restore stock using bulkWrite ---
+    const cancelProductIds = [...new Set(sale.items.map(item => item.product.toString()))];
+    const cancelProducts = await Product.find({ _id: { $in: cancelProductIds } });
+    const cancelProductMap = new Map(cancelProducts.map(p => [p._id.toString(), p]));
 
-        // Create stock transaction
-        await StockTransaction.create({
-          shop: shopId,
-          product: product._id,
-          variantId: item.variantId || null,
-          type: 'return',
-          quantity: item.quantity,
-          reference: {
-            type: 'sale',
-            id: sale._id,
+    const restoreOps = [];
+    const cancelStockTxns = [];
+
+    for (const item of sale.items) {
+      const product = cancelProductMap.get(item.product.toString());
+      if (!product) continue;
+
+      if (item.variantId) {
+        restoreOps.push({
+          updateOne: {
+            filter: { _id: product._id, 'variants._id': item.variantId },
+            update: { $inc: { 'variants.$.stock': item.quantity } },
           },
-          notes: `Sale cancelled: ${sale.invoiceNo}`,
-          createdBy: userId,
+        });
+      } else {
+        restoreOps.push({
+          updateOne: {
+            filter: { _id: product._id },
+            update: { $inc: { stock: item.quantity } },
+          },
         });
       }
+
+      cancelStockTxns.push({
+        shop: shopId,
+        product: product._id,
+        productName: product.name,
+        productCode: product.code,
+        variantId: item.variantId || null,
+        type: 'return',
+        quantity: item.quantity,
+        reference: {
+          type: 'sale',
+          id: sale._id,
+        },
+        notes: `Sale cancelled: ${sale.invoiceNo}`,
+        createdBy: userId,
+      });
+    }
+
+    if (restoreOps.length > 0) {
+      await Product.bulkWrite(restoreOps);
+    }
+    if (cancelStockTxns.length > 0) {
+      await StockTransaction.insertMany(cancelStockTxns);
     }
 
     // Update customer balance if applicable

@@ -1,6 +1,7 @@
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
+const compression = require('compression');
 const cookieParser = require('cookie-parser');
 const mongoSanitize = require('express-mongo-sanitize');
 const hpp = require('hpp');
@@ -41,6 +42,8 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
+// Response Compression (gzip/deflate) — reduces transfer size by 60-80%
+app.use(compression());
 // Body Parsing
 const bodyLimit = process.env.REQUEST_BODY_LIMIT || '10mb';
 app.use(express.json({ limit: bodyLimit }));

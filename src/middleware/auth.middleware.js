@@ -5,37 +5,83 @@ const Shop = require('../models/Shop.model');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 const { COOKIE_NAMES } = require('../utils/cookie.util');
+const cacheService = require('../services/cache.service');
+
+// Auth cache TTL: 30 seconds — short enough to reflect password changes quickly
+const AUTH_CACHE_TTL = 30;
 
 /**
- * Protect routes - Verify JWT token
+ * Extract token from cookies/headers based on route type
  */
-const protect = asyncHandler(async (req, res, next) => {
+function extractToken(req) {
   let token = null;
-
-  // Determine if this is an admin route (prefer admin cookie for these)
   const isAdminRoute = req.originalUrl.startsWith('/api/admin') ||
     req.originalUrl.startsWith('/api/pages') ||
     req.originalUrl.startsWith('/api/contact');
 
   if (isAdminRoute) {
-    // For admin routes: prefer admin token, fall back to user token
     if (req.cookies && req.cookies[COOKIE_NAMES.ADMIN_TOKEN]) {
       token = req.cookies[COOKIE_NAMES.ADMIN_TOKEN];
     } else if (req.cookies && req.cookies[COOKIE_NAMES.USER_TOKEN]) {
       token = req.cookies[COOKIE_NAMES.USER_TOKEN];
     }
   } else {
-    // For user routes: prefer user token, fall back to admin token
     if (req.cookies && req.cookies[COOKIE_NAMES.USER_TOKEN]) {
       token = req.cookies[COOKIE_NAMES.USER_TOKEN];
     } else if (req.cookies && req.cookies[COOKIE_NAMES.ADMIN_TOKEN]) {
       token = req.cookies[COOKIE_NAMES.ADMIN_TOKEN];
     }
   }
-  // Fallback to Authorization header (for mobile apps, API clients)
   if (!token && req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
     token = req.headers.authorization.split(' ')[1];
   }
+  return token;
+}
+
+/**
+ * Fetch user with shop, using a short-lived cache to avoid DB hit on every request.
+ * Cache key is based on user ID; invalidated naturally by 30s TTL.
+ */
+async function getCachedUser(userId) {
+  const cacheKey = `auth:user:${userId}`;
+  const cached = await cacheService.get(cacheKey);
+  if (cached) {
+    // Reconstruct Mongoose-like object with method support
+    const user = await User.hydrate(cached.user);
+    user.shop = cached.shop;
+    return user;
+  }
+  const user = await User.findById(userId).populate('shop');
+  if (user) {
+    await cacheService.set(cacheKey, {
+      user: user.toObject(),
+      shop: user.shop ? user.shop.toObject() : null,
+    }, AUTH_CACHE_TTL);
+  }
+  return user;
+}
+
+/**
+ * Fetch admin, using a short-lived cache.
+ */
+async function getCachedAdmin(adminId) {
+  const cacheKey = `auth:admin:${adminId}`;
+  const cached = await cacheService.get(cacheKey);
+  if (cached) {
+    return Admin.hydrate(cached);
+  }
+  const admin = await Admin.findById(adminId);
+  if (admin) {
+    await cacheService.set(cacheKey, admin.toObject(), AUTH_CACHE_TTL);
+  }
+  return admin;
+}
+
+/**
+ * Protect routes - Verify JWT token
+ */
+const protect = asyncHandler(async (req, res, next) => {
+  const token = extractToken(req);
 
   if (!token) {
     return ApiResponse.unauthorized(res, {
@@ -50,7 +96,7 @@ const protect = asyncHandler(async (req, res, next) => {
 
     // Check if it's an admin token
     if (decoded.isAdmin) {
-      const admin = await Admin.findById(decoded.id);
+      const admin = await getCachedAdmin(decoded.id);
 
       if (!admin) {
         return ApiResponse.unauthorized(res, {
@@ -80,7 +126,7 @@ const protect = asyncHandler(async (req, res, next) => {
     }
 
     // Regular user token
-    const user = await User.findById(decoded.id).populate('shop');
+    const user = await getCachedUser(decoded.id);
 
     if (!user) {
       return ApiResponse.unauthorized(res, {
@@ -227,31 +273,7 @@ const restrictTo = (...roles) => {
  * Decodes user or admin credentials if present, but does NOT block unauthenticated requests.
  */
 const softProtect = asyncHandler(async (req, res, next) => {
-  let token = null;
-
-  // Determine if this is an admin route (prefer admin cookie for these)
-  const isAdminRoute = req.originalUrl.startsWith('/api/admin') ||
-    req.originalUrl.startsWith('/api/pages') ||
-    req.originalUrl.startsWith('/api/contact');
-
-  if (isAdminRoute) {
-    if (req.cookies && req.cookies[COOKIE_NAMES.ADMIN_TOKEN]) {
-      token = req.cookies[COOKIE_NAMES.ADMIN_TOKEN];
-    } else if (req.cookies && req.cookies[COOKIE_NAMES.USER_TOKEN]) {
-      token = req.cookies[COOKIE_NAMES.USER_TOKEN];
-    }
-  } else {
-    if (req.cookies && req.cookies[COOKIE_NAMES.USER_TOKEN]) {
-      token = req.cookies[COOKIE_NAMES.USER_TOKEN];
-    } else if (req.cookies && req.cookies[COOKIE_NAMES.ADMIN_TOKEN]) {
-      token = req.cookies[COOKIE_NAMES.ADMIN_TOKEN];
-    }
-  }
-
-  // Fallback to Authorization header (for mobile apps, API clients)
-  if (!token && req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-    token = req.headers.authorization.split(' ')[1];
-  }
+  const token = extractToken(req);
 
   if (!token) {
     req.user = null;
@@ -264,7 +286,7 @@ const softProtect = asyncHandler(async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     if (decoded.isAdmin) {
-      const admin = await Admin.findById(decoded.id);
+      const admin = await getCachedAdmin(decoded.id);
       if (admin && admin.isActive && !admin.changedPasswordAfter(decoded.iat)) {
         req.admin = admin;
         req.isAdmin = true;
@@ -272,7 +294,7 @@ const softProtect = asyncHandler(async (req, res, next) => {
       return next();
     }
 
-    const user = await User.findById(decoded.id).populate('shop');
+    const user = await getCachedUser(decoded.id);
     if (user && user.isActive && !user.changedPasswordAfter(decoded.iat)) {
       if (user.shop && user.shop.isActive) {
         req.user = user;

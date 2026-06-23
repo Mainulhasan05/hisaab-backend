@@ -52,13 +52,14 @@ class ReportService {
           totalSales: { $sum: '$total' },
           totalPaid: { $sum: '$paid' },
           totalDue: { $sum: '$due' },
+          totalProfit: { $sum: '$profit' },
           count: { $sum: 1 },
         },
       },
     ]);
 
-    // Calculate today's profit
-    const todayProfit = await this.calculateProfit(shopId, startOfDay, endOfDay);
+    // Today's profit is already available from the aggregation below via $profit field.
+    // No need for a separate $lookup-based calculateProfit call.
 
     // Get total due from all customers
     const customerDueResult = await Customer.aggregate([
@@ -154,12 +155,12 @@ class ReportService {
       { $sort: { _id: 1 } },
     ]);
 
-    const todaySales = todaySalesResult[0] || { totalSales: 0, totalPaid: 0, totalDue: 0, count: 0 };
+    const todaySales = todaySalesResult[0] || { totalSales: 0, totalPaid: 0, totalDue: 0, totalProfit: 0, count: 0 };
     const totalDue = customerDueResult[0]?.totalDue || 0;
 
     const result = {
       todaySales: todaySales.totalSales,
-      todayProfit: todayProfit,
+      todayProfit: todaySales.totalProfit,
       todayOrders: todaySales.count,
       totalDue,
       lowStockCount,
@@ -175,48 +176,8 @@ class ReportService {
     return result;
   }
 
-  // Calculate profit for date range
-  async calculateProfit(shopId, startDate, endDate) {
-    const result = await Sale.aggregate([
-      {
-        $match: {
-          shop: new mongoose.Types.ObjectId(shopId),
-          status: { $ne: 'cancelled' },
-          createdAt: { $gte: startDate, $lte: endDate },
-        },
-      },
-      { $unwind: '$items' },
-      {
-        $lookup: {
-          from: 'products',
-          localField: 'items.product',
-          foreignField: '_id',
-          as: 'productDetails',
-        },
-      },
-      { $unwind: '$productDetails' },
-      {
-        $project: {
-          profit: {
-            $multiply: [
-              { $subtract: ['$items.unitPrice', '$productDetails.buyingPrice'] },
-              '$items.quantity',
-            ],
-          },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          totalProfit: { $sum: '$profit' },
-        },
-      },
-    ]);
 
-    return result[0]?.totalProfit || 0;
-  }
-
-  // Get sales report
+  // Get sales report — uses $facet to combine period breakdown, summary, and profit in a single pipeline
   async getSalesReport(shopId, options = {}) {
     const { startDate, endDate, groupBy = 'day' } = options;
 
@@ -249,51 +210,47 @@ class ReportService {
         dateFormat = '%Y-%m-%d';
     }
 
-    const data = await Sale.aggregate([
+    // Single $facet pipeline: one DB scan for both period data and summary
+    const facetResult = await Sale.aggregate([
       { $match: matchStage },
       {
-        $group: {
-          _id: {
-            $dateToString: { format: dateFormat, date: '$createdAt' },
-          },
-          totalSales: { $sum: '$total' },
-          totalPaid: { $sum: '$paid' },
-          totalDue: { $sum: '$due' },
-          count: { $sum: 1 },
+        $facet: {
+          byPeriod: [
+            {
+              $group: {
+                _id: {
+                  $dateToString: { format: dateFormat, date: '$createdAt' },
+                },
+                totalSales: { $sum: '$total' },
+                totalPaid: { $sum: '$paid' },
+                totalDue: { $sum: '$due' },
+                count: { $sum: 1 },
+              },
+            },
+            { $sort: { _id: 1 } },
+          ],
+          summary: [
+            {
+              $group: {
+                _id: null,
+                totalSales: { $sum: '$total' },
+                totalPaid: { $sum: '$paid' },
+                totalDue: { $sum: '$due' },
+                totalProfit: { $sum: '$profit' },
+                count: { $sum: 1 },
+              },
+            },
+          ],
         },
       },
-      { $sort: { _id: 1 } },
     ]);
 
-    // Get summary
-    const summaryResult = await Sale.aggregate([
-      { $match: matchStage },
-      {
-        $group: {
-          _id: null,
-          totalSales: { $sum: '$total' },
-          totalPaid: { $sum: '$paid' },
-          totalDue: { $sum: '$due' },
-          count: { $sum: 1 },
-        },
-      },
-    ]);
-
-    const summary = summaryResult[0] || { totalSales: 0, totalPaid: 0, totalDue: 0, count: 0 };
-
-    // Calculate profit
-    const profit = await this.calculateProfit(
-      shopId,
-      startDate ? new Date(startDate) : new Date(0),
-      endDate ? new Date(endDate) : new Date()
-    );
+    const data = facetResult[0]?.byPeriod || [];
+    const summary = facetResult[0]?.summary[0] || { totalSales: 0, totalPaid: 0, totalDue: 0, totalProfit: 0, count: 0 };
 
     return {
       data,
-      summary: {
-        ...summary,
-        totalProfit: profit,
-      },
+      summary,
     };
   }
 
