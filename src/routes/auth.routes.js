@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 
 const authController = require('../controllers/auth.controller');
-const { protect, ownerOnly } = require('../middleware/auth.middleware');
+const { protect, softProtect, ownerOnly } = require('../middleware/auth.middleware');
 const { validate } = require('../middleware/validate.middleware');
 const authValidation = require('../validations/auth.validation');
 const { COOKIE_NAMES } = require('../utils/cookie.util');
@@ -66,11 +66,12 @@ router.get('/admin/me', async (req, res) => {
   }
 });
 
+router.get('/me', softProtect, authController.getMe);
+
 // Protected routes
 router.use(protect);
 
 router.post('/logout', authController.logout);
-router.get('/me', authController.getMe);
 router.post('/change-password', validate(authValidation.changePassword), authController.changePassword);
 router.patch('/profile', validate(authValidation.updateProfile), authController.updateProfile);
 

@@ -222,8 +222,78 @@ const restrictTo = (...roles) => {
   });
 };
 
+/**
+ * Soft protect middleware - Optional token validation
+ * Decodes user or admin credentials if present, but does NOT block unauthenticated requests.
+ */
+const softProtect = asyncHandler(async (req, res, next) => {
+  let token = null;
+
+  // Determine if this is an admin route (prefer admin cookie for these)
+  const isAdminRoute = req.originalUrl.startsWith('/api/admin') ||
+    req.originalUrl.startsWith('/api/pages') ||
+    req.originalUrl.startsWith('/api/contact');
+
+  if (isAdminRoute) {
+    if (req.cookies && req.cookies[COOKIE_NAMES.ADMIN_TOKEN]) {
+      token = req.cookies[COOKIE_NAMES.ADMIN_TOKEN];
+    } else if (req.cookies && req.cookies[COOKIE_NAMES.USER_TOKEN]) {
+      token = req.cookies[COOKIE_NAMES.USER_TOKEN];
+    }
+  } else {
+    if (req.cookies && req.cookies[COOKIE_NAMES.USER_TOKEN]) {
+      token = req.cookies[COOKIE_NAMES.USER_TOKEN];
+    } else if (req.cookies && req.cookies[COOKIE_NAMES.ADMIN_TOKEN]) {
+      token = req.cookies[COOKIE_NAMES.ADMIN_TOKEN];
+    }
+  }
+
+  // Fallback to Authorization header (for mobile apps, API clients)
+  if (!token && req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+    token = req.headers.authorization.split(' ')[1];
+  }
+
+  if (!token) {
+    req.user = null;
+    req.shop = null;
+    req.isAdmin = false;
+    return next();
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    if (decoded.isAdmin) {
+      const admin = await Admin.findById(decoded.id);
+      if (admin && admin.isActive && !admin.changedPasswordAfter(decoded.iat)) {
+        req.admin = admin;
+        req.isAdmin = true;
+      }
+      return next();
+    }
+
+    const user = await User.findById(decoded.id).populate('shop');
+    if (user && user.isActive && !user.changedPasswordAfter(decoded.iat)) {
+      if (user.shop && user.shop.isActive) {
+        req.user = user;
+        req.shop = user.shop;
+        req.user.isOwner = decoded.isOwner === true;
+        req.user.permissions = decoded.permissions || null;
+      }
+    }
+    next();
+  } catch (error) {
+    // Silently ignore jwt errors in softProtect
+    req.user = null;
+    req.shop = null;
+    req.isAdmin = false;
+    next();
+  }
+});
+
 module.exports = {
   protect,
+  softProtect,
   adminOnly,
   superAdminOnly,
   ownerOnly,

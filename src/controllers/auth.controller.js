@@ -119,12 +119,21 @@ const getMe = asyncHandler(async (req, res) => {
   }
 
   // Handle regular user token
-  const result = await AuthService.getMe(req.user._id);
+  if (req.user) {
+    const result = await AuthService.getMe(req.user._id);
 
+    return ApiResponse.success(res, {
+      data: { user: result.user, shop: req.shop, permissions: result.permissions },
+      message: 'Profile retrieved',
+      messageBn: 'প্রোফাইল পাওয়া গেছে'
+    });
+  }
+
+  // Handle guest (not authenticated)
   return ApiResponse.success(res, {
-    data: { user: result.user, shop: req.shop, permissions: result.permissions },
-    message: 'Profile retrieved',
-    messageBn: 'প্রোফাইল পাওয়া গেছে'
+    data: { user: null, shop: null, permissions: null },
+    message: 'Not authenticated',
+    messageBn: 'লগইন করা নেই'
   });
 });
 
