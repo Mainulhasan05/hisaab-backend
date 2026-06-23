@@ -48,7 +48,7 @@ async function getCachedUser(userId) {
   if (cached) {
     // Reconstruct Mongoose-like object with method support
     const user = await User.hydrate(cached.user);
-    user.shop = cached.shop;
+    user.shop = cached.shop ? Shop.hydrate(cached.shop) : null;
     return user;
   }
   const user = await User.findById(userId).populate('shop');
