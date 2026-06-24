@@ -168,6 +168,7 @@ class SaleService {
       customerName,
       customerPhone,
       discount = 0,
+      discountType = 'fixed',
       tax = 0,
       paid = 0,
       paymentMethod = 'cash',
@@ -328,7 +329,12 @@ class SaleService {
       await StockTransaction.insertMany(stockTransactions);
     }
 
-    const total = subtotal - discount + tax;
+    let discountAmount = discount;
+    if (discountType === 'percentage') {
+      discountAmount = (subtotal * discount) / 100;
+    }
+
+    const total = subtotal - discountAmount + tax;
     const due = Math.max(0, total - paid);
     const status = due <= 0 ? 'completed' : (paid > 0 ? 'partial' : 'unpaid');
 
@@ -371,6 +377,7 @@ class SaleService {
           items: processedItems,
           subtotal,
           discount,
+          discountType,
           tax,
           total,
           paid,
