@@ -148,9 +148,9 @@ class SaleService {
   // Get single sale by ID
   async getSaleById(shopId, saleId) {
     const sale = await Sale.findOne({ _id: saleId, shop: shopId })
-      .populate('customer', 'name phone address')
+      .populate('customer', 'name phone address totalDue')
       .populate('createdBy', 'name phone')
-      .populate('items.product', 'name code');
+      .populate('items.product', 'name code unit barcode');
 
     if (!sale) {
       throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
