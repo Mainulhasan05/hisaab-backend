@@ -341,3 +341,13 @@ exports.updateShopSettings = asyncHandler(async (req, res) => {
     messageBn: 'দোকানের সেটিংস সফলভাবে আপডেট হয়েছে',
   });
 });
+
+// Enable multi-branch for a shop
+exports.enableMultiBranch = asyncHandler(async (req, res) => {
+  const result = await adminService.enableMultiBranch(req.params.id, req.admin._id);
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Multi-branch enabled successfully',
+    messageBn: 'মাল্টি-ব্রাঞ্চ সফলভাবে সক্রিয় হয়েছে',
+  });
+});

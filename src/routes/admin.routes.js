@@ -24,6 +24,7 @@ router.patch('/shops/:id/status', adminController.updateShopStatus);
 router.patch('/shops/:id/subscription', adminController.updateShopSubscription);
 router.patch('/shops/:id/settings', adminController.updateShopSettings);
 router.post('/shops/:id/restrict', adminController.restrictShop);
+router.post('/shops/:id/enable-multi-branch', adminController.enableMultiBranch);
 
 // Users (all shops) — list + impersonation
 router.get('/users', adminController.getAllUsers);

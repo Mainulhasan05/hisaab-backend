@@ -2,10 +2,20 @@ const Shop = require('../models/Shop.model');
 const User = require('../models/User.model');
 const Admin = require('../models/Admin.model');
 const Sale = require('../models/Sale.model');
+const Purchase = require('../models/Purchase.model');
+const Expense = require('../models/Expense.model');
+const CashRegister = require('../models/CashRegister.model');
+const StockTransaction = require('../models/StockTransaction.model');
+const SalesReturn = require('../models/SalesReturn.model');
+const SMSLog = require('../models/SMSLog.model');
 const SMSQuota = require('../models/SMSQuota.model');
 const AuditLog = require('../models/AuditLog.model');
 const Payment = require('../models/Payment.model');
+const Product = require('../models/Product.model');
+const Branch = require('../models/Branch.model');
+const BranchStock = require('../models/BranchStock.model');
 const mongoose = require('mongoose');
+const { AUDIT_ACTIONS } = require('../config/constants');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { AppError } = require('../middleware/error.middleware');
@@ -1205,6 +1215,111 @@ class AdminService {
       name: admin.name,
       phone: admin.phone,
       role: admin.role,
+    };
+  }
+
+  /**
+   * Enable multi-branch mode for a shop.
+   * This is a one-way operation that:
+   * 1. Creates a default "Main Branch"
+   * 2. Backfills all existing data with the default branch
+   * 3. Assigns all staff to the default branch
+   * 4. Migrates product stock to BranchStock model
+   */
+  async enableMultiBranch(shopId, adminId) {
+    const shop = await Shop.findById(shopId);
+    if (!shop) {
+      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
+    }
+
+    if (shop.multiBranchEnabled) {
+      throw new AppError('মাল্টি-ব্রাঞ্চ আগে থেকেই সক্রিয়', 'Multi-branch already enabled', 400);
+    }
+
+    // 1. Create default branch
+    const defaultBranch = await Branch.create({
+      shop: shopId,
+      name: 'প্রধান শাখা',
+      code: 'MAIN',
+      address: shop.address,
+      phone: shop.phone,
+      isDefault: true
+    });
+
+    // 2. Enable multi-branch on shop
+    shop.multiBranchEnabled = true;
+    await shop.save();
+
+    // 3. Backfill all transactional data with default branch
+    const branchScopedModels = [
+      Sale, Purchase, Expense, CashRegister,
+      StockTransaction, Payment, SalesReturn, SMSLog, AuditLog
+    ];
+
+    for (const Model of branchScopedModels) {
+      await Model.updateMany(
+        { shop: shopId, branch: null },
+        { $set: { branch: defaultBranch._id } }
+      );
+    }
+
+    // 4. Assign all non-owner staff to default branch
+    await User.updateMany(
+      { shop: shopId, isOwner: false, branch: null },
+      { $set: { branch: defaultBranch._id } }
+    );
+
+    // 5. Migrate product stock to BranchStock
+    const products = await Product.find({ shop: shopId });
+    const stockOps = [];
+    for (const product of products) {
+      if (product.hasVariants) {
+        for (const variant of product.variants) {
+          stockOps.push({
+            shop: shopId,
+            branch: defaultBranch._id,
+            product: product._id,
+            variantId: variant._id,
+            stock: variant.stock || 0
+          });
+        }
+      } else {
+        stockOps.push({
+          shop: shopId,
+          branch: defaultBranch._id,
+          product: product._id,
+          variantId: null,
+          stock: product.stock || 0
+        });
+      }
+    }
+    if (stockOps.length > 0) {
+      await BranchStock.insertMany(stockOps, { ordered: false }).catch(() => {
+        // Ignore duplicate key errors (idempotent)
+      });
+    }
+
+    // 6. Log audit
+    await AuditLog.log({
+      shop: shopId,
+      branch: defaultBranch._id,
+      admin: adminId,
+      action: AUDIT_ACTIONS.MULTI_BRANCH_ENABLED.en,
+      description: `"${shop.name}" দোকানে মাল্টি-ব্রাঞ্চ সক্রিয় করা হয়েছে`,
+      entity: { type: 'shop', id: shop._id, name: shop.name }
+    });
+
+    // Invalidate cache
+    await cacheService.deletePattern(`auth:user:*`);
+
+    return {
+      shop: shop.toObject(),
+      defaultBranch: defaultBranch.toObject(),
+      backedUp: {
+        models: branchScopedModels.length,
+        products: products.length,
+        stockRecords: stockOps.length
+      }
     };
   }
 }
