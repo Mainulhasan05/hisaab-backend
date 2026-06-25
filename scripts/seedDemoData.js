@@ -223,8 +223,7 @@ async function seed() {
     const doc = await Product.create({
       shop: shopId,
       code: p.code,
-      name: p.name,
-      nameBn: p.nameBn,
+      name: p.nameBn || p.name,
       category: categoryDocs[p.cat]._id,
       buyingPrice: p.buy,
       sellingPrice: p.sell,

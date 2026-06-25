@@ -64,10 +64,6 @@ const productSchema = new mongoose.Schema({
     trim: true,
     maxlength: [200, 'পণ্যের নাম ২০০ অক্ষরের বেশি হতে পারবে না']
   },
-  nameBn: {
-    type: String,
-    trim: true
-  },
   category: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Category'
@@ -217,7 +213,6 @@ productSchema.statics.searchProducts = function(shopId, query, options = {}) {
     isActive: true,
     $or: [
       { name: { $regex: query, $options: 'i' } },
-      { nameBn: { $regex: query, $options: 'i' } },
       { code: { $regex: query, $options: 'i' } },
       { barcode: { $regex: query, $options: 'i' } }
     ]

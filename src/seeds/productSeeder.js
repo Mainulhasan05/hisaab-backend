@@ -533,8 +533,7 @@ async function seedProducts() {
       const brand = Math.random() < 0.7 ? pick(brands) : undefined;
 
       // Product name with suffix for uniqueness
-      const nameEn = suffix > 0 ? `${template.name} V${suffix + 1}` : template.name;
-      const nameBn = suffix > 0 ? `${template.nameBn} V${suffix + 1}` : template.nameBn;
+      const name = suffix > 0 ? `${template.nameBn || template.name} V${suffix + 1}` : (template.nameBn || template.name);
 
       // Barcode (40% chance for non-variant)
       const barcode = (!shouldHaveVariants && Math.random() < 0.4) ? genBarcode() : undefined;
@@ -566,7 +565,7 @@ async function seedProducts() {
 
       // Description (20% chance)
       const description = Math.random() < 0.2
-        ? `${nameBn} - ${brand || 'ভালো মানের'} পণ্য। দোকান থেকে সরাসরি কিনুন।`
+        ? `${name} - ${brand || 'ভালো মানের'} পণ্য। দোকান থেকে সরাসরি কিনুন।`
         : undefined;
 
       // Active (95% active)
@@ -636,8 +635,7 @@ async function seedProducts() {
         products.push({
           shop: shop._id,
           code,
-          name: nameEn,
-          nameBn,
+          name,
           category: parentCat?._id,
           subcategory: subCat?._id,
           brand,
@@ -658,8 +656,7 @@ async function seedProducts() {
           shop: shop._id,
           code,
           barcode,
-          name: nameEn,
-          nameBn,
+          name,
           category: parentCat?._id,
           subcategory: subCat?._id,
           brand,
