@@ -7,6 +7,11 @@ const stockTransactionSchema = new mongoose.Schema({
     ref: 'Shop',
     required: [true, 'দোকান নির্বাচন করুন']
   },
+  branch: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null
+  },
   product: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Product',
@@ -93,8 +98,8 @@ const stockTransactionSchema = new mongoose.Schema({
 });
 
 // Indexes - Optimized for scalability
-stockTransactionSchema.index({ shop: 1, product: 1, createdAt: -1 }); // Product stock history
-stockTransactionSchema.index({ shop: 1, createdAt: -1 }); // Main listing
+stockTransactionSchema.index({ shop: 1, branch: 1, product: 1, createdAt: -1 }); // Product stock history with branch
+stockTransactionSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Main listing with branch
 
 // Virtual: Is stock in
 stockTransactionSchema.virtual('isStockIn').get(function() {

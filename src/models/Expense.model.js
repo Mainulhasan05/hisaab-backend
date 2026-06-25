@@ -7,6 +7,11 @@ const expenseSchema = new mongoose.Schema({
     ref: 'Shop',
     required: [true, 'দোকান নির্বাচন করুন']
   },
+  branch: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null
+  },
   category: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'ExpenseCategory',
@@ -46,8 +51,8 @@ const expenseSchema = new mongoose.Schema({
 });
 
 // Indexes - Optimized for scalability
-expenseSchema.index({ shop: 1, date: -1 }); // Date-based listing and reports
-expenseSchema.index({ shop: 1, category: 1, date: -1 }); // Category-wise expenses
+expenseSchema.index({ shop: 1, branch: 1, date: -1 }); // Date-based listing with branch
+expenseSchema.index({ shop: 1, branch: 1, category: 1, date: -1 }); // Category-wise expenses with branch
 
 // Static: Get summary by category for a date range
 expenseSchema.statics.getSummaryByCategory = async function(shopId, startDate, endDate) {

@@ -20,6 +20,11 @@ const cashRegisterSchema = new mongoose.Schema({
     ref: 'Shop',
     required: [true, 'দোকান নির্বাচন করুন']
   },
+  branch: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null
+  },
   date: {
     type: Date,
     required: [true, 'তারিখ দিন']
@@ -77,8 +82,8 @@ const cashRegisterSchema = new mongoose.Schema({
 });
 
 // Indexes
-cashRegisterSchema.index({ shop: 1, date: -1 }, { unique: true });
-cashRegisterSchema.index({ shop: 1, status: 1 });
+cashRegisterSchema.index({ shop: 1, branch: 1, date: -1 }, { unique: true });
+cashRegisterSchema.index({ shop: 1, branch: 1, status: 1 });
 
 // Virtuals
 cashRegisterSchema.virtual('totalCashIn').get(function () {

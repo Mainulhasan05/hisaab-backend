@@ -54,6 +54,11 @@ const saleSchema = new mongoose.Schema({
     ref: 'Shop',
     required: [true, 'দোকান নির্বাচন করুন']
   },
+  branch: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null
+  },
   invoiceNo: {
     type: String,
     required: [true, 'ইনভয়েস নম্বর দিন']
@@ -157,8 +162,8 @@ const saleSchema = new mongoose.Schema({
 // Indexes - Optimized for scalability
 saleSchema.index({ shop: 1, invoiceNo: 1 }, { unique: true }); // Invoice lookup
 saleSchema.index({ shop: 1, customer: 1, createdAt: -1 }); // Customer purchase history
-saleSchema.index({ shop: 1, createdAt: -1 }); // Main listing, reports, date-based queries
-saleSchema.index({ shop: 1, status: 1, createdAt: -1 }); // Due/pending sales with date sort
+saleSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Main listing with branch filter
+saleSchema.index({ shop: 1, branch: 1, status: 1, createdAt: -1 }); // Due/pending sales with branch
 
 // Calculate totals before saving
 saleSchema.pre('save', function(next) {

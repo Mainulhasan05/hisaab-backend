@@ -127,6 +127,10 @@ const shopSchema = new mongoose.Schema({
   isActive: {
     type: Boolean,
     default: true
+  },
+  multiBranchEnabled: {
+    type: Boolean,
+    default: false
   }
 }, {
   timestamps: true,

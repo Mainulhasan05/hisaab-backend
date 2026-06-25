@@ -2,6 +2,7 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User.model');
 const Admin = require('../models/Admin.model');
 const Shop = require('../models/Shop.model');
+const Branch = require('../models/Branch.model');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 const { COOKIE_NAMES } = require('../utils/cookie.util');
@@ -193,6 +194,37 @@ const protect = asyncHandler(async (req, res, next) => {
     // Inject RBAC data from JWT payload (no additional DB lookup needed)
     req.user.isOwner = decoded.isOwner === true;
     req.user.permissions = decoded.permissions || null;
+
+    // ── Branch Context Resolution ──
+    // For single-branch shops: skip entirely (branch = null)
+    // For multi-branch shops:
+    //   Owner: read X-Active-Branch header (switchable)
+    //   Staff: use branch from JWT (fixed)
+    req.branch = null;
+    req.branchId = null;
+
+    if (user.shop && user.shop.multiBranchEnabled) {
+      if (decoded.isOwner) {
+        // Owner can switch branches via header
+        const activeBranchId = req.headers['x-active-branch'] || req.cookies?.activeBranch;
+        if (activeBranchId && activeBranchId !== 'all') {
+          const branch = await Branch.validateBranchOwnership(activeBranchId, user.shop._id);
+          if (branch) {
+            req.branch = branch;
+            req.branchId = branch._id;
+          }
+          // If invalid branch ID, silently fall back to "All Branches" view
+        }
+        // If no header or 'all', req.branch stays null = "All Branches" view
+      } else if (decoded.branch) {
+        // Staff is locked to their assigned branch
+        const branch = await Branch.validateBranchOwnership(decoded.branch, user.shop._id);
+        if (branch) {
+          req.branch = branch;
+          req.branchId = branch._id;
+        }
+      }
+    }
 
     next();
   } catch (error) {

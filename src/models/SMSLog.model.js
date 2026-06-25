@@ -27,6 +27,11 @@ const smsLogSchema = new mongoose.Schema({
     ref: 'Shop',
     required: [true, 'দোকান নির্বাচন করুন']
   },
+  branch: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null
+  },
   recipients: {
     type: [recipientSchema],
     required: [true, 'প্রাপক দিন'],

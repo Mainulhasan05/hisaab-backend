@@ -7,6 +7,11 @@ const paymentSchema = new mongoose.Schema({
     ref: 'Shop',
     required: [true, 'দোকান নির্বাচন করুন']
   },
+  branch: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null
+  },
   sale: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Sale'
@@ -64,7 +69,7 @@ const paymentSchema = new mongoose.Schema({
 });
 
 // Indexes - Optimized for scalability
-paymentSchema.index({ shop: 1, createdAt: -1 }); // Main listing
+paymentSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Main listing with branch
 paymentSchema.index({ shop: 1, customer: 1, createdAt: -1 }); // Customer payment history
 paymentSchema.index({ shop: 1, sale: 1 }); // Sale payments lookup
 paymentSchema.index({ shop: 1, purchase: 1 }, { sparse: true }); // Purchase payments

@@ -7,6 +7,11 @@ const auditLogSchema = new mongoose.Schema({
     ref: 'Shop'
     // null for system-level actions
   },
+  branch: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null
+  },
   user: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'

@@ -37,6 +37,11 @@ const userSchema = new mongoose.Schema({
     default: null
   },
   // ── End RBAC ──
+  branch: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null // null = org-level (owner) or single-branch shop
+  },
   avatar: {
     type: String
   },
@@ -112,6 +117,7 @@ userSchema.methods.generateToken = function() {
     shop: this.shop._id || this.shop,
     isOwner: this.isOwner,
     permissions: null, // default for owners
+    branch: this.branch?._id || this.branch || null, // branch assignment (null for owners/single-branch)
   };
 
   // If not owner and role is populated with permissions, embed them

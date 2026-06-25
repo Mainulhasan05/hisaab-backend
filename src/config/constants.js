@@ -143,6 +143,12 @@ module.exports = {
     CASH_REGISTER_CLOSE: { en: 'cash_register_close', bn: 'ক্যাশ রেজিস্টার বন্ধ' },
     CASH_REGISTER_REOPEN: { en: 'cash_register_reopen', bn: 'ক্যাশ রেজিস্টার পুনরায় খোলা' },
 
+    // Branch Management
+    BRANCH_CREATE: { en: 'branch_create', bn: 'নতুন শাখা যোগ' },
+    BRANCH_UPDATE: { en: 'branch_update', bn: 'শাখা আপডেট' },
+    BRANCH_DEACTIVATE: { en: 'branch_deactivate', bn: 'শাখা নিষ্ক্রিয়' },
+    MULTI_BRANCH_ENABLED: { en: 'multi_branch_enabled', bn: 'মাল্টি-ব্রাঞ্চ সক্রিয়' },
+
     // Shop Settings
     SHOP_UPDATE: { en: 'shop_update', bn: 'দোকান তথ্য সম্পাদনা' },
     SETTINGS_UPDATE: { en: 'settings_update', bn: 'সেটিংস আপডেট' }

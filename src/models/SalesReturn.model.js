@@ -64,6 +64,11 @@ const salesReturnSchema = new mongoose.Schema({
     ref: 'Shop',
     required: [true, 'দোকান নির্বাচন করুন']
   },
+  branch: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null
+  },
   returnNo: {
     type: String,
     required: [true, 'রিটার্ন নম্বর দিন']
@@ -134,7 +139,7 @@ const salesReturnSchema = new mongoose.Schema({
 salesReturnSchema.index({ shop: 1, returnNo: 1 }, { unique: true });
 salesReturnSchema.index({ shop: 1, sale: 1 });
 salesReturnSchema.index({ shop: 1, customer: 1 });
-salesReturnSchema.index({ shop: 1, createdAt: -1 });
+salesReturnSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Main listing with branch
 salesReturnSchema.index({ shop: 1, createdBy: 1 });
 
 // Virtual: Item count

@@ -41,6 +41,11 @@ const purchaseSchema = new mongoose.Schema({
     ref: 'Shop',
     required: [true, 'দোকান নির্বাচন করুন']
   },
+  branch: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null
+  },
   invoiceNo: {
     type: String,
     trim: true
@@ -108,7 +113,7 @@ const purchaseSchema = new mongoose.Schema({
 });
 
 // Indexes - Optimized for scalability
-purchaseSchema.index({ shop: 1, date: -1 }); // Date-based listing
+purchaseSchema.index({ shop: 1, branch: 1, date: -1 }); // Date-based listing with branch
 purchaseSchema.index({ shop: 1, supplier: 1, date: -1 }); // Supplier purchase history
 purchaseSchema.index({ shop: 1, invoiceNo: 1 }, { unique: true, sparse: true }); // Invoice lookup
 

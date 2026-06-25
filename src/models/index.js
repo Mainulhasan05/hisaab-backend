@@ -2,6 +2,8 @@
 module.exports = {
   Admin: require('./Admin.model'),
   Shop: require('./Shop.model'),
+  Branch: require('./Branch.model'),
+  BranchStock: require('./BranchStock.model'),
   User: require('./User.model'),
   Role: require('./Role.model'),
   Customer: require('./Customer.model'),
