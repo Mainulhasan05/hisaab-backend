@@ -18,6 +18,11 @@ class AuditService {
 
     const query = { shop: shopId };
 
+    // Branch scoping
+    if (options.branchId) {
+      query.branch = options.branchId;
+    }
+
     // Filter by user
     if (userId) {
       query.user = userId;

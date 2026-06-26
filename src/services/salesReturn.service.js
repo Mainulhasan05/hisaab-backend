@@ -7,13 +7,15 @@ const StockTransaction = require('../models/StockTransaction.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
+const { getBranchForCreate } = require('../utils/branchScope.util');
 
 class SalesReturnService {
   /**
    * Create a sales return
    */
-  async createReturn(shopId, userId, returnData) {
+  async createReturn(shopId, userId, returnData, req) {
     const { saleId, items, refundMethod, paymentMethod, reason, notes } = returnData;
+    const branchId = req ? getBranchForCreate(req) : null;
 
     // 1. Fetch the sale
     const sale = await Sale.findOne({ _id: saleId, shop: shopId });
@@ -116,6 +118,7 @@ class SalesReturnService {
     // 7. Create SalesReturn document
     const salesReturn = await SalesReturn.create({
       shop: shopId,
+      branch: branchId,
       returnNo,
       sale: sale._id,
       invoiceNo: sale.invoiceNo,
@@ -155,6 +158,7 @@ class SalesReturnService {
         // Create stock transaction
         await StockTransaction.create({
           shop: shopId,
+          branch: branchId,
           product: item.product,
           productName: item.productName,
           productCode: item.productCode,
@@ -186,6 +190,7 @@ class SalesReturnService {
       // Create refund payment
       await Payment.create({
         shop: shopId,
+        branch: branchId,
         sale: sale._id,
         customer: sale.customer,
         amount: totalRefundAmount,
@@ -225,6 +230,7 @@ class SalesReturnService {
     // 11. Audit log
     await AuditLog.create({
       shop: shopId,
+      branch: branchId,
       user: userId,
       action: AUDIT_ACTIONS.SALES_RETURN_CREATE.en,
       actionBn: AUDIT_ACTIONS.SALES_RETURN_CREATE.bn,
@@ -266,6 +272,11 @@ class SalesReturnService {
     } = options;
 
     const query = { shop: shopId };
+
+    // Branch scoping
+    if (options.branchId) {
+      query.branch = options.branchId;
+    }
 
     if (search) {
       query.$or = [

@@ -7,7 +7,8 @@ exports.createReturn = asyncHandler(async (req, res) => {
   const salesReturn = await salesReturnService.createReturn(
     req.shop._id,
     req.user._id,
-    req.body
+    req.body,
+    req
   );
   return ApiResponse.created(res, {
     data: salesReturn,
@@ -18,7 +19,9 @@ exports.createReturn = asyncHandler(async (req, res) => {
 
 // Get all returns (paginated)
 exports.getReturns = asyncHandler(async (req, res) => {
-  const result = await salesReturnService.getReturns(req.shop._id, req.query);
+  const options = { ...req.query };
+  if (req.branchId) options.branchId = req.branchId;
+  const result = await salesReturnService.getReturns(req.shop._id, options);
   return ApiResponse.paginated(res, {
     ...result,
     message: 'Returns retrieved successfully',

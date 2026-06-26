@@ -5,6 +5,7 @@ const { formatPhone } = require('../utils/phone.util');
 const { SMS_TYPES, SMS_STATUS } = require('../config/constants');
 const logger = require('../utils/logger.util');
 const { countSms } = require('../utils/smsCounter.util');
+const { getBranchForCreate } = require('../utils/branchScope.util');
 
 // MimSMS API Configuration
 const MIMSMS = {
@@ -44,7 +45,7 @@ class SMSService {
   /**
    * Send single SMS
    */
-  async sendSingle(shopId, userId, phone, message, customerId = null) {
+  async sendSingle(shopId, userId, phone, message, customerId = null, req = null) {
     // Calculate segment cost
     const smsInfo = countSms(message);
     const segmentCost = smsInfo.segments || 1;
@@ -70,6 +71,7 @@ class SMSService {
       // Log SMS
       const smsLog = await SMSLog.create({
         shop: shopId,
+        branch: req ? getBranchForCreate(req) : null,
         recipients: [{
           phone: formattedPhone,
           customer: customerId,
@@ -94,6 +96,7 @@ class SMSService {
       // Log failed attempt
       await SMSLog.create({
         shop: shopId,
+        branch: req ? getBranchForCreate(req) : null,
         recipients: [{ phone: formattedPhone, customer: customerId, status: SMS_STATUS.FAILED }],
         message,
         type: SMS_TYPES.SINGLE,

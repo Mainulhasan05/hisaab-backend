@@ -4,7 +4,9 @@ const asyncHandler = require('../utils/asyncHandler.util');
 
 // Get audit logs
 exports.getAuditLogs = asyncHandler(async (req, res) => {
-  const result = await auditService.getAuditLogs(req.shop._id, req.query);
+  const options = { ...req.query };
+  if (req.branchId) options.branchId = req.branchId;
+  const result = await auditService.getAuditLogs(req.shop._id, options);
   return ApiResponse.paginated(res, {
     ...result,
     message: 'Audit logs retrieved successfully',
