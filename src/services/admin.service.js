@@ -519,8 +519,12 @@ class AdminService {
       SMSQuota.findOne({ shop: shopId }),
     ]);
 
+    // Fetch branches for this shop
+    const branches = await Branch.find({ shop: shopId }).sort({ createdAt: -1 });
+
     return {
       ...shop.toObject(),
+      branches: branches.map(b => b.toObject()),
       statistics: {
         usersCount,
         customersCount,
@@ -1321,6 +1325,119 @@ class AdminService {
         stockRecords: stockOps.length
       }
     };
+  }
+
+  // Get all branches of a shop for admin
+  async getShopBranches(shopId) {
+    const shop = await Shop.findById(shopId);
+    if (!shop) {
+      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
+    }
+    return await Branch.find({ shop: shopId }).sort({ createdAt: -1 });
+  }
+
+  // Add a branch to a shop by admin
+  async addShopBranch(shopId, adminId, data) {
+    const shop = await Shop.findById(shopId);
+    if (!shop) {
+      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
+    }
+
+    // Check code uniqueness within shop
+    const normalizedCode = data.code.toUpperCase().trim();
+    const existing = await Branch.findOne({ shop: shopId, code: normalizedCode });
+    if (existing) {
+      throw new AppError('এই কোডের শাখা ইতোমধ্যে রয়েছে', 'Branch with this code already exists', 400);
+    }
+
+    const branch = await Branch.create({
+      shop: shopId,
+      name: data.name,
+      code: normalizedCode,
+      address: data.address || '',
+      phone: data.phone || '',
+      createdBy: adminId
+    });
+
+    // Log audit
+    await AuditLog.log({
+      shop: shopId,
+      branch: branch._id,
+      admin: adminId,
+      action: AUDIT_ACTIONS.BRANCH_CREATE.en,
+      description: `শাখা "${data.name}" (কোড: ${normalizedCode}) অ্যাডমিন কর্তৃক তৈরি করা হয়েছে`,
+      entity: { type: 'branch', id: branch._id, name: branch.name }
+    });
+
+    return branch;
+  }
+
+  // Update a shop's branch by admin
+  async updateShopBranch(shopId, branchId, adminId, data) {
+    const shop = await Shop.findById(shopId);
+    if (!shop) {
+      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
+    }
+
+    const branch = await Branch.findOne({ _id: branchId, shop: shopId });
+    if (!branch) {
+      throw new AppError('শাখা পাওয়া যায়নি', 'Branch not found', 404);
+    }
+
+    if (data.name !== undefined) branch.name = data.name;
+    if (data.code !== undefined) {
+      const normalizedCode = data.code.toUpperCase().trim();
+      const existing = await Branch.findOne({ shop: shopId, code: normalizedCode, _id: { $ne: branchId } });
+      if (existing) {
+        throw new AppError('এই কোডের শাখা ইতোমধ্যে রয়েছে', 'Branch with this code already exists', 400);
+      }
+      branch.code = normalizedCode;
+    }
+    if (data.address !== undefined) branch.address = data.address;
+    if (data.phone !== undefined) branch.phone = data.phone;
+    if (typeof data.isActive === 'boolean') branch.isActive = data.isActive;
+
+    await branch.save();
+
+    // Log audit
+    await AuditLog.log({
+      shop: shopId,
+      branch: branch._id,
+      admin: adminId,
+      action: AUDIT_ACTIONS.BRANCH_UPDATE.en,
+      description: `শাখা "${branch.name}" অ্যাডমিন কর্তৃক আপডেট করা হয়েছে`,
+      entity: { type: 'branch', id: branch._id, name: branch.name }
+    });
+
+    return branch;
+  }
+
+  // Delete/Deactivate a shop's branch by admin
+  async deleteShopBranch(shopId, branchId, adminId) {
+    const shop = await Shop.findById(shopId);
+    if (!shop) {
+      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
+    }
+
+    const branch = await Branch.findOne({ _id: branchId, shop: shopId });
+    if (!branch) {
+      throw new AppError('শাখা পাওয়া যায়নি', 'Branch not found', 404);
+    }
+
+    branch.isActive = false;
+    await branch.save();
+
+    // Log audit
+    await AuditLog.log({
+      shop: shopId,
+      branch: branch._id,
+      admin: adminId,
+      action: AUDIT_ACTIONS.BRANCH_DEACTIVATE.en,
+      description: `শাখা "${branch.name}" অ্যাডমিন কর্তৃক নিষ্ক্রিয় করা হয়েছে`,
+      entity: { type: 'branch', id: branch._id, name: branch.name }
+    });
+
+    return branch;
   }
 }
 

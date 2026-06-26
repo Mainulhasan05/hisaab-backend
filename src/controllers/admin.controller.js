@@ -351,3 +351,43 @@ exports.enableMultiBranch = asyncHandler(async (req, res) => {
     messageBn: 'মাল্টি-ব্রাঞ্চ সফলভাবে সক্রিয় হয়েছে',
   });
 });
+
+// Get shop branches
+exports.getShopBranches = asyncHandler(async (req, res) => {
+  const branches = await adminService.getShopBranches(req.params.id);
+  return ApiResponse.success(res, {
+    data: branches,
+    message: 'Shop branches retrieved successfully',
+    messageBn: 'দোকানের শাখাসমূহ সফলভাবে লোড হয়েছে',
+  });
+});
+
+// Add shop branch
+exports.addShopBranch = asyncHandler(async (req, res) => {
+  const branch = await adminService.addShopBranch(req.params.id, req.admin._id, req.body);
+  return ApiResponse.created(res, {
+    data: branch,
+    message: 'Shop branch created successfully',
+    messageBn: 'দোকানের শাখা সফলভাবে তৈরি হয়েছে',
+  });
+});
+
+// Update shop branch
+exports.updateShopBranch = asyncHandler(async (req, res) => {
+  const branch = await adminService.updateShopBranch(req.params.id, req.params.branchId, req.admin._id, req.body);
+  return ApiResponse.success(res, {
+    data: branch,
+    message: 'Shop branch updated successfully',
+    messageBn: 'দোকানের শাখা সফলভাবে আপডেট হয়েছে',
+  });
+});
+
+// Delete/Deactivate shop branch
+exports.deleteShopBranch = asyncHandler(async (req, res) => {
+  const branch = await adminService.deleteShopBranch(req.params.id, req.params.branchId, req.admin._id);
+  return ApiResponse.success(res, {
+    data: branch,
+    message: 'Shop branch deactivated successfully',
+    messageBn: 'দোকানের শাখা সফলভাবে নিষ্ক্রিয় করা হয়েছে',
+  });
+});

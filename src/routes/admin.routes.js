@@ -25,6 +25,10 @@ router.patch('/shops/:id/subscription', adminController.updateShopSubscription);
 router.patch('/shops/:id/settings', adminController.updateShopSettings);
 router.post('/shops/:id/restrict', adminController.restrictShop);
 router.post('/shops/:id/enable-multi-branch', adminController.enableMultiBranch);
+router.get('/shops/:id/branches', adminController.getShopBranches);
+router.post('/shops/:id/branches', adminController.addShopBranch);
+router.patch('/shops/:id/branches/:branchId', adminController.updateShopBranch);
+router.delete('/shops/:id/branches/:branchId', adminController.deleteShopBranch);
 
 // Users (all shops) — list + impersonation
 router.get('/users', adminController.getAllUsers);
