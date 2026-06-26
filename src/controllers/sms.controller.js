@@ -32,13 +32,13 @@ exports.sendSMS = asyncHandler(async (req, res) => {
 
   switch (type) {
     case 'single':
-      result = await smsService.sendSingleSMS(req.shop._id, req.user._id, req.body);
+      result = await smsService.sendSingleSMS(req.shop._id, req.user._id, req.body, req);
       break;
     case 'bulk':
-      result = await smsService.sendBulkSMS(req.shop._id, req.user._id, req.body);
+      result = await smsService.sendBulkSMS(req.shop._id, req.user._id, req.body, req);
       break;
     case 'dynamic':
-      result = await smsService.sendDynamicSMS(req.shop._id, req.user._id, req.body.recipients);
+      result = await smsService.sendDynamicSMS(req.shop._id, req.user._id, req.body.recipients, req);
       break;
     default:
       return ApiResponse.badRequest(res, {
@@ -65,7 +65,7 @@ exports.sendDueReminder = asyncHandler(async (req, res) => {
     });
   }
 
-  const result = await smsService.sendDueReminder(req.shop._id, req.user._id, customerIds);
+  const result = await smsService.sendDueReminder(req.shop._id, req.user._id, customerIds, req);
   return ApiResponse.success(res, {
     data: result,
     message: 'Due reminders sent successfully',
@@ -75,7 +75,7 @@ exports.sendDueReminder = asyncHandler(async (req, res) => {
 
 // Get SMS history
 exports.getHistory = asyncHandler(async (req, res) => {
-  const result = await smsService.getSMSHistory(req.shop._id, req.query);
+  const result = await smsService.getSMSHistory(req.shop._id, req.query, req);
   return ApiResponse.paginated(res, {
     ...result,
     message: 'SMS history retrieved successfully',

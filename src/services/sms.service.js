@@ -5,7 +5,7 @@ const { formatPhone } = require('../utils/phone.util');
 const { SMS_TYPES, SMS_STATUS } = require('../config/constants');
 const logger = require('../utils/logger.util');
 const { countSms } = require('../utils/smsCounter.util');
-const { getBranchForCreate } = require('../utils/branchScope.util');
+const { getBranchForCreate, scopeByBranch } = require('../utils/branchScope.util');
 
 // MimSMS API Configuration
 const MIMSMS = {
@@ -113,7 +113,7 @@ class SMSService {
   /**
    * Send bulk SMS (same message to multiple recipients)
    */
-  async sendBulk(shopId, userId, recipients, message) {
+  async sendBulk(shopId, userId, recipients, message, req = null) {
     const count = recipients.length;
 
     // Calculate segment-aware cost: segments per message × recipient count
@@ -147,6 +147,7 @@ class SMSService {
       // Log SMS
       const smsLog = await SMSLog.create({
         shop: shopId,
+        branch: req ? getBranchForCreate(req) : null,
         recipients: formattedRecipients.map(r => ({
           phone: r.phone,
           customer: r.customerId,
@@ -171,6 +172,7 @@ class SMSService {
     } catch (error) {
       await SMSLog.create({
         shop: shopId,
+        branch: req ? getBranchForCreate(req) : null,
         recipients: formattedRecipients.map(r => ({
           phone: r.phone,
           customer: r.customerId,
@@ -192,7 +194,7 @@ class SMSService {
   /**
    * Send dynamic SMS (personalized messages)
    */
-  async sendDynamic(shopId, userId, recipients) {
+  async sendDynamic(shopId, userId, recipients, req = null) {
     const count = recipients.length;
 
     // Calculate total segment cost across all personalized messages
@@ -225,6 +227,7 @@ class SMSService {
       // Log SMS
       const smsLog = await SMSLog.create({
         shop: shopId,
+        branch: req ? getBranchForCreate(req) : null,
         recipients: recipients.map(r => ({
           phone: formatPhone(r.phone),
           customer: r.customerId,
@@ -250,6 +253,7 @@ class SMSService {
     } catch (error) {
       await SMSLog.create({
         shop: shopId,
+        branch: req ? getBranchForCreate(req) : null,
         recipients: recipients.map(r => ({
           phone: formatPhone(r.phone),
           customer: r.customerId,
@@ -313,39 +317,45 @@ class SMSService {
   /**
    * Send single SMS (wrapper for controller)
    */
-  async sendSingleSMS(shopId, userId, data) {
+  async sendSingleSMS(shopId, userId, data, req = null) {
     const { phone, message, customerId } = data;
-    return this.sendSingle(shopId, userId, phone, message, customerId);
+    return this.sendSingle(shopId, userId, phone, message, customerId, req);
   }
 
   /**
    * Send bulk SMS (wrapper for controller)
    */
-  async sendBulkSMS(shopId, userId, data) {
+  async sendBulkSMS(shopId, userId, data, req = null) {
     const { recipients, message } = data;
-    return this.sendBulk(shopId, userId, recipients, message);
+    return this.sendBulk(shopId, userId, recipients, message, req);
   }
 
   /**
    * Send dynamic SMS (wrapper for controller)
    */
-  async sendDynamicSMS(shopId, userId, recipients) {
-    return this.sendDynamic(shopId, userId, recipients);
+  async sendDynamicSMS(shopId, userId, recipients, req = null) {
+    return this.sendDynamic(shopId, userId, recipients, req);
   }
 
   /**
    * Send due reminder SMS to customers
    */
-  async sendDueReminder(shopId, userId, customerIds) {
+  async sendDueReminder(shopId, userId, customerIds, req = null) {
     const Customer = require('../models/Customer.model');
     const Shop = require('../models/Shop.model');
 
     const shop = await Shop.findById(shopId);
-    const customers = await Customer.find({
-      _id: { $in: customerIds },
-      shop: shopId,
-      totalDue: { $gt: 0 },
-    });
+    const customers = await Customer.find(
+      req ? scopeByBranch(req, {
+        _id: { $in: customerIds },
+        shop: shopId,
+        totalDue: { $gt: 0 },
+      }) : {
+        _id: { $in: customerIds },
+        shop: shopId,
+        totalDue: { $gt: 0 },
+      }
+    );
 
     if (customers.length === 0) {
       return { success: true, message: 'No customers with due found', sentCount: 0 };
@@ -359,23 +369,24 @@ class SMSService {
       message: `প্রিয় ${customer.name},\nআপনার বকেয়া: ৳${customer.totalDue}\n${shop.name} থেকে অনুরোধ করা হচ্ছে যত দ্রুত সম্ভব বকেয়া পরিশোধ করুন।\nধন্যবাদ।`,
     }));
 
-    return this.sendDynamic(shopId, userId, recipients);
+    return this.sendDynamic(shopId, userId, recipients, req);
   }
 
   /**
    * Get SMS history for shop
    */
-  async getSMSHistory(shopId, options = {}) {
+  async getSMSHistory(shopId, options = {}, req = null) {
     const { page = 1, limit = 20 } = options;
     const skip = (page - 1) * limit;
+    const filter = req ? scopeByBranch(req, { shop: shopId }) : { shop: shopId };
 
     const [history, total] = await Promise.all([
-      SMSLog.find({ shop: shopId })
+      SMSLog.find(filter)
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(parseInt(limit))
         .lean(),
-      SMSLog.countDocuments({ shop: shopId }),
+      SMSLog.countDocuments(filter),
     ]);
 
     return {

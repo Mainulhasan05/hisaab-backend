@@ -7,7 +7,7 @@ const Purchase = require('../models/Purchase.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
-const { getBranchForCreate } = require('../utils/branchScope.util');
+const { getBranchForCreate, scopeByBranch } = require('../utils/branchScope.util');
 
 class CashRegisterService {
   // Helper: get start and end of a date
@@ -209,11 +209,14 @@ class CashRegisterService {
   }
 
   // Update register (manual entries: other cash in/out)
-  async updateRegister(shopId, userId, data) {
+  async updateRegister(shopId, userId, data, req = null) {
     const { start, end } = this._dayRange();
+    const branchId = req ? getBranchForCreate(req) : null;
+    const branchQuery = branchId ? { branch: branchId } : {};
 
     const register = await CashRegister.findOne({
       shop: shopId,
+      ...branchQuery,
       date: { $gte: start, $lte: end },
     });
 
@@ -241,7 +244,7 @@ class CashRegisterService {
     if (data.notes != null) register.notes = data.notes;
 
     // Recalculate auto fields
-    const flows = await this._calculateCashFlows(shopId, start, end);
+    const flows = await this._calculateCashFlows(shopId, start, end, branchId);
     register.cashIn.sales = flows.sales;
     register.cashIn.dueCollections = flows.dueCollections;
     register.cashOut.expenses = flows.expenses;
@@ -270,11 +273,14 @@ class CashRegisterService {
   }
 
   // Close today's register
-  async closeRegister(shopId, userId, actualClosing, notes) {
+  async closeRegister(shopId, userId, actualClosing, notes, req = null) {
     const { start, end } = this._dayRange();
+    const branchId = req ? getBranchForCreate(req) : null;
+    const branchQuery = branchId ? { branch: branchId } : {};
 
     const register = await CashRegister.findOne({
       shop: shopId,
+      ...branchQuery,
       date: { $gte: start, $lte: end },
     });
 
@@ -295,7 +301,7 @@ class CashRegisterService {
     }
 
     // Final recalculation before closing
-    const flows = await this._calculateCashFlows(shopId, start, end);
+    const flows = await this._calculateCashFlows(shopId, start, end, branchId);
     register.cashIn.sales = flows.sales;
     register.cashIn.dueCollections = flows.dueCollections;
     register.cashOut.expenses = flows.expenses;
@@ -334,10 +340,14 @@ class CashRegisterService {
   }
 
   // Close a previous day's register by ID
-  async closePreviousRegister(shopId, userId, registerId, actualClosing, notes) {
+  async closePreviousRegister(shopId, userId, registerId, actualClosing, notes, req = null) {
+    const branchId = req ? getBranchForCreate(req) : null;
+    const branchQuery = branchId ? { branch: branchId } : {};
+
     const register = await CashRegister.findOne({
       _id: registerId,
       shop: shopId,
+      ...branchQuery,
     });
 
     if (!register) {
@@ -389,11 +399,14 @@ class CashRegisterService {
   }
 
   // Reopen a closed register (owner only)
-  async reopenRegister(shopId, userId, reason) {
+  async reopenRegister(shopId, userId, reason, req = null) {
     const { start, end } = this._dayRange();
+    const branchId = req ? getBranchForCreate(req) : null;
+    const branchQuery = branchId ? { branch: branchId } : {};
 
     const register = await CashRegister.findOne({
       shop: shopId,
+      ...branchQuery,
       date: { $gte: start, $lte: end },
     });
 
@@ -429,7 +442,7 @@ class CashRegisterService {
     register.closedBy = undefined;
 
     // Recalculate cash flows
-    const flows = await this._calculateCashFlows(shopId, start, end);
+    const flows = await this._calculateCashFlows(shopId, start, end, branchId);
     register.cashIn.sales = flows.sales;
     register.cashIn.dueCollections = flows.dueCollections;
     register.cashOut.expenses = flows.expenses;
@@ -459,10 +472,10 @@ class CashRegisterService {
   }
 
   // Get register history
-  async getHistory(shopId, options = {}) {
+  async getHistory(shopId, options = {}, req = null) {
     const { page = 1, limit = 10, startDate, endDate } = options;
 
-    const query = { shop: shopId };
+    const query = req ? scopeByBranch(req, { shop: shopId }) : { shop: shopId };
 
     if (startDate || endDate) {
       query.date = {};

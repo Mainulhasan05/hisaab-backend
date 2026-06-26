@@ -30,7 +30,8 @@ exports.updateDay = asyncHandler(async (req, res) => {
   const register = await cashRegisterService.updateRegister(
     req.shop._id,
     req.user._id,
-    req.body
+    req.body,
+    req
   );
   ApiResponse.success(res, {
     data: register,
@@ -51,7 +52,8 @@ exports.closeDay = asyncHandler(async (req, res) => {
     req.shop._id,
     req.user._id,
     parseFloat(actualClosing),
-    notes
+    notes,
+    req
   );
   ApiResponse.success(res, {
     data: register,
@@ -67,7 +69,7 @@ exports.getHistory = asyncHandler(async (req, res) => {
     limit,
     startDate,
     endDate,
-  });
+  }, req);
   ApiResponse.paginated(res, {
     data: result.data,
     page,
@@ -83,7 +85,8 @@ exports.reopenDay = asyncHandler(async (req, res) => {
   const register = await cashRegisterService.reopenRegister(
     req.shop._id,
     req.user._id,
-    reason
+    reason,
+    req
   );
   ApiResponse.success(res, {
     data: register,
@@ -108,7 +111,8 @@ exports.closePreviousDay = asyncHandler(async (req, res) => {
     req.user._id,
     id,
     parseFloat(actualClosing),
-    notes
+    notes,
+    req
   );
   ApiResponse.success(res, {
     data: register,

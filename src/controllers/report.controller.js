@@ -14,7 +14,7 @@ exports.getDashboard = asyncHandler(async (req, res) => {
 
 // Get sales report
 exports.getSalesReport = asyncHandler(async (req, res) => {
-  const report = await reportService.getSalesReport(req.shop._id, req.query);
+  const report = await reportService.getSalesReport(req.shop._id, req.query, req.branchId);
   return ApiResponse.success(res, {
     data: report,
     message: 'Sales report retrieved successfully',
@@ -24,7 +24,7 @@ exports.getSalesReport = asyncHandler(async (req, res) => {
 
 // Get product report
 exports.getProductReport = asyncHandler(async (req, res) => {
-  const report = await reportService.getProductReport(req.shop._id, req.query);
+  const report = await reportService.getProductReport(req.shop._id, req.query, req.branchId);
   return ApiResponse.success(res, {
     data: report,
     message: 'Product report retrieved successfully',
@@ -34,7 +34,7 @@ exports.getProductReport = asyncHandler(async (req, res) => {
 
 // Get customer report
 exports.getCustomerReport = asyncHandler(async (req, res) => {
-  const report = await reportService.getCustomerReport(req.shop._id, req.query);
+  const report = await reportService.getCustomerReport(req.shop._id, req.query, req.branchId);
   return ApiResponse.success(res, {
     data: report,
     message: 'Customer report retrieved successfully',
@@ -44,7 +44,7 @@ exports.getCustomerReport = asyncHandler(async (req, res) => {
 
 // Get Daily Business Summary
 exports.getDailySummary = asyncHandler(async (req, res) => {
-  const report = await reportService.getDailySummary(req.shop._id, req.query);
+  const report = await reportService.getDailySummary(req.shop._id, req.query, req.branchId);
   return ApiResponse.success(res, {
     data: report,
     message: 'Daily summary retrieved successfully',
@@ -54,7 +54,7 @@ exports.getDailySummary = asyncHandler(async (req, res) => {
 
 // Get Profit & Loss statement
 exports.getProfitLoss = asyncHandler(async (req, res) => {
-  const report = await reportService.getProfitLoss(req.shop._id, req.query);
+  const report = await reportService.getProfitLoss(req.shop._id, req.query, req.branchId);
   return ApiResponse.success(res, {
     data: report,
     message: 'Profit & Loss report retrieved successfully',
@@ -64,7 +64,7 @@ exports.getProfitLoss = asyncHandler(async (req, res) => {
 
 // Get Date-wise Summary (monthly table)
 exports.getDateWiseSummary = asyncHandler(async (req, res) => {
-  const report = await reportService.getDateWiseSummary(req.shop._id, req.query);
+  const report = await reportService.getDateWiseSummary(req.shop._id, req.query, req.branchId);
   return ApiResponse.success(res, {
     data: report,
     message: 'Date-wise summary retrieved successfully',
@@ -82,7 +82,7 @@ exports.getSalesByDate = asyncHandler(async (req, res) => {
       statusCode: 400,
     });
   }
-  const report = await reportService.getSalesByDate(req.shop._id, date);
+  const report = await reportService.getSalesByDate(req.shop._id, date, req.branchId);
   return ApiResponse.success(res, {
     data: report,
     message: 'Sales for date retrieved successfully',
@@ -92,7 +92,7 @@ exports.getSalesByDate = asyncHandler(async (req, res) => {
 
 // Get trending products
 exports.getTrendingProducts = asyncHandler(async (req, res) => {
-  const report = await reportService.getTrendingProducts(req.shop._id, req.query);
+  const report = await reportService.getTrendingProducts(req.shop._id, req.query, req.branchId);
   return ApiResponse.success(res, {
     data: report,
     message: 'Trending products retrieved successfully',
@@ -103,7 +103,7 @@ exports.getTrendingProducts = asyncHandler(async (req, res) => {
 // Export report
 exports.exportReport = asyncHandler(async (req, res) => {
   const { type, format } = req.params;
-  const report = await reportService.exportReport(req.shop._id, type, format, req.query);
+  const report = await reportService.exportReport(req.shop._id, type, format, req.query, req.branchId);
 
   // For now, return JSON data
   // In production, this would generate actual file downloads

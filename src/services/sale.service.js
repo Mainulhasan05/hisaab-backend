@@ -9,6 +9,8 @@ const { AppError } = require('../middleware/error.middleware');
 const cacheService = require('./cache.service');
 const { KEYS } = require('../config/cacheKeys');
 const { getBranchForCreate, getBranchCode } = require('../utils/branchScope.util');
+const BranchStock = require('../models/BranchStock.model');
+const mongoose = require('mongoose');
 
 // Bangladesh is UTC+6
 const BD_OFFSET_MS = 6 * 60 * 60 * 1000;
@@ -195,8 +197,37 @@ class SaleService {
     const products = await Product.find({ _id: { $in: productIds }, shop: shopId });
     const productMap = new Map(products.map(p => [p._id.toString(), p]));
 
+    const branchId = req ? getBranchForCreate(req) : null;
+    const isMultiBranchActive = branchId && req?.shop?.multiBranchEnabled;
+
+    if (isMultiBranchActive) {
+      const branchStocks = await BranchStock.find({
+        shop: shopId,
+        branch: branchId,
+        product: { $in: productIds }
+      }).lean();
+
+      const branchStockMap = {};
+      branchStocks.forEach(bs => {
+        const key = bs.variantId ? `${bs.product}_${bs.variantId}` : `${bs.product}`;
+        branchStockMap[key] = bs.stock;
+      });
+
+      products.forEach(p => {
+        if (p.hasVariants && p.variants) {
+          p.variants.forEach(v => {
+            v.stock = branchStockMap[`${p._id}_${v._id}`] ?? 0;
+          });
+          p.stock = p.variants.reduce((sum, v) => sum + v.stock, 0);
+        } else {
+          p.stock = branchStockMap[`${p._id}`] ?? 0;
+        }
+      });
+    }
+
     // Prepare bulk operations
     const bulkStockOps = [];
+    const branchStockOps = [];
     const stockTransactions = [];
 
     for (const item of items) {
@@ -234,13 +265,23 @@ class SaleService {
         // Track stock change in memory for validation of subsequent items of same product
         variant.stock -= item.quantity;
 
-        // Queue bulkWrite operation for variant stock
-        bulkStockOps.push({
-          updateOne: {
-            filter: { _id: product._id, 'variants._id': variant._id },
-            update: { $inc: { 'variants.$.stock': -item.quantity } },
-          },
-        });
+        if (isMultiBranchActive) {
+          branchStockOps.push({
+            updateOne: {
+              filter: { shop: shopId, branch: branchId, product: product._id, variantId: variant._id },
+              update: { $inc: { stock: -item.quantity } },
+              upsert: true,
+            },
+          });
+        } else {
+          // Queue bulkWrite operation for variant stock
+          bulkStockOps.push({
+            updateOne: {
+              filter: { _id: product._id, 'variants._id': variant._id },
+              update: { $inc: { 'variants.$.stock': -item.quantity } },
+            },
+          });
+        }
 
         // Queue stock transaction
         stockTransactions.push({
@@ -280,13 +321,23 @@ class SaleService {
         // Track stock change in memory for validation of subsequent items of same product
         product.stock -= item.quantity;
 
-        // Queue bulkWrite operation for product stock
-        bulkStockOps.push({
-          updateOne: {
-            filter: { _id: product._id },
-            update: { $inc: { stock: -item.quantity } },
-          },
-        });
+        if (isMultiBranchActive) {
+          branchStockOps.push({
+            updateOne: {
+              filter: { shop: shopId, branch: branchId, product: product._id, variantId: null },
+              update: { $inc: { stock: -item.quantity } },
+              upsert: true,
+            },
+          });
+        } else {
+          // Queue bulkWrite operation for product stock
+          bulkStockOps.push({
+            updateOne: {
+              filter: { _id: product._id },
+              update: { $inc: { stock: -item.quantity } },
+            },
+          });
+        }
 
         // Queue stock transaction
         stockTransactions.push({
@@ -332,8 +383,44 @@ class SaleService {
     }
 
     // --- BATCH: Execute all stock updates in one bulkWrite ---
-    if (bulkStockOps.length > 0) {
-      await Product.bulkWrite(bulkStockOps);
+    if (isMultiBranchActive) {
+      if (branchStockOps.length > 0) {
+        await BranchStock.bulkWrite(branchStockOps);
+      }
+
+      // Now sync the Product total stocks in the database
+      const productSyncOps = [];
+      for (const productId of productIds) {
+        const product = productMap.get(productId.toString());
+        if (product) {
+          if (product.hasVariants && product.variants) {
+            for (const variant of product.variants) {
+              const totalStock = await BranchStock.getTotalStock(shopId, productId, variant._id);
+              productSyncOps.push({
+                updateOne: {
+                  filter: { _id: productId, 'variants._id': variant._id },
+                  update: { $set: { 'variants.$.stock': totalStock } }
+                }
+              });
+            }
+          } else {
+            const totalStock = await BranchStock.getTotalStock(shopId, productId, null);
+            productSyncOps.push({
+              updateOne: {
+                filter: { _id: productId },
+                update: { $set: { stock: totalStock } }
+              }
+            });
+          }
+        }
+      }
+      if (productSyncOps.length > 0) {
+        await Product.bulkWrite(productSyncOps);
+      }
+    } else {
+      if (bulkStockOps.length > 0) {
+        await Product.bulkWrite(bulkStockOps);
+      }
     }
 
     // --- BATCH: Insert all stock transactions in one call ---
@@ -562,31 +649,46 @@ class SaleService {
     const cancelProducts = await Product.find({ _id: { $in: cancelProductIds } });
     const cancelProductMap = new Map(cancelProducts.map(p => [p._id.toString(), p]));
 
+    const branchId = sale.branch;
+    const isMultiBranchSale = branchId != null;
+
     const restoreOps = [];
+    const restoreBranchOps = [];
     const cancelStockTxns = [];
 
     for (const item of sale.items) {
       const product = cancelProductMap.get(item.product.toString());
       if (!product) continue;
 
-      if (item.variantId) {
-        restoreOps.push({
+      if (isMultiBranchSale) {
+        restoreBranchOps.push({
           updateOne: {
-            filter: { _id: product._id, 'variants._id': item.variantId },
-            update: { $inc: { 'variants.$.stock': item.quantity } },
+            filter: { shop: shopId, branch: branchId, product: product._id, variantId: item.variantId || null },
+            update: { $inc: { stock: item.quantity } },
+            upsert: true,
           },
         });
       } else {
-        restoreOps.push({
-          updateOne: {
-            filter: { _id: product._id },
-            update: { $inc: { stock: item.quantity } },
-          },
-        });
+        if (item.variantId) {
+          restoreOps.push({
+            updateOne: {
+              filter: { _id: product._id, 'variants._id': item.variantId },
+              update: { $inc: { 'variants.$.stock': item.quantity } },
+            },
+          });
+        } else {
+          restoreOps.push({
+            updateOne: {
+              filter: { _id: product._id },
+              update: { $inc: { stock: item.quantity } },
+            },
+          });
+        }
       }
 
       cancelStockTxns.push({
         shop: shopId,
+        branch: branchId || null,
         product: product._id,
         productName: product.name,
         productCode: product.code,
@@ -602,8 +704,44 @@ class SaleService {
       });
     }
 
-    if (restoreOps.length > 0) {
-      await Product.bulkWrite(restoreOps);
+    if (isMultiBranchSale) {
+      if (restoreBranchOps.length > 0) {
+        await BranchStock.bulkWrite(restoreBranchOps);
+      }
+
+      // Sync the Product total stock in the database
+      const productSyncOps = [];
+      for (const productId of cancelProductIds) {
+        const product = cancelProductMap.get(productId.toString());
+        if (product) {
+          if (product.hasVariants && product.variants) {
+            for (const variant of product.variants) {
+              const totalStock = await BranchStock.getTotalStock(shopId, productId, variant._id);
+              productSyncOps.push({
+                updateOne: {
+                  filter: { _id: productId, 'variants._id': variant._id },
+                  update: { $set: { 'variants.$.stock': totalStock } }
+                }
+              });
+            }
+          } else {
+            const totalStock = await BranchStock.getTotalStock(shopId, productId, null);
+            productSyncOps.push({
+              updateOne: {
+                filter: { _id: productId },
+                update: { $set: { stock: totalStock } }
+              }
+            });
+          }
+        }
+      }
+      if (productSyncOps.length > 0) {
+        await Product.bulkWrite(productSyncOps);
+      }
+    } else {
+      if (restoreOps.length > 0) {
+        await Product.bulkWrite(restoreOps);
+      }
     }
     if (cancelStockTxns.length > 0) {
       await StockTransaction.insertMany(cancelStockTxns);

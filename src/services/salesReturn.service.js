@@ -8,6 +8,8 @@ const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const { getBranchForCreate } = require('../utils/branchScope.util');
+const BranchStock = require('../models/BranchStock.model');
+const mongoose = require('mongoose');
 
 class SalesReturnService {
   /**
@@ -140,20 +142,41 @@ class SalesReturnService {
       const product = await Product.findById(item.product);
       if (product) {
         let previousStock, newStock;
+        const isMultiBranchActive = branchId && req?.shop?.multiBranchEnabled;
 
-        if (item.variantId && product.hasVariants) {
-          const variant = product.variants.id(item.variantId);
-          if (variant) {
-            previousStock = variant.stock;
-            variant.stock += item.quantity;
-            newStock = variant.stock;
+        if (isMultiBranchActive) {
+          const bsRecord = await BranchStock.getOrCreate(shopId, branchId, item.product, item.variantId || null);
+          previousStock = bsRecord.stock;
+          bsRecord.stock += item.quantity;
+          newStock = bsRecord.stock;
+          await bsRecord.save();
+
+          // Sync Product total stock
+          const totalStock = await BranchStock.getTotalStock(shopId, item.product, item.variantId || null);
+          if (item.variantId && product.hasVariants) {
+            const variant = product.variants.id(item.variantId);
+            if (variant) {
+              variant.stock = totalStock;
+            }
+          } else {
+            product.stock = totalStock;
           }
+          await product.save();
         } else {
-          previousStock = product.stock;
-          product.stock += item.quantity;
-          newStock = product.stock;
+          if (item.variantId && product.hasVariants) {
+            const variant = product.variants.id(item.variantId);
+            if (variant) {
+              previousStock = variant.stock;
+              variant.stock += item.quantity;
+              newStock = variant.stock;
+            }
+          } else {
+            previousStock = product.stock;
+            product.stock += item.quantity;
+            newStock = product.stock;
+          }
+          await product.save();
         }
-        await product.save();
 
         // Create stock transaction
         await StockTransaction.create({

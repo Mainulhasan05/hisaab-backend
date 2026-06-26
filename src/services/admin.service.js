@@ -1226,7 +1226,7 @@ class AdminService {
    * 3. Assigns all staff to the default branch
    * 4. Migrates product stock to BranchStock model
    */
-  async enableMultiBranch(shopId, adminId) {
+  async enableMultiBranch(shopId, adminId, branchName = null) {
     const shop = await Shop.findById(shopId);
     if (!shop) {
       throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
@@ -1239,7 +1239,7 @@ class AdminService {
     // 1. Create default branch
     const defaultBranch = await Branch.create({
       shop: shopId,
-      name: 'প্রধান শাখা',
+      name: branchName || 'প্রধান শাখা',
       code: 'MAIN',
       address: shop.address,
       phone: shop.phone,

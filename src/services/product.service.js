@@ -2,11 +2,14 @@ const Product = require('../models/Product.model');
 const Category = require('../models/Category.model');
 const StockTransaction = require('../models/StockTransaction.model');
 const AuditLog = require('../models/AuditLog.model');
+const BranchStock = require('../models/BranchStock.model');
 const { AppError } = require('../middleware/error.middleware');
+const mongoose = require('mongoose');
+const { getBranchForCreate } = require('../utils/branchScope.util');
 
 class ProductService {
   // Get all products with filtering, searching, pagination
-  async getProducts(shopId, options = {}) {
+  async getProducts(shopId, options = {}, req = null) {
     const {
       page,
       limit,
@@ -45,10 +48,46 @@ class ProductService {
     }
 
     // Filter low stock items (works for both non-variant and variant products)
-    const lowStockOr = (lowStock === 'true' || lowStock === true) ? [
-      { hasVariants: { $ne: true }, $expr: { $lt: ['$stock', '$minStock'] } },
-      { hasVariants: true, 'variants.stock': { $lt: 5 } },
-    ] : null;
+    let lowStockOr = null;
+    const branchId = req?.branchId;
+    if (lowStock === 'true' || lowStock === true) {
+      if (branchId && req?.shop?.multiBranchEnabled) {
+        const lowStockBranchRecords = await BranchStock.aggregate([
+          {
+            $match: {
+              shop: new mongoose.Types.ObjectId(shopId),
+              branch: new mongoose.Types.ObjectId(branchId)
+            }
+          },
+          {
+            $lookup: {
+              from: 'products',
+              localField: 'product',
+              foreignField: '_id',
+              as: 'productDetails'
+            }
+          },
+          { $unwind: '$productDetails' },
+          {
+            $match: {
+              $or: [
+                { variantId: null, $expr: { $lt: ['$stock', '$productDetails.minStock'] } },
+                { variantId: { $ne: null }, stock: { $lt: 5 } }
+              ]
+            }
+          },
+          { $project: { product: 1 } }
+        ]);
+
+        const lowStockProductIds = lowStockBranchRecords.map(r => r.product);
+        query._id = { $in: lowStockProductIds };
+      } else {
+        lowStockOr = [
+          { hasVariants: { $ne: true }, $expr: { $lt: ['$stock', '$minStock'] } },
+          { hasVariants: true, 'variants.stock': { $lt: 5 } },
+        ];
+      }
+    }
 
     // Combine search and lowStock filters — use $and when both are active to avoid $or overwrite
     if (searchOr && lowStockOr) {
@@ -72,6 +111,34 @@ class ProductService {
       Product.countDocuments(query),
     ]);
 
+    // Integrate BranchStock if in multi-branch mode and a specific branch is selected
+    if (branchId && req?.shop?.multiBranchEnabled) {
+      const productIds = products.map(p => p._id);
+      const branchStocks = await BranchStock.find({
+        shop: shopId,
+        branch: branchId,
+        product: { $in: productIds }
+      }).lean();
+
+      // Create a map for quick lookup
+      const stockMap = {};
+      branchStocks.forEach(bs => {
+        const key = bs.variantId ? `${bs.product}_${bs.variantId}` : `${bs.product}`;
+        stockMap[key] = bs.stock;
+      });
+
+      products.forEach(p => {
+        if (p.hasVariants && p.variants) {
+          p.variants.forEach(v => {
+            v.stock = stockMap[`${p._id}_${v._id}`] ?? 0;
+          });
+          p.stock = p.variants.reduce((sum, v) => sum + v.stock, 0);
+        } else {
+          p.stock = stockMap[`${p._id}`] ?? 0;
+        }
+      });
+    }
+
     return {
       data: products,
       pagination: {
@@ -84,7 +151,7 @@ class ProductService {
   }
 
   // Get single product by ID
-  async getProductById(shopId, productId) {
+  async getProductById(shopId, productId, req = null) {
     const product = await Product.findOne({ _id: productId, shop: shopId })
       .populate('category', 'name nameBn')
       .populate('createdBy', 'name phone');
@@ -93,11 +160,35 @@ class ProductService {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
     }
 
+    const branchId = req?.branchId;
+    if (branchId && req?.shop?.multiBranchEnabled) {
+      const branchStocks = await BranchStock.find({
+        shop: shopId,
+        branch: branchId,
+        product: productId
+      }).lean();
+
+      const stockMap = {};
+      branchStocks.forEach(bs => {
+        const key = bs.variantId ? bs.variantId.toString() : 'base';
+        stockMap[key] = bs.stock;
+      });
+
+      if (product.hasVariants && product.variants) {
+        product.variants.forEach(v => {
+          v.stock = stockMap[v._id.toString()] ?? 0;
+        });
+        product.stock = product.variants.reduce((sum, v) => sum + v.stock, 0);
+      } else {
+        product.stock = stockMap['base'] ?? 0;
+      }
+    }
+
     return product;
   }
 
   // Get product by barcode/code
-  async getProductByCode(shopId, code) {
+  async getProductByCode(shopId, code, req = null) {
     const product = await Product.findOne({
       shop: shopId,
       $or: [
@@ -109,6 +200,30 @@ class ProductService {
 
     if (!product) {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
+    }
+
+    const branchId = req?.branchId;
+    if (branchId && req?.shop?.multiBranchEnabled) {
+      const branchStocks = await BranchStock.find({
+        shop: shopId,
+        branch: branchId,
+        product: product._id
+      }).lean();
+
+      const stockMap = {};
+      branchStocks.forEach(bs => {
+        const key = bs.variantId ? bs.variantId.toString() : 'base';
+        stockMap[key] = bs.stock;
+      });
+
+      if (product.hasVariants && product.variants) {
+        product.variants.forEach(v => {
+          v.stock = stockMap[v._id.toString()] ?? 0;
+        });
+        product.stock = product.variants.reduce((sum, v) => sum + v.stock, 0);
+      } else {
+        product.stock = stockMap['base'] ?? 0;
+      }
     }
 
     return product;
@@ -165,7 +280,7 @@ class ProductService {
   }
 
   // Update product
-  async updateProduct(shopId, userId, productId, updateData) {
+  async updateProduct(shopId, userId, productId, updateData, req = null) {
     const product = await Product.findOne({ _id: productId, shop: shopId });
     if (!product) {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
@@ -232,7 +347,7 @@ class ProductService {
         quantity: parseInt(stock) || 0,
         type: 'set',
         notes: 'পণ্য সম্পাদনা থেকে স্টক আপডেট',
-      });
+      }, req);
     }
 
     return product;
@@ -300,7 +415,7 @@ class ProductService {
   }
 
   // Update stock
-  async updateStock(shopId, userId, productId, stockData) {
+  async updateStock(shopId, userId, productId, stockData, req = null) {
     const { quantity, type, variantId, notes } = stockData;
 
     const product = await Product.findOne({ _id: productId, shop: shopId });
@@ -309,40 +424,66 @@ class ProductService {
     }
 
     let previousStock, newStock;
+    const branchId = req ? getBranchForCreate(req) : null;
 
-    if (variantId) {
-      // Update variant stock
-      const variant = product.variants.id(variantId);
-      if (!variant) {
-        throw new AppError('ভেরিয়েন্ট পাওয়া যায়নি', 'Variant not found', 404);
-      }
-      previousStock = variant.stock;
+    if (branchId && req?.shop?.multiBranchEnabled) {
+      const bsRecord = await BranchStock.getOrCreate(shopId, branchId, productId, variantId || null);
+      previousStock = bsRecord.stock;
       if (type === 'set') {
-        variant.stock = quantity;
+        bsRecord.stock = quantity;
       } else if (type === 'subtract') {
-        variant.stock = variant.stock - quantity;
+        bsRecord.stock = Math.max(0, bsRecord.stock - quantity);
       } else {
-        variant.stock = variant.stock + quantity;
+        bsRecord.stock = bsRecord.stock + quantity;
       }
-      newStock = variant.stock;
+      newStock = bsRecord.stock;
+      await bsRecord.save();
+
+      const totalStock = await BranchStock.getTotalStock(shopId, productId, variantId || null);
+      if (variantId) {
+        const variant = product.variants.id(variantId);
+        if (variant) {
+          variant.stock = totalStock;
+        }
+      } else {
+        product.stock = totalStock;
+      }
+      await product.save();
     } else {
-      // Update main product stock
-      previousStock = product.stock;
-      if (type === 'set') {
-        product.stock = quantity;
-      } else if (type === 'subtract') {
-        product.stock = product.stock - quantity;
+      if (variantId) {
+        // Update variant stock
+        const variant = product.variants.id(variantId);
+        if (!variant) {
+          throw new AppError('ভেরিয়েন্ট পাওয়া যায়নি', 'Variant not found', 404);
+        }
+        previousStock = variant.stock;
+        if (type === 'set') {
+          variant.stock = quantity;
+        } else if (type === 'subtract') {
+          variant.stock = variant.stock - quantity;
+        } else {
+          variant.stock = variant.stock + quantity;
+        }
+        newStock = variant.stock;
       } else {
-        product.stock = product.stock + quantity;
+        // Update main product stock
+        previousStock = product.stock;
+        if (type === 'set') {
+          product.stock = quantity;
+        } else if (type === 'subtract') {
+          product.stock = product.stock - quantity;
+        } else {
+          product.stock = product.stock + quantity;
+        }
+        newStock = product.stock;
       }
-      newStock = product.stock;
+      await product.save();
     }
-
-    await product.save();
 
     // Create stock transaction
     await StockTransaction.create({
       shop: shopId,
+      branch: branchId,
       product: productId,
       productName: product.name,
       productCode: product.code,
@@ -364,8 +505,8 @@ class ProductService {
       user: userId,
       action: 'stock_update',
       actionBn: 'স্টক আপডেট',
-      description: `Updated stock for ${product.name}: ${previousStock} → ${newStock}`,
-      descriptionBn: `${product.name} এর স্টক আপডেট: ${previousStock} → ${newStock}`,
+      description: `Updated stock for ${product.name}: ${previousStock} → ${newStock}${branchId ? ` (Branch: ${branchId})` : ''}`,
+      descriptionBn: `${product.name} এর স্টক আপডেট: ${previousStock} → ${newStock}${branchId ? ` (শাখা: ${branchId})` : ''}`,
       entity: {
         type: 'product',
         id: product._id,
@@ -377,11 +518,63 @@ class ProductService {
       },
     });
 
+    if (branchId && req?.shop?.multiBranchEnabled) {
+      if (product.hasVariants && product.variants) {
+        const allBranchStocks = await BranchStock.find({ shop: shopId, branch: branchId, product: productId }).lean();
+        const stockMap = {};
+        allBranchStocks.forEach(bs => { stockMap[bs.variantId ? bs.variantId.toString() : 'base'] = bs.stock; });
+        product.variants.forEach(v => { v.stock = stockMap[v._id.toString()] ?? 0; });
+        product.stock = product.variants.reduce((sum, v) => sum + v.stock, 0);
+      } else {
+        product.stock = newStock;
+      }
+    }
+
     return product;
   }
 
   // Get low stock products
-  async getLowStockProducts(shopId, limit = 10) {
+  async getLowStockProducts(shopId, limit = 10, req = null) {
+    const branchId = req?.branchId;
+    if (branchId && req?.shop?.multiBranchEnabled) {
+      const lowStockRecords = await BranchStock.aggregate([
+        {
+          $match: {
+            shop: new mongoose.Types.ObjectId(shopId),
+            branch: new mongoose.Types.ObjectId(branchId)
+          }
+        },
+        {
+          $lookup: {
+            from: 'products',
+            localField: 'product',
+            foreignField: '_id',
+            as: 'productDetails'
+          }
+        },
+        { $unwind: '$productDetails' },
+        {
+          $match: {
+            'productDetails.isActive': true,
+            $expr: { $lt: ['$stock', '$productDetails.minStock'] }
+          }
+        },
+        {
+          $project: {
+            _id: '$productDetails._id',
+            name: '$productDetails.name',
+            code: '$productDetails.code',
+            stock: '$stock',
+            minStock: '$productDetails.minStock',
+            sellingPrice: '$productDetails.sellingPrice'
+          }
+        },
+        { $sort: { stock: 1 } },
+        { $limit: limit }
+      ]);
+      return lowStockRecords;
+    }
+
     const products = await Product.find({
       shop: shopId,
       isActive: true,
@@ -395,10 +588,11 @@ class ProductService {
   }
 
   // Get stock transactions
-  async getStockTransactions(shopId, productId, options = {}) {
+  async getStockTransactions(shopId, productId, options = {}, req = null) {
     const { page = 1, limit = 20 } = options;
 
-    const query = { shop: shopId };
+    const { scopeByBranch } = require('../utils/branchScope.util');
+    const query = req ? scopeByBranch(req, { shop: shopId }) : { shop: shopId };
     if (productId) {
       query.product = productId;
     }
@@ -428,7 +622,7 @@ class ProductService {
   }
 
   // Bulk update products
-  async bulkUpdateStock(shopId, userId, updates) {
+  async bulkUpdateStock(shopId, userId, updates, req = null) {
     const results = [];
 
     for (const update of updates) {
@@ -438,7 +632,7 @@ class ProductService {
           type: update.type || 'add',
           variantId: update.variantId,
           notes: update.notes,
-        });
+        }, req);
         results.push({ productId: update.productId, success: true });
       } catch (error) {
         results.push({ productId: update.productId, success: false, error: error.message });

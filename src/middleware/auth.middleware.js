@@ -311,6 +311,8 @@ const softProtect = asyncHandler(async (req, res, next) => {
     req.user = null;
     req.shop = null;
     req.isAdmin = false;
+    req.branch = null;
+    req.branchId = null;
     return next();
   }
 
@@ -333,6 +335,29 @@ const softProtect = asyncHandler(async (req, res, next) => {
         req.shop = user.shop;
         req.user.isOwner = decoded.isOwner === true;
         req.user.permissions = decoded.permissions || null;
+
+        // ── Branch Context Resolution (same as protect) ──
+        req.branch = null;
+        req.branchId = null;
+
+        if (user.shop.multiBranchEnabled) {
+          if (decoded.isOwner) {
+            const activeBranchId = req.headers['x-active-branch'] || req.cookies?.activeBranch;
+            if (activeBranchId && activeBranchId !== 'all') {
+              const branch = await Branch.validateBranchOwnership(activeBranchId, user.shop._id);
+              if (branch) {
+                req.branch = branch;
+                req.branchId = branch._id;
+              }
+            }
+          } else if (decoded.branch) {
+            const branch = await Branch.validateBranchOwnership(decoded.branch, user.shop._id);
+            if (branch) {
+              req.branch = branch;
+              req.branchId = branch._id;
+            }
+          }
+        }
       }
     }
     next();
@@ -341,6 +366,8 @@ const softProtect = asyncHandler(async (req, res, next) => {
     req.user = null;
     req.shop = null;
     req.isAdmin = false;
+    req.branch = null;
+    req.branchId = null;
     next();
   }
 });

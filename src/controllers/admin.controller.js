@@ -344,7 +344,7 @@ exports.updateShopSettings = asyncHandler(async (req, res) => {
 
 // Enable multi-branch for a shop
 exports.enableMultiBranch = asyncHandler(async (req, res) => {
-  const result = await adminService.enableMultiBranch(req.params.id, req.admin._id);
+  const result = await adminService.enableMultiBranch(req.params.id, req.admin._id, req.body.branchName);
   return ApiResponse.success(res, {
     data: result,
     message: 'Multi-branch enabled successfully',

@@ -4,7 +4,7 @@ const asyncHandler = require('../utils/asyncHandler.util');
 
 // Get all products
 exports.getProducts = asyncHandler(async (req, res) => {
-  const result = await productService.getProducts(req.shop._id, req.query);
+  const result = await productService.getProducts(req.shop._id, req.query, req);
   return ApiResponse.paginated(res, {
     ...result,
     message: 'Products retrieved successfully',
@@ -14,7 +14,7 @@ exports.getProducts = asyncHandler(async (req, res) => {
 
 // Get single product
 exports.getProduct = asyncHandler(async (req, res) => {
-  const product = await productService.getProductById(req.shop._id, req.params.id);
+  const product = await productService.getProductById(req.shop._id, req.params.id, req);
   return ApiResponse.success(res, {
     data: product,
     message: 'Product retrieved successfully',
@@ -24,7 +24,7 @@ exports.getProduct = asyncHandler(async (req, res) => {
 
 // Get product by barcode/code
 exports.getProductByCode = asyncHandler(async (req, res) => {
-  const product = await productService.getProductByCode(req.shop._id, req.params.code);
+  const product = await productService.getProductByCode(req.shop._id, req.params.code, req);
   return ApiResponse.success(res, {
     data: product,
     message: 'Product retrieved successfully',
@@ -45,7 +45,7 @@ exports.createProduct = asyncHandler(async (req, res) => {
 
 // Update product
 exports.updateProduct = asyncHandler(async (req, res) => {
-  const product = await productService.updateProduct(req.shop._id, req.user._id, req.params.id, req.body);
+  const product = await productService.updateProduct(req.shop._id, req.user._id, req.params.id, req.body, req);
   return ApiResponse.success(res, {
     data: product,
     message: 'Product updated successfully',
@@ -64,7 +64,7 @@ exports.deleteProduct = asyncHandler(async (req, res) => {
 
 // Update stock
 exports.updateStock = asyncHandler(async (req, res) => {
-  const product = await productService.updateStock(req.shop._id, req.user._id, req.params.id, req.body);
+  const product = await productService.updateStock(req.shop._id, req.user._id, req.params.id, req.body, req);
   return ApiResponse.success(res, {
     data: product,
     message: 'Stock updated successfully',
@@ -75,7 +75,7 @@ exports.updateStock = asyncHandler(async (req, res) => {
 // Get low stock products
 exports.getLowStock = asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
-  const products = await productService.getLowStockProducts(req.shop._id, limit);
+  const products = await productService.getLowStockProducts(req.shop._id, limit, req);
   return ApiResponse.success(res, {
     data: products,
     message: 'Low stock products retrieved successfully',
@@ -85,7 +85,7 @@ exports.getLowStock = asyncHandler(async (req, res) => {
 
 // Get stock transactions
 exports.getStockTransactions = asyncHandler(async (req, res) => {
-  const result = await productService.getStockTransactions(req.shop._id, req.params.id, req.query);
+  const result = await productService.getStockTransactions(req.shop._id, req.params.id, req.query, req);
   return ApiResponse.paginated(res, {
     ...result,
     message: 'Stock transactions retrieved successfully',
@@ -95,7 +95,7 @@ exports.getStockTransactions = asyncHandler(async (req, res) => {
 
 // Bulk update stock
 exports.bulkUpdateStock = asyncHandler(async (req, res) => {
-  const results = await productService.bulkUpdateStock(req.shop._id, req.user._id, req.body.updates);
+  const results = await productService.bulkUpdateStock(req.shop._id, req.user._id, req.body.updates, req);
   return ApiResponse.success(res, {
     data: results,
     message: 'Bulk stock update completed',

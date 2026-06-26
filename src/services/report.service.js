@@ -6,6 +6,7 @@ const Expense = require('../models/Expense.model');
 const SalesReturn = require('../models/SalesReturn.model');
 const Purchase = require('../models/Purchase.model');
 const CashRegister = require('../models/CashRegister.model');
+const BranchStock = require('../models/BranchStock.model');
 const mongoose = require('mongoose');
 const cacheService = require('./cache.service');
 const { KEYS, getTTL } = require('../config/cacheKeys');
@@ -195,11 +196,11 @@ class ReportService {
 
 
   // Get sales report — uses $facet to combine period breakdown, summary, and profit in a single pipeline
-  async getSalesReport(shopId, options = {}) {
+  async getSalesReport(shopId, options = {}, branchId = null) {
     const { startDate, endDate, groupBy = 'day' } = options;
 
     const matchStage = {
-      shop: new mongoose.Types.ObjectId(shopId),
+      ...this._baseMatch(shopId, branchId),
       status: { $ne: 'cancelled' },
     };
 
@@ -272,12 +273,12 @@ class ReportService {
   }
 
   // Get product report
-  async getProductReport(shopId, options = {}) {
+  async getProductReport(shopId, options = {}, branchId = null) {
     const { startDate, endDate } = options;
 
     // Top selling products
     const matchStage = {
-      shop: new mongoose.Types.ObjectId(shopId),
+      ...this._baseMatch(shopId, branchId),
       status: { $ne: 'cancelled' },
     };
 
@@ -304,45 +305,154 @@ class ReportService {
     ]);
 
     // Low stock products
-    const lowStock = await Product.find({
-      shop: shopId,
-      isActive: true,
-      $expr: { $lt: ['$stock', '$minStock'] },
-    })
-      .select('name code stock minStock sellingPrice')
-      .sort({ stock: 1 })
-      .limit(20)
-      .lean();
+    let lowStock;
+    if (branchId) {
+      lowStock = await BranchStock.aggregate([
+        {
+          $match: {
+            shop: new mongoose.Types.ObjectId(shopId),
+            branch: new mongoose.Types.ObjectId(branchId),
+          }
+        },
+        {
+          $lookup: {
+            from: 'products',
+            localField: 'product',
+            foreignField: '_id',
+            as: 'productDetails'
+          }
+        },
+        { $unwind: '$productDetails' },
+        {
+          $match: {
+            'productDetails.isActive': true,
+            $expr: { $lt: ['$stock', '$productDetails.minStock'] }
+          }
+        },
+        {
+          $project: {
+            name: '$productDetails.name',
+            code: '$productDetails.code',
+            stock: '$stock',
+            minStock: '$productDetails.minStock',
+            sellingPrice: '$productDetails.sellingPrice'
+          }
+        },
+        { $sort: { stock: 1 } },
+        { $limit: 20 }
+      ]);
+    } else {
+      lowStock = await Product.find({
+        shop: shopId,
+        isActive: true,
+        $expr: { $lt: ['$stock', '$minStock'] },
+      })
+        .select('name code stock minStock sellingPrice')
+        .sort({ stock: 1 })
+        .limit(20)
+        .lean();
+    }
 
     // No stock products
-    const noStock = await Product.find({
-      shop: shopId,
-      isActive: true,
-      stock: { $lte: 0 },
-    })
-      .select('name code stock minStock sellingPrice')
-      .limit(20)
-      .lean();
+    let noStock;
+    if (branchId) {
+      noStock = await BranchStock.aggregate([
+        {
+          $match: {
+            shop: new mongoose.Types.ObjectId(shopId),
+            branch: new mongoose.Types.ObjectId(branchId),
+            stock: { $lte: 0 }
+          }
+        },
+        {
+          $lookup: {
+            from: 'products',
+            localField: 'product',
+            foreignField: '_id',
+            as: 'productDetails'
+          }
+        },
+        { $unwind: '$productDetails' },
+        {
+          $match: {
+            'productDetails.isActive': true
+          }
+        },
+        {
+          $project: {
+            name: '$productDetails.name',
+            code: '$productDetails.code',
+            stock: '$stock',
+            minStock: '$productDetails.minStock',
+            sellingPrice: '$productDetails.sellingPrice'
+          }
+        },
+        { $limit: 20 }
+      ]);
+    } else {
+      noStock = await Product.find({
+        shop: shopId,
+        isActive: true,
+        stock: { $lte: 0 },
+      })
+        .select('name code stock minStock sellingPrice')
+        .limit(20)
+        .lean();
+    }
 
     // Product summary
-    const summaryResult = await Product.aggregate([
-      {
-        $match: {
-          shop: new mongoose.Types.ObjectId(shopId),
-          isActive: true,
+    let summary;
+    if (branchId) {
+      const summaryResult = await BranchStock.aggregate([
+        {
+          $match: {
+            shop: new mongoose.Types.ObjectId(shopId),
+            branch: new mongoose.Types.ObjectId(branchId),
+          }
         },
-      },
-      {
-        $group: {
-          _id: null,
-          totalProducts: { $sum: 1 },
-          totalStock: { $sum: '$stock' },
-          totalValue: { $sum: { $multiply: ['$stock', '$sellingPrice'] } },
+        {
+          $lookup: {
+            from: 'products',
+            localField: 'product',
+            foreignField: '_id',
+            as: 'productDetails'
+          }
         },
-      },
-    ]);
-
-    const summary = summaryResult[0] || { totalProducts: 0, totalStock: 0, totalValue: 0 };
+        { $unwind: '$productDetails' },
+        {
+          $match: {
+            'productDetails.isActive': true
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            totalProducts: { $sum: 1 },
+            totalStock: { $sum: '$stock' },
+            totalValue: { $sum: { $multiply: ['$stock', '$productDetails.sellingPrice'] } }
+          }
+        }
+      ]);
+      summary = summaryResult[0] || { totalProducts: 0, totalStock: 0, totalValue: 0 };
+    } else {
+      const summaryResult = await Product.aggregate([
+        {
+          $match: {
+            shop: new mongoose.Types.ObjectId(shopId),
+            isActive: true,
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalProducts: { $sum: 1 },
+            totalStock: { $sum: '$stock' },
+            totalValue: { $sum: { $multiply: ['$stock', '$sellingPrice'] } },
+          },
+        },
+      ]);
+      summary = summaryResult[0] || { totalProducts: 0, totalStock: 0, totalValue: 0 };
+    }
 
     return {
       topSelling,
@@ -353,7 +463,7 @@ class ReportService {
   }
 
   // Get customer report
-  async getCustomerReport(shopId, options = {}) {
+  async getCustomerReport(shopId, options = {}, branchId = null) {
     const { startDate, endDate } = options;
 
     // Top customers by purchase
@@ -424,13 +534,15 @@ class ReportService {
   }
 
   // Get Daily Business Summary
-  async getDailySummary(shopId, options = {}) {
+  async getDailySummary(shopId, options = {}, branchId = null) {
     const { date } = options;
     // Use Bangladesh today if no date provided
     const dateStr = date || getBangladeshTodayStr();
 
     // Try cache first
-    const cacheKey = KEYS.DAILY_SUMMARY(shopId, dateStr);
+    const cacheKey = branchId
+      ? `${KEYS.DAILY_SUMMARY(shopId, dateStr)}:branch:${branchId}`
+      : KEYS.DAILY_SUMMARY(shopId, dateStr);
     const cached = await cacheService.get(cacheKey);
     if (cached) return cached;
 
@@ -458,7 +570,7 @@ class ReportService {
     ] = await Promise.all([
       // 1. Sales summary
       Sale.aggregate([
-        { $match: { shop: shopObjId, status: { $ne: 'cancelled' }, ...dateMatch } },
+        { $match: { ...this._baseMatch(shopId, branchId), status: { $ne: 'cancelled' }, ...dateMatch } },
         {
           $group: {
             _id: null,
@@ -475,7 +587,7 @@ class ReportService {
 
       // 2. Sales by payment method
       Sale.aggregate([
-        { $match: { shop: shopObjId, status: { $ne: 'cancelled' }, ...dateMatch } },
+        { $match: { ...this._baseMatch(shopId, branchId), status: { $ne: 'cancelled' }, ...dateMatch } },
         {
           $group: {
             _id: '$paymentMethod',
@@ -489,7 +601,7 @@ class ReportService {
 
       // 3. Sales by hour (for hourly chart)
       Sale.aggregate([
-        { $match: { shop: shopObjId, status: { $ne: 'cancelled' }, ...dateMatch } },
+        { $match: { ...this._baseMatch(shopId, branchId), status: { $ne: 'cancelled' }, ...dateMatch } },
         {
           $group: {
             _id: { $hour: '$createdAt' },
@@ -503,7 +615,7 @@ class ReportService {
 
       // 4. Expenses summary
       Expense.aggregate([
-        { $match: { shop: shopObjId, ...expenseDateMatch } },
+        { $match: { ...this._baseMatch(shopId, branchId), ...expenseDateMatch } },
         {
           $group: {
             _id: null,
@@ -515,7 +627,7 @@ class ReportService {
 
       // 5. Expenses by category
       Expense.aggregate([
-        { $match: { shop: shopObjId, ...expenseDateMatch } },
+        { $match: { ...this._baseMatch(shopId, branchId), ...expenseDateMatch } },
         {
           $group: {
             _id: '$category',
@@ -529,7 +641,7 @@ class ReportService {
 
       // 6. Purchases summary
       Purchase.aggregate([
-        { $match: { shop: shopObjId, status: { $ne: 'cancelled' }, ...dateMatch } },
+        { $match: { ...this._baseMatch(shopId, branchId), status: { $ne: 'cancelled' }, ...dateMatch } },
         {
           $group: {
             _id: null,
@@ -545,7 +657,7 @@ class ReportService {
       Payment.aggregate([
         {
           $match: {
-            shop: shopObjId,
+            ...this._baseMatch(shopId, branchId),
             type: 'due_collection',
             createdAt: { $gte: startOfDay, $lte: endOfDay },
           },
@@ -561,7 +673,7 @@ class ReportService {
 
       // 8. Sales returns
       SalesReturn.aggregate([
-        { $match: { shop: shopObjId, ...dateMatch } },
+        { $match: { ...this._baseMatch(shopId, branchId), ...dateMatch } },
         {
           $group: {
             _id: null,
@@ -574,13 +686,13 @@ class ReportService {
 
       // 9. Cash register for this date
       CashRegister.findOne({
-        shop: shopObjId,
+        ...this._baseMatch(shopId, branchId),
         date: { $gte: startOfDay, $lte: endOfDay },
       }).lean(),
 
       // 10. Top products sold today
       Sale.aggregate([
-        { $match: { shop: shopObjId, status: { $ne: 'cancelled' }, ...dateMatch } },
+        { $match: { ...this._baseMatch(shopId, branchId), status: { $ne: 'cancelled' }, ...dateMatch } },
         { $unwind: '$items' },
         {
           $group: {
@@ -595,7 +707,40 @@ class ReportService {
       ]),
 
       // 11. Low stock products
-      Product.find({
+      branchId ? BranchStock.aggregate([
+        {
+          $match: {
+            shop: new mongoose.Types.ObjectId(shopId),
+            branch: new mongoose.Types.ObjectId(branchId),
+          }
+        },
+        {
+          $lookup: {
+            from: 'products',
+            localField: 'product',
+            foreignField: '_id',
+            as: 'productDetails'
+          }
+        },
+        { $unwind: '$productDetails' },
+        {
+          $match: {
+            'productDetails.isActive': true,
+            $expr: { $lte: ['$stock', '$productDetails.minStock'] }
+          }
+        },
+        {
+          $project: {
+            name: '$productDetails.name',
+            code: '$productDetails.code',
+            stock: '$stock',
+            minStock: '$productDetails.minStock',
+            sellingPrice: '$productDetails.sellingPrice'
+          }
+        },
+        { $sort: { stock: 1 } },
+        { $limit: 15 }
+      ]) : Product.find({
         shop: shopObjId,
         isActive: true,
         $expr: { $lte: ['$stock', '$minStock'] },
@@ -708,11 +853,13 @@ class ReportService {
   }
 
   // Get Profit & Loss statement
-  async getProfitLoss(shopId, options = {}) {
+  async getProfitLoss(shopId, options = {}, branchId = null) {
     const { startDate, endDate } = options;
 
     // Try cache first
-    const cacheKey = KEYS.PROFIT_LOSS(shopId, startDate, endDate);
+    const cacheKey = branchId
+      ? `${KEYS.PROFIT_LOSS(shopId, startDate, endDate)}:branch:${branchId}`
+      : KEYS.PROFIT_LOSS(shopId, startDate, endDate);
     const cached = await cacheService.get(cacheKey);
     if (cached) return cached;
 
@@ -746,7 +893,7 @@ class ReportService {
       Sale.aggregate([
         {
           $match: {
-            shop: shopObjId,
+            ...this._baseMatch(shopId, branchId),
             status: { $ne: 'cancelled' },
             ...dateMatch,
           },
@@ -768,7 +915,7 @@ class ReportService {
       Expense.aggregate([
         {
           $match: {
-            shop: shopObjId,
+            ...this._baseMatch(shopId, branchId),
             ...expenseDateMatch,
           },
         },
@@ -785,7 +932,7 @@ class ReportService {
       Expense.aggregate([
         {
           $match: {
-            shop: shopObjId,
+            ...this._baseMatch(shopId, branchId),
             ...expenseDateMatch,
           },
         },
@@ -804,7 +951,7 @@ class ReportService {
       SalesReturn.aggregate([
         {
           $match: {
-            shop: shopObjId,
+            ...this._baseMatch(shopId, branchId),
             ...dateMatch,
           },
         },
@@ -822,7 +969,7 @@ class ReportService {
       Purchase.aggregate([
         {
           $match: {
-            shop: shopObjId,
+            ...this._baseMatch(shopId, branchId),
             status: { $ne: 'cancelled' },
             ...dateMatch,
           },
@@ -842,7 +989,7 @@ class ReportService {
       Sale.aggregate([
         {
           $match: {
-            shop: shopObjId,
+            ...this._baseMatch(shopId, branchId),
             status: { $ne: 'cancelled' },
             ...dateMatch,
           },
@@ -864,7 +1011,7 @@ class ReportService {
       Expense.aggregate([
         {
           $match: {
-            shop: shopObjId,
+            ...this._baseMatch(shopId, branchId),
             ...expenseDateMatch,
           },
         },
@@ -950,9 +1097,8 @@ class ReportService {
   }
 
   // Get Date-wise Summary for a month (scrollable table)
-  async getDateWiseSummary(shopId, options = {}) {
+  async getDateWiseSummary(shopId, options = {}, branchId = null) {
     const { month } = options; // format: 'YYYY-MM'
-    const shopObjId = new mongoose.Types.ObjectId(shopId);
 
     // Determine start and end of the month in BD time
     let year, mon;
@@ -974,7 +1120,7 @@ class ReportService {
       Sale.aggregate([
         {
           $match: {
-            shop: shopObjId,
+            ...this._baseMatch(shopId, branchId),
             status: { $ne: 'cancelled' },
             createdAt: { $gte: startOfMonth, $lte: endOfMonth },
           },
@@ -1001,7 +1147,7 @@ class ReportService {
       Expense.aggregate([
         {
           $match: {
-            shop: shopObjId,
+            ...this._baseMatch(shopId, branchId),
             date: { $gte: startOfMonth, $lte: endOfMonth },
           },
         },
@@ -1072,13 +1218,12 @@ class ReportService {
   }
 
   // Get all sales for a specific date (drill-down)
-  async getSalesByDate(shopId, dateStr) {
-    const shopObjId = new mongoose.Types.ObjectId(shopId);
+  async getSalesByDate(shopId, dateStr, branchId = null) {
     const { startOfDay, endOfDay } = getBangladeshDayRange(dateStr);
 
     const [sales, summary, expenseTotal] = await Promise.all([
       Sale.find({
-        shop: shopObjId,
+        ...this._baseMatch(shopId, branchId),
         createdAt: { $gte: startOfDay, $lte: endOfDay },
       })
         .populate('customer', 'name phone')
@@ -1089,7 +1234,7 @@ class ReportService {
       Sale.aggregate([
         {
           $match: {
-            shop: shopObjId,
+            ...this._baseMatch(shopId, branchId),
             status: { $ne: 'cancelled' },
             createdAt: { $gte: startOfDay, $lte: endOfDay },
           },
@@ -1109,7 +1254,7 @@ class ReportService {
       Expense.aggregate([
         {
           $match: {
-            shop: shopObjId,
+            ...this._baseMatch(shopId, branchId),
             date: { $gte: startOfDay, $lte: endOfDay },
           },
         },
@@ -1149,9 +1294,8 @@ class ReportService {
   }
 
   // Get trending products (7-day vs previous 7-day comparison)
-  async getTrendingProducts(shopId, options = {}) {
+  async getTrendingProducts(shopId, options = {}, branchId = null) {
     const { period = 7, limit = 20 } = options;
-    const shopObjId = new mongoose.Types.ObjectId(shopId);
 
     const now = new Date();
     const currentStart = new Date(now);
@@ -1164,7 +1308,7 @@ class ReportService {
       Sale.aggregate([
         {
           $match: {
-            shop: shopObjId,
+            ...this._baseMatch(shopId, branchId),
             status: { $ne: 'cancelled' },
             createdAt: { $gte: currentStart, $lte: now },
           },
@@ -1185,7 +1329,7 @@ class ReportService {
       Sale.aggregate([
         {
           $match: {
-            shop: shopObjId,
+            ...this._baseMatch(shopId, branchId),
             status: { $ne: 'cancelled' },
             createdAt: { $gte: previousStart, $lt: currentStart },
           },
@@ -1286,19 +1430,19 @@ class ReportService {
   }
 
   // Export report (placeholder - implement actual export logic)
-  async exportReport(shopId, type, format, options) {
+  async exportReport(shopId, type, format, options, branchId = null) {
     // This would generate actual PDF/Excel/CSV files
     // For now, return the data
     let data;
     switch (type) {
       case 'sales':
-        data = await this.getSalesReport(shopId, options);
+        data = await this.getSalesReport(shopId, options, branchId);
         break;
       case 'products':
-        data = await this.getProductReport(shopId, options);
+        data = await this.getProductReport(shopId, options, branchId);
         break;
       case 'customers':
-        data = await this.getCustomerReport(shopId, options);
+        data = await this.getCustomerReport(shopId, options, branchId);
         break;
       default:
         throw new Error('Invalid report type');

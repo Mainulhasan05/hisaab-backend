@@ -6,6 +6,8 @@ const StockTransaction = require('../models/StockTransaction.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { getBranchForCreate } = require('../utils/branchScope.util');
+const BranchStock = require('../models/BranchStock.model');
+const mongoose = require('mongoose');
 
 class PurchaseService {
   // Get all purchases with filtering and pagination
@@ -177,26 +179,50 @@ class PurchaseService {
     });
 
     // Increase stock for each item
+    const isMultiBranchActive = branchId && req?.shop?.multiBranchEnabled;
+
     for (const item of preparedItems) {
       const product = await Product.findById(item.product);
-      const previousStock = item.variantId
-        ? product.variants?.id(item.variantId)?.stock || 0
-        : product.stock;
+      let previousStock, newStock;
 
-      // Update stock
-      if (item.variantId && product.hasVariants) {
-        const variant = product.variants.id(item.variantId);
-        if (variant) {
-          variant.stock += item.quantity;
+      if (isMultiBranchActive) {
+        const bsRecord = await BranchStock.getOrCreate(shopId, branchId, item.product, item.variantId || null);
+        previousStock = bsRecord.stock;
+        bsRecord.stock += item.quantity;
+        newStock = bsRecord.stock;
+        await bsRecord.save();
+
+        // Recalculate main product stock
+        const totalStock = await BranchStock.getTotalStock(shopId, item.product, item.variantId || null);
+        if (item.variantId && product.hasVariants) {
+          const variant = product.variants.id(item.variantId);
+          if (variant) {
+            variant.stock = totalStock;
+          }
+        } else {
+          product.stock = totalStock;
         }
+        await product.save();
       } else {
-        product.stock += item.quantity;
-      }
-      await product.save();
+        previousStock = item.variantId
+          ? product.variants?.id(item.variantId)?.stock || 0
+          : product.stock;
 
-      const newStock = item.variantId
-        ? product.variants?.id(item.variantId)?.stock || 0
-        : product.stock;
+        // Update stock
+        if (item.variantId && product.hasVariants) {
+          const variant = product.variants.id(item.variantId);
+          if (variant) {
+            variant.stock += item.quantity;
+          }
+        } else {
+          product.stock += item.quantity;
+        }
+        await product.save();
+
+        newStock = item.variantId
+          ? product.variants?.id(item.variantId)?.stock || 0
+          : product.stock;
+      }
 
       // Create stock transaction
       await StockTransaction.create({
