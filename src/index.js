@@ -11,7 +11,7 @@ require('./models/Role.model');
 // Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
   logger.error('UNCAUGHT EXCEPTION! 💥 Shutting down...');
-  logger.error(err.name, err.message);
+  logger.error(err.stack || err);
   process.exit(1);
 });
 

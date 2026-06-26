@@ -55,13 +55,20 @@ function getRedisConfig() {
 
   // Priority 1: Unix Socket (for shared hosting)
   if (socketPath) {
+    const fs = require('fs');
+    if (!fs.existsSync(socketPath)) {
+      logger.warn(`Redis socket file not found at ${socketPath}. Falling back to memory.`);
+      connectionMode = 'none';
+      return null;
+    }
     connectionMode = 'socket';
     return {
       socket: {
         path: socketPath,
         reconnectStrategy,
         connectTimeout: 10000
-      }
+      },
+      disableOfflineQueue: true
     };
   }
 
@@ -76,7 +83,8 @@ function getRedisConfig() {
         connectTimeout: 10000
       },
       username: username || undefined,
-      password: password || undefined
+      password: password || undefined,
+      disableOfflineQueue: true
     };
   }
 
