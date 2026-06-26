@@ -4,7 +4,9 @@ const asyncHandler = require('../utils/asyncHandler.util');
 
 // Get all expenses
 exports.getExpenses = asyncHandler(async (req, res) => {
-  const result = await expenseService.getExpenses(req.shop._id, req.query);
+  const options = { ...req.query };
+  if (req.branchId) options.branchId = req.branchId;
+  const result = await expenseService.getExpenses(req.shop._id, options);
   return ApiResponse.paginated(res, {
     ...result,
     message: 'Expenses retrieved successfully',
@@ -14,7 +16,7 @@ exports.getExpenses = asyncHandler(async (req, res) => {
 
 // Create expense
 exports.createExpense = asyncHandler(async (req, res) => {
-  const expense = await expenseService.createExpense(req.shop._id, req.user._id, req.body);
+  const expense = await expenseService.createExpense(req.shop._id, req.user._id, req.body, req);
   return ApiResponse.created(res, {
     data: expense,
     message: 'Expense added successfully',

@@ -4,7 +4,9 @@ const asyncHandler = require('../utils/asyncHandler.util');
 
 // Get all purchases
 exports.getPurchases = asyncHandler(async (req, res) => {
-  const result = await purchaseService.getPurchases(req.shop._id, req.query);
+  const options = { ...req.query };
+  if (req.branchId) options.branchId = req.branchId;
+  const result = await purchaseService.getPurchases(req.shop._id, options);
   return ApiResponse.paginated(res, {
     ...result,
     message: 'Purchases retrieved successfully',
@@ -24,7 +26,7 @@ exports.getPurchase = asyncHandler(async (req, res) => {
 
 // Create purchase
 exports.createPurchase = asyncHandler(async (req, res) => {
-  const purchase = await purchaseService.createPurchase(req.shop._id, req.user._id, req.body);
+  const purchase = await purchaseService.createPurchase(req.shop._id, req.user._id, req.body, req);
   return ApiResponse.created(res, {
     data: purchase,
     message: 'Purchase recorded successfully',

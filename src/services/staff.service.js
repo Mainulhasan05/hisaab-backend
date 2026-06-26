@@ -1,10 +1,12 @@
 const User = require('../models/User.model');
 const Role = require('../models/Role.model');
 const Shop = require('../models/Shop.model');
+const Branch = require('../models/Branch.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const { normalizePhone } = require('../utils/phone.util');
+const { getBranchForCreate } = require('../utils/branchScope.util');
 
 class StaffService {
   /**
@@ -16,6 +18,7 @@ class StaffService {
       isOwner: false,
     })
       .populate('role', 'name permissions')
+      .populate('branch', 'name code')
       .select('-password -otp')
       .sort({ createdAt: -1 });
   }
@@ -66,6 +69,7 @@ class StaffService {
       shop: shopId,
       isOwner: false,
       role: role._id,
+      branch: req ? getBranchForCreate(req) : (data.branchId || null),
       isPhoneVerified: true, // Owner-created employees are pre-verified
       createdBy: ownerId,
     });
@@ -114,6 +118,19 @@ class StaffService {
 
     if (typeof data.isActive === 'boolean') {
       staff.isActive = data.isActive;
+    }
+
+    // Branch assignment (for multi-branch shops)
+    if (data.branchId !== undefined) {
+      if (data.branchId) {
+        const branch = await Branch.validateBranchOwnership(data.branchId, shopId);
+        if (!branch) {
+          throw new AppError('Invalid branch', 'অবৈধ শাখা', 400);
+        }
+        staff.branch = branch._id;
+      } else {
+        staff.branch = null;
+      }
     }
 
     await staff.save();

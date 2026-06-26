@@ -2,6 +2,7 @@ const Expense = require('../models/Expense.model');
 const ExpenseCategory = require('../models/ExpenseCategory.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
+const { getBranchForCreate } = require('../utils/branchScope.util');
 
 class ExpenseService {
   // Get all expenses with filtering, pagination
@@ -18,6 +19,11 @@ class ExpenseService {
     } = options;
 
     const query = { shop: shopId };
+
+    // Branch scoping
+    if (options.branchId) {
+      query.branch = options.branchId;
+    }
 
     if (category) {
       query.category = category;
@@ -64,7 +70,7 @@ class ExpenseService {
   }
 
   // Create expense
-  async createExpense(shopId, userId, expenseData) {
+  async createExpense(shopId, userId, expenseData, req) {
     const { category, amount, description, date, paymentMethod } = expenseData;
 
     // Validate category exists
@@ -80,6 +86,7 @@ class ExpenseService {
 
     const expense = await Expense.create({
       shop: shopId,
+      branch: req ? getBranchForCreate(req) : null,
       category: categoryDoc._id,
       categoryName: categoryDoc.name,
       amount,
@@ -96,6 +103,7 @@ class ExpenseService {
     // Audit log
     await AuditLog.create({
       shop: shopId,
+      branch: req ? getBranchForCreate(req) : null,
       user: userId,
       action: 'expense_create',
       actionBn: 'নতুন খরচ যোগ',

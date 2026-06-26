@@ -29,10 +29,26 @@ function getBangladeshDayRange(dateStr) {
 }
 
 class ReportService {
+  /**
+   * Build the base $match for aggregation with optional branch scoping.
+   * @param {string} shopId - Shop ID
+   * @param {string|null} branchId - Branch ID (null = all branches)
+   * @returns {Object} Base match object
+   */
+  _baseMatch(shopId, branchId = null) {
+    const match = { shop: new mongoose.Types.ObjectId(shopId) };
+    if (branchId) {
+      match.branch = new mongoose.Types.ObjectId(branchId);
+    }
+    return match;
+  }
+
   // Get dashboard statistics
-  async getDashboardStats(shopId) {
-    // Try cache first
-    const cacheKey = KEYS.DASHBOARD_STATS(shopId);
+  async getDashboardStats(shopId, branchId = null) {
+    // Try cache first (include branchId in cache key)
+    const cacheKey = branchId
+      ? `${KEYS.DASHBOARD_STATS(shopId)}:branch:${branchId}`
+      : KEYS.DASHBOARD_STATS(shopId);
     const cached = await cacheService.get(cacheKey);
     if (cached) return cached;
     const { startOfDay, endOfDay } = getBangladeshDayRange(getBangladeshTodayStr());
@@ -41,7 +57,7 @@ class ReportService {
     const todaySalesResult = await Sale.aggregate([
       {
         $match: {
-          shop: new mongoose.Types.ObjectId(shopId),
+          ...this._baseMatch(shopId, branchId),
           status: { $ne: 'cancelled' },
           createdAt: { $gte: startOfDay, $lte: endOfDay },
         },
@@ -99,6 +115,7 @@ class ReportService {
     // Get recent sales
     const recentSales = await Sale.find({
       shop: shopId,
+      ...(branchId ? { branch: branchId } : {}),
       status: { $ne: 'cancelled' },
     })
       .populate('customer', 'name phone')
@@ -113,7 +130,7 @@ class ReportService {
     const topProducts = await Sale.aggregate([
       {
         $match: {
-          shop: new mongoose.Types.ObjectId(shopId),
+          ...this._baseMatch(shopId, branchId),
           status: { $ne: 'cancelled' },
           createdAt: { $gte: thirtyDaysAgo },
         },

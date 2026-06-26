@@ -8,6 +8,7 @@ const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const cacheService = require('./cache.service');
 const { KEYS } = require('../config/cacheKeys');
+const { getBranchForCreate, getBranchCode } = require('../utils/branchScope.util');
 
 // Bangladesh is UTC+6
 const BD_OFFSET_MS = 6 * 60 * 60 * 1000;
@@ -35,8 +36,8 @@ class SaleService {
     ]);
   }
 
-  // Generate invoice number
-  async generateInvoiceNumber(shopId) {
+  // Generate invoice number (with optional branch code)
+  async generateInvoiceNumber(shopId, branchCode = null) {
     const { startOfDay, endOfDay, dateStr } = getBangladeshTodayRange();
     // Date prefix from Bangladesh local date
     const datePrefix = dateStr.replace(/-/g, '');
@@ -46,14 +47,23 @@ class SaleService {
       createdAt: { $gte: startOfDay, $lte: endOfDay },
     });
 
-    return `INV-${datePrefix}-${String(count + 1).padStart(4, '0')}`;
+    const prefix = branchCode
+      ? `INV-${branchCode}-${datePrefix}`
+      : `INV-${datePrefix}`;
+
+    return `${prefix}-${String(count + 1).padStart(4, '0')}`;
   }
 
   // Build query from filters (shared by getSales and getSalesSummary)
   _buildQuery(shopId, options = {}) {
-    const { search, status, customerId, startDate, endDate, paymentMethod } = options;
+    const { search, status, customerId, startDate, endDate, paymentMethod, branchId } = options;
 
     const query = { shop: shopId };
+
+    // Branch scoping
+    if (branchId) {
+      query.branch = branchId;
+    }
 
     if (search) {
       query.$or = [
@@ -160,7 +170,7 @@ class SaleService {
   }
 
   // Create new sale
-  async createSale(shopId, userId, saleData) {
+  async createSale(shopId, userId, saleData, req) {
     const {
       items,
       customerId: rawCustomerId,
@@ -235,6 +245,7 @@ class SaleService {
         // Queue stock transaction
         stockTransactions.push({
           shop: shopId,
+          branch: req ? getBranchForCreate(req) : null,
           product: product._id,
           productName: product.name,
           productCode: product.code,
@@ -280,6 +291,7 @@ class SaleService {
         // Queue stock transaction
         stockTransactions.push({
           shop: shopId,
+          branch: req ? getBranchForCreate(req) : null,
           product: product._id,
           productName: product.name,
           productCode: product.code,
@@ -367,9 +379,12 @@ class SaleService {
     const maxRetries = 3;
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
-        const invoiceNo = await this.generateInvoiceNumber(shopId);
+        const branchId = req ? getBranchForCreate(req) : null;
+        const branchCode = req ? getBranchCode(req) : null;
+        const invoiceNo = await this.generateInvoiceNumber(shopId, branchCode);
         sale = await Sale.create({
           shop: shopId,
+          branch: branchId,
           invoiceNo,
           customer: customer?._id,
           customerName: finalCustomerName,
@@ -411,6 +426,7 @@ class SaleService {
     if (paid > 0) {
       await Payment.create({
         shop: shopId,
+        branch: req ? getBranchForCreate(req) : null,
         sale: sale._id,
         customer: customer?._id,
         amount: paid,

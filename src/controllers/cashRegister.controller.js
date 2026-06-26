@@ -3,7 +3,7 @@ const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 
 exports.getToday = asyncHandler(async (req, res) => {
-  const result = await cashRegisterService.getTodayRegister(req.shop._id, req.user._id);
+  const result = await cashRegisterService.getTodayRegister(req.shop._id, req.user._id, req);
   ApiResponse.success(res, {
     data: result,
     message: 'Today\'s cash register',
@@ -16,7 +16,8 @@ exports.openDay = asyncHandler(async (req, res) => {
   const register = await cashRegisterService.openRegister(
     req.shop._id,
     req.user._id,
-    parseFloat(openingBalance) || 0
+    parseFloat(openingBalance) || 0,
+    req
   );
   ApiResponse.created(res, {
     data: register,

@@ -7,6 +7,7 @@ const Purchase = require('../models/Purchase.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
+const { getBranchForCreate } = require('../utils/branchScope.util');
 
 class CashRegisterService {
   // Helper: get start and end of a date
@@ -19,8 +20,9 @@ class CashRegisterService {
   }
 
   // Helper: aggregate today's cash flows from all sources
-  async _calculateCashFlows(shopId, start, end) {
+  async _calculateCashFlows(shopId, start, end, branchId = null) {
     const shopOid = new mongoose.Types.ObjectId(shopId);
+    const branchMatch = branchId ? { branch: new mongoose.Types.ObjectId(branchId) } : {};
 
     const [cashSales, cashDueCollections, cashExpenses, cashPurchases] = await Promise.all([
       // Cash sales (paid amount from cash sales)
@@ -28,6 +30,7 @@ class CashRegisterService {
         {
           $match: {
             shop: shopOid,
+            ...branchMatch,
             paymentMethod: 'cash',
             status: { $ne: 'cancelled' },
             createdAt: { $gte: start, $lte: end },
@@ -41,6 +44,7 @@ class CashRegisterService {
         {
           $match: {
             shop: shopOid,
+            ...branchMatch,
             method: 'cash',
             type: 'due_collection',
             createdAt: { $gte: start, $lte: end },
@@ -54,6 +58,7 @@ class CashRegisterService {
         {
           $match: {
             shop: shopOid,
+            ...branchMatch,
             paymentMethod: 'cash',
             date: { $gte: start, $lte: end },
           },
@@ -66,6 +71,7 @@ class CashRegisterService {
         {
           $match: {
             shop: shopOid,
+            ...branchMatch,
             paymentMethod: 'cash',
             status: { $ne: 'cancelled' },
             date: { $gte: start, $lte: end },
@@ -84,11 +90,14 @@ class CashRegisterService {
   }
 
   // Get today's register (find or create, auto-calculate)
-  async getTodayRegister(shopId, userId) {
+  async getTodayRegister(shopId, userId, req) {
     const { start, end } = this._dayRange();
+    const branchId = req ? getBranchForCreate(req) : null;
+    const branchQuery = branchId ? { branch: branchId } : {};
 
     let register = await CashRegister.findOne({
       shop: shopId,
+      ...branchQuery,
       date: { $gte: start, $lte: end },
     });
 
@@ -96,6 +105,7 @@ class CashRegisterService {
       // Check for unclosed previous day
       const previousRegister = await CashRegister.findOne({
         shop: shopId,
+        ...branchQuery,
         date: { $lt: start },
       }).sort({ date: -1 });
 
@@ -116,7 +126,7 @@ class CashRegisterService {
     }
 
     // Auto-calculate cash flows from live data
-    const flows = await this._calculateCashFlows(shopId, start, end);
+    const flows = await this._calculateCashFlows(shopId, start, end, branchId);
 
     // Update auto-calculated fields (preserve manual 'other' entries)
     register.cashIn.sales = flows.sales;
@@ -133,12 +143,15 @@ class CashRegisterService {
   }
 
   // Open today's register
-  async openRegister(shopId, userId, openingBalance) {
+  async openRegister(shopId, userId, openingBalance, req) {
     const { start, end } = this._dayRange();
+    const branchId = req ? getBranchForCreate(req) : null;
+    const branchQuery = branchId ? { branch: branchId } : {};
 
     // Check if already exists
     let register = await CashRegister.findOne({
       shop: shopId,
+      ...branchQuery,
       date: { $gte: start, $lte: end },
     });
 
@@ -160,6 +173,7 @@ class CashRegisterService {
 
       register = await CashRegister.create({
         shop: shopId,
+        branch: branchId,
         date: today,
         openingBalance: openingBalance || 0,
         createdBy: userId,
@@ -167,7 +181,7 @@ class CashRegisterService {
     }
 
     // Calculate live cash flows
-    const flows = await this._calculateCashFlows(shopId, start, end);
+    const flows = await this._calculateCashFlows(shopId, start, end, branchId);
     register.cashIn.sales = flows.sales;
     register.cashIn.dueCollections = flows.dueCollections;
     register.cashOut.expenses = flows.expenses;

@@ -5,6 +5,7 @@ const Payment = require('../models/Payment.model');
 const StockTransaction = require('../models/StockTransaction.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
+const { getBranchForCreate } = require('../utils/branchScope.util');
 
 class PurchaseService {
   // Get all purchases with filtering and pagination
@@ -21,6 +22,11 @@ class PurchaseService {
     } = options;
 
     const query = { shop: shopId, status: { $ne: 'cancelled' } };
+
+    // Branch scoping
+    if (options.branchId) {
+      query.branch = options.branchId;
+    }
 
     if (supplier) {
       query.supplier = supplier;
@@ -83,7 +89,7 @@ class PurchaseService {
   }
 
   // Create purchase — the main action that increases stock
-  async createPurchase(shopId, userId, purchaseData) {
+  async createPurchase(shopId, userId, purchaseData, req) {
     const { items, supplier, paid, paymentMethod, date, notes } = purchaseData;
 
     if (!items || items.length === 0) {
@@ -154,8 +160,10 @@ class PurchaseService {
     const invoiceNo = await Purchase.generateInvoiceNo(shopId);
 
     // Create purchase
+    const branchId = req ? getBranchForCreate(req) : null;
     const purchase = await Purchase.create({
       shop: shopId,
+      branch: branchId,
       invoiceNo,
       supplier: supplierDoc?._id,
       supplierName,
@@ -193,6 +201,7 @@ class PurchaseService {
       // Create stock transaction
       await StockTransaction.create({
         shop: shopId,
+        branch: branchId,
         product: item.product,
         productName: item.productName,
         productCode: item.productCode,
@@ -225,6 +234,7 @@ class PurchaseService {
     const itemNames = preparedItems.map(i => i.productName).join(', ');
     await AuditLog.create({
       shop: shopId,
+      branch: branchId,
       user: userId,
       action: 'purchase_create',
       actionBn: 'নতুন ক্রয়',

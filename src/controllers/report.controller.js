@@ -4,7 +4,7 @@ const asyncHandler = require('../utils/asyncHandler.util');
 
 // Get dashboard statistics
 exports.getDashboard = asyncHandler(async (req, res) => {
-  const stats = await reportService.getDashboardStats(req.shop._id);
+  const stats = await reportService.getDashboardStats(req.shop._id, req.branchId);
   return ApiResponse.success(res, {
     data: stats,
     message: 'Dashboard stats retrieved successfully',

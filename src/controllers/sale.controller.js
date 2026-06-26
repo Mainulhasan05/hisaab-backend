@@ -4,7 +4,9 @@ const asyncHandler = require('../utils/asyncHandler.util');
 
 // Get all sales
 exports.getSales = asyncHandler(async (req, res) => {
-  const result = await saleService.getSales(req.shop._id, req.query);
+  const options = { ...req.query };
+  if (req.branchId) options.branchId = req.branchId;
+  const result = await saleService.getSales(req.shop._id, options);
   return ApiResponse.paginated(res, {
     ...result,
     message: 'Sales retrieved successfully',
@@ -24,7 +26,7 @@ exports.getSale = asyncHandler(async (req, res) => {
 
 // Create sale
 exports.createSale = asyncHandler(async (req, res) => {
-  const sale = await saleService.createSale(req.shop._id, req.user._id, req.body);
+  const sale = await saleService.createSale(req.shop._id, req.user._id, req.body, req);
   return ApiResponse.success(res, {
     data: sale,
     message: 'Sale created successfully',
