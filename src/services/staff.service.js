@@ -62,6 +62,26 @@ class StaffService {
       );
     }
 
+    // Resolve branch assignment
+    let resolvedBranchId = null;
+    if (data.branchId) {
+      const branch = await Branch.validateBranchOwnership(data.branchId, shopId);
+      if (!branch) {
+        throw new AppError('Invalid branch', 'অবৈধ শাখা', 400);
+      }
+      resolvedBranchId = branch._id;
+    } else if (req) {
+      try {
+        resolvedBranchId = getBranchForCreate(req);
+      } catch (err) {
+        // If owner is in "All Branches" context, default to the default branch of the shop
+        const defaultBranch = await Branch.getDefaultBranch(shopId);
+        if (defaultBranch) {
+          resolvedBranchId = defaultBranch._id;
+        }
+      }
+    }
+
     const user = await User.create({
       phone: normalizedPhone,
       password,
@@ -69,7 +89,7 @@ class StaffService {
       shop: shopId,
       isOwner: false,
       role: role._id,
-      branch: req ? getBranchForCreate(req) : (data.branchId || null),
+      branch: resolvedBranchId,
       isPhoneVerified: true, // Owner-created employees are pre-verified
       createdBy: ownerId,
     });

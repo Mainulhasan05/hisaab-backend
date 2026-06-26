@@ -7,6 +7,7 @@ const SalesReturn = require('../models/SalesReturn.model');
 const Purchase = require('../models/Purchase.model');
 const CashRegister = require('../models/CashRegister.model');
 const BranchStock = require('../models/BranchStock.model');
+const Branch = require('../models/Branch.model');
 const mongoose = require('mongoose');
 const cacheService = require('./cache.service');
 const { KEYS, getTTL } = require('../config/cacheKeys');
@@ -176,6 +177,49 @@ class ReportService {
     const todaySales = todaySalesResult[0] || { totalSales: 0, totalPaid: 0, totalDue: 0, totalProfit: 0, count: 0 };
     const totalDue = customerDueResult[0]?.totalDue || 0;
 
+    // Get sales breakdown by branch (for multi-branch dashboard overview)
+    let branchBreakdown = [];
+    if (!branchId) {
+      const salesByBranch = await Sale.aggregate([
+        {
+          $match: {
+            shop: new mongoose.Types.ObjectId(shopId),
+            status: { $ne: 'cancelled' },
+            createdAt: { $gte: startOfDay, $lte: endOfDay },
+          },
+        },
+        {
+          $group: {
+            _id: '$branch',
+            todaySales: { $sum: '$total' },
+            todayProfit: { $sum: '$profit' },
+            todayOrders: { $sum: 1 },
+          },
+        },
+      ]);
+
+      const activeBranches = await Branch.find({ shop: shopId, isActive: true }).lean();
+
+      branchBreakdown = activeBranches.map(branch => {
+        const stats = salesByBranch.find(s => s._id && s._id.toString() === branch._id.toString()) || {
+          todaySales: 0,
+          todayProfit: 0,
+          todayOrders: 0,
+        };
+        return {
+          branchId: branch._id,
+          name: branch.name,
+          code: branch.code,
+          address: branch.address,
+          phone: branch.phone,
+          isDefault: branch.isDefault,
+          todaySales: stats.todaySales,
+          todayProfit: stats.todayProfit,
+          todayOrders: stats.todayOrders,
+        };
+      });
+    }
+
     const result = {
       todaySales: todaySales.totalSales,
       todayProfit: todaySales.totalProfit,
@@ -187,6 +231,7 @@ class ReportService {
       recentSales,
       topProducts,
       salesChart,
+      branchBreakdown,
     };
 
     // Cache the result
