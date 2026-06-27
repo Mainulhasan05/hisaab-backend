@@ -12,11 +12,6 @@ const categorySchema = new mongoose.Schema({
     trim: true,
     maxlength: [100, 'ক্যাটাগরির নাম ১০০ অক্ষরের বেশি হতে পারবে না']
   },
-  nameBn: {
-    type: String,
-    trim: true,
-    maxlength: [100, 'বাংলা নাম ১০০ অক্ষরের বেশি হতে পারবে না']
-  },
   slug: {
     type: String,
     lowercase: true,

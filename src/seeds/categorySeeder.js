@@ -22,8 +22,7 @@ async function seedCategories(shopId, shopType) {
     // Create parent category
     const parent = await Category.create({
       shop: shopId,
-      name: seed.name,
-      nameBn: seed.nameBn,
+      name: seed.nameBn || seed.name,
       icon: seed.icon || null,
       parent: null,
       order: seed.order || 0,
@@ -34,8 +33,7 @@ async function seedCategories(shopId, shopType) {
     if (seed.subcategories && seed.subcategories.length > 0) {
       const subcategoryDocs = seed.subcategories.map((sub) => ({
         shop: shopId,
-        name: sub.name,
-        nameBn: sub.nameBn,
+        name: sub.nameBn || sub.name,
         icon: sub.icon || null,
         parent: parent._id,
         order: sub.order || 0,

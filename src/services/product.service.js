@@ -166,7 +166,7 @@ class ProductService {
 
     const [products, total] = await Promise.all([
       Product.find(query)
-        .populate('category', 'name nameBn')
+        .populate('category', 'name')
         .sort(sort)
         .skip(skip)
         .limit(limitNum)
@@ -217,7 +217,7 @@ class ProductService {
   // Get single product by ID
   async getProductById(shopId, productId, req = null) {
     const product = await Product.findOne({ _id: productId, shop: shopId })
-      .populate('category', 'name nameBn')
+      .populate('category', 'name')
       .populate('createdBy', 'name phone');
 
     if (!product) {
@@ -260,7 +260,7 @@ class ProductService {
         { 'variants.sku': code },
         { 'variants.barcode': code },
       ],
-    }).populate('category', 'name nameBn');
+    }).populate('category', 'name');
 
     if (!product) {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);

@@ -2,1011 +2,2143 @@
  * Category & Subcategory Seed Data
  * Auto-seeded per shop type during onboarding
  *
- * Shop types: cloth, grocery, electronics, pharmacy, hardware, cosmetics, bookshop, other
- * Each category has: name (English), nameBn (Bengali), icon, order, subcategories[]
+ * Each category has: name (Bengali by default), icon, order, subcategories[]
  */
 
 const CATEGORY_SEEDS = {
-  // ==========================================
-  // কাপড়ের দোকান (Cloth / Garments)
-  // ==========================================
-  cloth: [
+  "cloth": [
     {
-      name: 'Men\'s Clothing',
-      nameBn: 'পুরুষ পোশাক',
-      icon: 'shirt',
-      order: 1,
-      subcategories: [
-        { name: 'Shirt', nameBn: 'শার্ট', order: 1 },
-        { name: 'Pant', nameBn: 'প্যান্ট', order: 2 },
-        { name: 'Panjabi', nameBn: 'পাঞ্জাবি', order: 3 },
-        { name: 'Lungi', nameBn: 'লুঙ্গি', order: 4 },
-        { name: 'T-Shirt', nameBn: 'টি-শার্ট/গেঞ্জি', order: 5 },
-        { name: 'Polo Shirt', nameBn: 'পোলো শার্ট', order: 6 },
-        { name: 'Jacket', nameBn: 'জ্যাকেট', order: 7 },
-        { name: 'Coat & Blazer', nameBn: 'কোট/ব্লেজার', order: 8 },
-        { name: 'Sweater', nameBn: 'সোয়েটার', order: 9 },
-        { name: 'Underwear', nameBn: 'আন্ডারগার্মেন্টস', order: 10 },
-        { name: 'Shorts', nameBn: 'শর্টস/হাফ প্যান্ট', order: 11 },
-        { name: 'Jeans', nameBn: 'জিন্স', order: 12 },
-      ],
+      "name": "পুরুষ পোশাক",
+      "icon": "shirt",
+      "order": 1,
+      "subcategories": [
+        {
+          "name": "শার্ট",
+          "order": 1
+        },
+        {
+          "name": "প্যান্ট",
+          "order": 2
+        },
+        {
+          "name": "পাঞ্জাবি",
+          "order": 3
+        },
+        {
+          "name": "লুঙ্গি",
+          "order": 4
+        },
+        {
+          "name": "টি-শার্ট/গেঞ্জি",
+          "order": 5
+        },
+        {
+          "name": "পোলো শার্ট",
+          "order": 6
+        },
+        {
+          "name": "জ্যাকেট",
+          "order": 7
+        },
+        {
+          "name": "কোট/ব্লেজার",
+          "order": 8
+        },
+        {
+          "name": "সোয়েটার",
+          "order": 9
+        },
+        {
+          "name": "আন্ডারগার্মেন্টস",
+          "order": 10
+        },
+        {
+          "name": "শর্টস/হাফ প্যান্ট",
+          "order": 11
+        },
+        {
+          "name": "জিন্স",
+          "order": 12
+        }
+      ]
     },
     {
-      name: 'Women\'s Clothing',
-      nameBn: 'মহিলা পোশাক',
-      icon: 'dress',
-      order: 2,
-      subcategories: [
-        { name: 'Saree', nameBn: 'শাড়ি', order: 1 },
-        { name: 'Salwar Kameez', nameBn: 'সালোয়ার কামিজ', order: 2 },
-        { name: 'Three Piece', nameBn: 'থ্রি-পিস', order: 3 },
-        { name: 'Kurti', nameBn: 'কুর্তি', order: 4 },
-        { name: 'Blouse', nameBn: 'ব্লাউজ', order: 5 },
-        { name: 'Borka & Hijab', nameBn: 'বোরকা/হিজাব', order: 6 },
-        { name: 'Lehenga', nameBn: 'লেহেঙ্গা', order: 7 },
-        { name: 'Skirt', nameBn: 'স্কার্ট', order: 8 },
-        { name: 'Maxi Dress', nameBn: 'ম্যাক্সি ড্রেস', order: 9 },
-        { name: 'Nightwear', nameBn: 'নাইটওয়্যার', order: 10 },
-        { name: 'Undergarments', nameBn: 'আন্ডারগার্মেন্টস', order: 11 },
-      ],
+      "name": "মহিলা পোশাক",
+      "icon": "dress",
+      "order": 2,
+      "subcategories": [
+        {
+          "name": "শাড়ি",
+          "order": 1
+        },
+        {
+          "name": "সালোয়ার কামিজ",
+          "order": 2
+        },
+        {
+          "name": "থ্রি-পিস",
+          "order": 3
+        },
+        {
+          "name": "কুর্তি",
+          "order": 4
+        },
+        {
+          "name": "ব্লাউজ",
+          "order": 5
+        },
+        {
+          "name": "বোরকা/হিজাব",
+          "order": 6
+        },
+        {
+          "name": "লেহেঙ্গা",
+          "order": 7
+        },
+        {
+          "name": "স্কার্ট",
+          "order": 8
+        },
+        {
+          "name": "ম্যাক্সি ড্রেস",
+          "order": 9
+        },
+        {
+          "name": "নাইটওয়্যার",
+          "order": 10
+        },
+        {
+          "name": "আন্ডারগার্মেন্টস",
+          "order": 11
+        }
+      ]
     },
     {
-      name: 'Kids\' Clothing',
-      nameBn: 'শিশু পোশাক',
-      icon: 'baby',
-      order: 3,
-      subcategories: [
-        { name: 'Boys\' Clothing', nameBn: 'ছেলেদের পোশাক', order: 1 },
-        { name: 'Girls\' Clothing', nameBn: 'মেয়েদের পোশাক', order: 2 },
-        { name: 'Baby Clothing', nameBn: 'বেবি পোশাক (০-২ বছর)', order: 3 },
-        { name: 'School Uniform', nameBn: 'স্কুল ইউনিফর্ম', order: 4 },
-        { name: 'Kids\' Innerwear', nameBn: 'শিশু আন্ডারওয়্যার', order: 5 },
-      ],
+      "name": "শিশু পোশাক",
+      "icon": "baby",
+      "order": 3,
+      "subcategories": [
+        {
+          "name": "ছেলেদের পোশাক",
+          "order": 1
+        },
+        {
+          "name": "মেয়েদের পোশাক",
+          "order": 2
+        },
+        {
+          "name": "বেবি পোশাক (০-২ বছর)",
+          "order": 3
+        },
+        {
+          "name": "স্কুল ইউনিফর্ম",
+          "order": 4
+        },
+        {
+          "name": "শিশু আন্ডারওয়্যার",
+          "order": 5
+        }
+      ]
     },
     {
-      name: 'Fabric',
-      nameBn: 'কাপড়/থান',
-      icon: 'scissors',
-      order: 4,
-      subcategories: [
-        { name: 'Cotton', nameBn: 'সুতি কাপড়', order: 1 },
-        { name: 'Silk', nameBn: 'সিল্ক', order: 2 },
-        { name: 'Georgette', nameBn: 'জর্জেট', order: 3 },
-        { name: 'Linen', nameBn: 'লিনেন', order: 4 },
-        { name: 'Chiffon', nameBn: 'শিফন', order: 5 },
-        { name: 'Polyester', nameBn: 'পলিয়েস্টার', order: 6 },
-        { name: 'Muslin', nameBn: 'মসলিন', order: 7 },
-        { name: 'Voile', nameBn: 'ভয়েল', order: 8 },
-      ],
+      "name": "কাপড়/থান",
+      "icon": "scissors",
+      "order": 4,
+      "subcategories": [
+        {
+          "name": "সুতি কাপড়",
+          "order": 1
+        },
+        {
+          "name": "সিল্ক",
+          "order": 2
+        },
+        {
+          "name": "জর্জেট",
+          "order": 3
+        },
+        {
+          "name": "লিনেন",
+          "order": 4
+        },
+        {
+          "name": "শিফন",
+          "order": 5
+        },
+        {
+          "name": "পলিয়েস্টার",
+          "order": 6
+        },
+        {
+          "name": "মসলিন",
+          "order": 7
+        },
+        {
+          "name": "ভয়েল",
+          "order": 8
+        }
+      ]
     },
     {
-      name: 'Footwear',
-      nameBn: 'জুতা/স্যান্ডেল',
-      icon: 'footprints',
-      order: 5,
-      subcategories: [
-        { name: 'Men\'s Shoes', nameBn: 'পুরুষ জুতা', order: 1 },
-        { name: 'Women\'s Shoes', nameBn: 'মহিলা জুতা', order: 2 },
-        { name: 'Sandals', nameBn: 'স্যান্ডেল', order: 3 },
-        { name: 'Sneakers', nameBn: 'কেডস/স্নিকার্স', order: 4 },
-        { name: 'Kids\' Shoes', nameBn: 'শিশু জুতা', order: 5 },
-        { name: 'Slippers', nameBn: 'চপ্পল/স্লিপার', order: 6 },
-      ],
+      "name": "জুতা/স্যান্ডেল",
+      "icon": "footprints",
+      "order": 5,
+      "subcategories": [
+        {
+          "name": "পুরুষ জুতা",
+          "order": 1
+        },
+        {
+          "name": "মহিলা জুতা",
+          "order": 2
+        },
+        {
+          "name": "স্যান্ডেল",
+          "order": 3
+        },
+        {
+          "name": "কেডস/স্নিকার্স",
+          "order": 4
+        },
+        {
+          "name": "শিশু জুতা",
+          "order": 5
+        },
+        {
+          "name": "চপ্পল/স্লিপার",
+          "order": 6
+        }
+      ]
     },
     {
-      name: 'Accessories',
-      nameBn: 'আনুষাঙ্গিক',
-      icon: 'glasses',
-      order: 6,
-      subcategories: [
-        { name: 'Cap & Hat', nameBn: 'টুপি/ক্যাপ', order: 1 },
-        { name: 'Belt', nameBn: 'বেল্ট', order: 2 },
-        { name: 'Orna & Scarf', nameBn: 'ওড়না/স্কার্ফ', order: 3 },
-        { name: 'Tie & Bow', nameBn: 'টাই/বো', order: 4 },
-        { name: 'Socks', nameBn: 'মোজা', order: 5 },
-        { name: 'Bag', nameBn: 'ব্যাগ', order: 6 },
-        { name: 'Wallet', nameBn: 'মানিব্যাগ/ওয়ালেট', order: 7 },
-        { name: 'Gamcha & Towel', nameBn: 'গামছা/তোয়ালে', order: 8 },
-        { name: 'Jewelry', nameBn: 'গহনা/জুয়েলারি', order: 9 },
-      ],
+      "name": "আনুষাঙ্গিক",
+      "icon": "glasses",
+      "order": 6,
+      "subcategories": [
+        {
+          "name": "টুপি/ক্যাপ",
+          "order": 1
+        },
+        {
+          "name": "বেল্ট",
+          "order": 2
+        },
+        {
+          "name": "ওড়না/স্কার্ফ",
+          "order": 3
+        },
+        {
+          "name": "টাই/বো",
+          "order": 4
+        },
+        {
+          "name": "মোজা",
+          "order": 5
+        },
+        {
+          "name": "ব্যাগ",
+          "order": 6
+        },
+        {
+          "name": "মানিব্যাগ/ওয়ালেট",
+          "order": 7
+        },
+        {
+          "name": "গামছা/তোয়ালে",
+          "order": 8
+        },
+        {
+          "name": "গহনা/জুয়েলারি",
+          "order": 9
+        }
+      ]
     },
     {
-      name: 'Tailoring',
-      nameBn: 'সেলাই সামগ্রী',
-      icon: 'needle',
-      order: 7,
-      subcategories: [
-        { name: 'Thread', nameBn: 'সুতা', order: 1 },
-        { name: 'Button', nameBn: 'বোতাম', order: 2 },
-        { name: 'Zipper', nameBn: 'জিপার/চেইন', order: 3 },
-        { name: 'Lace & Border', nameBn: 'লেস/বর্ডার', order: 4 },
-        { name: 'Elastic', nameBn: 'ইলাস্টিক', order: 5 },
-      ],
-    },
+      "name": "সেলাই সামগ্রী",
+      "icon": "needle",
+      "order": 7,
+      "subcategories": [
+        {
+          "name": "সুতা",
+          "order": 1
+        },
+        {
+          "name": "বোতাম",
+          "order": 2
+        },
+        {
+          "name": "জিপার/চেইন",
+          "order": 3
+        },
+        {
+          "name": "লেস/বর্ডার",
+          "order": 4
+        },
+        {
+          "name": "ইলাস্টিক",
+          "order": 5
+        }
+      ]
+    }
   ],
-
-  // ==========================================
-  // মুদি দোকান (Grocery)
-  // ==========================================
-  grocery: [
+  "grocery": [
     {
-      name: 'Rice & Lentils',
-      nameBn: 'চাল ও ডাল',
-      icon: 'wheat',
-      order: 1,
-      subcategories: [
-        { name: 'Miniket Rice', nameBn: 'মিনিকেট চাল', order: 1 },
-        { name: 'Nazirshail Rice', nameBn: 'নাজিরশাইল চাল', order: 2 },
-        { name: 'Basmati Rice', nameBn: 'বাসমতি চাল', order: 3 },
-        { name: 'Atap Rice', nameBn: 'আতপ চাল', order: 4 },
-        { name: 'Polao Rice', nameBn: 'পোলাও চাল', order: 5 },
-        { name: 'Masoor Dal', nameBn: 'মসুর ডাল', order: 6 },
-        { name: 'Mung Dal', nameBn: 'মুগ ডাল', order: 7 },
-        { name: 'Cholar Dal', nameBn: 'বুটের/চোলার ডাল', order: 8 },
-        { name: 'Khesari Dal', nameBn: 'খেসারি ডাল', order: 9 },
-        { name: 'Motor Dal', nameBn: 'মটর ডাল', order: 10 },
-      ],
+      "name": "চাল ও ডাল",
+      "icon": "wheat",
+      "order": 1,
+      "subcategories": [
+        {
+          "name": "মিনিকেট চাল",
+          "order": 1
+        },
+        {
+          "name": "নাজিরশাইল চাল",
+          "order": 2
+        },
+        {
+          "name": "বাসমতি চাল",
+          "order": 3
+        },
+        {
+          "name": "আতপ চাল",
+          "order": 4
+        },
+        {
+          "name": "পোলাও চাল",
+          "order": 5
+        },
+        {
+          "name": "মসুর ডাল",
+          "order": 6
+        },
+        {
+          "name": "মুগ ডাল",
+          "order": 7
+        },
+        {
+          "name": "বুটের/চোলার ডাল",
+          "order": 8
+        },
+        {
+          "name": "খেসারি ডাল",
+          "order": 9
+        },
+        {
+          "name": "মটর ডাল",
+          "order": 10
+        }
+      ]
     },
     {
-      name: 'Oil & Spices',
-      nameBn: 'তেল ও মশলা',
-      icon: 'flame',
-      order: 2,
-      subcategories: [
-        { name: 'Soybean Oil', nameBn: 'সয়াবিন তেল', order: 1 },
-        { name: 'Mustard Oil', nameBn: 'সরিষার তেল', order: 2 },
-        { name: 'Palm Oil', nameBn: 'পাম অয়েল', order: 3 },
-        { name: 'Turmeric', nameBn: 'হলুদ', order: 4 },
-        { name: 'Chili Powder', nameBn: 'মরিচ গুঁড়া', order: 5 },
-        { name: 'Cumin', nameBn: 'জিরা', order: 6 },
-        { name: 'Coriander', nameBn: 'ধনে', order: 7 },
-        { name: 'Garlic', nameBn: 'রসুন', order: 8 },
-        { name: 'Ginger', nameBn: 'আদা', order: 9 },
-        { name: 'Onion', nameBn: 'পেঁয়াজ', order: 10 },
-        { name: 'Mixed Spice', nameBn: 'গরম মশলা', order: 11 },
-        { name: 'Bay Leaf', nameBn: 'তেজপাতা', order: 12 },
-        { name: 'Cinnamon', nameBn: 'দারুচিনি', order: 13 },
-        { name: 'Cardamom', nameBn: 'এলাচ', order: 14 },
-      ],
+      "name": "তেল ও মশলা",
+      "icon": "flame",
+      "order": 2,
+      "subcategories": [
+        {
+          "name": "সয়াবিন তেল",
+          "order": 1
+        },
+        {
+          "name": "সরিষার তেল",
+          "order": 2
+        },
+        {
+          "name": "পাম অয়েল",
+          "order": 3
+        },
+        {
+          "name": "হলুদ",
+          "order": 4
+        },
+        {
+          "name": "মরিচ গুঁড়া",
+          "order": 5
+        },
+        {
+          "name": "জিরা",
+          "order": 6
+        },
+        {
+          "name": "ধনে",
+          "order": 7
+        },
+        {
+          "name": "রসুন",
+          "order": 8
+        },
+        {
+          "name": "আদা",
+          "order": 9
+        },
+        {
+          "name": "পেঁয়াজ",
+          "order": 10
+        },
+        {
+          "name": "গরম মশলা",
+          "order": 11
+        },
+        {
+          "name": "তেজপাতা",
+          "order": 12
+        },
+        {
+          "name": "দারুচিনি",
+          "order": 13
+        },
+        {
+          "name": "এলাচ",
+          "order": 14
+        }
+      ]
     },
     {
-      name: 'Flour & Grains',
-      nameBn: 'আটা ও শস্য',
-      icon: 'grain',
-      order: 3,
-      subcategories: [
-        { name: 'Wheat Flour', nameBn: 'আটা', order: 1 },
-        { name: 'White Flour', nameBn: 'ময়দা', order: 2 },
-        { name: 'Semolina', nameBn: 'সুজি', order: 3 },
-        { name: 'Flattened Rice', nameBn: 'চিড়া', order: 4 },
-        { name: 'Puffed Rice', nameBn: 'মুড়ি', order: 5 },
-        { name: 'Corn Flour', nameBn: 'কর্ন ফ্লাওয়ার', order: 6 },
-        { name: 'Noodles', nameBn: 'নুডলস/সেমাই', order: 7 },
-        { name: 'Bread', nameBn: 'রুটি/পাউরুটি', order: 8 },
-      ],
+      "name": "আটা ও শস্য",
+      "icon": "grain",
+      "order": 3,
+      "subcategories": [
+        {
+          "name": "আটা",
+          "order": 1
+        },
+        {
+          "name": "ময়দা",
+          "order": 2
+        },
+        {
+          "name": "সুজি",
+          "order": 3
+        },
+        {
+          "name": "চিড়া",
+          "order": 4
+        },
+        {
+          "name": "মুড়ি",
+          "order": 5
+        },
+        {
+          "name": "কর্ন ফ্লাওয়ার",
+          "order": 6
+        },
+        {
+          "name": "নুডলস/সেমাই",
+          "order": 7
+        },
+        {
+          "name": "রুটি/পাউরুটি",
+          "order": 8
+        }
+      ]
     },
     {
-      name: 'Sugar & Salt',
-      nameBn: 'চিনি ও লবণ',
-      icon: 'candy',
-      order: 4,
-      subcategories: [
-        { name: 'Sugar', nameBn: 'চিনি', order: 1 },
-        { name: 'Salt', nameBn: 'লবণ', order: 2 },
-        { name: 'Jaggery', nameBn: 'গুড়', order: 3 },
-        { name: 'Honey', nameBn: 'মধু', order: 4 },
-      ],
+      "name": "চিনি ও লবণ",
+      "icon": "candy",
+      "order": 4,
+      "subcategories": [
+        {
+          "name": "চিনি",
+          "order": 1
+        },
+        {
+          "name": "লবণ",
+          "order": 2
+        },
+        {
+          "name": "গুড়",
+          "order": 3
+        },
+        {
+          "name": "মধু",
+          "order": 4
+        }
+      ]
     },
     {
-      name: 'Tea & Beverages',
-      nameBn: 'চা ও পানীয়',
-      icon: 'coffee',
-      order: 5,
-      subcategories: [
-        { name: 'Tea Leaves', nameBn: 'চা পাতা', order: 1 },
-        { name: 'Coffee', nameBn: 'কফি', order: 2 },
-        { name: 'Powdered Milk', nameBn: 'গুঁড়া দুধ', order: 3 },
-        { name: 'Juice', nameBn: 'জুস/ড্রিংকস', order: 4 },
-        { name: 'Water', nameBn: 'পানি (বোতল)', order: 5 },
-        { name: 'Soft Drinks', nameBn: 'কোমল পানীয়', order: 6 },
-      ],
+      "name": "চা ও পানীয়",
+      "icon": "coffee",
+      "order": 5,
+      "subcategories": [
+        {
+          "name": "চা পাতা",
+          "order": 1
+        },
+        {
+          "name": "কফি",
+          "order": 2
+        },
+        {
+          "name": "গুঁড়া দুধ",
+          "order": 3
+        },
+        {
+          "name": "জুস/ড্রিংকস",
+          "order": 4
+        },
+        {
+          "name": "পানি (বোতল)",
+          "order": 5
+        },
+        {
+          "name": "কোমল পানীয়",
+          "order": 6
+        }
+      ]
     },
     {
-      name: 'Snacks & Biscuits',
-      nameBn: 'স্ন্যাকস ও বিস্কুট',
-      icon: 'cookie',
-      order: 6,
-      subcategories: [
-        { name: 'Biscuit', nameBn: 'বিস্কুট', order: 1 },
-        { name: 'Chips', nameBn: 'চিপস', order: 2 },
-        { name: 'Chanachur', nameBn: 'চানাচুর', order: 3 },
-        { name: 'Chocolate', nameBn: 'চকলেট', order: 4 },
-        { name: 'Cake', nameBn: 'কেক', order: 5 },
-        { name: 'Instant Noodles', nameBn: 'ইনস্ট্যান্ট নুডলস', order: 6 },
-        { name: 'Nuts & Dry Fruits', nameBn: 'বাদাম ও শুকনো ফল', order: 7 },
-      ],
+      "name": "স্ন্যাকস ও বিস্কুট",
+      "icon": "cookie",
+      "order": 6,
+      "subcategories": [
+        {
+          "name": "বিস্কুট",
+          "order": 1
+        },
+        {
+          "name": "চিপস",
+          "order": 2
+        },
+        {
+          "name": "চানাচুর",
+          "order": 3
+        },
+        {
+          "name": "চকলেট",
+          "order": 4
+        },
+        {
+          "name": "কেক",
+          "order": 5
+        },
+        {
+          "name": "ইনস্ট্যান্ট নুডলস",
+          "order": 6
+        },
+        {
+          "name": "বাদাম ও শুকনো ফল",
+          "order": 7
+        }
+      ]
     },
     {
-      name: 'Soap & Cleaners',
-      nameBn: 'সাবান ও পরিষ্কারক',
-      icon: 'sparkles',
-      order: 7,
-      subcategories: [
-        { name: 'Bath Soap', nameBn: 'গোসলের সাবান', order: 1 },
-        { name: 'Laundry Soap', nameBn: 'কাপড় ধোয়ার সাবান', order: 2 },
-        { name: 'Detergent', nameBn: 'ডিটারজেন্ট পাউডার', order: 3 },
-        { name: 'Liquid Detergent', nameBn: 'লিকুইড ডিটারজেন্ট', order: 4 },
-        { name: 'Dish Wash', nameBn: 'ডিশ ওয়াশ', order: 5 },
-        { name: 'Floor Cleaner', nameBn: 'ফ্লোর ক্লিনার', order: 6 },
-        { name: 'Toilet Cleaner', nameBn: 'টয়লেট ক্লিনার', order: 7 },
-      ],
+      "name": "সাবান ও পরিষ্কারক",
+      "icon": "sparkles",
+      "order": 7,
+      "subcategories": [
+        {
+          "name": "গোসলের সাবান",
+          "order": 1
+        },
+        {
+          "name": "কাপড় ধোয়ার সাবান",
+          "order": 2
+        },
+        {
+          "name": "ডিটারজেন্ট পাউডার",
+          "order": 3
+        },
+        {
+          "name": "লিকুইড ডিটারজেন্ট",
+          "order": 4
+        },
+        {
+          "name": "ডিশ ওয়াশ",
+          "order": 5
+        },
+        {
+          "name": "ফ্লোর ক্লিনার",
+          "order": 6
+        },
+        {
+          "name": "টয়লেট ক্লিনার",
+          "order": 7
+        }
+      ]
     },
     {
-      name: 'Personal Care',
-      nameBn: 'ব্যক্তিগত যত্ন',
-      icon: 'sparkle',
-      order: 8,
-      subcategories: [
-        { name: 'Shampoo', nameBn: 'শ্যাম্পু', order: 1 },
-        { name: 'Hair Oil', nameBn: 'চুলের তেল', order: 2 },
-        { name: 'Cream & Lotion', nameBn: 'ক্রিম/লোশন', order: 3 },
-        { name: 'Toothpaste', nameBn: 'টুথপেস্ট', order: 4 },
-        { name: 'Toothbrush', nameBn: 'টুথব্রাশ', order: 5 },
-        { name: 'Razor & Blades', nameBn: 'রেজার/ব্লেড', order: 6 },
-        { name: 'Tissue & Napkin', nameBn: 'টিস্যু/ন্যাপকিন', order: 7 },
-      ],
+      "name": "ব্যক্তিগত যত্ন",
+      "icon": "sparkle",
+      "order": 8,
+      "subcategories": [
+        {
+          "name": "শ্যাম্পু",
+          "order": 1
+        },
+        {
+          "name": "চুলের তেল",
+          "order": 2
+        },
+        {
+          "name": "ক্রিম/লোশন",
+          "order": 3
+        },
+        {
+          "name": "টুথপেস্ট",
+          "order": 4
+        },
+        {
+          "name": "টুথব্রাশ",
+          "order": 5
+        },
+        {
+          "name": "রেজার/ব্লেড",
+          "order": 6
+        },
+        {
+          "name": "টিস্যু/ন্যাপকিন",
+          "order": 7
+        }
+      ]
     },
     {
-      name: 'Baby & Dairy',
-      nameBn: 'শিশু খাদ্য ও দুগ্ধ',
-      icon: 'milk',
-      order: 9,
-      subcategories: [
-        { name: 'Powdered Milk', nameBn: 'গুঁড়া দুধ', order: 1 },
-        { name: 'Baby Cereal', nameBn: 'সেরেলাক/বেবি ফুড', order: 2 },
-        { name: 'Diaper', nameBn: 'ডায়পার', order: 3 },
-        { name: 'Condensed Milk', nameBn: 'ঘন দুধ', order: 4 },
-        { name: 'Yogurt', nameBn: 'দই', order: 5 },
-        { name: 'Ghee & Butter', nameBn: 'ঘি/মাখন', order: 6 },
-      ],
+      "name": "শিশু খাদ্য ও দুগ্ধ",
+      "icon": "milk",
+      "order": 9,
+      "subcategories": [
+        {
+          "name": "গুঁড়া দুধ",
+          "order": 1
+        },
+        {
+          "name": "সেরেলাক/বেবি ফুড",
+          "order": 2
+        },
+        {
+          "name": "ডায়পার",
+          "order": 3
+        },
+        {
+          "name": "ঘন দুধ",
+          "order": 4
+        },
+        {
+          "name": "দই",
+          "order": 5
+        },
+        {
+          "name": "ঘি/মাখন",
+          "order": 6
+        }
+      ]
     },
     {
-      name: 'Miscellaneous',
-      nameBn: 'বিবিধ',
-      icon: 'package',
-      order: 10,
-      subcategories: [
-        { name: 'Matchbox', nameBn: 'দিয়াশলাই', order: 1 },
-        { name: 'Battery', nameBn: 'ব্যাটারি', order: 2 },
-        { name: 'Candle', nameBn: 'মোমবাতি', order: 3 },
-        { name: 'Mosquito Coil', nameBn: 'মশা মারার কয়েল', order: 4 },
-        { name: 'Plastic Bag', nameBn: 'প্লাস্টিক ব্যাগ/প্যাকেট', order: 5 },
-        { name: 'Incense', nameBn: 'আগরবাতি', order: 6 },
-      ],
-    },
+      "name": "বিবিধ",
+      "icon": "package",
+      "order": 10,
+      "subcategories": [
+        {
+          "name": "দিয়াশলাই",
+          "order": 1
+        },
+        {
+          "name": "ব্যাটারি",
+          "order": 2
+        },
+        {
+          "name": "মোমবাতি",
+          "order": 3
+        },
+        {
+          "name": "মশা মারার কয়েল",
+          "order": 4
+        },
+        {
+          "name": "প্লাস্টিক ব্যাগ/প্যাকেট",
+          "order": 5
+        },
+        {
+          "name": "আগরবাতি",
+          "order": 6
+        }
+      ]
+    }
   ],
-
-  // ==========================================
-  // ইলেকট্রনিক্স (Electronics)
-  // ==========================================
-  electronics: [
+  "electronics": [
     {
-      name: 'Mobile & Tablet',
-      nameBn: 'মোবাইল ও ট্যাবলেট',
-      icon: 'smartphone',
-      order: 1,
-      subcategories: [
-        { name: 'Smartphone', nameBn: 'স্মার্টফোন', order: 1 },
-        { name: 'Feature Phone', nameBn: 'ফিচার ফোন', order: 2 },
-        { name: 'Tablet', nameBn: 'ট্যাবলেট', order: 3 },
-        { name: 'Smartwatch', nameBn: 'স্মার্টওয়াচ', order: 4 },
-      ],
+      "name": "মোবাইল ও ট্যাবলেট",
+      "icon": "smartphone",
+      "order": 1,
+      "subcategories": [
+        {
+          "name": "স্মার্টফোন",
+          "order": 1
+        },
+        {
+          "name": "ফিচার ফোন",
+          "order": 2
+        },
+        {
+          "name": "ট্যাবলেট",
+          "order": 3
+        },
+        {
+          "name": "স্মার্টওয়াচ",
+          "order": 4
+        }
+      ]
     },
     {
-      name: 'Mobile Accessories',
-      nameBn: 'মোবাইল এক্সেসরিজ',
-      icon: 'cable',
-      order: 2,
-      subcategories: [
-        { name: 'Charger', nameBn: 'চার্জার', order: 1 },
-        { name: 'Cable & Cord', nameBn: 'ক্যাবল/কর্ড', order: 2 },
-        { name: 'Earphone & Headphone', nameBn: 'ইয়ারফোন/হেডফোন', order: 3 },
-        { name: 'Case & Cover', nameBn: 'কেস/কভার', order: 4 },
-        { name: 'Screen Protector', nameBn: 'স্ক্রিন প্রটেক্টর', order: 5 },
-        { name: 'Power Bank', nameBn: 'পাওয়ার ব্যাংক', order: 6 },
-        { name: 'Bluetooth Speaker', nameBn: 'ব্লুটুথ স্পিকার', order: 7 },
-        { name: 'Memory Card', nameBn: 'মেমোরি কার্ড', order: 8 },
-        { name: 'SIM Card', nameBn: 'সিম কার্ড', order: 9 },
-        { name: 'Holder & Stand', nameBn: 'হোল্ডার/স্ট্যান্ড', order: 10 },
-      ],
+      "name": "মোবাইল এক্সেসরিজ",
+      "icon": "cable",
+      "order": 2,
+      "subcategories": [
+        {
+          "name": "চার্জার",
+          "order": 1
+        },
+        {
+          "name": "ক্যাবল/কর্ড",
+          "order": 2
+        },
+        {
+          "name": "ইয়ারফোন/হেডফোন",
+          "order": 3
+        },
+        {
+          "name": "কেস/কভার",
+          "order": 4
+        },
+        {
+          "name": "স্ক্রিন প্রটেক্টর",
+          "order": 5
+        },
+        {
+          "name": "পাওয়ার ব্যাংক",
+          "order": 6
+        },
+        {
+          "name": "ব্লুটুথ স্পিকার",
+          "order": 7
+        },
+        {
+          "name": "মেমোরি কার্ড",
+          "order": 8
+        },
+        {
+          "name": "সিম কার্ড",
+          "order": 9
+        },
+        {
+          "name": "হোল্ডার/স্ট্যান্ড",
+          "order": 10
+        }
+      ]
     },
     {
-      name: 'Computer & Laptop',
-      nameBn: 'কম্পিউটার ও ল্যাপটপ',
-      icon: 'laptop',
-      order: 3,
-      subcategories: [
-        { name: 'Laptop', nameBn: 'ল্যাপটপ', order: 1 },
-        { name: 'Desktop', nameBn: 'ডেস্কটপ', order: 2 },
-        { name: 'Monitor', nameBn: 'মনিটর', order: 3 },
-        { name: 'Printer', nameBn: 'প্রিন্টার', order: 4 },
-        { name: 'UPS & IPS', nameBn: 'ইউপিএস/আইপিএস', order: 5 },
-      ],
+      "name": "কম্পিউটার ও ল্যাপটপ",
+      "icon": "laptop",
+      "order": 3,
+      "subcategories": [
+        {
+          "name": "ল্যাপটপ",
+          "order": 1
+        },
+        {
+          "name": "ডেস্কটপ",
+          "order": 2
+        },
+        {
+          "name": "মনিটর",
+          "order": 3
+        },
+        {
+          "name": "প্রিন্টার",
+          "order": 4
+        },
+        {
+          "name": "ইউপিএস/আইপিএস",
+          "order": 5
+        }
+      ]
     },
     {
-      name: 'Computer Accessories',
-      nameBn: 'কম্পিউটার এক্সেসরিজ',
-      icon: 'mouse',
-      order: 4,
-      subcategories: [
-        { name: 'Mouse', nameBn: 'মাউস', order: 1 },
-        { name: 'Keyboard', nameBn: 'কিবোর্ড', order: 2 },
-        { name: 'Pen Drive', nameBn: 'পেনড্রাইভ', order: 3 },
-        { name: 'Hard Disk', nameBn: 'হার্ড ডিস্ক/SSD', order: 4 },
-        { name: 'RAM', nameBn: 'র‍্যাম', order: 5 },
-        { name: 'Webcam', nameBn: 'ওয়েবক্যাম', order: 6 },
-        { name: 'Mouse Pad', nameBn: 'মাউস প্যাড', order: 7 },
-        { name: 'USB Hub', nameBn: 'ইউএসবি হাব', order: 8 },
-        { name: 'Ink & Toner', nameBn: 'কালি/টোনার', order: 9 },
-      ],
+      "name": "কম্পিউটার এক্সেসরিজ",
+      "icon": "mouse",
+      "order": 4,
+      "subcategories": [
+        {
+          "name": "মাউস",
+          "order": 1
+        },
+        {
+          "name": "কিবোর্ড",
+          "order": 2
+        },
+        {
+          "name": "পেনড্রাইভ",
+          "order": 3
+        },
+        {
+          "name": "হার্ড ডিস্ক/SSD",
+          "order": 4
+        },
+        {
+          "name": "র‍্যাম",
+          "order": 5
+        },
+        {
+          "name": "ওয়েবক্যাম",
+          "order": 6
+        },
+        {
+          "name": "মাউস প্যাড",
+          "order": 7
+        },
+        {
+          "name": "ইউএসবি হাব",
+          "order": 8
+        },
+        {
+          "name": "কালি/টোনার",
+          "order": 9
+        }
+      ]
     },
     {
-      name: 'TV & Sound',
-      nameBn: 'টিভি ও সাউন্ড',
-      icon: 'tv',
-      order: 5,
-      subcategories: [
-        { name: 'Television', nameBn: 'টেলিভিশন', order: 1 },
-        { name: 'Soundbar', nameBn: 'সাউন্ডবার', order: 2 },
-        { name: 'Speaker', nameBn: 'স্পিকার', order: 3 },
-        { name: 'Home Theater', nameBn: 'হোম থিয়েটার', order: 4 },
-        { name: 'Microphone', nameBn: 'মাইক্রোফোন', order: 5 },
-        { name: 'Amplifier', nameBn: 'অ্যাম্প্লিফায়ার', order: 6 },
-      ],
+      "name": "টিভি ও সাউন্ড",
+      "icon": "tv",
+      "order": 5,
+      "subcategories": [
+        {
+          "name": "টেলিভিশন",
+          "order": 1
+        },
+        {
+          "name": "সাউন্ডবার",
+          "order": 2
+        },
+        {
+          "name": "স্পিকার",
+          "order": 3
+        },
+        {
+          "name": "হোম থিয়েটার",
+          "order": 4
+        },
+        {
+          "name": "মাইক্রোফোন",
+          "order": 5
+        },
+        {
+          "name": "অ্যাম্প্লিফায়ার",
+          "order": 6
+        }
+      ]
     },
     {
-      name: 'Home Appliance',
-      nameBn: 'ঘরের যন্ত্রপাতি',
-      icon: 'plug',
-      order: 6,
-      subcategories: [
-        { name: 'Fan', nameBn: 'ফ্যান', order: 1 },
-        { name: 'Light & Bulb', nameBn: 'লাইট/বাল্ব', order: 2 },
-        { name: 'Iron', nameBn: 'আয়রন/ইস্ত্রি', order: 3 },
-        { name: 'Blender', nameBn: 'ব্লেন্ডার', order: 4 },
-        { name: 'Rice Cooker', nameBn: 'রাইস কুকার', order: 5 },
-        { name: 'Microwave Oven', nameBn: 'মাইক্রোওয়েভ ওভেন', order: 6 },
-        { name: 'Water Heater', nameBn: 'ওয়াটার হিটার', order: 7 },
-        { name: 'AC', nameBn: 'এসি', order: 8 },
-        { name: 'Refrigerator', nameBn: 'রেফ্রিজারেটর/ফ্রিজ', order: 9 },
-        { name: 'Washing Machine', nameBn: 'ওয়াশিং মেশিন', order: 10 },
-      ],
+      "name": "ঘরের যন্ত্রপাতি",
+      "icon": "plug",
+      "order": 6,
+      "subcategories": [
+        {
+          "name": "ফ্যান",
+          "order": 1
+        },
+        {
+          "name": "লাইট/বাল্ব",
+          "order": 2
+        },
+        {
+          "name": "আয়রন/ইস্ত্রি",
+          "order": 3
+        },
+        {
+          "name": "ব্লেন্ডার",
+          "order": 4
+        },
+        {
+          "name": "রাইস কুকার",
+          "order": 5
+        },
+        {
+          "name": "মাইক্রোওয়েভ ওভেন",
+          "order": 6
+        },
+        {
+          "name": "ওয়াটার হিটার",
+          "order": 7
+        },
+        {
+          "name": "এসি",
+          "order": 8
+        },
+        {
+          "name": "রেফ্রিজারেটর/ফ্রিজ",
+          "order": 9
+        },
+        {
+          "name": "ওয়াশিং মেশিন",
+          "order": 10
+        }
+      ]
     },
     {
-      name: 'Camera & Security',
-      nameBn: 'ক্যামেরা ও সিকিউরিটি',
-      icon: 'camera',
-      order: 7,
-      subcategories: [
-        { name: 'CCTV Camera', nameBn: 'সিসিটিভি ক্যামেরা', order: 1 },
-        { name: 'IP Camera', nameBn: 'আইপি ক্যামেরা', order: 2 },
-        { name: 'DVR & NVR', nameBn: 'DVR/NVR', order: 3 },
-        { name: 'Digital Camera', nameBn: 'ডিজিটাল ক্যামেরা', order: 4 },
-        { name: 'Action Camera', nameBn: 'অ্যাকশন ক্যামেরা', order: 5 },
-      ],
+      "name": "ক্যামেরা ও সিকিউরিটি",
+      "icon": "camera",
+      "order": 7,
+      "subcategories": [
+        {
+          "name": "সিসিটিভি ক্যামেরা",
+          "order": 1
+        },
+        {
+          "name": "আইপি ক্যামেরা",
+          "order": 2
+        },
+        {
+          "name": "DVR/NVR",
+          "order": 3
+        },
+        {
+          "name": "ডিজিটাল ক্যামেরা",
+          "order": 4
+        },
+        {
+          "name": "অ্যাকশন ক্যামেরা",
+          "order": 5
+        }
+      ]
     },
     {
-      name: 'Networking',
-      nameBn: 'নেটওয়ার্কিং',
-      icon: 'wifi',
-      order: 8,
-      subcategories: [
-        { name: 'Router', nameBn: 'রাউটার', order: 1 },
-        { name: 'Switch', nameBn: 'সুইচ/হাব', order: 2 },
-        { name: 'Network Cable', nameBn: 'নেটওয়ার্ক ক্যাবল', order: 3 },
-        { name: 'Connector', nameBn: 'কানেক্টর/RJ45', order: 4 },
-        { name: 'ONU & Modem', nameBn: 'ওএনইউ/মডেম', order: 5 },
-      ],
+      "name": "নেটওয়ার্কিং",
+      "icon": "wifi",
+      "order": 8,
+      "subcategories": [
+        {
+          "name": "রাউটার",
+          "order": 1
+        },
+        {
+          "name": "সুইচ/হাব",
+          "order": 2
+        },
+        {
+          "name": "নেটওয়ার্ক ক্যাবল",
+          "order": 3
+        },
+        {
+          "name": "কানেক্টর/RJ45",
+          "order": 4
+        },
+        {
+          "name": "ওএনইউ/মডেম",
+          "order": 5
+        }
+      ]
     },
     {
-      name: 'Gaming',
-      nameBn: 'গেমিং',
-      icon: 'gamepad',
-      order: 9,
-      subcategories: [
-        { name: 'Game Console', nameBn: 'গেম কনসোল', order: 1 },
-        { name: 'Controller', nameBn: 'কন্ট্রোলার/গেমপ্যাড', order: 2 },
-        { name: 'Gaming Headset', nameBn: 'গেমিং হেডসেট', order: 3 },
-        { name: 'Gaming Accessories', nameBn: 'গেমিং এক্সেসরিজ', order: 4 },
-      ],
-    },
+      "name": "গেমিং",
+      "icon": "gamepad",
+      "order": 9,
+      "subcategories": [
+        {
+          "name": "গেম কনসোল",
+          "order": 1
+        },
+        {
+          "name": "কন্ট্রোলার/গেমপ্যাড",
+          "order": 2
+        },
+        {
+          "name": "গেমিং হেডসেট",
+          "order": 3
+        },
+        {
+          "name": "গেমিং এক্সেসরিজ",
+          "order": 4
+        }
+      ]
+    }
   ],
-
-  // ==========================================
-  // ফার্মেসি (Pharmacy)
-  // ==========================================
-  pharmacy: [
+  "pharmacy": [
     {
-      name: 'Medicine - Tablet',
-      nameBn: 'ওষুধ - ট্যাবলেট',
-      icon: 'pill',
-      order: 1,
-      subcategories: [
-        { name: 'Antipyretic', nameBn: 'জ্বরের ওষুধ', order: 1 },
-        { name: 'Antibiotic', nameBn: 'অ্যান্টিবায়োটিক', order: 2 },
-        { name: 'Pain Killer', nameBn: 'ব্যথানাশক', order: 3 },
-        { name: 'Antacid', nameBn: 'গ্যাসের ওষুধ', order: 4 },
-        { name: 'Antihistamine', nameBn: 'এলার্জির ওষুধ', order: 5 },
-        { name: 'Blood Pressure', nameBn: 'প্রেসারের ওষুধ', order: 6 },
-        { name: 'Diabetes', nameBn: 'ডায়াবেটিসের ওষুধ', order: 7 },
-        { name: 'Heart Medicine', nameBn: 'হৃদরোগের ওষুধ', order: 8 },
-      ],
+      "name": "ওষুধ - ট্যাবলেট",
+      "icon": "pill",
+      "order": 1,
+      "subcategories": [
+        {
+          "name": "জ্বরের ওষুধ",
+          "order": 1
+        },
+        {
+          "name": "অ্যান্টিবায়োটিক",
+          "order": 2
+        },
+        {
+          "name": "ব্যথানাশক",
+          "order": 3
+        },
+        {
+          "name": "গ্যাসের ওষুধ",
+          "order": 4
+        },
+        {
+          "name": "এলার্জির ওষুধ",
+          "order": 5
+        },
+        {
+          "name": "প্রেসারের ওষুধ",
+          "order": 6
+        },
+        {
+          "name": "ডায়াবেটিসের ওষুধ",
+          "order": 7
+        },
+        {
+          "name": "হৃদরোগের ওষুধ",
+          "order": 8
+        }
+      ]
     },
     {
-      name: 'Medicine - Liquid',
-      nameBn: 'ওষুধ - তরল',
-      icon: 'beaker',
-      order: 2,
-      subcategories: [
-        { name: 'Syrup', nameBn: 'সিরাপ', order: 1 },
-        { name: 'Suspension', nameBn: 'সাসপেনশন', order: 2 },
-        { name: 'Drop', nameBn: 'ড্রপ', order: 3 },
-        { name: 'Injection', nameBn: 'ইনজেকশন', order: 4 },
-        { name: 'Saline', nameBn: 'স্যালাইন', order: 5 },
-      ],
+      "name": "ওষুধ - তরল",
+      "icon": "beaker",
+      "order": 2,
+      "subcategories": [
+        {
+          "name": "সিরাপ",
+          "order": 1
+        },
+        {
+          "name": "সাসপেনশন",
+          "order": 2
+        },
+        {
+          "name": "ড্রপ",
+          "order": 3
+        },
+        {
+          "name": "ইনজেকশন",
+          "order": 4
+        },
+        {
+          "name": "স্যালাইন",
+          "order": 5
+        }
+      ]
     },
     {
-      name: 'Medicine - External',
-      nameBn: 'ওষুধ - বাহ্যিক',
-      icon: 'cream',
-      order: 3,
-      subcategories: [
-        { name: 'Ointment & Cream', nameBn: 'মলম/ক্রিম', order: 1 },
-        { name: 'Eye Drop', nameBn: 'চোখের ড্রপ', order: 2 },
-        { name: 'Ear Drop', nameBn: 'কানের ড্রপ', order: 3 },
-        { name: 'Nasal Spray', nameBn: 'নাকের স্প্রে', order: 4 },
-        { name: 'Inhaler', nameBn: 'ইনহেলার', order: 5 },
-        { name: 'Suppository', nameBn: 'সাপোজিটরি', order: 6 },
-      ],
+      "name": "ওষুধ - বাহ্যিক",
+      "icon": "cream",
+      "order": 3,
+      "subcategories": [
+        {
+          "name": "মলম/ক্রিম",
+          "order": 1
+        },
+        {
+          "name": "চোখের ড্রপ",
+          "order": 2
+        },
+        {
+          "name": "কানের ড্রপ",
+          "order": 3
+        },
+        {
+          "name": "নাকের স্প্রে",
+          "order": 4
+        },
+        {
+          "name": "ইনহেলার",
+          "order": 5
+        },
+        {
+          "name": "সাপোজিটরি",
+          "order": 6
+        }
+      ]
     },
     {
-      name: 'Vitamins & Supplements',
-      nameBn: 'ভিটামিন ও সাপ্লিমেন্ট',
-      icon: 'dumbbell',
-      order: 4,
-      subcategories: [
-        { name: 'Multivitamin', nameBn: 'মাল্টিভিটামিন', order: 1 },
-        { name: 'Vitamin C', nameBn: 'ভিটামিন সি', order: 2 },
-        { name: 'Vitamin D', nameBn: 'ভিটামিন ডি', order: 3 },
-        { name: 'Calcium', nameBn: 'ক্যালসিয়াম', order: 4 },
-        { name: 'Iron', nameBn: 'আয়রন', order: 5 },
-        { name: 'Zinc', nameBn: 'জিংক', order: 6 },
-        { name: 'Omega 3', nameBn: 'ওমেগা ৩/ফিশ অয়েল', order: 7 },
-        { name: 'Protein Supplement', nameBn: 'প্রোটিন সাপ্লিমেন্ট', order: 8 },
-      ],
+      "name": "ভিটামিন ও সাপ্লিমেন্ট",
+      "icon": "dumbbell",
+      "order": 4,
+      "subcategories": [
+        {
+          "name": "মাল্টিভিটামিন",
+          "order": 1
+        },
+        {
+          "name": "ভিটামিন সি",
+          "order": 2
+        },
+        {
+          "name": "ভিটামিন ডি",
+          "order": 3
+        },
+        {
+          "name": "ক্যালসিয়াম",
+          "order": 4
+        },
+        {
+          "name": "আয়রন",
+          "order": 5
+        },
+        {
+          "name": "জিংক",
+          "order": 6
+        },
+        {
+          "name": "ওমেগা ৩/ফিশ অয়েল",
+          "order": 7
+        },
+        {
+          "name": "প্রোটিন সাপ্লিমেন্ট",
+          "order": 8
+        }
+      ]
     },
     {
-      name: 'First Aid',
-      nameBn: 'প্রাথমিক চিকিৎসা',
-      icon: 'cross',
-      order: 5,
-      subcategories: [
-        { name: 'Bandage', nameBn: 'ব্যান্ডেজ', order: 1 },
-        { name: 'Gauze', nameBn: 'গজ', order: 2 },
-        { name: 'Plaster', nameBn: 'প্লাস্টার', order: 3 },
-        { name: 'Cotton', nameBn: 'তুলা', order: 4 },
-        { name: 'Antiseptic', nameBn: 'অ্যান্টিসেপটিক', order: 5 },
-        { name: 'Sanitizer', nameBn: 'স্যানিটাইজার', order: 6 },
-        { name: 'Mask', nameBn: 'মাস্ক', order: 7 },
-        { name: 'Gloves', nameBn: 'গ্লাভস', order: 8 },
-      ],
+      "name": "প্রাথমিক চিকিৎসা",
+      "icon": "cross",
+      "order": 5,
+      "subcategories": [
+        {
+          "name": "ব্যান্ডেজ",
+          "order": 1
+        },
+        {
+          "name": "গজ",
+          "order": 2
+        },
+        {
+          "name": "প্লাস্টার",
+          "order": 3
+        },
+        {
+          "name": "তুলা",
+          "order": 4
+        },
+        {
+          "name": "অ্যান্টিসেপটিক",
+          "order": 5
+        },
+        {
+          "name": "স্যানিটাইজার",
+          "order": 6
+        },
+        {
+          "name": "মাস্ক",
+          "order": 7
+        },
+        {
+          "name": "গ্লাভস",
+          "order": 8
+        }
+      ]
     },
     {
-      name: 'Medical Equipment',
-      nameBn: 'চিকিৎসা সরঞ্জাম',
-      icon: 'stethoscope',
-      order: 6,
-      subcategories: [
-        { name: 'Thermometer', nameBn: 'থার্মোমিটার', order: 1 },
-        { name: 'BP Machine', nameBn: 'বিপি মেশিন', order: 2 },
-        { name: 'Glucometer', nameBn: 'গ্লুকোমিটার', order: 3 },
-        { name: 'Nebulizer', nameBn: 'নেবুলাইজার', order: 4 },
-        { name: 'Oximeter', nameBn: 'অক্সিমিটার', order: 5 },
-        { name: 'Wheelchair & Crutch', nameBn: 'হুইলচেয়ার/ক্রাচ', order: 6 },
-        { name: 'Test Strip', nameBn: 'টেস্ট স্ট্রিপ', order: 7 },
-        { name: 'Syringe', nameBn: 'সিরিঞ্জ', order: 8 },
-      ],
+      "name": "চিকিৎসা সরঞ্জাম",
+      "icon": "stethoscope",
+      "order": 6,
+      "subcategories": [
+        {
+          "name": "থার্মোমিটার",
+          "order": 1
+        },
+        {
+          "name": "বিপি মেশিন",
+          "order": 2
+        },
+        {
+          "name": "গ্লুকোমিটার",
+          "order": 3
+        },
+        {
+          "name": "নেবুলাইজার",
+          "order": 4
+        },
+        {
+          "name": "অক্সিমিটার",
+          "order": 5
+        },
+        {
+          "name": "হুইলচেয়ার/ক্রাচ",
+          "order": 6
+        },
+        {
+          "name": "টেস্ট স্ট্রিপ",
+          "order": 7
+        },
+        {
+          "name": "সিরিঞ্জ",
+          "order": 8
+        }
+      ]
     },
     {
-      name: 'Baby Health',
-      nameBn: 'শিশু স্বাস্থ্য',
-      icon: 'baby',
-      order: 7,
-      subcategories: [
-        { name: 'Baby Drop', nameBn: 'বেবি ড্রপ', order: 1 },
-        { name: 'Gripe Water', nameBn: 'গ্রাইপ ওয়াটার', order: 2 },
-        { name: 'Diaper Cream', nameBn: 'ডায়পার ক্রিম', order: 3 },
-        { name: 'Baby Powder', nameBn: 'বেবি পাউডার', order: 4 },
-        { name: 'Baby Soap', nameBn: 'বেবি সাবান/ওয়াশ', order: 5 },
-        { name: 'Feeding Bottle', nameBn: 'ফিডার/বোতল', order: 6 },
-      ],
+      "name": "শিশু স্বাস্থ্য",
+      "icon": "baby",
+      "order": 7,
+      "subcategories": [
+        {
+          "name": "বেবি ড্রপ",
+          "order": 1
+        },
+        {
+          "name": "গ্রাইপ ওয়াটার",
+          "order": 2
+        },
+        {
+          "name": "ডায়পার ক্রিম",
+          "order": 3
+        },
+        {
+          "name": "বেবি পাউডার",
+          "order": 4
+        },
+        {
+          "name": "বেবি সাবান/ওয়াশ",
+          "order": 5
+        },
+        {
+          "name": "ফিডার/বোতল",
+          "order": 6
+        }
+      ]
     },
     {
-      name: 'Women\'s Health',
-      nameBn: 'মহিলা স্বাস্থ্য',
-      icon: 'heart',
-      order: 8,
-      subcategories: [
-        { name: 'Sanitary Napkin', nameBn: 'স্যানিটারি ন্যাপকিন', order: 1 },
-        { name: 'Contraceptive', nameBn: 'গর্ভনিরোধক', order: 2 },
-        { name: 'Pregnancy Test', nameBn: 'প্রেগন্যান্সি টেস্ট', order: 3 },
-        { name: 'Folic Acid', nameBn: 'ফলিক অ্যাসিড', order: 4 },
-      ],
+      "name": "মহিলা স্বাস্থ্য",
+      "icon": "heart",
+      "order": 8,
+      "subcategories": [
+        {
+          "name": "স্যানিটারি ন্যাপকিন",
+          "order": 1
+        },
+        {
+          "name": "গর্ভনিরোধক",
+          "order": 2
+        },
+        {
+          "name": "প্রেগন্যান্সি টেস্ট",
+          "order": 3
+        },
+        {
+          "name": "ফলিক অ্যাসিড",
+          "order": 4
+        }
+      ]
     },
     {
-      name: 'Personal Care',
-      nameBn: 'ব্যক্তিগত যত্ন',
-      icon: 'sparkle',
-      order: 9,
-      subcategories: [
-        { name: 'Toothpaste', nameBn: 'টুথপেস্ট', order: 1 },
-        { name: 'Mouthwash', nameBn: 'মাউথওয়াশ', order: 2 },
-        { name: 'Shampoo', nameBn: 'শ্যাম্পু', order: 3 },
-        { name: 'Soap', nameBn: 'সাবান', order: 4 },
-        { name: 'Face Wash', nameBn: 'ফেসওয়াশ', order: 5 },
-        { name: 'Sunscreen', nameBn: 'সানস্ক্রিন', order: 6 },
-        { name: 'Body Lotion', nameBn: 'বডি লোশন', order: 7 },
-      ],
-    },
+      "name": "ব্যক্তিগত যত্ন",
+      "icon": "sparkle",
+      "order": 9,
+      "subcategories": [
+        {
+          "name": "টুথপেস্ট",
+          "order": 1
+        },
+        {
+          "name": "মাউথওয়াশ",
+          "order": 2
+        },
+        {
+          "name": "শ্যাম্পু",
+          "order": 3
+        },
+        {
+          "name": "সাবান",
+          "order": 4
+        },
+        {
+          "name": "ফেসওয়াশ",
+          "order": 5
+        },
+        {
+          "name": "সানস্ক্রিন",
+          "order": 6
+        },
+        {
+          "name": "বডি লোশন",
+          "order": 7
+        }
+      ]
+    }
   ],
-
-  // ==========================================
-  // হার্ডওয়্যার (Hardware)
-  // ==========================================
-  hardware: [
+  "hardware": [
     {
-      name: 'Hand Tools',
-      nameBn: 'হাতের যন্ত্র',
-      icon: 'wrench',
-      order: 1,
-      subcategories: [
-        { name: 'Hammer', nameBn: 'হাতুড়ি', order: 1 },
-        { name: 'Plier', nameBn: 'প্লায়ার্স', order: 2 },
-        { name: 'Screwdriver', nameBn: 'স্ক্রু ড্রাইভার', order: 3 },
-        { name: 'Wrench', nameBn: 'রেঞ্চ/স্প্যানার', order: 4 },
-        { name: 'Cutter & Knife', nameBn: 'কাটার/ছুরি', order: 5 },
-        { name: 'Measuring Tape', nameBn: 'মাপার ফিতা', order: 6 },
-        { name: 'Level', nameBn: 'লেভেল/ওয়াটার লেভেল', order: 7 },
-        { name: 'Saw', nameBn: 'করাত', order: 8 },
-        { name: 'Drill Machine', nameBn: 'ড্রিল মেশিন', order: 9 },
-        { name: 'Tool Set', nameBn: 'টুল সেট', order: 10 },
-      ],
+      "name": "হাতের যন্ত্র",
+      "icon": "wrench",
+      "order": 1,
+      "subcategories": [
+        {
+          "name": "হাতুড়ি",
+          "order": 1
+        },
+        {
+          "name": "প্লায়ার্স",
+          "order": 2
+        },
+        {
+          "name": "স্ক্রু ড্রাইভার",
+          "order": 3
+        },
+        {
+          "name": "রেঞ্চ/স্প্যানার",
+          "order": 4
+        },
+        {
+          "name": "কাটার/ছুরি",
+          "order": 5
+        },
+        {
+          "name": "মাপার ফিতা",
+          "order": 6
+        },
+        {
+          "name": "লেভেল/ওয়াটার লেভেল",
+          "order": 7
+        },
+        {
+          "name": "করাত",
+          "order": 8
+        },
+        {
+          "name": "ড্রিল মেশিন",
+          "order": 9
+        },
+        {
+          "name": "টুল সেট",
+          "order": 10
+        }
+      ]
     },
     {
-      name: 'Electrical',
-      nameBn: 'ইলেকট্রিক্যাল',
-      icon: 'zap',
-      order: 2,
-      subcategories: [
-        { name: 'Wire & Cable', nameBn: 'তার/ক্যাবল', order: 1 },
-        { name: 'Switch & Socket', nameBn: 'সুইচ/সকেট', order: 2 },
-        { name: 'Plug & Connector', nameBn: 'প্লাগ/কানেক্টর', order: 3 },
-        { name: 'Circuit Breaker', nameBn: 'সার্কিট ব্রেকার', order: 4 },
-        { name: 'Bulb & Light', nameBn: 'বাল্ব/লাইট', order: 5 },
-        { name: 'Tube Light', nameBn: 'টিউব লাইট', order: 6 },
-        { name: 'Fan', nameBn: 'ফ্যান', order: 7 },
-        { name: 'Extension Board', nameBn: 'মাল্টিপ্লাগ/এক্সটেনশন', order: 8 },
-        { name: 'Tape & Insulation', nameBn: 'টেপ/ইনসুলেশন', order: 9 },
-      ],
+      "name": "ইলেকট্রিক্যাল",
+      "icon": "zap",
+      "order": 2,
+      "subcategories": [
+        {
+          "name": "তার/ক্যাবল",
+          "order": 1
+        },
+        {
+          "name": "সুইচ/সকেট",
+          "order": 2
+        },
+        {
+          "name": "প্লাগ/কানেক্টর",
+          "order": 3
+        },
+        {
+          "name": "সার্কিট ব্রেকার",
+          "order": 4
+        },
+        {
+          "name": "বাল্ব/লাইট",
+          "order": 5
+        },
+        {
+          "name": "টিউব লাইট",
+          "order": 6
+        },
+        {
+          "name": "ফ্যান",
+          "order": 7
+        },
+        {
+          "name": "মাল্টিপ্লাগ/এক্সটেনশন",
+          "order": 8
+        },
+        {
+          "name": "টেপ/ইনসুলেশন",
+          "order": 9
+        }
+      ]
     },
     {
-      name: 'Pipe & Fittings',
-      nameBn: 'পাইপ ও ফিটিংস',
-      icon: 'pipe',
-      order: 3,
-      subcategories: [
-        { name: 'PVC Pipe', nameBn: 'পিভিসি পাইপ', order: 1 },
-        { name: 'GI Pipe', nameBn: 'জিআই পাইপ', order: 2 },
-        { name: 'Pipe Fittings', nameBn: 'পাইপ ফিটিংস', order: 3 },
-        { name: 'Tap & Faucet', nameBn: 'ট্যাপ/কল', order: 4 },
-        { name: 'Valve', nameBn: 'ভালভ', order: 5 },
-        { name: 'Water Tank', nameBn: 'পানির ট্যাংক', order: 6 },
-        { name: 'Water Pump', nameBn: 'পানির পাম্প', order: 7 },
-      ],
+      "name": "পাইপ ও ফিটিংস",
+      "icon": "pipe",
+      "order": 3,
+      "subcategories": [
+        {
+          "name": "পিভিসি পাইপ",
+          "order": 1
+        },
+        {
+          "name": "জিআই পাইপ",
+          "order": 2
+        },
+        {
+          "name": "পাইপ ফিটিংস",
+          "order": 3
+        },
+        {
+          "name": "ট্যাপ/কল",
+          "order": 4
+        },
+        {
+          "name": "ভালভ",
+          "order": 5
+        },
+        {
+          "name": "পানির ট্যাংক",
+          "order": 6
+        },
+        {
+          "name": "পানির পাম্প",
+          "order": 7
+        }
+      ]
     },
     {
-      name: 'Paint & Chemical',
-      nameBn: 'রং ও কেমিক্যাল',
-      icon: 'paint-bucket',
-      order: 4,
-      subcategories: [
-        { name: 'Wall Paint', nameBn: 'দেয়ালের রং', order: 1 },
-        { name: 'Wood Paint', nameBn: 'কাঠের রং/বার্নিশ', order: 2 },
-        { name: 'Spray Paint', nameBn: 'স্প্রে পেইন্ট', order: 3 },
-        { name: 'Thinner', nameBn: 'থিনার', order: 4 },
-        { name: 'Putty', nameBn: 'পুটি', order: 5 },
-        { name: 'Silicone & Sealant', nameBn: 'সিলিকন/সিল্যান্ট', order: 6 },
-        { name: 'Glue & Adhesive', nameBn: 'গ্লু/আঠা', order: 7 },
-        { name: 'Brush & Roller', nameBn: 'ব্রাশ/রোলার', order: 8 },
-      ],
+      "name": "রং ও কেমিক্যাল",
+      "icon": "paint-bucket",
+      "order": 4,
+      "subcategories": [
+        {
+          "name": "দেয়ালের রং",
+          "order": 1
+        },
+        {
+          "name": "কাঠের রং/বার্নিশ",
+          "order": 2
+        },
+        {
+          "name": "স্প্রে পেইন্ট",
+          "order": 3
+        },
+        {
+          "name": "থিনার",
+          "order": 4
+        },
+        {
+          "name": "পুটি",
+          "order": 5
+        },
+        {
+          "name": "সিলিকন/সিল্যান্ট",
+          "order": 6
+        },
+        {
+          "name": "গ্লু/আঠা",
+          "order": 7
+        },
+        {
+          "name": "ব্রাশ/রোলার",
+          "order": 8
+        }
+      ]
     },
     {
-      name: 'Lock & Hardware',
-      nameBn: 'তালা ও কব্জা',
-      icon: 'lock',
-      order: 5,
-      subcategories: [
-        { name: 'Padlock', nameBn: 'তালা', order: 1 },
-        { name: 'Door Lock', nameBn: 'দরজার লক', order: 2 },
-        { name: 'Hinge', nameBn: 'কব্জা', order: 3 },
-        { name: 'Door Handle', nameBn: 'দরজার হ্যান্ডেল', order: 4 },
-        { name: 'Latch & Bolt', nameBn: 'খিল/স্লাইড', order: 5 },
-        { name: 'Door Closer', nameBn: 'ডোর ক্লোজার', order: 6 },
-        { name: 'Window Fittings', nameBn: 'জানালার ফিটিংস', order: 7 },
-      ],
+      "name": "তালা ও কব্জা",
+      "icon": "lock",
+      "order": 5,
+      "subcategories": [
+        {
+          "name": "তালা",
+          "order": 1
+        },
+        {
+          "name": "দরজার লক",
+          "order": 2
+        },
+        {
+          "name": "কব্জা",
+          "order": 3
+        },
+        {
+          "name": "দরজার হ্যান্ডেল",
+          "order": 4
+        },
+        {
+          "name": "খিল/স্লাইড",
+          "order": 5
+        },
+        {
+          "name": "ডোর ক্লোজার",
+          "order": 6
+        },
+        {
+          "name": "জানালার ফিটিংস",
+          "order": 7
+        }
+      ]
     },
     {
-      name: 'Bathroom Fittings',
-      nameBn: 'বাথরুম ফিটিংস',
-      icon: 'droplets',
-      order: 6,
-      subcategories: [
-        { name: 'Shower', nameBn: 'শাওয়ার', order: 1 },
-        { name: 'Commode', nameBn: 'কমোড', order: 2 },
-        { name: 'Basin & Sink', nameBn: 'বেসিন/সিংক', order: 3 },
-        { name: 'Towel Rack', nameBn: 'তোয়ালে র‍্যাক', order: 4 },
-        { name: 'Soap Holder', nameBn: 'সাবানদানি', order: 5 },
-        { name: 'Mirror', nameBn: 'আয়না', order: 6 },
-      ],
+      "name": "বাথরুম ফিটিংস",
+      "icon": "droplets",
+      "order": 6,
+      "subcategories": [
+        {
+          "name": "শাওয়ার",
+          "order": 1
+        },
+        {
+          "name": "কমোড",
+          "order": 2
+        },
+        {
+          "name": "বেসিন/সিংক",
+          "order": 3
+        },
+        {
+          "name": "তোয়ালে র‍্যাক",
+          "order": 4
+        },
+        {
+          "name": "সাবানদানি",
+          "order": 5
+        },
+        {
+          "name": "আয়না",
+          "order": 6
+        }
+      ]
     },
     {
-      name: 'Construction',
-      nameBn: 'নির্মাণ সামগ্রী',
-      icon: 'building',
-      order: 7,
-      subcategories: [
-        { name: 'Cement', nameBn: 'সিমেন্ট', order: 1 },
-        { name: 'Rod & Steel', nameBn: 'রড/স্টিল', order: 2 },
-        { name: 'Brick', nameBn: 'ইট', order: 3 },
-        { name: 'Sand', nameBn: 'বালু', order: 4 },
-        { name: 'Stone Chips', nameBn: 'পাথর/খোয়া', order: 5 },
-        { name: 'Tiles', nameBn: 'টাইলস', order: 6 },
-      ],
+      "name": "নির্মাণ সামগ্রী",
+      "icon": "building",
+      "order": 7,
+      "subcategories": [
+        {
+          "name": "সিমেন্ট",
+          "order": 1
+        },
+        {
+          "name": "রড/স্টিল",
+          "order": 2
+        },
+        {
+          "name": "ইট",
+          "order": 3
+        },
+        {
+          "name": "বালু",
+          "order": 4
+        },
+        {
+          "name": "পাথর/খোয়া",
+          "order": 5
+        },
+        {
+          "name": "টাইলস",
+          "order": 6
+        }
+      ]
     },
     {
-      name: 'Fasteners & Misc',
-      nameBn: 'নাট-বোল্ট ও বিবিধ',
-      icon: 'package',
-      order: 8,
-      subcategories: [
-        { name: 'Nut & Bolt', nameBn: 'নাট/বোল্ট', order: 1 },
-        { name: 'Screw & Nail', nameBn: 'স্ক্রু/পেরেক', order: 2 },
-        { name: 'Rope & Chain', nameBn: 'দড়ি/চেইন', order: 3 },
-        { name: 'Net & Wire Mesh', nameBn: 'জাল/তারজালি', order: 4 },
-        { name: 'Hook & Anchor', nameBn: 'হুক/অ্যাংকর', order: 5 },
-        { name: 'Clamp', nameBn: 'ক্ল্যাম্প', order: 6 },
-      ],
-    },
+      "name": "নাট-বোল্ট ও বিবিধ",
+      "icon": "package",
+      "order": 8,
+      "subcategories": [
+        {
+          "name": "নাট/বোল্ট",
+          "order": 1
+        },
+        {
+          "name": "স্ক্রু/পেরেক",
+          "order": 2
+        },
+        {
+          "name": "দড়ি/চেইন",
+          "order": 3
+        },
+        {
+          "name": "জাল/তারজালি",
+          "order": 4
+        },
+        {
+          "name": "হুক/অ্যাংকর",
+          "order": 5
+        },
+        {
+          "name": "ক্ল্যাম্প",
+          "order": 6
+        }
+      ]
+    }
   ],
-
-  // ==========================================
-  // কসমেটিক্স (Cosmetics & Beauty)
-  // ==========================================
-  cosmetics: [
+  "cosmetics": [
     {
-      name: 'Skincare',
-      nameBn: 'স্কিনকেয়ার',
-      icon: 'droplet',
-      order: 1,
-      subcategories: [
-        { name: 'Face Wash', nameBn: 'ফেসওয়াশ', order: 1 },
-        { name: 'Cleanser', nameBn: 'ক্লিনজার', order: 2 },
-        { name: 'Toner', nameBn: 'টোনার', order: 3 },
-        { name: 'Serum', nameBn: 'সিরাম', order: 4 },
-        { name: 'Moisturizer', nameBn: 'ময়েশ্চারাইজার', order: 5 },
-        { name: 'Sunscreen', nameBn: 'সানস্ক্রিন', order: 6 },
-        { name: 'Night Cream', nameBn: 'নাইট ক্রিম', order: 7 },
-        { name: 'Eye Cream', nameBn: 'আই ক্রিম', order: 8 },
-        { name: 'Face Mask', nameBn: 'ফেস মাস্ক/প্যাক', order: 9 },
-        { name: 'Lip Balm', nameBn: 'লিপ বাম', order: 10 },
-        { name: 'Fairness Cream', nameBn: 'ফেয়ারনেস ক্রিম', order: 11 },
-      ],
+      "name": "স্কিনকেয়ার",
+      "icon": "droplet",
+      "order": 1,
+      "subcategories": [
+        {
+          "name": "ফেসওয়াশ",
+          "order": 1
+        },
+        {
+          "name": "ক্লিনজার",
+          "order": 2
+        },
+        {
+          "name": "টোনার",
+          "order": 3
+        },
+        {
+          "name": "সিরাম",
+          "order": 4
+        },
+        {
+          "name": "ময়েশ্চারাইজার",
+          "order": 5
+        },
+        {
+          "name": "সানস্ক্রিন",
+          "order": 6
+        },
+        {
+          "name": "নাইট ক্রিম",
+          "order": 7
+        },
+        {
+          "name": "আই ক্রিম",
+          "order": 8
+        },
+        {
+          "name": "ফেস মাস্ক/প্যাক",
+          "order": 9
+        },
+        {
+          "name": "লিপ বাম",
+          "order": 10
+        },
+        {
+          "name": "ফেয়ারনেস ক্রিম",
+          "order": 11
+        }
+      ]
     },
     {
-      name: 'Makeup',
-      nameBn: 'মেকআপ',
-      icon: 'palette',
-      order: 2,
-      subcategories: [
-        { name: 'Foundation', nameBn: 'ফাউন্ডেশন', order: 1 },
-        { name: 'Concealer', nameBn: 'কনসিলার', order: 2 },
-        { name: 'Compact Powder', nameBn: 'কম্প্যাক্ট পাউডার', order: 3 },
-        { name: 'Loose Powder', nameBn: 'লুজ পাউডার', order: 4 },
-        { name: 'Lipstick', nameBn: 'লিপস্টিক', order: 5 },
-        { name: 'Lip Gloss', nameBn: 'লিপ গ্লস', order: 6 },
-        { name: 'Eyeliner', nameBn: 'আইলাইনার', order: 7 },
-        { name: 'Kajal', nameBn: 'কাজল/সুরমা', order: 8 },
-        { name: 'Mascara', nameBn: 'মাসকারা', order: 9 },
-        { name: 'Eye Shadow', nameBn: 'আই শ্যাডো', order: 10 },
-        { name: 'Blush', nameBn: 'ব্লাশ/রুজ', order: 11 },
-        { name: 'Primer', nameBn: 'প্রাইমার', order: 12 },
-        { name: 'Setting Spray', nameBn: 'সেটিং স্প্রে', order: 13 },
-        { name: 'Makeup Remover', nameBn: 'মেকআপ রিমুভার', order: 14 },
-      ],
+      "name": "মেকআপ",
+      "icon": "palette",
+      "order": 2,
+      "subcategories": [
+        {
+          "name": "ফাউন্ডেশন",
+          "order": 1
+        },
+        {
+          "name": "কনসিলার",
+          "order": 2
+        },
+        {
+          "name": "কম্প্যাক্ট পাউডার",
+          "order": 3
+        },
+        {
+          "name": "লুজ পাউডার",
+          "order": 4
+        },
+        {
+          "name": "লিপস্টিক",
+          "order": 5
+        },
+        {
+          "name": "লিপ গ্লস",
+          "order": 6
+        },
+        {
+          "name": "আইলাইনার",
+          "order": 7
+        },
+        {
+          "name": "কাজল/সুরমা",
+          "order": 8
+        },
+        {
+          "name": "মাসকারা",
+          "order": 9
+        },
+        {
+          "name": "আই শ্যাডো",
+          "order": 10
+        },
+        {
+          "name": "ব্লাশ/রুজ",
+          "order": 11
+        },
+        {
+          "name": "প্রাইমার",
+          "order": 12
+        },
+        {
+          "name": "সেটিং স্প্রে",
+          "order": 13
+        },
+        {
+          "name": "মেকআপ রিমুভার",
+          "order": 14
+        }
+      ]
     },
     {
-      name: 'Haircare',
-      nameBn: 'হেয়ারকেয়ার',
-      icon: 'wind',
-      order: 3,
-      subcategories: [
-        { name: 'Shampoo', nameBn: 'শ্যাম্পু', order: 1 },
-        { name: 'Conditioner', nameBn: 'কন্ডিশনার', order: 2 },
-        { name: 'Hair Oil', nameBn: 'হেয়ার অয়েল', order: 3 },
-        { name: 'Hair Serum', nameBn: 'হেয়ার সিরাম', order: 4 },
-        { name: 'Hair Gel', nameBn: 'হেয়ার জেল/ওয়াক্স', order: 5 },
-        { name: 'Hair Mask', nameBn: 'হেয়ার মাস্ক', order: 6 },
-        { name: 'Hair Color', nameBn: 'হেয়ার কালার/ডাই', order: 7 },
-        { name: 'Henna', nameBn: 'মেহেদি/হেনা', order: 8 },
-        { name: 'Anti-Dandruff', nameBn: 'অ্যান্টি-ড্যানড্রাফ', order: 9 },
-      ],
+      "name": "হেয়ারকেয়ার",
+      "icon": "wind",
+      "order": 3,
+      "subcategories": [
+        {
+          "name": "শ্যাম্পু",
+          "order": 1
+        },
+        {
+          "name": "কন্ডিশনার",
+          "order": 2
+        },
+        {
+          "name": "হেয়ার অয়েল",
+          "order": 3
+        },
+        {
+          "name": "হেয়ার সিরাম",
+          "order": 4
+        },
+        {
+          "name": "হেয়ার জেল/ওয়াক্স",
+          "order": 5
+        },
+        {
+          "name": "হেয়ার মাস্ক",
+          "order": 6
+        },
+        {
+          "name": "হেয়ার কালার/ডাই",
+          "order": 7
+        },
+        {
+          "name": "মেহেদি/হেনা",
+          "order": 8
+        },
+        {
+          "name": "অ্যান্টি-ড্যানড্রাফ",
+          "order": 9
+        }
+      ]
     },
     {
-      name: 'Body Care',
-      nameBn: 'বডি কেয়ার',
-      icon: 'sparkles',
-      order: 4,
-      subcategories: [
-        { name: 'Body Lotion', nameBn: 'বডি লোশন', order: 1 },
-        { name: 'Body Wash', nameBn: 'বডি ওয়াশ/শাওয়ার জেল', order: 2 },
-        { name: 'Soap', nameBn: 'সাবান', order: 3 },
-        { name: 'Body Scrub', nameBn: 'বডি স্ক্রাব', order: 4 },
-        { name: 'Body Oil', nameBn: 'বডি অয়েল', order: 5 },
-        { name: 'Hand Cream', nameBn: 'হ্যান্ড ক্রিম', order: 6 },
-        { name: 'Foot Cream', nameBn: 'ফুট ক্রিম', order: 7 },
-        { name: 'Deodorant', nameBn: 'ডিওডোরেন্ট', order: 8 },
-      ],
+      "name": "বডি কেয়ার",
+      "icon": "sparkles",
+      "order": 4,
+      "subcategories": [
+        {
+          "name": "বডি লোশন",
+          "order": 1
+        },
+        {
+          "name": "বডি ওয়াশ/শাওয়ার জেল",
+          "order": 2
+        },
+        {
+          "name": "সাবান",
+          "order": 3
+        },
+        {
+          "name": "বডি স্ক্রাব",
+          "order": 4
+        },
+        {
+          "name": "বডি অয়েল",
+          "order": 5
+        },
+        {
+          "name": "হ্যান্ড ক্রিম",
+          "order": 6
+        },
+        {
+          "name": "ফুট ক্রিম",
+          "order": 7
+        },
+        {
+          "name": "ডিওডোরেন্ট",
+          "order": 8
+        }
+      ]
     },
     {
-      name: 'Fragrance',
-      nameBn: 'সুগন্ধি',
-      icon: 'flower',
-      order: 5,
-      subcategories: [
-        { name: 'Perfume', nameBn: 'পারফিউম', order: 1 },
-        { name: 'Body Spray', nameBn: 'বডি স্প্রে', order: 2 },
-        { name: 'Attar', nameBn: 'আতর', order: 3 },
-        { name: 'Body Mist', nameBn: 'বডি মিস্ট', order: 4 },
-        { name: 'Roll On', nameBn: 'রোল অন', order: 5 },
-      ],
+      "name": "সুগন্ধি",
+      "icon": "flower",
+      "order": 5,
+      "subcategories": [
+        {
+          "name": "পারফিউম",
+          "order": 1
+        },
+        {
+          "name": "বডি স্প্রে",
+          "order": 2
+        },
+        {
+          "name": "আতর",
+          "order": 3
+        },
+        {
+          "name": "বডি মিস্ট",
+          "order": 4
+        },
+        {
+          "name": "রোল অন",
+          "order": 5
+        }
+      ]
     },
     {
-      name: 'Nail Care',
-      nameBn: 'নখের যত্ন',
-      icon: 'hand',
-      order: 6,
-      subcategories: [
-        { name: 'Nail Polish', nameBn: 'নেইল পলিশ', order: 1 },
-        { name: 'Nail Remover', nameBn: 'নেইল রিমুভার', order: 2 },
-        { name: 'Nail Art', nameBn: 'নেইল আর্ট', order: 3 },
-        { name: 'Nail File', nameBn: 'নেইল ফাইল', order: 4 },
-        { name: 'Nail Cutter', nameBn: 'নেইল কাটার', order: 5 },
-        { name: 'Cuticle Oil', nameBn: 'কিউটিকল অয়েল', order: 6 },
-      ],
+      "name": "নখের যত্ন",
+      "icon": "hand",
+      "order": 6,
+      "subcategories": [
+        {
+          "name": "নেইল পলিশ",
+          "order": 1
+        },
+        {
+          "name": "নেইল রিমুভার",
+          "order": 2
+        },
+        {
+          "name": "নেইল আর্ট",
+          "order": 3
+        },
+        {
+          "name": "নেইল ফাইল",
+          "order": 4
+        },
+        {
+          "name": "নেইল কাটার",
+          "order": 5
+        },
+        {
+          "name": "কিউটিকল অয়েল",
+          "order": 6
+        }
+      ]
     },
     {
-      name: 'Men\'s Grooming',
-      nameBn: 'মেন\'স গ্রুমিং',
-      icon: 'user',
-      order: 7,
-      subcategories: [
-        { name: 'Shaving Cream', nameBn: 'শেভিং ক্রিম/ফোম', order: 1 },
-        { name: 'After Shave', nameBn: 'আফটার শেভ', order: 2 },
-        { name: 'Razor & Blade', nameBn: 'রেজার/ব্লেড', order: 3 },
-        { name: 'Trimmer', nameBn: 'ট্রিমার', order: 4 },
-        { name: 'Men\'s Face Wash', nameBn: 'মেন\'স ফেসওয়াশ', order: 5 },
-        { name: 'Men\'s Cream', nameBn: 'মেন\'স ক্রিম', order: 6 },
-        { name: 'Men\'s Deodorant', nameBn: 'মেন\'স ডিওডোরেন্ট', order: 7 },
-        { name: 'Beard Oil', nameBn: 'বিয়ার্ড অয়েল', order: 8 },
-      ],
+      "name": "মেন'স গ্রুমিং",
+      "icon": "user",
+      "order": 7,
+      "subcategories": [
+        {
+          "name": "শেভিং ক্রিম/ফোম",
+          "order": 1
+        },
+        {
+          "name": "আফটার শেভ",
+          "order": 2
+        },
+        {
+          "name": "রেজার/ব্লেড",
+          "order": 3
+        },
+        {
+          "name": "ট্রিমার",
+          "order": 4
+        },
+        {
+          "name": "মেন'স ফেসওয়াশ",
+          "order": 5
+        },
+        {
+          "name": "মেন'স ক্রিম",
+          "order": 6
+        },
+        {
+          "name": "মেন'স ডিওডোরেন্ট",
+          "order": 7
+        },
+        {
+          "name": "বিয়ার্ড অয়েল",
+          "order": 8
+        }
+      ]
     },
     {
-      name: 'Beauty Tools',
-      nameBn: 'বিউটি সরঞ্জাম',
-      icon: 'wand',
-      order: 8,
-      subcategories: [
-        { name: 'Makeup Brush Set', nameBn: 'মেকআপ ব্রাশ সেট', order: 1 },
-        { name: 'Sponge & Puff', nameBn: 'স্পঞ্জ/পাফ', order: 2 },
-        { name: 'Mirror', nameBn: 'আয়না', order: 3 },
-        { name: 'Hair Dryer', nameBn: 'হেয়ার ড্রায়ার', order: 4 },
-        { name: 'Straightener', nameBn: 'স্ট্রেইটনার', order: 5 },
-        { name: 'Curler', nameBn: 'কার্লার', order: 6 },
-        { name: 'Hair Brush & Comb', nameBn: 'চিরুনি/ব্রাশ', order: 7 },
-        { name: 'Eyelash Curler', nameBn: 'আইল্যাশ কার্লার', order: 8 },
-        { name: 'Tweezers', nameBn: 'টুইজার', order: 9 },
-      ],
-    },
+      "name": "বিউটি সরঞ্জাম",
+      "icon": "wand",
+      "order": 8,
+      "subcategories": [
+        {
+          "name": "মেকআপ ব্রাশ সেট",
+          "order": 1
+        },
+        {
+          "name": "স্পঞ্জ/পাফ",
+          "order": 2
+        },
+        {
+          "name": "আয়না",
+          "order": 3
+        },
+        {
+          "name": "হেয়ার ড্রায়ার",
+          "order": 4
+        },
+        {
+          "name": "স্ট্রেইটনার",
+          "order": 5
+        },
+        {
+          "name": "কার্লার",
+          "order": 6
+        },
+        {
+          "name": "চিরুনি/ব্রাশ",
+          "order": 7
+        },
+        {
+          "name": "আইল্যাশ কার্লার",
+          "order": 8
+        },
+        {
+          "name": "টুইজার",
+          "order": 9
+        }
+      ]
+    }
   ],
-
-  // ==========================================
-  // বইয়ের দোকান (Book Shop)
-  // ==========================================
-  bookshop: [
+  "bookshop": [
     {
-      name: 'Textbooks',
-      nameBn: 'পাঠ্যবই',
-      icon: 'book-open',
-      order: 1,
-      subcategories: [
-        { name: 'Primary', nameBn: 'প্রাথমিক', order: 1 },
-        { name: 'Secondary', nameBn: 'মাধ্যমিক', order: 2 },
-        { name: 'Higher Secondary', nameBn: 'উচ্চ মাধ্যমিক', order: 3 },
-        { name: 'University', nameBn: 'বিশ্ববিদ্যালয়', order: 4 },
-      ],
+      "name": "পাঠ্যবই",
+      "icon": "book-open",
+      "order": 1,
+      "subcategories": [
+        {
+          "name": "প্রাথমিক",
+          "order": 1
+        },
+        {
+          "name": "মাধ্যমিক",
+          "order": 2
+        },
+        {
+          "name": "উচ্চ মাধ্যমিক",
+          "order": 3
+        },
+        {
+          "name": "বিশ্ববিদ্যালয়",
+          "order": 4
+        }
+      ]
     },
     {
-      name: 'Notebooks & Copies',
-      nameBn: 'নোটবুক ও খাতা',
-      icon: 'notebook',
-      order: 2,
-      subcategories: [
-        { name: 'Exercise Copy', nameBn: 'এক্সারসাইজ খাতা', order: 1 },
-        { name: 'Drawing Copy', nameBn: 'ড্রয়িং খাতা', order: 2 },
-        { name: 'Lab Copy', nameBn: 'ল্যাব খাতা', order: 3 },
-        { name: 'Practical Copy', nameBn: 'প্র্যাকটিক্যাল খাতা', order: 4 },
-      ],
+      "name": "নোটবুক ও খাতা",
+      "icon": "notebook",
+      "order": 2,
+      "subcategories": [
+        {
+          "name": "এক্সারসাইজ খাতা",
+          "order": 1
+        },
+        {
+          "name": "ড্রয়িং খাতা",
+          "order": 2
+        },
+        {
+          "name": "ল্যাব খাতা",
+          "order": 3
+        },
+        {
+          "name": "প্র্যাকটিক্যাল খাতা",
+          "order": 4
+        }
+      ]
     },
     {
-      name: 'Stationery',
-      nameBn: 'স্টেশনারি',
-      icon: 'pen',
-      order: 3,
-      subcategories: [
-        { name: 'Pen', nameBn: 'কলম', order: 1 },
-        { name: 'Pencil', nameBn: 'পেন্সিল', order: 2 },
-        { name: 'Eraser', nameBn: 'রাবার', order: 3 },
-        { name: 'Sharpener', nameBn: 'শার্পনার', order: 4 },
-        { name: 'Scale', nameBn: 'স্কেল', order: 5 },
-      ],
+      "name": "স্টেশনারি",
+      "icon": "pen",
+      "order": 3,
+      "subcategories": [
+        {
+          "name": "কলম",
+          "order": 1
+        },
+        {
+          "name": "পেন্সিল",
+          "order": 2
+        },
+        {
+          "name": "রাবার",
+          "order": 3
+        },
+        {
+          "name": "শার্পনার",
+          "order": 4
+        },
+        {
+          "name": "স্কেল",
+          "order": 5
+        }
+      ]
     },
     {
-      name: 'Fiction/Novels',
-      nameBn: 'গল্প/উপন্যাস',
-      icon: 'book',
-      order: 4,
-      subcategories: [
-        { name: 'Bengali Literature', nameBn: 'বাংলা সাহিত্য', order: 1 },
-        { name: 'Translated', nameBn: 'অনুবাদ', order: 2 },
-        { name: 'Children\'s Literature', nameBn: 'শিশু সাহিত্য', order: 3 },
-        { name: 'Islamic Books', nameBn: 'ইসলামিক বই', order: 4 },
-      ],
+      "name": "গল্প/উপন্যাস",
+      "icon": "book",
+      "order": 4,
+      "subcategories": [
+        {
+          "name": "বাংলা সাহিত্য",
+          "order": 1
+        },
+        {
+          "name": "অনুবাদ",
+          "order": 2
+        },
+        {
+          "name": "শিশু সাহিত্য",
+          "order": 3
+        },
+        {
+          "name": "ইসলামিক বই",
+          "order": 4
+        }
+      ]
     },
     {
-      name: 'Reference Books',
-      nameBn: 'রেফারেন্স বই',
-      icon: 'library',
-      order: 5,
-      subcategories: [
-        { name: 'Dictionary', nameBn: 'অভিধান', order: 1 },
-        { name: 'Encyclopedia', nameBn: 'এনসাইক্লোপিডিয়া', order: 2 },
-        { name: 'Guide Book', nameBn: 'গাইড বই', order: 3 },
-        { name: 'Question Bank', nameBn: 'প্রশ্নব্যাংক', order: 4 },
-      ],
+      "name": "রেফারেন্স বই",
+      "icon": "library",
+      "order": 5,
+      "subcategories": [
+        {
+          "name": "অভিধান",
+          "order": 1
+        },
+        {
+          "name": "এনসাইক্লোপিডিয়া",
+          "order": 2
+        },
+        {
+          "name": "গাইড বই",
+          "order": 3
+        },
+        {
+          "name": "প্রশ্নব্যাংক",
+          "order": 4
+        }
+      ]
     },
     {
-      name: 'Bags & Accessories',
-      nameBn: 'ব্যাগ ও এক্সেসরিজ',
-      icon: 'backpack',
-      order: 6,
-      subcategories: [
-        { name: 'School Bag', nameBn: 'স্কুল ব্যাগ', order: 1 },
-        { name: 'Tiffin Box', nameBn: 'টিফিন বক্স', order: 2 },
-        { name: 'Water Bottle', nameBn: 'পানির বোতল', order: 3 },
-        { name: 'Pencil Box', nameBn: 'পেন্সিল বক্স', order: 4 },
-      ],
+      "name": "ব্যাগ ও এক্সেসরিজ",
+      "icon": "backpack",
+      "order": 6,
+      "subcategories": [
+        {
+          "name": "স্কুল ব্যাগ",
+          "order": 1
+        },
+        {
+          "name": "টিফিন বক্স",
+          "order": 2
+        },
+        {
+          "name": "পানির বোতল",
+          "order": 3
+        },
+        {
+          "name": "পেন্সিল বক্স",
+          "order": 4
+        }
+      ]
     },
     {
-      name: 'Art & Craft',
-      nameBn: 'আর্ট ও ক্রাফট',
-      icon: 'palette',
-      order: 7,
-      subcategories: [
-        { name: 'Color', nameBn: 'রং', order: 1 },
-        { name: 'Brush', nameBn: 'তুলি', order: 2 },
-        { name: 'Craft Paper', nameBn: 'ক্রাফট পেপার', order: 3 },
-        { name: 'Glue', nameBn: 'গ্লু', order: 4 },
-      ],
+      "name": "আর্ট ও ক্রাফট",
+      "icon": "palette",
+      "order": 7,
+      "subcategories": [
+        {
+          "name": "রং",
+          "order": 1
+        },
+        {
+          "name": "তুলি",
+          "order": 2
+        },
+        {
+          "name": "ক্রাফট পেপার",
+          "order": 3
+        },
+        {
+          "name": "গ্লু",
+          "order": 4
+        }
+      ]
     },
     {
-      name: 'Religious Books',
-      nameBn: 'ধর্মীয় বই',
-      icon: 'book-marked',
-      order: 8,
-      subcategories: [
-        { name: 'Quran', nameBn: 'কুরআন', order: 1 },
-        { name: 'Hadith', nameBn: 'হাদিস', order: 2 },
-        { name: 'Islamic Books', nameBn: 'ইসলামিক বই', order: 3 },
-        { name: 'Others', nameBn: 'অন্যান্য', order: 4 },
-      ],
-    },
+      "name": "ধর্মীয় বই",
+      "icon": "book-marked",
+      "order": 8,
+      "subcategories": [
+        {
+          "name": "কুরআন",
+          "order": 1
+        },
+        {
+          "name": "হাদিস",
+          "order": 2
+        },
+        {
+          "name": "ইসলামিক বই",
+          "order": 3
+        },
+        {
+          "name": "অন্যান্য",
+          "order": 4
+        }
+      ]
+    }
   ],
-
-  // ==========================================
-  // অন্যান্য (Other / Generic)
-  // ==========================================
-  other: [
+  "other": [
     {
-      name: 'General Products',
-      nameBn: 'সাধারণ পণ্য',
-      icon: 'package',
-      order: 1,
-      subcategories: [],
+      "name": "সাধারণ পণ্য",
+      "icon": "package",
+      "order": 1,
+      "subcategories": []
     },
     {
-      name: 'Food Items',
-      nameBn: 'খাদ্যদ্রব্য',
-      icon: 'utensils',
-      order: 2,
-      subcategories: [],
+      "name": "খাদ্যদ্রব্য",
+      "icon": "utensils",
+      "order": 2,
+      "subcategories": []
     },
     {
-      name: 'Beverages',
-      nameBn: 'পানীয়',
-      icon: 'coffee',
-      order: 3,
-      subcategories: [],
+      "name": "পানীয়",
+      "icon": "coffee",
+      "order": 3,
+      "subcategories": []
     },
     {
-      name: 'Household',
-      nameBn: 'গৃহস্থালি',
-      icon: 'home',
-      order: 4,
-      subcategories: [],
+      "name": "গৃহস্থালি",
+      "icon": "home",
+      "order": 4,
+      "subcategories": []
     },
     {
-      name: 'Clothing',
-      nameBn: 'পরিধান',
-      icon: 'shirt',
-      order: 5,
-      subcategories: [],
+      "name": "পরিধান",
+      "icon": "shirt",
+      "order": 5,
+      "subcategories": []
     },
     {
-      name: 'Electronics',
-      nameBn: 'ইলেকট্রনিক্স',
-      icon: 'zap',
-      order: 6,
-      subcategories: [],
+      "name": "ইলেকট্রনিক্স",
+      "icon": "zap",
+      "order": 6,
+      "subcategories": []
     },
     {
-      name: 'Health & Beauty',
-      nameBn: 'স্বাস্থ্য ও সৌন্দর্য',
-      icon: 'heart',
-      order: 7,
-      subcategories: [],
+      "name": "স্বাস্থ্য ও সৌন্দর্য",
+      "icon": "heart",
+      "order": 7,
+      "subcategories": []
     },
     {
-      name: 'Toys & Kids',
-      nameBn: 'খেলনা ও শিশু',
-      icon: 'baby',
-      order: 8,
-      subcategories: [],
+      "name": "খেলনা ও শিশু",
+      "icon": "baby",
+      "order": 8,
+      "subcategories": []
     },
     {
-      name: 'Stationery',
-      nameBn: 'স্টেশনারি',
-      icon: 'pen',
-      order: 9,
-      subcategories: [],
+      "name": "স্টেশনারি",
+      "icon": "pen",
+      "order": 9,
+      "subcategories": []
     },
     {
-      name: 'Others',
-      nameBn: 'অন্যান্য',
-      icon: 'box',
-      order: 10,
-      subcategories: [],
-    },
-  ],
+      "name": "অন্যান্য",
+      "icon": "box",
+      "order": 10,
+      "subcategories": []
+    }
+  ]
 };
 
 module.exports = CATEGORY_SEEDS;

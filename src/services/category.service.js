@@ -56,7 +56,6 @@ class CategoryService {
     const categoryData = {
       shop: shopId,
       name: data.name,
-      nameBn: data.nameBn || '',
       icon: data.icon || null,
       parent: data.parent || null,
       order: data.order || 0,
@@ -84,7 +83,7 @@ class CategoryService {
       throw new AppError('Category not found', 'ক্যাটাগরি পাওয়া যায়নি', 404);
     }
 
-    const allowed = ['name', 'nameBn', 'icon', 'order', 'description', 'isActive'];
+    const allowed = ['name', 'icon', 'order', 'description', 'isActive'];
     allowed.forEach((field) => {
       if (data[field] !== undefined) {
         category[field] = data[field];
