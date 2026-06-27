@@ -101,6 +101,69 @@ class ProductService {
     const skip = (pageNum - 1) * limitNum;
     const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
 
+    // Calculate total stock and stock values
+    let inventoryStats = { totalStock: 0, totalBuyingValue: 0, totalSellingValue: 0 };
+    try {
+      if (branchId && req?.shop?.multiBranchEnabled) {
+        const statsResult = await BranchStock.aggregate([
+          {
+            $match: {
+              shop: new mongoose.Types.ObjectId(shopId),
+              branch: new mongoose.Types.ObjectId(branchId),
+            }
+          },
+          {
+            $lookup: {
+              from: 'products',
+              localField: 'product',
+              foreignField: '_id',
+              as: 'productDetails'
+            }
+          },
+          { $unwind: '$productDetails' },
+          {
+            $match: { 'productDetails.isActive': true }
+          },
+          {
+            $group: {
+              _id: null,
+              totalStock: { $sum: '$stock' },
+              totalBuyingValue: { $sum: { $multiply: ['$stock', { $ifNull: ['$productDetails.buyingPrice', 0] }] } },
+              totalSellingValue: { $sum: { $multiply: ['$stock', { $ifNull: ['$productDetails.sellingPrice', 0] }] } }
+            }
+          }
+        ]);
+        if (statsResult.length > 0) {
+          inventoryStats = {
+            totalStock: statsResult[0].totalStock || 0,
+            totalBuyingValue: statsResult[0].totalBuyingValue || 0,
+            totalSellingValue: statsResult[0].totalSellingValue || 0,
+          };
+        }
+      } else {
+        const statsResult = await Product.aggregate([
+          { $match: { shop: new mongoose.Types.ObjectId(shopId), isActive: true } },
+          {
+            $group: {
+              _id: null,
+              totalStock: { $sum: '$stock' },
+              totalBuyingValue: { $sum: { $multiply: ['$stock', { $ifNull: ['$buyingPrice', 0] }] } },
+              totalSellingValue: { $sum: { $multiply: ['$stock', { $ifNull: ['$sellingPrice', 0] }] } }
+            }
+          }
+        ]);
+        if (statsResult.length > 0) {
+          inventoryStats = {
+            totalStock: statsResult[0].totalStock || 0,
+            totalBuyingValue: statsResult[0].totalBuyingValue || 0,
+            totalSellingValue: statsResult[0].totalSellingValue || 0,
+          };
+        }
+      }
+    } catch (err) {
+      console.error('Failed to calculate inventory stats:', err.message);
+    }
+
     const [products, total] = await Promise.all([
       Product.find(query)
         .populate('category', 'name nameBn')
@@ -147,6 +210,7 @@ class ProductService {
         total,
         pages: Math.ceil(total / limitNum),
       },
+      inventoryStats,
     };
   }
 

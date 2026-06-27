@@ -25,8 +25,12 @@ module.exports = {
 
   // Subscription Plans — Single flat plan, all features included
   SUBSCRIPTION_PLANS: {
+    TRIAL: 'trial',
     PAID: 'paid'
   },
+
+  // Trial Period in Days
+  TRIAL_PERIOD_DAYS: 14,
 
   // Subscription Status
   SUBSCRIPTION_STATUS: {

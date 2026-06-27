@@ -53,7 +53,8 @@ class ApiResponse {
     total,
     pagination,
     message = 'Success',
-    messageBn = 'সফল'
+    messageBn = 'সফল',
+    ...extra
   }) {
     // Support both direct params and nested pagination object
     const pPage = page ?? pagination?.page ?? 1;
@@ -78,6 +79,7 @@ class ApiResponse {
         hasNext: currentPage < pages,
         hasPrev: currentPage > 1
       },
+      ...extra,
       timestamp: new Date().toISOString()
     });
   }

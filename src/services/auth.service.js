@@ -33,6 +33,17 @@ class AuthService {
       );
     }
 
+    const defaultVariantTypesMap = {
+      cloth: ['size', 'color'],
+      grocery: ['weight', 'pack-size'],
+      electronics: ['color', 'storage', 'warranty'],
+      pharmacy: ['strength', 'pack-size'],
+      hardware: ['size', 'weight'],
+      cosmetics: ['shade', 'pack-size', 'weight'],
+      bookshop: [],
+      other: ['size', 'color', 'weight']
+    };
+
     // Create shop first
     const shop = await Shop.create({
       name: shopName,
@@ -44,6 +55,9 @@ class AuthService {
         status: 'active',
         startedAt: new Date(),
         expiresAt: new Date(Date.now() + TRIAL_PERIOD_DAYS * 24 * 60 * 60 * 1000)
+      },
+      settings: {
+        enabledVariantTypes: defaultVariantTypesMap[shopType || 'other']
       }
     });
 
