@@ -34,7 +34,7 @@ exports.getProductByCode = asyncHandler(async (req, res) => {
 
 // Create product
 exports.createProduct = asyncHandler(async (req, res) => {
-  const product = await productService.createProduct(req.shop._id, req.user._id, req.body);
+  const product = await productService.createProduct(req.shop._id, req.user._id, req.body, req);
   return ApiResponse.success(res, {
     data: product,
     message: 'Product created successfully',

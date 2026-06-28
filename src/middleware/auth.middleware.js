@@ -63,6 +63,31 @@ async function getCachedUser(userId) {
 }
 
 /**
+ * Fetch default branch for a shop, cached in Redis/memory.
+ */
+async function getCachedDefaultBranch(shopId) {
+  const cacheKey = `shop:${shopId}:default_branch`;
+  const cached = await cacheService.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const branch = await Branch.findOne({ shop: shopId, isDefault: true, isActive: true }).lean();
+  if (branch) {
+    await cacheService.set(cacheKey, branch, 86400); // cache for 24h
+    return branch;
+  }
+
+  const fallbackBranch = await Branch.findOne({ shop: shopId, isActive: true }).lean();
+  if (fallbackBranch) {
+    await cacheService.set(cacheKey, fallbackBranch, 86400);
+    return fallbackBranch;
+  }
+
+  return null;
+}
+
+/**
  * Fetch admin, using a short-lived cache.
  */
 async function getCachedAdmin(adminId) {
@@ -216,6 +241,14 @@ const protect = asyncHandler(async (req, res, next) => {
           // If invalid branch ID, silently fall back to "All Branches" view
         }
         // If no header or 'all', req.branch stays null = "All Branches" view
+        // Fallback to default branch for write requests to prevent blocker errors
+        if (!req.branchId && req.method !== 'GET') {
+          const defaultBranch = await getCachedDefaultBranch(user.shop._id);
+          if (defaultBranch) {
+            req.branch = defaultBranch;
+            req.branchId = defaultBranch._id;
+          }
+        }
       } else if (decoded.branch) {
         // Staff is locked to their assigned branch
         const branch = await Branch.validateBranchOwnership(decoded.branch, user.shop._id);
@@ -348,6 +381,14 @@ const softProtect = asyncHandler(async (req, res, next) => {
               if (branch) {
                 req.branch = branch;
                 req.branchId = branch._id;
+              }
+            }
+            // Fallback to default branch for write requests to prevent blocker errors
+            if (!req.branchId && req.method !== 'GET') {
+              const defaultBranch = await getCachedDefaultBranch(user.shop._id);
+              if (defaultBranch) {
+                req.branch = defaultBranch;
+                req.branchId = defaultBranch._id;
               }
             }
           } else if (decoded.branch) {

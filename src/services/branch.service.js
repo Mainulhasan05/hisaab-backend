@@ -2,6 +2,7 @@ const Branch = require('../models/Branch.model');
 const User = require('../models/User.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AUDIT_ACTIONS } = require('../config/constants');
+const cacheService = require('./cache.service');
 
 class BranchService {
   /**
@@ -50,6 +51,9 @@ class BranchService {
       createdBy: req.user._id
     });
 
+    // Invalidate default branch cache
+    await cacheService.delete(`shop:${shopId}:default_branch`);
+
     // Log audit
     await AuditLog.log({
       shop: shopId,
@@ -92,6 +96,9 @@ class BranchService {
     if (data.phone !== undefined) branch.phone = data.phone;
 
     await branch.save();
+
+    // Invalidate default branch cache
+    await cacheService.delete(`shop:${shopId}:default_branch`);
 
     // Log audit
     await AuditLog.log({
@@ -137,6 +144,9 @@ class BranchService {
 
     branch.isActive = false;
     await branch.save();
+
+    // Invalidate default branch cache
+    await cacheService.delete(`shop:${shopId}:default_branch`);
 
     // Log audit
     await AuditLog.log({

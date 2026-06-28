@@ -203,7 +203,7 @@ class ProductService {
     }
 
     return {
-      data: products,
+      data: products.map(p => this._transformProduct(p)),
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -248,7 +248,7 @@ class ProductService {
       }
     }
 
-    return product;
+    return this._transformProduct(product);
   }
 
   // Get product by barcode/code
@@ -290,11 +290,11 @@ class ProductService {
       }
     }
 
-    return product;
+    return this._transformProduct(product);
   }
 
   // Create new product
-  async createProduct(shopId, userId, productData) {
+  async createProduct(shopId, userId, productData, req = null) {
     const { code, name, category, variants, ...rest } = productData;
 
     // Check if code already exists
@@ -311,16 +311,56 @@ class ProductService {
       }
     }
 
+    const formattedVariants = this._formatVariants(variants);
     const product = await Product.create({
       shop: shopId,
       code,
       name,
       category,
-      variants: variants || [],
-      hasVariants: variants && variants.length > 0,
+      variants: formattedVariants,
+      hasVariants: formattedVariants.length > 0,
       createdBy: userId,
       ...rest,
     });
+
+    // If multi-branch is enabled, initialize BranchStock for the default branch
+    if (req?.shop?.multiBranchEnabled) {
+      let targetBranchId = req.branchId;
+      if (!targetBranchId) {
+        const Branch = require('../models/Branch.model');
+        const defaultBranch = await Branch.findOne({ shop: shopId, isDefault: true, isActive: true });
+        if (defaultBranch) {
+          targetBranchId = defaultBranch._id;
+        } else {
+          const firstBranch = await Branch.findOne({ shop: shopId, isActive: true });
+          if (firstBranch) {
+            targetBranchId = firstBranch._id;
+          }
+        }
+      }
+
+      if (targetBranchId) {
+        if (product.hasVariants && product.variants) {
+          for (const variant of product.variants) {
+            await BranchStock.create({
+              shop: shopId,
+              branch: targetBranchId,
+              product: product._id,
+              variantId: variant._id,
+              stock: variant.stock || 0
+            });
+          }
+        } else {
+          await BranchStock.create({
+            shop: shopId,
+            branch: targetBranchId,
+            product: product._id,
+            variantId: null,
+            stock: product.stock || 0
+          });
+        }
+      }
+    }
 
     // Create audit log
     await AuditLog.create({
@@ -340,7 +380,7 @@ class ProductService {
       },
     });
 
-    return product;
+    return this._transformProduct(product);
   }
 
   // Update product
@@ -357,15 +397,16 @@ class ProductService {
 
     // If variants are being updated, preserve existing stock for each variant
     if (variantsWithStock && Array.isArray(variantsWithStock)) {
-      safeUpdateData.variants = variantsWithStock.map(variant => {
-        const { stock: variantStock, ...safeVariant } = variant;
-        // Preserve existing stock for this variant if it exists
+      const formattedInputVariants = this._formatVariants(variantsWithStock);
+
+      safeUpdateData.variants = formattedInputVariants.map(variant => {
         const existingVariant = product.variants?.find(v =>
           v._id?.toString() === variant._id?.toString() || v.sku === variant.sku
         );
         return {
-          ...safeVariant,
-          stock: existingVariant?.stock ?? 0, // Keep existing stock or default to 0 for new variants
+          ...variant,
+          // Preserve stock or use input stock for new variants
+          stock: existingVariant?.stock ?? variant.stock,
         };
       });
     }
@@ -384,6 +425,61 @@ class ProductService {
       product.hasVariants = safeUpdateData.variants.length > 0;
     }
     await product.save();
+
+    // If multi-branch is enabled, make sure all variants have BranchStock records
+    if (req?.shop?.multiBranchEnabled) {
+      let targetBranchId = req.branchId;
+      if (!targetBranchId) {
+        const Branch = require('../models/Branch.model');
+        const defaultBranch = await Branch.findOne({ shop: shopId, isDefault: true, isActive: true });
+        if (defaultBranch) {
+          targetBranchId = defaultBranch._id;
+        } else {
+          const firstBranch = await Branch.findOne({ shop: shopId, isActive: true });
+          if (firstBranch) {
+            targetBranchId = firstBranch._id;
+          }
+        }
+      }
+
+      if (targetBranchId) {
+        if (product.hasVariants && product.variants) {
+          for (const variant of product.variants) {
+            const exists = await BranchStock.findOne({
+              shop: shopId,
+              branch: targetBranchId,
+              product: product._id,
+              variantId: variant._id
+            });
+            if (!exists) {
+              await BranchStock.create({
+                shop: shopId,
+                branch: targetBranchId,
+                product: product._id,
+                variantId: variant._id,
+                stock: variant.stock || 0
+              });
+            }
+          }
+        } else {
+          const exists = await BranchStock.findOne({
+            shop: shopId,
+            branch: targetBranchId,
+            product: product._id,
+            variantId: null
+          });
+          if (!exists) {
+            await BranchStock.create({
+              shop: shopId,
+              branch: targetBranchId,
+              product: product._id,
+              variantId: null,
+              stock: product.stock || 0
+            });
+          }
+        }
+      }
+    }
 
     // Create audit log for general product update
     await AuditLog.create({
@@ -407,14 +503,15 @@ class ProductService {
     // If stock was provided and this is a non-variant product, update stock through
     // the proper channel so it's tracked in StockTransaction
     if (stock !== undefined && stock !== null && !product.hasVariants) {
-      return await this.updateStock(shopId, userId, productId, {
+      const updatedProduct = await this.updateStock(shopId, userId, productId, {
         quantity: parseInt(stock) || 0,
         type: 'set',
         notes: 'পণ্য সম্পাদনা থেকে স্টক আপডেট',
       }, req);
+      return this._transformProduct(updatedProduct);
     }
 
-    return product;
+    return this._transformProduct(product);
   }
 
   // Delete product (soft delete)
@@ -594,7 +691,7 @@ class ProductService {
       }
     }
 
-    return product;
+    return this._transformProduct(product);
   }
 
   // Get low stock products
@@ -704,6 +801,80 @@ class ProductService {
     }
 
     return results;
+  }
+
+  /**
+   * Helper to format variant arrays from client flat structure to DB nested attributes structure.
+   */
+  _formatVariants(variants) {
+    if (!variants || !Array.isArray(variants)) return [];
+
+    return variants.map(v => {
+      const attributes = {};
+      const knownKeys = ['size', 'color', 'weight', 'material', 'style'];
+      
+      if (v.attributes) {
+        Object.assign(attributes, v.attributes);
+      }
+
+      knownKeys.forEach(key => {
+        if (v[key] !== undefined && v[key] !== null) {
+          attributes[key] = v[key];
+        }
+      });
+
+      const customKeys = Object.keys(v).filter(k => 
+        !['id', '_id', 'sku', 'barcode', 'buyingPrice', 'sellingPrice', 'stock', 'image', 'isActive', 'attributes'].includes(k) &&
+        !knownKeys.includes(k)
+      );
+
+      if (customKeys.length > 0) {
+        if (!attributes.custom) attributes.custom = {};
+        customKeys.forEach(k => {
+          attributes.custom[k] = v[k];
+        });
+      }
+
+      return {
+        _id: v._id || v.id || undefined,
+        sku: v.sku,
+        barcode: v.barcode,
+        buyingPrice: v.buyingPrice,
+        sellingPrice: v.sellingPrice,
+        stock: v.stock || 0,
+        image: v.image,
+        isActive: v.isActive !== false,
+        attributes
+      };
+    });
+  }
+
+  /**
+   * Helper to transform product variants from DB nested attributes structure to client flat structure.
+   */
+  _transformProduct(product) {
+    if (!product) return null;
+    const p = typeof product.toObject === 'function' ? product.toObject() : product;
+
+    if (p.hasVariants && p.variants && Array.isArray(p.variants)) {
+      p.variants = p.variants.map(v => {
+        const transformed = { ...v };
+        if (v.attributes) {
+          Object.entries(v.attributes).forEach(([key, val]) => {
+            if (key === 'custom' && val && typeof val === 'object') {
+              Object.entries(val).forEach(([ckey, cval]) => {
+                transformed[ckey] = cval;
+              });
+            } else {
+              transformed[key] = val;
+            }
+          });
+        }
+        return transformed;
+      });
+    }
+
+    return p;
   }
 }
 

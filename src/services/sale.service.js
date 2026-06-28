@@ -557,6 +557,7 @@ class SaleService {
       customerId: customer?._id,
       customerName: finalCustomerName,
       customerPhone: finalCustomerPhone,
+      sendSms: saleData.sendSms || false,
     });
 
     // Invalidate related caches

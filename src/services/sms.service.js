@@ -418,15 +418,16 @@ class SMSService {
           return;
         }
 
-        // Check if auto SMS is enabled
+        // Check if auto SMS is enabled OR if forced by sendSms flag
         const smsSettings = shop.settings?.smsSettings || {};
-        if (!smsSettings.autoSendOnSale) {
-          logger.info(`SMS: Auto-send disabled for shop ${shop.name}`);
+        const forceSend = saleData.sendSms === true;
+        if (!forceSend && !smsSettings.autoSendOnSale) {
+          logger.info(`SMS: Auto-send disabled for shop ${shop.name} and not forced.`);
           return;
         }
 
-        // Check minimum sale amount
-        if (smsSettings.minSaleAmountForSms > 0 && saleData.total < smsSettings.minSaleAmountForSms) {
+        // Check minimum sale amount (ignore if forced)
+        if (!forceSend && smsSettings.minSaleAmountForSms > 0 && saleData.total < smsSettings.minSaleAmountForSms) {
           logger.info(`SMS: Sale amount ${saleData.total} below minimum ${smsSettings.minSaleAmountForSms}`);
           return;
         }
