@@ -174,30 +174,54 @@ class ProductService {
       Product.countDocuments(query),
     ]);
 
-    // Integrate BranchStock if in multi-branch mode and a specific branch is selected
-    if (branchId && req?.shop?.multiBranchEnabled) {
+    // Integrate BranchStock if in multi-branch mode
+    if (req?.shop?.multiBranchEnabled) {
       const productIds = products.map(p => p._id);
-      const branchStocks = await BranchStock.find({
-        shop: shopId,
-        branch: branchId,
-        product: { $in: productIds }
-      }).lean();
-
-      // Create a map for quick lookup
       const stockMap = {};
-      branchStocks.forEach(bs => {
-        const key = bs.variantId ? `${bs.product}_${bs.variantId}` : `${bs.product}`;
-        stockMap[key] = bs.stock;
-      });
+
+      if (branchId) {
+        // Specific branch selected
+        const branchStocks = await BranchStock.find({
+          shop: shopId,
+          branch: branchId,
+          product: { $in: productIds }
+        }).lean();
+
+        branchStocks.forEach(bs => {
+          const key = bs.variantId ? `${bs.product}_${bs.variantId}` : `${bs.product}`;
+          stockMap[key] = bs.stock;
+        });
+      } else {
+        // "All Branches" view: aggregate stock across all branches
+        const branchStocks = await BranchStock.aggregate([
+          {
+            $match: {
+              shop: new mongoose.Types.ObjectId(shopId),
+              product: { $in: productIds.map(id => new mongoose.Types.ObjectId(id)) }
+            }
+          },
+          {
+            $group: {
+              _id: { product: '$product', variantId: '$variantId' },
+              totalStock: { $sum: '$stock' }
+            }
+          }
+        ]);
+
+        branchStocks.forEach(bs => {
+          const key = bs._id.variantId ? `${bs._id.product}_${bs._id.variantId}` : `${bs._id.product}`;
+          stockMap[key] = bs.totalStock;
+        });
+      }
 
       products.forEach(p => {
         if (p.hasVariants && p.variants) {
           p.variants.forEach(v => {
-            v.stock = stockMap[`${p._id}_${v._id}`] ?? 0;
+            v.stock = stockMap[`${p._id}_${v._id}`] ?? v.stock ?? 0;
           });
           p.stock = p.variants.reduce((sum, v) => sum + v.stock, 0);
         } else {
-          p.stock = stockMap[`${p._id}`] ?? 0;
+          p.stock = stockMap[`${p._id}`] ?? p.stock ?? 0;
         }
       });
     }
@@ -225,26 +249,50 @@ class ProductService {
     }
 
     const branchId = req?.branchId;
-    if (branchId && req?.shop?.multiBranchEnabled) {
-      const branchStocks = await BranchStock.find({
-        shop: shopId,
-        branch: branchId,
-        product: productId
-      }).lean();
-
+    if (req?.shop?.multiBranchEnabled) {
       const stockMap = {};
-      branchStocks.forEach(bs => {
-        const key = bs.variantId ? bs.variantId.toString() : 'base';
-        stockMap[key] = bs.stock;
-      });
+
+      if (branchId) {
+        const branchStocks = await BranchStock.find({
+          shop: shopId,
+          branch: branchId,
+          product: productId
+        }).lean();
+
+        branchStocks.forEach(bs => {
+          const key = bs.variantId ? bs.variantId.toString() : 'base';
+          stockMap[key] = bs.stock;
+        });
+      } else {
+        // "All Branches" view: aggregate stock across all branches
+        const branchStocks = await BranchStock.aggregate([
+          {
+            $match: {
+              shop: new mongoose.Types.ObjectId(shopId),
+              product: new mongoose.Types.ObjectId(productId)
+            }
+          },
+          {
+            $group: {
+              _id: '$variantId',
+              totalStock: { $sum: '$stock' }
+            }
+          }
+        ]);
+
+        branchStocks.forEach(bs => {
+          const key = bs._id ? bs._id.toString() : 'base';
+          stockMap[key] = bs.totalStock;
+        });
+      }
 
       if (product.hasVariants && product.variants) {
         product.variants.forEach(v => {
-          v.stock = stockMap[v._id.toString()] ?? 0;
+          v.stock = stockMap[v._id.toString()] ?? v.stock ?? 0;
         });
         product.stock = product.variants.reduce((sum, v) => sum + v.stock, 0);
       } else {
-        product.stock = stockMap['base'] ?? 0;
+        product.stock = stockMap['base'] ?? product.stock ?? 0;
       }
     }
 
@@ -267,26 +315,50 @@ class ProductService {
     }
 
     const branchId = req?.branchId;
-    if (branchId && req?.shop?.multiBranchEnabled) {
-      const branchStocks = await BranchStock.find({
-        shop: shopId,
-        branch: branchId,
-        product: product._id
-      }).lean();
-
+    if (req?.shop?.multiBranchEnabled) {
       const stockMap = {};
-      branchStocks.forEach(bs => {
-        const key = bs.variantId ? bs.variantId.toString() : 'base';
-        stockMap[key] = bs.stock;
-      });
+
+      if (branchId) {
+        const branchStocks = await BranchStock.find({
+          shop: shopId,
+          branch: branchId,
+          product: product._id
+        }).lean();
+
+        branchStocks.forEach(bs => {
+          const key = bs.variantId ? bs.variantId.toString() : 'base';
+          stockMap[key] = bs.stock;
+        });
+      } else {
+        // "All Branches" view: aggregate stock across all branches
+        const branchStocks = await BranchStock.aggregate([
+          {
+            $match: {
+              shop: new mongoose.Types.ObjectId(shopId),
+              product: new mongoose.Types.ObjectId(product._id)
+            }
+          },
+          {
+            $group: {
+              _id: '$variantId',
+              totalStock: { $sum: '$stock' }
+            }
+          }
+        ]);
+
+        branchStocks.forEach(bs => {
+          const key = bs._id ? bs._id.toString() : 'base';
+          stockMap[key] = bs.totalStock;
+        });
+      }
 
       if (product.hasVariants && product.variants) {
         product.variants.forEach(v => {
-          v.stock = stockMap[v._id.toString()] ?? 0;
+          v.stock = stockMap[v._id.toString()] ?? v.stock ?? 0;
         });
         product.stock = product.variants.reduce((sum, v) => sum + v.stock, 0);
       } else {
-        product.stock = stockMap['base'] ?? 0;
+        product.stock = stockMap['base'] ?? product.stock ?? 0;
       }
     }
 
@@ -395,20 +467,92 @@ class ProductService {
     // Separate stock from other update data so we can handle it via updateStock
     const { stock, variants: variantsWithStock, ...safeUpdateData } = updateData;
 
-    // If variants are being updated, preserve existing stock for each variant
+    // Resolve target branch for updates
+    let targetBranchId = req?.branchId;
+    if (req?.shop?.multiBranchEnabled && !targetBranchId) {
+      const Branch = require('../models/Branch.model');
+      const defaultBranch = await Branch.findOne({ shop: shopId, isDefault: true, isActive: true });
+      if (defaultBranch) {
+        targetBranchId = defaultBranch._id;
+      } else {
+        const firstBranch = await Branch.findOne({ shop: shopId, isActive: true });
+        if (firstBranch) {
+          targetBranchId = firstBranch._id;
+        }
+      }
+    }
+
+    // Process variant updates and handle variant stock changes
     if (variantsWithStock && Array.isArray(variantsWithStock)) {
       const formattedInputVariants = this._formatVariants(variantsWithStock);
+      const updatedVariants = [];
 
-      safeUpdateData.variants = formattedInputVariants.map(variant => {
+      for (const variant of formattedInputVariants) {
         const existingVariant = product.variants?.find(v =>
           v._id?.toString() === variant._id?.toString() || v.sku === variant.sku
         );
-        return {
+
+        let inputStock = variant.stock ?? 0;
+        let currentStock = 0;
+        let variantId = variant._id;
+
+        if (existingVariant) {
+          // Keep existing variant's ID
+          variantId = existingVariant._id;
+          variant._id = existingVariant._id;
+          
+          if (req?.shop?.multiBranchEnabled && targetBranchId) {
+            const bs = await BranchStock.findOne({
+              shop: shopId,
+              branch: targetBranchId,
+              product: product._id,
+              variantId: existingVariant._id
+            });
+            currentStock = bs ? bs.stock : 0;
+          } else {
+            currentStock = existingVariant.stock || 0;
+          }
+        }
+
+        // If the stock is different, we must update it
+        if (inputStock !== currentStock) {
+          if (req?.shop?.multiBranchEnabled && targetBranchId) {
+            // Update or create BranchStock record
+            await BranchStock.findOneAndUpdate(
+              { shop: shopId, branch: targetBranchId, product: product._id, variantId: variantId },
+              { $set: { stock: inputStock } },
+              { upsert: true }
+            );
+          } else {
+            // In single-branch mode, the stock is stored directly on the variant object
+            variant.stock = inputStock;
+          }
+
+          // Create stock transaction for this variant stock adjustment
+          await StockTransaction.create({
+            shop: shopId,
+            branch: req?.shop?.multiBranchEnabled ? targetBranchId : null,
+            product: product._id,
+            productName: product.name,
+            productCode: product.code,
+            variantId: variantId,
+            type: 'adjustment',
+            quantity: inputStock - currentStock,
+            previousStock: currentStock,
+            newStock: inputStock,
+            reference: { type: 'manual' },
+            notes: 'পণ্য সম্পাদনা থেকে ভ্যারিয়েন্ট স্টক আপডেট',
+            createdBy: userId,
+          });
+        }
+
+        updatedVariants.push({
           ...variant,
-          // Preserve stock or use input stock for new variants
-          stock: existingVariant?.stock ?? variant.stock,
-        };
-      });
+          stock: req?.shop?.multiBranchEnabled ? currentStock : inputStock // Will be populated from BranchStock anyway, but preserve for single-branch
+        });
+      }
+
+      safeUpdateData.variants = updatedVariants;
     }
 
     // Check if code is being changed and if it conflicts
@@ -419,7 +563,7 @@ class ProductService {
       }
     }
 
-    // Update product with safe data (stock handled separately below)
+    // Update product with safe data
     Object.assign(product, safeUpdateData);
     if (safeUpdateData.variants) {
       product.hasVariants = safeUpdateData.variants.length > 0;
@@ -428,20 +572,6 @@ class ProductService {
 
     // If multi-branch is enabled, make sure all variants have BranchStock records
     if (req?.shop?.multiBranchEnabled) {
-      let targetBranchId = req.branchId;
-      if (!targetBranchId) {
-        const Branch = require('../models/Branch.model');
-        const defaultBranch = await Branch.findOne({ shop: shopId, isDefault: true, isActive: true });
-        if (defaultBranch) {
-          targetBranchId = defaultBranch._id;
-        } else {
-          const firstBranch = await Branch.findOne({ shop: shopId, isActive: true });
-          if (firstBranch) {
-            targetBranchId = firstBranch._id;
-          }
-        }
-      }
-
       if (targetBranchId) {
         if (product.hasVariants && product.variants) {
           for (const variant of product.variants) {
@@ -509,6 +639,54 @@ class ProductService {
         notes: 'পণ্য সম্পাদনা থেকে স্টক আপডেট',
       }, req);
       return this._transformProduct(updatedProduct);
+    }
+
+    // Integrate and aggregate BranchStock for the returned product
+    if (req?.shop?.multiBranchEnabled) {
+      const stockMap = {};
+      const branchId = req?.branchId;
+
+      if (branchId) {
+        const branchStocks = await BranchStock.find({
+          shop: shopId,
+          branch: branchId,
+          product: product._id
+        }).lean();
+
+        branchStocks.forEach(bs => {
+          const key = bs.variantId ? bs.variantId.toString() : 'base';
+          stockMap[key] = bs.stock;
+        });
+      } else {
+        const branchStocks = await BranchStock.aggregate([
+          {
+            $match: {
+              shop: new mongoose.Types.ObjectId(shopId),
+              product: new mongoose.Types.ObjectId(product._id)
+            }
+          },
+          {
+            $group: {
+              _id: '$variantId',
+              totalStock: { $sum: '$stock' }
+            }
+          }
+        ]);
+
+        branchStocks.forEach(bs => {
+          const key = bs._id ? bs._id.toString() : 'base';
+          stockMap[key] = bs.totalStock;
+        });
+      }
+
+      if (product.hasVariants && product.variants) {
+        product.variants.forEach(v => {
+          v.stock = stockMap[v._id.toString()] ?? v.stock ?? 0;
+        });
+        product.stock = product.variants.reduce((sum, v) => sum + v.stock, 0);
+      } else {
+        product.stock = stockMap['base'] ?? product.stock ?? 0;
+      }
     }
 
     return this._transformProduct(product);
@@ -835,8 +1013,12 @@ class ProductService {
         });
       }
 
+      const idVal = v._id || v.id;
+      const isValidId = idVal && mongoose.Types.ObjectId.isValid(idVal);
+      const variantId = isValidId ? new mongoose.Types.ObjectId(idVal) : new mongoose.Types.ObjectId();
+
       return {
-        _id: v._id || v.id || undefined,
+        _id: variantId,
         sku: v.sku,
         barcode: v.barcode,
         buyingPrice: v.buyingPrice,
