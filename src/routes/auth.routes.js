@@ -73,6 +73,7 @@ router.use(protect);
 
 router.post('/logout', authController.logout);
 router.post('/change-password', validate(authValidation.changePassword), authController.changePassword);
+router.post('/verify-password', authController.verifyPassword);
 router.patch('/profile', validate(authValidation.updateProfile), authController.updateProfile);
 
 // Team management (Owner only)

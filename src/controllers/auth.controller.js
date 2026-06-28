@@ -1,6 +1,7 @@
 const AuthService = require('../services/auth.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
+const User = require('../models/User.model');
 const {
   setUserTokenCookie,
   setAdminTokenCookie,
@@ -363,6 +364,42 @@ const updateProfile = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * @desc    Verify current user's password for delete actions
+ * @route   POST /api/auth/verify-password
+ * @access  Private
+ */
+const verifyPassword = asyncHandler(async (req, res) => {
+  const { password } = req.body;
+  if (!password) {
+    return ApiResponse.badRequest(res, {
+      message: 'Password is required',
+      messageBn: 'পাসওয়ার্ড দেওয়া আবশ্যক'
+    });
+  }
+
+  const user = await User.findById(req.user._id).select('+password');
+  if (!user) {
+    return ApiResponse.unauthorized(res, {
+      message: 'User not found',
+      messageBn: 'ব্যবহারকারী পাওয়া যায়নি'
+    });
+  }
+
+  const isMatch = await user.comparePassword(password);
+  if (!isMatch) {
+    return ApiResponse.badRequest(res, {
+      message: 'Incorrect password',
+      messageBn: 'পাসওয়ার্ড সঠিক নয়'
+    });
+  }
+
+  return ApiResponse.success(res, {
+    message: 'Password verified successfully',
+    messageBn: 'পাসওয়ার্ড সফলভাবে যাচাই করা হয়েছে'
+  });
+});
+
 module.exports = {
   register,
   sendOTP,
@@ -378,5 +415,6 @@ module.exports = {
   updateTeamMember,
   deleteTeamMember,
   updateShopSettings,
-  updateProfile
+  updateProfile,
+  verifyPassword
 };
