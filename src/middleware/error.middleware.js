@@ -90,7 +90,6 @@ const sendErrorDev = (err, res) => {
     success: false,
     statusCode: err.statusCode || 500,
     message: err.message,
-    messageBn: err.messageBn || 'কিছু সমস্যা হয়েছে',
     error: err,
     stack: err.stack,
     timestamp: new Date().toISOString()
@@ -107,7 +106,6 @@ const sendErrorProd = (err, res) => {
       success: false,
       statusCode: err.statusCode,
       message: err.message,
-      messageBn: err.messageBn || 'কিছু সমস্যা হয়েছে',
       timestamp: new Date().toISOString()
     };
 
@@ -125,7 +123,6 @@ const sendErrorProd = (err, res) => {
     success: false,
     statusCode: err.statusCode || 500,
     message: err.message || 'Something went wrong!',
-    messageBn: err.messageBn || 'কিছু সমস্যা হয়েছে!',
     errors: null,
     timestamp: new Date().toISOString()
   });

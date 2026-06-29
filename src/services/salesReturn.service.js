@@ -17,13 +17,15 @@ class SalesReturnService {
    */
   async createReturn(shopId, userId, returnData, req) {
     const { saleId, items, refundMethod, paymentMethod, reason, notes } = returnData;
-    const branchId = req ? getBranchForCreate(req) : null;
 
     // 1. Fetch the sale
     const sale = await Sale.findOne({ _id: saleId, shop: shopId });
     if (!sale) {
       throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }
+
+    // Resolve branch context directly from the original sale
+    const branchId = sale.branch || null;
 
     // 2. Validate sale status
     if (sale.status === 'cancelled') {

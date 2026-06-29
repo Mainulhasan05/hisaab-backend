@@ -221,12 +221,7 @@ const protect = asyncHandler(async (req, res, next) => {
             req.branchId = branch._id;
           }
         }
-        if (!req.branchId && req.method !== 'GET') {
-          return ApiResponse.forbidden(res, {
-            message: 'Select an active branch before making changes',
-            messageBn: '???????? ???? ??? ???? ??????? ???? ???????? ????',
-          });
-        }
+
       } else if (decoded.branch) {
         const branch = await Branch.validateBranchOwnership(decoded.branch, user.shop._id);
         if (!branch) {

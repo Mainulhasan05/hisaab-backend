@@ -57,8 +57,8 @@ function getBranchForCreate(req) {
 
   // Multi-branch shop — branch is required for creating records
   if (!req.branchId) {
-    const error = new Error('মাল্টি-ব্রাঞ্চ দোকানে শাখা নির্বাচন করুন');
-    error.statusCode = 400;
+    const error = new Error('Select an active branch before making changes');
+    error.statusCode = 403;
     throw error;
   }
 

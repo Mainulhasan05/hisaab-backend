@@ -10,14 +10,12 @@ class ApiResponse {
   static success(res, {
     data = null,
     message = 'Success',
-    messageBn = 'সফল',
     statusCode = 200
   }) {
     return res.status(statusCode).json({
       success: true,
       statusCode,
       message,
-      messageBn,
       data,
       timestamp: new Date().toISOString()
     });
@@ -28,7 +26,6 @@ class ApiResponse {
    */
   static error(res, {
     message = 'Something went wrong',
-    messageBn = 'কিছু সমস্যা হয়েছে',
     statusCode = 500,
     errors = null
   }) {
@@ -36,7 +33,6 @@ class ApiResponse {
       success: false,
       statusCode,
       message,
-      messageBn,
       errors,
       timestamp: new Date().toISOString()
     });
@@ -53,7 +49,6 @@ class ApiResponse {
     total,
     pagination,
     message = 'Success',
-    messageBn = 'সফল',
     ...extra
   }) {
     // Support both direct params and nested pagination object
@@ -69,7 +64,6 @@ class ApiResponse {
       success: true,
       statusCode: 200,
       message,
-      messageBn,
       data,
       pagination: {
         page: currentPage,
@@ -89,10 +83,9 @@ class ApiResponse {
    */
   static created(res, {
     data = null,
-    message = 'Created successfully',
-    messageBn = 'সফলভাবে তৈরি হয়েছে'
+    message = 'Created successfully'
   }) {
-    return this.success(res, { data, message, messageBn, statusCode: 201 });
+    return this.success(res, { data, message, statusCode: 201 });
   }
 
   /**
@@ -107,20 +100,18 @@ class ApiResponse {
    */
   static badRequest(res, {
     message = 'Bad request',
-    messageBn = 'অবৈধ অনুরোধ',
     errors = null
   }) {
-    return this.error(res, { message, messageBn, statusCode: 400, errors });
+    return this.error(res, { message, statusCode: 400, errors });
   }
 
   /**
    * Send unauthorized response (401)
    */
   static unauthorized(res, {
-    message = 'Unauthorized',
-    messageBn = 'অননুমোদিত প্রবেশ'
+    message = 'Unauthorized'
   }) {
-    return this.error(res, { message, messageBn, statusCode: 401 });
+    return this.error(res, { message, statusCode: 401 });
   }
 
   /**
@@ -128,10 +119,9 @@ class ApiResponse {
    */
   static forbidden(res, {
     message = 'Access forbidden',
-    messageBn = 'প্রবেশ নিষিদ্ধ',
     code = null
   }) {
-    const body = { success: false, statusCode: 403, message, messageBn, timestamp: new Date().toISOString() };
+    const body = { success: false, statusCode: 403, message, timestamp: new Date().toISOString() };
     if (code) body.code = code;
     return res.status(403).json(body);
   }
@@ -141,14 +131,12 @@ class ApiResponse {
    */
   static paymentRequired(res, {
     message = 'Subscription required',
-    messageBn = 'সাবস্ক্রিপশন নবায়ন প্রয়োজন',
     code = 'SUBSCRIPTION_EXPIRED'
   }) {
     return res.status(402).json({
       success: false,
       statusCode: 402,
       message,
-      messageBn,
       code,
       timestamp: new Date().toISOString()
     });
@@ -158,20 +146,18 @@ class ApiResponse {
    * Send not found response (404)
    */
   static notFound(res, {
-    message = 'Resource not found',
-    messageBn = 'তথ্য পাওয়া যায়নি'
+    message = 'Resource not found'
   }) {
-    return this.error(res, { message, messageBn, statusCode: 404 });
+    return this.error(res, { message, statusCode: 404 });
   }
 
   /**
    * Send conflict response (409)
    */
   static conflict(res, {
-    message = 'Resource already exists',
-    messageBn = 'এই তথ্য আগে থেকেই আছে'
+    message = 'Resource already exists'
   }) {
-    return this.error(res, { message, messageBn, statusCode: 409 });
+    return this.error(res, { message, statusCode: 409 });
   }
 
   /**
@@ -179,30 +165,27 @@ class ApiResponse {
    */
   static validationError(res, {
     message = 'Validation failed',
-    messageBn = 'তথ্য যাচাই ব্যর্থ',
     errors = null
   }) {
-    return this.error(res, { message, messageBn, statusCode: 422, errors });
+    return this.error(res, { message, statusCode: 422, errors });
   }
 
   /**
    * Send too many requests response (429)
    */
   static tooManyRequests(res, {
-    message = 'Too many requests',
-    messageBn = 'অনেক বেশি অনুরোধ, কিছুক্ষণ পর চেষ্টা করুন'
+    message = 'Too many requests'
   }) {
-    return this.error(res, { message, messageBn, statusCode: 429 });
+    return this.error(res, { message, statusCode: 429 });
   }
 
   /**
    * Send server error response (500)
    */
   static serverError(res, {
-    message = 'Internal server error',
-    messageBn = 'সার্ভারে সমস্যা হয়েছে'
+    message = 'Internal server error'
   }) {
-    return this.error(res, { message, messageBn, statusCode: 500 });
+    return this.error(res, { message, statusCode: 500 });
   }
 }
 
