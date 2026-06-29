@@ -25,6 +25,7 @@ router.patch('/shops/:id/subscription', adminController.updateShopSubscription);
 router.patch('/shops/:id/settings', adminController.updateShopSettings);
 router.post('/shops/:id/restrict', adminController.restrictShop);
 router.post('/shops/:id/enable-multi-branch', adminController.enableMultiBranch);
+router.post('/shops/:id/disable-multi-branch', adminController.disableMultiBranch);
 router.get('/shops/:id/branches', adminController.getShopBranches);
 router.post('/shops/:id/branches', adminController.addShopBranch);
 router.patch('/shops/:id/branches/:branchId', adminController.updateShopBranch);

@@ -1327,6 +1327,38 @@ class AdminService {
     };
   }
 
+  /**
+   * Disable multi-branch support for a shop
+   */
+  async disableMultiBranch(shopId, adminId) {
+    const shop = await Shop.findById(shopId);
+    if (!shop) {
+      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
+    }
+
+    if (!shop.multiBranchEnabled) {
+      throw new AppError('মাল্টি-ব্রাঞ্চ ইতিমধ্যেই নিষ্ক্রিয়', 'Multi-branch is already disabled', 400);
+    }
+
+    // Disable multi-branch
+    shop.multiBranchEnabled = false;
+    await shop.save();
+
+    // Log audit
+    await AuditLog.log({
+      shop: shopId,
+      admin: adminId,
+      action: AUDIT_ACTIONS.MULTI_BRANCH_DISABLED.en,
+      description: `"${shop.name}" দোকানে মাল্টি-ব্রাঞ্চ নিষ্ক্রিয় করা হয়েছে`,
+      entity: { type: 'shop', id: shop._id, name: shop.name }
+    });
+
+    // Invalidate cache
+    await cacheService.deletePattern(`auth:user:*`);
+
+    return shop.toObject();
+  }
+
   // Get all branches of a shop for admin
   async getShopBranches(shopId) {
     const shop = await Shop.findById(shopId);

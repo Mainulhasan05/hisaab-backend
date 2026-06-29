@@ -152,6 +152,7 @@ module.exports = {
     BRANCH_UPDATE: { en: 'branch_update', bn: 'শাখা আপডেট' },
     BRANCH_DEACTIVATE: { en: 'branch_deactivate', bn: 'শাখা নিষ্ক্রিয়' },
     MULTI_BRANCH_ENABLED: { en: 'multi_branch_enabled', bn: 'মাল্টি-ব্রাঞ্চ সক্রিয়' },
+    MULTI_BRANCH_DISABLED: { en: 'multi_branch_disabled', bn: 'মাল্টি-ব্রাঞ্চ নিষ্ক্রিয়' },
 
     // Shop Settings
     SHOP_UPDATE: { en: 'shop_update', bn: 'দোকান তথ্য সম্পাদনা' },
