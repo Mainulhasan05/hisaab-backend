@@ -160,6 +160,7 @@ class SalesReturnService {
             if (variant) {
               variant.stock = totalStock;
             }
+            product.stock = product.variants.reduce((sum, v) => sum + v.stock, 0);
           } else {
             product.stock = totalStock;
           }
@@ -172,6 +173,7 @@ class SalesReturnService {
               variant.stock += item.quantity;
               newStock = variant.stock;
             }
+            product.stock = product.variants.reduce((sum, v) => sum + v.stock, 0);
           } else {
             previousStock = product.stock;
             product.stock += item.quantity;
@@ -205,10 +207,33 @@ class SalesReturnService {
       }
     }
 
-    // 9. Update Sale: returnedAmount and profit
-    sale.returnedAmount = (sale.returnedAmount || 0) + totalRefundAmount;
-    sale.profit = (sale.profit || 0) - totalProfitReduction;
-    await sale.save();
+    // 9. Update Sale: returnedAmount, profit, due and status (using updateOne to bypass pre-save hook recalculations)
+    const newReturnedAmount = (sale.returnedAmount || 0) + totalRefundAmount;
+    const newProfit = (sale.profit || 0) - totalProfitReduction;
+    
+    let newDue = sale.due;
+    if (refundMethod === 'adjustment') {
+      newDue = Math.max(0, sale.due - totalRefundAmount);
+    }
+    
+    let newStatus = sale.status;
+    if (newDue === 0 && sale.status !== 'cancelled') {
+      newStatus = 'completed';
+    } else if (newDue < sale.due && sale.status !== 'cancelled') {
+      newStatus = 'partial';
+    }
+
+    await Sale.updateOne(
+      { _id: sale._id },
+      { 
+        $set: { 
+          returnedAmount: newReturnedAmount,
+          profit: newProfit,
+          due: newDue,
+          status: newStatus
+        } 
+      }
+    );
 
     // 10. Handle refund by method
     if (refundMethod === 'cash') {
