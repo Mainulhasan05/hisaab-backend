@@ -10,6 +10,7 @@ const cashInSchema = new mongoose.Schema({
 const cashOutSchema = new mongoose.Schema({
   expenses: { type: Number, default: 0 },
   purchases: { type: Number, default: 0 },
+  refunds: { type: Number, default: 0 },
   other: { type: Number, default: 0 },
   otherNote: { type: String, trim: true, maxlength: 500 },
 }, { _id: false });
@@ -95,6 +96,7 @@ cashRegisterSchema.virtual('totalCashIn').get(function () {
 cashRegisterSchema.virtual('totalCashOut').get(function () {
   return (this.cashOut?.expenses || 0) +
     (this.cashOut?.purchases || 0) +
+    (this.cashOut?.refunds || 0) +
     (this.cashOut?.other || 0);
 });
 
@@ -105,6 +107,7 @@ cashRegisterSchema.pre('save', function (next) {
     (this.cashIn?.other || 0);
   const totalOut = (this.cashOut?.expenses || 0) +
     (this.cashOut?.purchases || 0) +
+    (this.cashOut?.refunds || 0) +
     (this.cashOut?.other || 0);
 
   this.expectedClosing = this.openingBalance + totalIn - totalOut;

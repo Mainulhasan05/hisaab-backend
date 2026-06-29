@@ -24,7 +24,7 @@ class CashRegisterService {
     const shopOid = new mongoose.Types.ObjectId(shopId);
     const branchMatch = branchId ? { branch: new mongoose.Types.ObjectId(branchId) } : {};
 
-    const [cashSales, cashDueCollections, cashExpenses, cashPurchases] = await Promise.all([
+    const [cashSales, cashDueCollections, cashExpenses, cashPurchases, cashRefunds] = await Promise.all([
       // Cash sales (paid amount from cash sales)
       Sale.aggregate([
         {
@@ -79,6 +79,20 @@ class CashRegisterService {
         },
         { $group: { _id: null, total: { $sum: '$paid' } } },
       ]),
+
+      // Cash refunds (from Payment model)
+      Payment.aggregate([
+        {
+          $match: {
+            shop: shopOid,
+            ...branchMatch,
+            method: 'cash',
+            type: 'refund',
+            createdAt: { $gte: start, $lte: end },
+          },
+        },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]),
     ]);
 
     return {
@@ -86,6 +100,7 @@ class CashRegisterService {
       dueCollections: cashDueCollections[0]?.total || 0,
       expenses: cashExpenses[0]?.total || 0,
       purchases: cashPurchases[0]?.total || 0,
+      refunds: cashRefunds[0]?.total || 0,
     };
   }
 
@@ -133,6 +148,7 @@ class CashRegisterService {
     register.cashIn.dueCollections = flows.dueCollections;
     register.cashOut.expenses = flows.expenses;
     register.cashOut.purchases = flows.purchases;
+    register.cashOut.refunds = flows.refunds;
 
     await register.save();
 
@@ -186,6 +202,7 @@ class CashRegisterService {
     register.cashIn.dueCollections = flows.dueCollections;
     register.cashOut.expenses = flows.expenses;
     register.cashOut.purchases = flows.purchases;
+    register.cashOut.refunds = flows.refunds;
     await register.save();
 
     // Audit log
@@ -249,6 +266,7 @@ class CashRegisterService {
     register.cashIn.dueCollections = flows.dueCollections;
     register.cashOut.expenses = flows.expenses;
     register.cashOut.purchases = flows.purchases;
+    register.cashOut.refunds = flows.refunds;
 
     await register.save();
 
@@ -306,6 +324,7 @@ class CashRegisterService {
     register.cashIn.dueCollections = flows.dueCollections;
     register.cashOut.expenses = flows.expenses;
     register.cashOut.purchases = flows.purchases;
+    register.cashOut.refunds = flows.refunds;
 
     register.actualClosing = actualClosing;
     register.status = 'closed';
@@ -447,6 +466,7 @@ class CashRegisterService {
     register.cashIn.dueCollections = flows.dueCollections;
     register.cashOut.expenses = flows.expenses;
     register.cashOut.purchases = flows.purchases;
+    register.cashOut.refunds = flows.refunds;
 
     await register.save();
 

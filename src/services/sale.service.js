@@ -392,13 +392,34 @@ class SaleService {
       }
 
       // Now sync the Product total stocks in the database
+      const branchStocks = await BranchStock.aggregate([
+        {
+          $match: {
+            shop: new mongoose.Types.ObjectId(shopId),
+            product: { $in: productIds.map(id => new mongoose.Types.ObjectId(id)) }
+          }
+        },
+        {
+          $group: {
+            _id: { product: '$product', variantId: '$variantId' },
+            totalStock: { $sum: '$stock' }
+          }
+        }
+      ]);
+
+      const totalStockMap = {};
+      branchStocks.forEach(bs => {
+        const key = bs._id.variantId ? `${bs._id.product}_${bs._id.variantId}` : `${bs._id.product}`;
+        totalStockMap[key] = bs.totalStock;
+      });
+
       const productSyncOps = [];
       for (const productId of productIds) {
         const product = productMap.get(productId.toString());
         if (product) {
           if (product.hasVariants && product.variants) {
             for (const variant of product.variants) {
-              const totalStock = await BranchStock.getTotalStock(shopId, productId, variant._id);
+              const totalStock = totalStockMap[`${productId}_${variant._id}`] || 0;
               productSyncOps.push({
                 updateOne: {
                   filter: { _id: productId, 'variants._id': variant._id },
@@ -407,7 +428,7 @@ class SaleService {
               });
             }
           } else {
-            const totalStock = await BranchStock.getTotalStock(shopId, productId, null);
+            const totalStock = totalStockMap[`${productId}`] || 0;
             productSyncOps.push({
               updateOne: {
                 filter: { _id: productId },
@@ -718,13 +739,34 @@ class SaleService {
       }
 
       // Sync the Product total stock in the database
+      const branchStocks = await BranchStock.aggregate([
+        {
+          $match: {
+            shop: new mongoose.Types.ObjectId(shopId),
+            product: { $in: cancelProductIds.map(id => new mongoose.Types.ObjectId(id)) }
+          }
+        },
+        {
+          $group: {
+            _id: { product: '$product', variantId: '$variantId' },
+            totalStock: { $sum: '$stock' }
+          }
+        }
+      ]);
+
+      const totalStockMap = {};
+      branchStocks.forEach(bs => {
+        const key = bs._id.variantId ? `${bs._id.product}_${bs._id.variantId}` : `${bs._id.product}`;
+        totalStockMap[key] = bs.totalStock;
+      });
+
       const productSyncOps = [];
       for (const productId of cancelProductIds) {
         const product = cancelProductMap.get(productId.toString());
         if (product) {
           if (product.hasVariants && product.variants) {
             for (const variant of product.variants) {
-              const totalStock = await BranchStock.getTotalStock(shopId, productId, variant._id);
+              const totalStock = totalStockMap[`${productId}_${variant._id}`] || 0;
               productSyncOps.push({
                 updateOne: {
                   filter: { _id: productId, 'variants._id': variant._id },
@@ -733,7 +775,7 @@ class SaleService {
               });
             }
           } else {
-            const totalStock = await BranchStock.getTotalStock(shopId, productId, null);
+            const totalStock = totalStockMap[`${productId}`] || 0;
             productSyncOps.push({
               updateOne: {
                 filter: { _id: productId },
