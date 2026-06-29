@@ -20,7 +20,7 @@ const validate = (schema, property = 'body') => {
         messageBn: translateValidationMessage(detail)
       }));
 
-      return ApiResponse.validationError(res, {
+      return ApiResponse.badRequest(res, {
         message: 'Validation failed',
         messageBn: 'তথ্য যাচাই ব্যর্থ',
         errors

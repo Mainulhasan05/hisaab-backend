@@ -63,31 +63,6 @@ async function getCachedUser(userId) {
 }
 
 /**
- * Fetch default branch for a shop, cached in Redis/memory.
- */
-async function getCachedDefaultBranch(shopId) {
-  const cacheKey = `shop:${shopId}:default_branch`;
-  const cached = await cacheService.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
-  const branch = await Branch.findOne({ shop: shopId, isDefault: true, isActive: true }).lean();
-  if (branch) {
-    await cacheService.set(cacheKey, branch, 86400); // cache for 24h
-    return branch;
-  }
-
-  const fallbackBranch = await Branch.findOne({ shop: shopId, isActive: true }).lean();
-  if (fallbackBranch) {
-    await cacheService.set(cacheKey, fallbackBranch, 86400);
-    return fallbackBranch;
-  }
-
-  return null;
-}
-
-/**
  * Fetch admin, using a short-lived cache.
  */
 async function getCachedAdmin(adminId) {
@@ -230,32 +205,39 @@ const protect = asyncHandler(async (req, res, next) => {
 
     if (user.shop && user.shop.multiBranchEnabled) {
       if (decoded.isOwner) {
-        // Owner can switch branches via header
         const activeBranchId = req.headers['x-active-branch'] || req.cookies?.activeBranch;
         if (activeBranchId && activeBranchId !== 'all') {
           const branch = await Branch.validateBranchOwnership(activeBranchId, user.shop._id);
-          if (branch) {
-            req.branch = branch;
-            req.branchId = branch._id;
+          if (!branch) {
+            return ApiResponse.forbidden(res, {
+              message: 'Invalid branch for this shop',
+              messageBn: '?? ??????? ???? ???? ????',
+            });
           }
-          // If invalid branch ID, silently fall back to "All Branches" view
-        }
-        // If no header or 'all', req.branch stays null = "All Branches" view
-        // Fallback to default branch for write requests to prevent blocker errors
-        if (!req.branchId && req.method !== 'GET') {
-          const defaultBranch = await getCachedDefaultBranch(user.shop._id);
-          if (defaultBranch) {
-            req.branch = defaultBranch;
-            req.branchId = defaultBranch._id;
-          }
-        }
-      } else if (decoded.branch) {
-        // Staff is locked to their assigned branch
-        const branch = await Branch.validateBranchOwnership(decoded.branch, user.shop._id);
-        if (branch) {
           req.branch = branch;
           req.branchId = branch._id;
         }
+        if (!req.branchId && req.method !== 'GET') {
+          return ApiResponse.forbidden(res, {
+            message: 'Select an active branch before making changes',
+            messageBn: '???????? ???? ??? ???? ??????? ???? ???????? ????',
+          });
+        }
+      } else if (decoded.branch) {
+        const branch = await Branch.validateBranchOwnership(decoded.branch, user.shop._id);
+        if (!branch) {
+          return ApiResponse.forbidden(res, {
+            message: 'Your assigned branch is inactive or invalid',
+            messageBn: '????? ????????? ???? ?????????? ?? ????',
+          });
+        }
+        req.branch = branch;
+        req.branchId = branch._id;
+      } else {
+        return ApiResponse.forbidden(res, {
+          message: 'No branch is assigned to this staff account',
+          messageBn: '?? ????? ??????????? ???? ???? ????????? ???',
+        });
       }
     }
 
@@ -381,14 +363,10 @@ const softProtect = asyncHandler(async (req, res, next) => {
               if (branch) {
                 req.branch = branch;
                 req.branchId = branch._id;
-              }
-            }
-            // Fallback to default branch for write requests to prevent blocker errors
-            if (!req.branchId && req.method !== 'GET') {
-              const defaultBranch = await getCachedDefaultBranch(user.shop._id);
-              if (defaultBranch) {
-                req.branch = defaultBranch;
-                req.branchId = defaultBranch._id;
+              } else {
+                req.user = null;
+                req.shop = null;
+                req.isAdmin = false;
               }
             }
           } else if (decoded.branch) {
@@ -396,7 +374,15 @@ const softProtect = asyncHandler(async (req, res, next) => {
             if (branch) {
               req.branch = branch;
               req.branchId = branch._id;
+            } else {
+              req.user = null;
+              req.shop = null;
+              req.isAdmin = false;
             }
+          } else {
+            req.user = null;
+            req.shop = null;
+            req.isAdmin = false;
           }
         }
       }

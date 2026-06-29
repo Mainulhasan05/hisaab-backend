@@ -158,8 +158,11 @@ class SaleService {
   }
 
   // Get single sale by ID
-  async getSaleById(shopId, saleId) {
-    const sale = await Sale.findOne({ _id: saleId, shop: shopId })
+  async getSaleById(shopId, saleId, branchId = null) {
+    const query = { _id: saleId, shop: shopId };
+    if (branchId) query.branch = branchId;
+
+    const sale = await Sale.findOne(query)
       .populate('customer', 'name phone address totalDue')
       .populate('createdBy', 'name phone')
       .populate('items.product', 'name code unit barcode');
@@ -286,7 +289,7 @@ class SaleService {
         // Queue stock transaction
         stockTransactions.push({
           shop: shopId,
-          branch: req ? getBranchForCreate(req) : null,
+          branch: branchId,
           product: product._id,
           productName: product.name,
           productCode: product.code,
@@ -342,7 +345,7 @@ class SaleService {
         // Queue stock transaction
         stockTransactions.push({
           shop: shopId,
-          branch: req ? getBranchForCreate(req) : null,
+          branch: branchId,
           product: product._id,
           productName: product.name,
           productCode: product.code,
@@ -466,7 +469,6 @@ class SaleService {
     const maxRetries = 3;
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
-        const branchId = req ? getBranchForCreate(req) : null;
         const branchCode = req ? getBranchCode(req) : null;
         const invoiceNo = await this.generateInvoiceNumber(shopId, branchCode);
         sale = await Sale.create({
@@ -513,7 +515,7 @@ class SaleService {
     if (paid > 0) {
       await Payment.create({
         shop: shopId,
-        branch: req ? getBranchForCreate(req) : null,
+        branch: branchId,
         sale: sale._id,
         customer: customer?._id,
         amount: paid,
@@ -567,10 +569,12 @@ class SaleService {
   }
 
   // Record payment for existing sale
-  async recordPayment(shopId, userId, saleId, paymentData) {
+  async recordPayment(shopId, userId, saleId, paymentData, branchId = null) {
     const { amount, method, transactionId, notes } = paymentData;
 
-    const sale = await Sale.findOne({ _id: saleId, shop: shopId });
+    const saleQuery = { _id: saleId, shop: shopId };
+    if (branchId) saleQuery.branch = branchId;
+    const sale = await Sale.findOne(saleQuery);
     if (!sale) {
       throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }
@@ -592,6 +596,7 @@ class SaleService {
     // Create payment record
     const payment = await Payment.create({
       shop: shopId,
+      branch: sale.branch || null,
       sale: saleId,
       customer: sale.customer,
       amount,
@@ -635,8 +640,10 @@ class SaleService {
   }
 
   // Cancel sale
-  async cancelSale(shopId, userId, saleId, reason) {
-    const sale = await Sale.findOne({ _id: saleId, shop: shopId });
+  async cancelSale(shopId, userId, saleId, reason, activeBranchId = null) {
+    const saleQuery = { _id: saleId, shop: shopId };
+    if (activeBranchId) saleQuery.branch = activeBranchId;
+    const sale = await Sale.findOne(saleQuery);
     if (!sale) {
       throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }
@@ -787,17 +794,19 @@ class SaleService {
   }
 
   // Get today's sales summary
-  async getTodaySummary(shopId) {
+  async getTodaySummary(shopId, branchId = null) {
     const { startOfDay, endOfDay } = getBangladeshTodayRange();
+    const match = {
+      shop: new mongoose.Types.ObjectId(shopId),
+      status: { $ne: 'cancelled' },
+      createdAt: { $gte: startOfDay, $lte: endOfDay },
+    };
+    if (branchId) {
+      match.branch = new mongoose.Types.ObjectId(branchId);
+    }
 
     const result = await Sale.aggregate([
-      {
-        $match: {
-          shop: shopId,
-          status: { $ne: 'cancelled' },
-          createdAt: { $gte: startOfDay, $lte: endOfDay },
-        },
-      },
+      { $match: match },
       {
         $group: {
           _id: null,
@@ -813,8 +822,10 @@ class SaleService {
   }
 
   // Get recent sales
-  async getRecentSales(shopId, limit = 10) {
-    const sales = await Sale.find({ shop: shopId, status: { $ne: 'cancelled' } })
+  async getRecentSales(shopId, limit = 10, branchId = null) {
+    const query = { shop: shopId, status: { $ne: 'cancelled' } };
+    if (branchId) query.branch = branchId;
+    const sales = await Sale.find(query)
       .populate('customer', 'name phone')
       .sort({ createdAt: -1 })
       .limit(limit)
@@ -824,8 +835,10 @@ class SaleService {
   }
 
   // Get payments for a sale
-  async getSalePayments(shopId, saleId) {
-    const sale = await Sale.findOne({ _id: saleId, shop: shopId });
+  async getSalePayments(shopId, saleId, branchId = null) {
+    const saleQuery = { _id: saleId, shop: shopId };
+    if (branchId) saleQuery.branch = branchId;
+    const sale = await Sale.findOne(saleQuery);
     if (!sale) {
       throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }

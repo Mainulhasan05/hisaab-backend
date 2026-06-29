@@ -1,5 +1,7 @@
 const Branch = require('../models/Branch.model');
 const User = require('../models/User.model');
+const Sale = require('../models/Sale.model');
+const BranchStock = require('../models/BranchStock.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const cacheService = require('./cache.service');
@@ -143,6 +145,7 @@ class BranchService {
     }
 
     branch.isActive = false;
+    branch.deletedAt = new Date();
     await branch.save();
 
     // Invalidate default branch cache
@@ -167,23 +170,71 @@ class BranchService {
    */
   async getBranchesWithStaffCount(shopId) {
     const branches = await Branch.getShopBranches(shopId);
+    const branchIds = branches.map((branch) => branch._id);
 
-    const branchesWithCount = await Promise.all(
-      branches.map(async (branch) => {
-        const staffCount = await User.countDocuments({
-          shop: shopId,
-          branch: branch._id,
-          isActive: true,
-          isOwner: false
-        });
-        return {
-          ...branch.toObject(),
-          staffCount
-        };
-      })
-    );
+    const [staffCounts, salesStats, itemCounts] = await Promise.all([
+      User.aggregate([
+        { $match: { shop: shopId, branch: { $in: branchIds }, isActive: true, isOwner: false } },
+        { $group: { _id: '$branch', staffCount: { $sum: 1 } } },
+      ]),
+      Sale.aggregate([
+        { $match: { shop: shopId, branch: { $in: branchIds }, status: { $ne: 'cancelled' } } },
+        {
+          $group: {
+            _id: '$branch',
+            salesCount: { $sum: 1 },
+            totalSales: { $sum: '$total' },
+            lastActivity: { $max: '$createdAt' },
+          },
+        },
+      ]),
+      BranchStock.aggregate([
+        { $match: { shop: shopId, branch: { $in: branchIds }, stock: { $gt: 0 } } },
+        { $group: { _id: { branch: '$branch', product: '$product' } } },
+        { $group: { _id: '$_id.branch', itemCount: { $sum: 1 } } },
+      ]),
+    ]);
 
-    return branchesWithCount;
+    const staffMap = new Map(staffCounts.map((row) => [row._id?.toString(), row.staffCount]));
+    const salesMap = new Map(salesStats.map((row) => [row._id?.toString(), row]));
+    const itemMap = new Map(itemCounts.map((row) => [row._id?.toString(), row.itemCount]));
+
+    return branches.map((branch) => {
+      const id = branch._id.toString();
+      const sales = salesMap.get(id) || {};
+      return {
+        ...branch.toObject(),
+        staffCount: staffMap.get(id) || 0,
+        itemCount: itemMap.get(id) || 0,
+        salesCount: sales.salesCount || 0,
+        totalSales: sales.totalSales || 0,
+        lastActivity: sales.lastActivity || null,
+      };
+    });
+  }
+
+  async getBranchDeletionImpact(branchId, shopId) {
+    const branch = await this.getBranch(branchId, shopId);
+    const [staffCount, salesCount, itemCount, stockRecordCount] = await Promise.all([
+      User.countDocuments({ shop: shopId, branch: branchId, isActive: true, isOwner: false }),
+      Sale.countDocuments({ shop: shopId, branch: branchId }),
+      BranchStock.distinct('product', { shop: shopId, branch: branchId, stock: { $gt: 0 } }).then((ids) => ids.length),
+      BranchStock.countDocuments({ shop: shopId, branch: branchId }),
+    ]);
+
+    return {
+      branch: {
+        _id: branch._id,
+        name: branch.name,
+        code: branch.code,
+        isDefault: branch.isDefault,
+      },
+      staffCount,
+      salesCount,
+      itemCount,
+      stockRecordCount,
+      canDeactivate: !branch.isDefault && staffCount === 0,
+    };
   }
 }
 

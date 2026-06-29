@@ -22,6 +22,16 @@ exports.getProduct = asyncHandler(async (req, res) => {
   });
 });
 
+// Search products for POS/sale item picker
+exports.searchProductsForSale = asyncHandler(async (req, res) => {
+  const result = await productService.searchProductsForSale(req.shop._id, req.query, req);
+  return ApiResponse.success(res, {
+    data: result.data,
+    message: 'Products searched successfully',
+    messageBn: '???? ????????? ??? ??????',
+  });
+});
+
 // Get product by barcode/code
 exports.getProductByCode = asyncHandler(async (req, res) => {
   const product = await productService.getProductByCode(req.shop._id, req.params.code, req);
@@ -55,7 +65,7 @@ exports.updateProduct = asyncHandler(async (req, res) => {
 
 // Delete product
 exports.deleteProduct = asyncHandler(async (req, res) => {
-  await productService.deleteProduct(req.shop._id, req.user._id, req.params.id);
+  await productService.deleteProduct(req.shop._id, req.user._id, req.params.id, req);
   return ApiResponse.success(res, {
     message: 'Product deleted successfully',
     messageBn: 'পণ্য সফলভাবে মুছে ফেলা হয়েছে',

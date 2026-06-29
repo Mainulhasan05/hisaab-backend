@@ -6,6 +6,7 @@ const BranchStock = require('../models/BranchStock.model');
 const { AppError } = require('../middleware/error.middleware');
 const mongoose = require('mongoose');
 const { getBranchForCreate } = require('../utils/branchScope.util');
+const logger = require('../utils/logger.util');
 
 class ProductService {
   // Get all products with filtering, searching, pagination
@@ -161,7 +162,7 @@ class ProductService {
         }
       }
     } catch (err) {
-      console.error('Failed to calculate inventory stats:', err.message);
+      logger.warn('Failed to calculate inventory stats:', err.message);
     }
 
     const [products, total] = await Promise.all([
@@ -235,6 +236,47 @@ class ProductService {
         pages: Math.ceil(total / limitNum),
       },
       inventoryStats,
+    };
+  }
+
+  // Search products for POS/sale item picker.
+  async searchProductsForSale(shopId, options = {}, req = null) {
+    const result = await this.getProducts(shopId, {
+      ...options,
+      status: 'active',
+      page: options.page || 1,
+      limit: options.limit || 30,
+    }, req);
+
+    return {
+      data: result.data.map((product) => ({
+        _id: product._id,
+        name: product.name,
+        code: product.code,
+        barcode: product.barcode,
+        hasVariants: product.hasVariants,
+        buyingPrice: product.buyingPrice,
+        sellingPrice: product.sellingPrice,
+        stock: product.stock,
+        minStock: product.minStock,
+        unit: product.unit,
+        category: product.category,
+        variants: (product.variants || [])
+          .filter((variant) => variant.isActive !== false)
+          .map((variant) => ({
+            _id: variant._id,
+            sku: variant.sku,
+            barcode: variant.barcode,
+            attributes: variant.attributes,
+            size: variant.size,
+            color: variant.color,
+            buyingPrice: variant.buyingPrice,
+            sellingPrice: variant.sellingPrice,
+            stock: variant.stock,
+            isActive: variant.isActive,
+          })),
+      })),
+      pagination: result.pagination,
     };
   }
 
@@ -395,42 +437,33 @@ class ProductService {
       ...rest,
     });
 
-    // If multi-branch is enabled, initialize BranchStock for the default branch
+    // If multi-branch is enabled, initialize BranchStock for the selected branch.
     if (req?.shop?.multiBranchEnabled) {
-      let targetBranchId = req.branchId;
-      if (!targetBranchId) {
-        const Branch = require('../models/Branch.model');
-        const defaultBranch = await Branch.findOne({ shop: shopId, isDefault: true, isActive: true });
-        if (defaultBranch) {
-          targetBranchId = defaultBranch._id;
-        } else {
-          const firstBranch = await Branch.findOne({ shop: shopId, isActive: true });
-          if (firstBranch) {
-            targetBranchId = firstBranch._id;
-          }
-        }
-      }
+      const targetBranchId = getBranchForCreate(req);
+      const branchStockDocs = [];
 
-      if (targetBranchId) {
-        if (product.hasVariants && product.variants) {
-          for (const variant of product.variants) {
-            await BranchStock.create({
-              shop: shopId,
-              branch: targetBranchId,
-              product: product._id,
-              variantId: variant._id,
-              stock: variant.stock || 0
-            });
-          }
-        } else {
-          await BranchStock.create({
+      if (product.hasVariants && product.variants) {
+        for (const variant of product.variants) {
+          branchStockDocs.push({
             shop: shopId,
             branch: targetBranchId,
             product: product._id,
-            variantId: null,
-            stock: product.stock || 0
+            variantId: variant._id,
+            stock: variant.stock || 0,
           });
         }
+      } else {
+        branchStockDocs.push({
+          shop: shopId,
+          branch: targetBranchId,
+          product: product._id,
+          variantId: null,
+          stock: product.stock || 0,
+        });
+      }
+
+      if (branchStockDocs.length > 0) {
+        await BranchStock.insertMany(branchStockDocs);
       }
     }
 
@@ -468,19 +501,7 @@ class ProductService {
     const { stock, variants: variantsWithStock, ...safeUpdateData } = updateData;
 
     // Resolve target branch for updates
-    let targetBranchId = req?.branchId;
-    if (req?.shop?.multiBranchEnabled && !targetBranchId) {
-      const Branch = require('../models/Branch.model');
-      const defaultBranch = await Branch.findOne({ shop: shopId, isDefault: true, isActive: true });
-      if (defaultBranch) {
-        targetBranchId = defaultBranch._id;
-      } else {
-        const firstBranch = await Branch.findOne({ shop: shopId, isActive: true });
-        if (firstBranch) {
-          targetBranchId = firstBranch._id;
-        }
-      }
-    }
+    const targetBranchId = req?.shop?.multiBranchEnabled ? getBranchForCreate(req) : null;
 
     // Process variant updates and handle variant stock changes
     if (variantsWithStock && Array.isArray(variantsWithStock)) {
@@ -572,42 +593,29 @@ class ProductService {
 
     // If multi-branch is enabled, make sure all variants have BranchStock records
     if (req?.shop?.multiBranchEnabled) {
-      if (targetBranchId) {
-        if (product.hasVariants && product.variants) {
-          for (const variant of product.variants) {
-            const exists = await BranchStock.findOne({
-              shop: shopId,
-              branch: targetBranchId,
-              product: product._id,
-              variantId: variant._id
-            });
-            if (!exists) {
-              await BranchStock.create({
-                shop: shopId,
-                branch: targetBranchId,
-                product: product._id,
-                variantId: variant._id,
-                stock: variant.stock || 0
-              });
-            }
-          }
-        } else {
-          const exists = await BranchStock.findOne({
-            shop: shopId,
-            branch: targetBranchId,
-            product: product._id,
-            variantId: null
+      const stockOps = [];
+      if (product.hasVariants && product.variants) {
+        for (const variant of product.variants) {
+          stockOps.push({
+            updateOne: {
+              filter: { shop: shopId, branch: targetBranchId, product: product._id, variantId: variant._id },
+              update: { $setOnInsert: { stock: variant.stock || 0 } },
+              upsert: true,
+            },
           });
-          if (!exists) {
-            await BranchStock.create({
-              shop: shopId,
-              branch: targetBranchId,
-              product: product._id,
-              variantId: null,
-              stock: product.stock || 0
-            });
-          }
         }
+      } else {
+        stockOps.push({
+          updateOne: {
+            filter: { shop: shopId, branch: targetBranchId, product: product._id, variantId: null },
+            update: { $setOnInsert: { stock: product.stock || 0 } },
+            upsert: true,
+          },
+        });
+      }
+
+      if (stockOps.length > 0) {
+        await BranchStock.bulkWrite(stockOps);
       }
     }
 
@@ -693,7 +701,11 @@ class ProductService {
   }
 
   // Delete product (soft delete)
-  async deleteProduct(shopId, userId, productId) {
+  async deleteProduct(shopId, userId, productId, req = null) {
+    if (req?.shop?.multiBranchEnabled) {
+      getBranchForCreate(req);
+    }
+
     const product = await Product.findOne({ _id: productId, shop: shopId });
     if (!product) {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);

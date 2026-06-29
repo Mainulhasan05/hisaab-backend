@@ -36,6 +36,10 @@ const branchSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  deletedAt: {
+    type: Date,
+    default: null
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'

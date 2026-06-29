@@ -16,7 +16,7 @@ exports.getSales = asyncHandler(async (req, res) => {
 
 // Get single sale
 exports.getSale = asyncHandler(async (req, res) => {
-  const sale = await saleService.getSaleById(req.shop._id, req.params.id);
+  const sale = await saleService.getSaleById(req.shop._id, req.params.id, req.branchId);
   return ApiResponse.success(res, {
     data: sale,
     message: 'Sale retrieved successfully',
@@ -37,7 +37,7 @@ exports.createSale = asyncHandler(async (req, res) => {
 
 // Record payment
 exports.recordPayment = asyncHandler(async (req, res) => {
-  const result = await saleService.recordPayment(req.shop._id, req.user._id, req.params.id, req.body);
+  const result = await saleService.recordPayment(req.shop._id, req.user._id, req.params.id, req.body, req.branchId);
   return ApiResponse.success(res, {
     data: result,
     message: 'Payment recorded successfully',
@@ -47,7 +47,7 @@ exports.recordPayment = asyncHandler(async (req, res) => {
 
 // Cancel sale
 exports.cancelSale = asyncHandler(async (req, res) => {
-  const sale = await saleService.cancelSale(req.shop._id, req.user._id, req.params.id, req.body.reason);
+  const sale = await saleService.cancelSale(req.shop._id, req.user._id, req.params.id, req.body.reason, req.branchId);
   return ApiResponse.success(res, {
     data: sale,
     message: 'Sale cancelled successfully',
@@ -57,7 +57,9 @@ exports.cancelSale = asyncHandler(async (req, res) => {
 
 // Get filtered sales summary (aggregated stats)
 exports.getSalesSummary = asyncHandler(async (req, res) => {
-  const summary = await saleService.getSalesSummary(req.shop._id, req.query);
+  const options = { ...req.query };
+  if (req.branchId) options.branchId = req.branchId;
+  const summary = await saleService.getSalesSummary(req.shop._id, options);
   return ApiResponse.success(res, {
     data: summary,
     message: 'Sales summary retrieved successfully',
@@ -67,7 +69,7 @@ exports.getSalesSummary = asyncHandler(async (req, res) => {
 
 // Get today's summary
 exports.getTodaySummary = asyncHandler(async (req, res) => {
-  const summary = await saleService.getTodaySummary(req.shop._id);
+  const summary = await saleService.getTodaySummary(req.shop._id, req.branchId);
   return ApiResponse.success(res, {
     data: summary,
     message: 'Today\'s summary retrieved successfully',
@@ -78,7 +80,7 @@ exports.getTodaySummary = asyncHandler(async (req, res) => {
 // Get recent sales
 exports.getRecentSales = asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
-  const sales = await saleService.getRecentSales(req.shop._id, limit);
+  const sales = await saleService.getRecentSales(req.shop._id, limit, req.branchId);
   return ApiResponse.success(res, {
     data: sales,
     message: 'Recent sales retrieved successfully',
@@ -88,7 +90,7 @@ exports.getRecentSales = asyncHandler(async (req, res) => {
 
 // Get payments for a sale
 exports.getSalePayments = asyncHandler(async (req, res) => {
-  const payments = await saleService.getSalePayments(req.shop._id, req.params.id);
+  const payments = await saleService.getSalePayments(req.shop._id, req.params.id, req.branchId);
   return ApiResponse.success(res, {
     data: payments,
     message: 'Sale payments fetched',
