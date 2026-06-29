@@ -2,7 +2,6 @@ const User = require('../models/User.model');
 const Role = require('../models/Role.model');
 const Shop = require('../models/Shop.model');
 const Admin = require('../models/Admin.model');
-const Role = require('../models/Role.model');
 const AuditLog = require('../models/AuditLog.model');
 const SMSService = require('./sms.service');
 const { AppError } = require('../middleware/error.middleware');
