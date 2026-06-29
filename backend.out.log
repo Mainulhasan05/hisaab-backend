@@ -1,0 +1,109 @@
+
+> hisaab-backend@1.0.0 start
+> node src/index.js
+
+2026-06-29 13:08:51 [33mwarn[39m: Redis socket file not found at /home/stackroo/.redis/redis.sock. Falling back to memory.
+2026-06-29 13:08:51 [33mwarn[39m: Redis enabled but no REDIS_SOCKET or REDIS_HOST configured, using in-memory cache
+2026-06-29 13:08:51 [32minfo[39m: 
+    ╔═══════════════════════════════════════════════════════╗
+    ║                                                       ║
+    ║   হিসাব - Hisaab Backend Server                       ║
+    ║                                                       ║
+    ║   Environment: development                           ║
+    ║   Port: 5000                                          ║
+    ║   URL: http://localhost:5000                          ║
+    ║                                                       ║
+    ╚═══════════════════════════════════════════════════════╝
+  
+2026-06-29 13:08:51 [32minfo[39m: Using in-memory cache (Redis not available)
+2026-06-29 13:08:52 [32minfo[39m: MongoDB Connected: ac-ac9fwp6-shard-00-02.ayxggxu.mongodb.net
+2026-06-29 13:08:54 [32minfo[39m: Default expense categories seeded
+2026-06-29 13:08:54 [32minfo[39m: Super admin already exists, skipping seed
+2026-06-29 13:08:54 [32minfo[39m: Default page content seeded
+2026-06-29 13:11:20 [31merror[39m: 404 - Route /api/health not found - /api/health - GET - ::1
+[0mGET /api/health [33m404[0m 16.969 ms - 355[0m
+[0mGET /health [32m200[0m 1.450 ms - 257[0m
+[0mPOST /api/auth/login [32m200[0m 1033.888 ms - 2397[0m
+[0mGET /api/auth/me [32m200[0m 220.982 ms - 2432[0m
+2026-06-29 13:23:49 [34mdebug[39m: Cleaned 1 expired entries from memory cache
+[0mGET /api/auth/me [32m200[0m 248.595 ms - 201[0m
+[0mPOST /api/auth/login [32m200[0m 1716.754 ms - -[0m
+[0mPOST /api/auth/login [32m200[0m 1736.256 ms - -[0m
+[0mPOST /api/heartbeat [33m403[0m 340.059 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 264.324 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 257.604 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 249.573 ms - 154[0m
+[0mGET /api/products/low-stock [33m403[0m 217.725 ms - 154[0m
+[0mGET /api/reports/dashboard [33m403[0m 275.198 ms - 154[0m
+[0mGET /api/customers/top?limit=5 [33m403[0m 68.011 ms - 154[0m
+[0mGET /api/products/low-stock [33m403[0m 75.897 ms - 154[0m
+[0mGET /api/reports/dashboard [33m403[0m 87.461 ms - 154[0m
+[0mGET /api/customers/top?limit=5 [33m403[0m 81.113 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 167.586 ms - 154[0m
+[0mPOST /api/auth/login [32m200[0m 1033.904 ms - -[0m
+[0mGET /api/auth/me [32m200[0m 131.895 ms - -[0m
+[0mPOST /api/heartbeat [33m403[0m 147.083 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 163.541 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 167.167 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 163.843 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 152.280 ms - 154[0m
+[0mGET /api/auth/me [32m200[0m 166.127 ms - 201[0m
+[0mGET /api/pages/public/refund-policy [32m200[0m 166.131 ms - -[0m
+[0mGET /api/pages/public/privacy-policy [32m200[0m 91.307 ms - -[0m
+[0mGET /api/pages/public/about-us [32m200[0m 59.535 ms - -[0m
+[0mGET /api/pages/public/terms-of-service [32m200[0m 53.175 ms - -[0m
+[0mPOST /api/auth/login [32m200[0m 1736.707 ms - -[0m
+[0mGET /api/reports/dashboard [33m403[0m 309.851 ms - 154[0m
+[0mGET /api/products/low-stock [33m403[0m 282.511 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 275.371 ms - 154[0m
+[0mGET /api/customers/top?limit=5 [33m403[0m 333.259 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 319.522 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 284.904 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 57.864 ms - 154[0m
+[0mGET /api/branches [33m403[0m 64.431 ms - 154[0m
+[0mGET /api/reports/dashboard [33m403[0m 63.090 ms - 154[0m
+[0mGET /api/products/low-stock [33m403[0m 56.995 ms - 154[0m
+[0mGET /api/customers/top?limit=5 [33m403[0m 88.140 ms - 154[0m
+[0mGET /api/branches [33m403[0m 71.123 ms - 154[0m
+[0mGET /api/branches [33m403[0m 81.969 ms - 154[0m
+[0mGET /api/branches [33m403[0m 53.048 ms - 154[0m
+[0mPOST /api/heartbeat/offline [33m403[0m 21.543 ms - 195[0m
+[0mGET /api/auth/me [32m200[0m 181.377 ms - 201[0m
+2026-06-29 14:28:49 [34mdebug[39m: Cleaned 1 expired entries from memory cache
+[0mPOST /api/auth/login [32m200[0m 1301.916 ms - -[0m
+[0mGET /api/reports/dashboard [33m403[0m 181.786 ms - 154[0m
+[0mGET /api/products/low-stock [33m403[0m 175.742 ms - 154[0m
+[0mGET /api/customers/top?limit=5 [33m403[0m 155.779 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 164.820 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 57.277 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 172.781 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 63.628 ms - 154[0m
+[0mGET /api/branches [33m403[0m 162.117 ms - 154[0m
+[0mGET /api/reports/dashboard [33m403[0m 70.990 ms - 154[0m
+[0mGET /api/products/low-stock [33m403[0m 55.702 ms - 154[0m
+[0mGET /api/customers/top?limit=5 [33m403[0m 52.454 ms - 154[0m
+[0mGET /api/branches [33m403[0m 51.516 ms - 154[0m
+[0mGET /api/branches [33m403[0m 54.254 ms - 154[0m
+[0mGET /api/branches [33m403[0m 55.220 ms - 154[0m
+[0mPOST /api/heartbeat/offline [33m403[0m 9.345 ms - 195[0m
+[0mGET /api/auth/me [32m200[0m 58.810 ms - 201[0m
+[0mPOST /api/auth/login [32m200[0m 1279.854 ms - -[0m
+[0mGET /api/reports/dashboard [33m403[0m 163.087 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 180.136 ms - 154[0m
+[0mGET /api/products/low-stock [33m403[0m 79.668 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 177.812 ms - 154[0m
+[0mGET /api/customers/top?limit=5 [33m403[0m 54.022 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 173.534 ms - 154[0m
+[0mPOST /api/heartbeat [33m403[0m 160.779 ms - 154[0m
+[0mGET /api/branches [33m403[0m 58.106 ms - 154[0m
+[0mGET /api/reports/dashboard [33m403[0m 61.719 ms - 154[0m
+[0mGET /api/products/low-stock [33m403[0m 57.905 ms - 154[0m
+[0mGET /api/customers/top?limit=5 [33m403[0m 55.193 ms - 154[0m
+[0mGET /api/branches [33m403[0m 69.548 ms - 154[0m
+[0mGET /api/branches [33m403[0m 57.691 ms - 154[0m
+[0mGET /api/branches [33m403[0m 55.250 ms - 154[0m
+[0mPOST /api/heartbeat/offline [33m403[0m 119.277 ms - 195[0m
+[0mGET /api/auth/me [32m200[0m 54.466 ms - 201[0m
+2026-06-29 14:33:49 [34mdebug[39m: Cleaned 1 expired entries from memory cache
+[0mPOST /api/auth/login [32m200[0m 998.175 ms - -[0m
+[0mGET /api/reports/dashboard [33m403[0m 146.660 ms - 154[0m

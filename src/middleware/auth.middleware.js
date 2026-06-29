@@ -209,13 +209,17 @@ const protect = asyncHandler(async (req, res, next) => {
         if (activeBranchId && activeBranchId !== 'all') {
           const branch = await Branch.validateBranchOwnership(activeBranchId, user.shop._id);
           if (!branch) {
-            return ApiResponse.forbidden(res, {
-              message: 'Invalid branch for this shop',
-              messageBn: '?? ??????? ???? ???? ????',
-            });
+            // For write requests, block access. For GET, fall back to null/all branches view.
+            if (req.method !== 'GET') {
+              return ApiResponse.forbidden(res, {
+                message: 'Invalid branch for this shop',
+                messageBn: '?? ??????? ???? ???? ????',
+              });
+            }
+          } else {
+            req.branch = branch;
+            req.branchId = branch._id;
           }
-          req.branch = branch;
-          req.branchId = branch._id;
         }
         if (!req.branchId && req.method !== 'GET') {
           return ApiResponse.forbidden(res, {
@@ -363,11 +367,9 @@ const softProtect = asyncHandler(async (req, res, next) => {
               if (branch) {
                 req.branch = branch;
                 req.branchId = branch._id;
-              } else {
-                req.user = null;
-                req.shop = null;
-                req.isAdmin = false;
               }
+              // If branch is invalid, we do NOT clear req.user for owners.
+              // They just fall back to all branches view (branch = null).
             }
           } else if (decoded.branch) {
             const branch = await Branch.validateBranchOwnership(decoded.branch, user.shop._id);
