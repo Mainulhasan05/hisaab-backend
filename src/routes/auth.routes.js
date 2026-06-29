@@ -78,7 +78,7 @@ router.patch('/profile', validate(authValidation.updateProfile), authController.
 
 // Team management (Owner only)
 router.route('/team')
-  .get(authController.getTeamMembers)
+  .get(ownerOnly, authController.getTeamMembers)
   .post(ownerOnly, validate(authValidation.createTeamMember), authController.createTeamMember);
 
 router.route('/team/:id')
