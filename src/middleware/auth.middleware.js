@@ -208,20 +208,21 @@ const protect = asyncHandler(async (req, res, next) => {
         const activeBranchId = req.headers['x-active-branch'] || req.cookies?.activeBranch;
         if (activeBranchId && activeBranchId !== 'all') {
           const branch = await Branch.validateBranchOwnership(activeBranchId, user.shop._id);
-          if (!branch) {
-            // For write requests, block access. For GET, fall back to null/all branches view.
-            if (req.method !== 'GET') {
-              return ApiResponse.forbidden(res, {
-                message: 'Invalid branch for this shop',
-                messageBn: '?? ??????? ???? ???? ????',
-              });
-            }
-          } else {
+          if (branch) {
             req.branch = branch;
             req.branchId = branch._id;
           }
         }
-
+        
+        // If owner is in "All Branches" view (or activeBranchId is not set)
+        // AND it is a write request, automatically default req.branchId to the first active branch.
+        if (!req.branchId && req.method !== 'GET') {
+          const defaultBranch = await Branch.findOne({ shop: user.shop._id, isActive: true }).sort({ createdAt: 1 });
+          if (defaultBranch) {
+            req.branch = defaultBranch;
+            req.branchId = defaultBranch._id;
+          }
+        }
       } else if (decoded.branch) {
         const branch = await Branch.validateBranchOwnership(decoded.branch, user.shop._id);
         if (!branch) {
