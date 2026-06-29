@@ -458,8 +458,8 @@ class AdminService {
     const smsQuotas = await SMSQuota.find({ shop: { $in: shopIds } }).lean();
     const quotaMap = new Map(smsQuotas.map(q => [q.shop.toString(), q]));
 
-    // Merge SMS quota data with shops, compute effective status
-    const shopsWithQuota = shops.map(shop => {
+    // Merge SMS quota data with shops, compute effective status, and fetch real-time stats
+    const shopsWithQuota = await Promise.all(shops.map(async (shop) => {
       // Compute effective status: active in DB but past expiresAt = effectively expired
       let effectiveStatus = shop.subscription?.status || 'trial';
       if (
@@ -469,12 +469,40 @@ class AdminService {
       ) {
         effectiveStatus = 'expired';
       }
+
+      // Query real-time stats
+      const [totalProducts, salesStats] = await Promise.all([
+        Product.countDocuments({ shop: shop._id, isActive: true }),
+        Sale.aggregate([
+          {
+            $match: {
+              shop: shop._id,
+              status: { $ne: 'cancelled' }
+            }
+          },
+          {
+            $group: {
+              _id: null,
+              totalSales: { $sum: '$total' }
+            }
+          }
+        ])
+      ]);
+
+      const totalSales = salesStats[0]?.totalSales || 0;
+
       return {
         ...shop,
         effectiveStatus,
         smsQuota: quotaMap.get(shop._id.toString()) || null,
+        stats: {
+          totalProducts,
+          totalSales,
+          totalCustomers: shop.stats?.totalCustomers || 0,
+          totalRevenue: shop.stats?.totalRevenue || 0
+        }
       };
-    });
+    }));
 
     return {
       data: shopsWithQuota,
