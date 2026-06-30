@@ -185,13 +185,15 @@ saleSchema.pre('save', function(next) {
     return sum + itemProfit;
   }, 0) - discountAmount;
 
-  // Set status
-  if (this.due === 0) {
-    this.status = SALE_STATUS.COMPLETED;
-  } else if (this.paid > 0) {
-    this.status = SALE_STATUS.PARTIAL;
-  } else {
-    this.status = SALE_STATUS.UNPAID;
+  // Set payment status unless the sale has been explicitly cancelled.
+  if (this.status !== SALE_STATUS.CANCELLED) {
+    if (this.due === 0) {
+      this.status = SALE_STATUS.COMPLETED;
+    } else if (this.paid > 0) {
+      this.status = SALE_STATUS.PARTIAL;
+    } else {
+      this.status = SALE_STATUS.UNPAID;
+    }
   }
 
   next();

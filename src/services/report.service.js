@@ -157,7 +157,7 @@ class ReportService {
     const salesChart = await Sale.aggregate([
       {
         $match: {
-          shop: new mongoose.Types.ObjectId(shopId),
+          ...this._baseMatch(shopId, branchId),
           status: { $ne: 'cancelled' },
           createdAt: { $gte: sevenDaysAgo },
         },

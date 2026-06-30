@@ -26,11 +26,12 @@ function getBangladeshTodayRange() {
 class SaleService {
   // Invalidate related caches when sales data changes
   async invalidateCache(shopId) {
-    const today = new Date().toISOString().split('T')[0];
+    const { dateStr: today } = getBangladeshTodayRange();
     await Promise.all([
-      cacheService.delete(KEYS.DASHBOARD_STATS(shopId)),
-      cacheService.delete(KEYS.DAILY_SUMMARY(shopId, today)),
+      cacheService.deletePattern(`${KEYS.DASHBOARD_STATS(shopId)}*`),
+      cacheService.deletePattern(`${KEYS.DAILY_SUMMARY(shopId, today)}*`),
       cacheService.deletePattern(KEYS.PROFIT_LOSS(shopId, '*', '*')),
+      cacheService.deletePattern(`${KEYS.PROFIT_LOSS(shopId, '*', '*')}:branch:*`),
       cacheService.deletePattern(KEYS.SALES_REPORT(shopId, '*', '*', '*')),
       // Admin caches too since they aggregate all shops
       cacheService.delete(KEYS.ADMIN_STATS()),
@@ -684,12 +685,34 @@ class SaleService {
     const restoreOps = [];
     const restoreBranchOps = [];
     const cancelStockTxns = [];
+    const getStockKey = (productId, variantId = null) => String(productId) + '_' + (variantId || 'base');
+    const branchStockMap = {};
+
+    if (isMultiBranchSale) {
+      const existingBranchStocks = await BranchStock.find({
+        shop: shopId,
+        branch: branchId,
+        product: { $in: cancelProductIds },
+      }).lean();
+
+      existingBranchStocks.forEach((stock) => {
+        branchStockMap[getStockKey(stock.product, stock.variantId || null)] = stock.stock || 0;
+      });
+    }
 
     for (const item of sale.items) {
       const product = cancelProductMap.get(item.product.toString());
       if (!product) continue;
 
+      let previousStock = 0;
+      let newStock = 0;
+
       if (isMultiBranchSale) {
+        const stockKey = getStockKey(product._id, item.variantId || null);
+        previousStock = branchStockMap[stockKey] || 0;
+        newStock = previousStock + item.quantity;
+        branchStockMap[stockKey] = newStock;
+
         restoreBranchOps.push({
           updateOne: {
             filter: { shop: shopId, branch: branchId, product: product._id, variantId: item.variantId || null },
@@ -697,22 +720,29 @@ class SaleService {
             upsert: true,
           },
         });
+      } else if (item.variantId) {
+        const variant = product.variants.id(item.variantId);
+        previousStock = variant?.stock || 0;
+        newStock = previousStock + item.quantity;
+        if (variant) variant.stock = newStock;
+
+        restoreOps.push({
+          updateOne: {
+            filter: { _id: product._id, 'variants._id': item.variantId },
+            update: { $inc: { 'variants.$.stock': item.quantity } },
+          },
+        });
       } else {
-        if (item.variantId) {
-          restoreOps.push({
-            updateOne: {
-              filter: { _id: product._id, 'variants._id': item.variantId },
-              update: { $inc: { 'variants.$.stock': item.quantity } },
-            },
-          });
-        } else {
-          restoreOps.push({
-            updateOne: {
-              filter: { _id: product._id },
-              update: { $inc: { stock: item.quantity } },
-            },
-          });
-        }
+        previousStock = product.stock || 0;
+        newStock = previousStock + item.quantity;
+        product.stock = newStock;
+
+        restoreOps.push({
+          updateOne: {
+            filter: { _id: product._id },
+            update: { $inc: { stock: item.quantity } },
+          },
+        });
       }
 
       cancelStockTxns.push({
@@ -722,11 +752,16 @@ class SaleService {
         productName: product.name,
         productCode: product.code,
         variantId: item.variantId || null,
+        variantSku: item.variantSku,
+        variantAttributes: item.variantAttributes,
         type: 'return',
         quantity: item.quantity,
+        previousStock,
+        newStock,
         reference: {
           type: 'sale',
           id: sale._id,
+          invoiceNo: sale.invoiceNo,
         },
         notes: `Sale cancelled: ${sale.invoiceNo}`,
         createdBy: userId,
@@ -811,6 +846,9 @@ class SaleService {
 
     // Update sale status
     sale.status = 'cancelled';
+    sale.cancelledAt = new Date();
+    sale.cancelledBy = userId;
+    sale.cancelReason = reason;
     sale.notes = `${sale.notes || ''}\nCancelled: ${reason}`;
     await sale.save();
 

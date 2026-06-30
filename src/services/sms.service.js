@@ -470,7 +470,7 @@ class SMSService {
         }
 
         // Keep sale receipt SMS ASCII/GSM-7 so it usually costs one segment.
-        const message = `${getGsmSafeShopName(shop.name)}\nInv:${saleData.invoiceNumber}\nTotal:Tk${formatSmsAmount(saleData.total)}\nPaid:Tk${formatSmsAmount(saleData.paid)}\nDue:Tk${formatSmsAmount(saleData.due)}\nThank you`;
+        const message = `${getGsmSafeShopName(shop.name)}\nInv:${saleData.invoiceNumber}\nTotal:Tk${formatSmsAmount(saleData.total)}\nPaid:Tk${formatSmsAmount(saleData.paid)}\nDue:Tk${formatSmsAmount(saleData.due)}\nThanks for visiting`;
 
         // Send SMS
         await this.sendSingle(shopId, userId, customerPhone, message, saleData.customerId);
@@ -543,7 +543,7 @@ class SMSService {
         id: 'sale_receipt',
         name: 'বিক্রয় রশিদ',
         nameEn: 'Sale Receipt',
-        template: '{shop_name}\nInv:{invoice_no}\nTotal:Tk{total}\nPaid:Tk{paid}\nDue:Tk{due}\nThank you',
+        template: '{shop_name}\nInv:{invoice_no}\nTotal:Tk{total}\nPaid:Tk{paid}\nDue:Tk{due}\nThanks for visiting',
         variables: ['shop_name', 'invoice_no', 'total', 'paid', 'due'],
       },
       {
