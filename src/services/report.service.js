@@ -1368,7 +1368,7 @@ class ReportService {
             salesCount: { $sum: 1 },
           },
         },
-        { $sort: { totalQuantity: -1 } },
+        { $sort: { totalRevenue: -1 } },
       ]),
 
       Sale.aggregate([
@@ -1461,7 +1461,7 @@ class ReportService {
       .slice(0, limit);
 
     const topSelling = all
-      .sort((a, b) => b.currentPeriodQty - a.currentPeriodQty)
+      .sort((a, b) => b.currentRevenue - a.currentRevenue)
       .slice(0, limit);
 
     return {
