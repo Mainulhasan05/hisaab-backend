@@ -11,6 +11,28 @@ const { getBranchForCreate } = require('../utils/branchScope.util');
 const BranchStock = require('../models/BranchStock.model');
 const mongoose = require('mongoose');
 
+const getInvoiceDiscountAmount = (sale) => {
+  const discount = Number(sale.discount) || 0;
+  const subtotal = Number(sale.subtotal) || 0;
+
+  if (sale.discountType === 'percentage') {
+    return (subtotal * discount) / 100;
+  }
+
+  return discount;
+};
+
+const getInvoiceDiscountShareForItem = (sale, saleItem) => {
+  const subtotal = Number(sale.subtotal) || 0;
+  if (subtotal <= 0) return 0;
+
+  const itemTotal = Number.isFinite(Number(saleItem.total))
+    ? Number(saleItem.total)
+    : ((Number(saleItem.unitPrice) || 0) * (Number(saleItem.quantity) || 0)) - (Number(saleItem.discount) || 0);
+
+  return (getInvoiceDiscountAmount(sale) * Math.max(0, itemTotal)) / subtotal;
+};
+
 class SalesReturnService {
   /**
    * Create a sales return
@@ -89,9 +111,13 @@ class SalesReturnService {
         );
       }
 
-      // Calculate proportional discount
-      const perUnitDiscount = saleItem.quantity > 0 ? saleItem.discount / saleItem.quantity : 0;
-      const itemReturnDiscount = perUnitDiscount * returnItem.quantity;
+      // Calculate proportional item-level and invoice-level discounts.
+      const perUnitItemDiscount = saleItem.quantity > 0 ? (saleItem.discount || 0) / saleItem.quantity : 0;
+      const itemReturnItemDiscount = perUnitItemDiscount * returnItem.quantity;
+      const invoiceDiscountShare = getInvoiceDiscountShareForItem(sale, saleItem);
+      const perUnitInvoiceDiscount = saleItem.quantity > 0 ? invoiceDiscountShare / saleItem.quantity : 0;
+      const itemReturnInvoiceDiscount = perUnitInvoiceDiscount * returnItem.quantity;
+      const itemReturnDiscount = itemReturnItemDiscount + itemReturnInvoiceDiscount;
       const itemReturnTotal = (saleItem.unitPrice * returnItem.quantity) - itemReturnDiscount;
       const itemProfitLoss = ((saleItem.unitPrice - (saleItem.buyingPrice || 0)) * returnItem.quantity) - itemReturnDiscount;
 
@@ -429,6 +455,8 @@ class SalesReturnService {
       .map(item => {
         const returned = returnedMap[item._id.toString()] || 0;
         const maxReturnable = item.quantity - returned;
+        const invoiceDiscount = getInvoiceDiscountShareForItem(sale, item);
+        const totalDiscount = (item.discount || 0) + invoiceDiscount;
         return {
           saleItemId: item._id,
           product: item.product,
@@ -442,7 +470,9 @@ class SalesReturnService {
           maxReturnable,
           unitPrice: item.unitPrice,
           buyingPrice: item.buyingPrice,
-          discount: item.discount,
+          discount: totalDiscount,
+          itemDiscount: item.discount || 0,
+          invoiceDiscount,
         };
       })
       .filter(item => item.maxReturnable > 0);

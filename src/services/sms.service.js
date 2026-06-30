@@ -4,7 +4,7 @@ const SMSQuota = require('../models/SMSQuota.model');
 const { formatPhone } = require('../utils/phone.util');
 const { SMS_TYPES, SMS_STATUS } = require('../config/constants');
 const logger = require('../utils/logger.util');
-const { countSms } = require('../utils/smsCounter.util');
+const { countSms, isUnicode } = require('../utils/smsCounter.util');
 const { getBranchForCreate, scopeByBranch } = require('../utils/branchScope.util');
 
 // MimSMS API Configuration
@@ -16,6 +16,19 @@ const MIMSMS = {
   BALANCE: '/balanceCheck'
 };
 
+const formatSmsAmount = (amount) => {
+  const value = Number(amount) || 0;
+  return Number.isInteger(value) ? value.toString() : value.toFixed(2);
+};
+
+const getGsmSafeShopName = (shopName) => {
+  if (!shopName || isUnicode(shopName)) {
+    return 'Hisaab';
+  }
+
+  return shopName;
+};
+
 class SMSService {
   /**
    * Send OTP (no quota check for registration)
@@ -23,6 +36,7 @@ class SMSService {
   async sendOTP(phone, otp) {
     const formattedPhone = formatPhone(phone);
     const message = `আপনার হিসাব OTP: ${otp}\nমেয়াদ: ৫ মিনিট`;
+
 
     try {
       const response = await axios.post(MIMSMS.BASE_URL + MIMSMS.SINGLE, {
@@ -47,8 +61,6 @@ class SMSService {
    */
   async sendSingle(shopId, userId, phone, message, customerId = null, req = null) {
     // Calculate segment cost
-    const smsInfo = countSms(message);
-    const segmentCost = smsInfo.segments || 1;
 
     // Check quota
     const quota = await SMSQuota.getOrCreate(shopId);
@@ -457,8 +469,8 @@ class SMSService {
           return;
         }
 
-        // Build message
-        const message = `${shop.name}\nবিল: ${saleData.invoiceNumber}\nমোট: ৳${saleData.total}\nপেমেন্ট: ৳${saleData.paid || 0}\nবাকি: ৳${saleData.due || 0}\nধন্যবাদ!`;
+        // Keep sale receipt SMS ASCII/GSM-7 so it usually costs one segment.
+        const message = `${getGsmSafeShopName(shop.name)}\nInv:${saleData.invoiceNumber}\nTotal:Tk${formatSmsAmount(saleData.total)}\nPaid:Tk${formatSmsAmount(saleData.paid)}\nDue:Tk${formatSmsAmount(saleData.due)}\nThank you`;
 
         // Send SMS
         await this.sendSingle(shopId, userId, customerPhone, message, saleData.customerId);
@@ -531,7 +543,7 @@ class SMSService {
         id: 'sale_receipt',
         name: 'বিক্রয় রশিদ',
         nameEn: 'Sale Receipt',
-        template: '{shop_name}\nবিল নং: {invoice_no}\nমোট: ৳{total}\nপেমেন্ট: ৳{paid}\nবাকি: ৳{due}\nধন্যবাদ!',
+        template: '{shop_name}\nInv:{invoice_no}\nTotal:Tk{total}\nPaid:Tk{paid}\nDue:Tk{due}\nThank you',
         variables: ['shop_name', 'invoice_no', 'total', 'paid', 'due'],
       },
       {

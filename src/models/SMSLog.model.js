@@ -25,7 +25,7 @@ const smsLogSchema = new mongoose.Schema({
   shop: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Shop',
-    required: [true, 'দোকান নির্বাচন করুন']
+    default: null
   },
   branch: {
     type: mongoose.Schema.Types.ObjectId,
@@ -88,7 +88,7 @@ const smsLogSchema = new mongoose.Schema({
   sentBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: true
+    default: null
   }
 }, {
   timestamps: true,

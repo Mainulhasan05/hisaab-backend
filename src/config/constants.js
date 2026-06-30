@@ -77,7 +77,8 @@ module.exports = {
   SMS_TYPES: {
     SINGLE: 'single',
     BULK: 'bulk',
-    DYNAMIC: 'dynamic'
+    DYNAMIC: 'dynamic',
+    OTP: 'otp'
   },
 
   // SMS Status
