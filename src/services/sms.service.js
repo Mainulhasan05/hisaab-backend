@@ -37,7 +37,6 @@ class SMSService {
     const formattedPhone = formatPhone(phone);
     const message = `আপনার হিসাব OTP: ${otp}\nমেয়াদ: ৫ মিনিট`;
 
-
     try {
       const response = await axios.post(MIMSMS.BASE_URL + MIMSMS.SINGLE, {
         UserName: process.env.MIMSMS_USERNAME,
@@ -61,7 +60,8 @@ class SMSService {
    */
   async sendSingle(shopId, userId, phone, message, customerId = null, req = null) {
     // Calculate segment cost
-
+    const smsInfo = countSms(message);
+    const segmentCost = smsInfo.segments || 1;
     // Check quota
     const quota = await SMSQuota.getOrCreate(shopId);
     if (quota.remainingQuota < segmentCost) {
