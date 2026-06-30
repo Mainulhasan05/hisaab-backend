@@ -30,6 +30,15 @@ function getBangladeshDayRange(dateStr) {
   return { startOfDay, endOfDay };
 }
 
+function netSaleAmountExpr() {
+  return {
+    $max: [
+      { $subtract: ['$total', { $ifNull: ['$returnedAmount', 0] }] },
+      0,
+    ],
+  };
+}
+
 class ReportService {
   /**
    * Build the base $match for aggregation with optional branch scoping.
@@ -67,7 +76,7 @@ class ReportService {
       {
         $group: {
           _id: null,
-          totalSales: { $sum: '$total' },
+          totalSales: { $sum: netSaleAmountExpr() },
           totalPaid: { $sum: '$paid' },
           totalDue: { $sum: '$due' },
           totalProfit: { $sum: '$profit' },
@@ -167,7 +176,7 @@ class ReportService {
           _id: {
             $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
           },
-          sales: { $sum: '$total' },
+          sales: { $sum: netSaleAmountExpr() },
           orders: { $sum: 1 },
         },
       },
@@ -191,7 +200,7 @@ class ReportService {
         {
           $group: {
             _id: '$branch',
-            todaySales: { $sum: '$total' },
+            todaySales: { $sum: netSaleAmountExpr() },
             todayProfit: { $sum: '$profit' },
             todayOrders: { $sum: 1 },
           },
@@ -284,7 +293,7 @@ class ReportService {
                 _id: {
                   $dateToString: { format: dateFormat, date: '$createdAt' },
                 },
-                totalSales: { $sum: '$total' },
+                totalSales: { $sum: netSaleAmountExpr() },
                 totalPaid: { $sum: '$paid' },
                 totalDue: { $sum: '$due' },
                 count: { $sum: 1 },
@@ -296,7 +305,7 @@ class ReportService {
             {
               $group: {
                 _id: null,
-                totalSales: { $sum: '$total' },
+                totalSales: { $sum: netSaleAmountExpr() },
                 totalPaid: { $sum: '$paid' },
                 totalDue: { $sum: '$due' },
                 totalProfit: { $sum: '$profit' },
@@ -619,7 +628,7 @@ class ReportService {
         {
           $group: {
             _id: null,
-            totalRevenue: { $sum: '$total' },
+            totalRevenue: { $sum: netSaleAmountExpr() },
             totalProfit: { $sum: '$profit' },
             totalPaid: { $sum: '$paid' },
             totalDue: { $sum: '$due' },
@@ -650,7 +659,7 @@ class ReportService {
         {
           $group: {
             _id: { $hour: '$createdAt' },
-            revenue: { $sum: '$total' },
+            revenue: { $sum: netSaleAmountExpr() },
             profit: { $sum: '$profit' },
             count: { $sum: 1 },
           },
@@ -811,7 +820,7 @@ class ReportService {
     const netCashFlow = cashIn - cashOut;
 
     // Net earnings for the day
-    const netEarnings = sales.totalProfit - expenses.totalExpenses - returns.totalProfitLoss;
+    const netEarnings = sales.totalProfit - expenses.totalExpenses;
 
     // Build hourly chart data (0-23 hours)
     const hourlyData = [];
@@ -946,7 +955,7 @@ class ReportService {
         {
           $group: {
             _id: null,
-            totalRevenue: { $sum: '$total' },
+            totalRevenue: { $sum: netSaleAmountExpr() },
             totalProfit: { $sum: '$profit' },
             totalPaid: { $sum: '$paid' },
             totalDue: { $sum: '$due' },
@@ -1044,7 +1053,7 @@ class ReportService {
             _id: {
               $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
             },
-            revenue: { $sum: '$total' },
+            revenue: { $sum: netSaleAmountExpr() },
             profit: { $sum: '$profit' },
             count: { $sum: 1 },
           },
@@ -1081,7 +1090,7 @@ class ReportService {
     const cogs = sales.totalRevenue - sales.totalProfit;
 
     // Net profit = Sales profit - Expenses - Returns profit loss
-    const netProfit = sales.totalProfit - expenses.totalExpenses - returns.totalProfitLoss;
+    const netProfit = sales.totalProfit - expenses.totalExpenses;
 
     // Merge daily sales and expenses into a single chart dataset
     const dailyMap = new Map();
@@ -1179,7 +1188,7 @@ class ReportService {
                 timezone: '+06:00',
               },
             },
-            totalSales: { $sum: '$total' },
+            totalSales: { $sum: netSaleAmountExpr() },
             totalProfit: { $sum: '$profit' },
             totalPaid: { $sum: '$paid' },
             totalDue: { $sum: '$due' },
@@ -1287,7 +1296,7 @@ class ReportService {
         {
           $group: {
             _id: null,
-            totalSales: { $sum: '$total' },
+            totalSales: { $sum: netSaleAmountExpr() },
             totalProfit: { $sum: '$profit' },
             totalPaid: { $sum: '$paid' },
             totalDue: { $sum: '$due' },

@@ -23,6 +23,15 @@ function getBangladeshTodayRange() {
   return { startOfDay, endOfDay, dateStr };
 }
 
+function netSaleAmountExpr() {
+  return {
+    $max: [
+      { $subtract: ['$total', { $ifNull: ['$returnedAmount', 0] }] },
+      0,
+    ],
+  };
+}
+
 class SaleService {
   // Invalidate related caches when sales data changes
   async invalidateCache(shopId) {
@@ -146,7 +155,7 @@ class SaleService {
       {
         $group: {
           _id: null,
-          totalSales: { $sum: '$total' },
+          totalSales: { $sum: netSaleAmountExpr() },
           totalPaid: { $sum: '$paid' },
           totalDue: { $sum: '$due' },
           totalProfit: { $sum: '$profit' },
@@ -890,7 +899,7 @@ class SaleService {
       {
         $group: {
           _id: null,
-          totalSales: { $sum: '$total' },
+          totalSales: { $sum: netSaleAmountExpr() },
           totalPaid: { $sum: '$paid' },
           totalDue: { $sum: '$due' },
           count: { $sum: 1 },

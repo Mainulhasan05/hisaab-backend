@@ -8,6 +8,7 @@ const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const { getBranchForCreate } = require('../utils/branchScope.util');
+const saleService = require('./sale.service');
 const BranchStock = require('../models/BranchStock.model');
 const mongoose = require('mongoose');
 
@@ -242,23 +243,34 @@ class SalesReturnService {
       newDue = Math.max(0, sale.due - totalRefundAmount);
     }
     
+    const isFullyReturned = newReturnedAmount >= (sale.total || 0) - 0.01;
     let newStatus = sale.status;
-    if (newDue === 0 && sale.status !== 'cancelled') {
+    if (isFullyReturned) {
+      newStatus = 'cancelled';
+      newDue = 0;
+    } else if (newDue === 0 && sale.status !== 'cancelled') {
       newStatus = 'completed';
     } else if (newDue < sale.due && sale.status !== 'cancelled') {
       newStatus = 'partial';
     }
 
+    const saleUpdate = {
+      returnedAmount: newReturnedAmount,
+      profit: isFullyReturned ? 0 : newProfit,
+      due: newDue,
+      status: newStatus,
+    };
+
+    if (isFullyReturned) {
+      saleUpdate.cancelledAt = new Date();
+      saleUpdate.cancelledBy = userId;
+      saleUpdate.cancelReason = `Fully returned via ${returnNo}`;
+      saleUpdate.notes = `${sale.notes || ''}\nFully returned: ${returnNo}`;
+    }
+
     await Sale.updateOne(
       { _id: sale._id },
-      { 
-        $set: { 
-          returnedAmount: newReturnedAmount,
-          profit: newProfit,
-          due: newDue,
-          status: newStatus
-        } 
-      }
+      { $set: saleUpdate }
     );
 
     // 10. Handle refund by method
@@ -327,6 +339,8 @@ class SalesReturnService {
         },
       },
     });
+
+    saleService.invalidateCache(shopId).catch(() => {});
 
     return salesReturn;
   }
