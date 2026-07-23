@@ -320,7 +320,7 @@ class AuthService {
     let user;
 
     if (shopSlug) {
-      // Team member login - find by phone and shop
+      // Team member login with shop slug
       const shop = await Shop.findBySlug(shopSlug);
       if (!shop) {
         throw new AppError(
@@ -329,15 +329,15 @@ class AuthService {
           404
         );
       }
-      user = await User.findByPhoneAndShop(normalizedPhone, shop._id);
+      user = await User.findByPhoneAndShop(normalizedPhone, shop._id).populate('shop').populate('role');
     } else {
-      // Owner login - find owner by phone
+      // Find active user by phone (supports both Shop Owner and Staff logins)
       user = await User.findOne({
         phone: normalizedPhone,
-        isOwner: true,
         isActive: true
-      }).populate('shop');
+      }).sort({ isOwner: -1 }).populate('shop').populate('role');
     }
+
 
     if (!user) {
       throw new AppError(

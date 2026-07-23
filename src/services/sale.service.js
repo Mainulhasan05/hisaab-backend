@@ -86,7 +86,12 @@ class SaleService {
     }
 
     if (status) {
-      query.status = status;
+      if (status === 'dues' || status === 'baki' || status === 'due') {
+        query.due = { $gt: 0 };
+        query.status = { $ne: 'cancelled' };
+      } else {
+        query.status = status;
+      }
     }
 
     if (customerId) {
@@ -118,7 +123,15 @@ class SaleService {
     const query = this._buildQuery(shopId, options);
 
     const skip = (page - 1) * limit;
-    const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
+
+    let sortField = 'createdAt';
+    if (sortBy === 'due' || sortBy === 'dueAmount') sortField = 'due';
+    else if (sortBy === 'total' || sortBy === 'totalAmount' || sortBy === 'amount') sortField = 'total';
+    else if (sortBy === 'createdAt' || sortBy === 'date') sortField = 'createdAt';
+    else if (sortBy) sortField = sortBy;
+
+    const sort = { [sortField]: sortOrder === 'asc' || sortOrder === '1' ? 1 : -1 };
+
 
     const [sales, total] = await Promise.all([
       Sale.find(query)
