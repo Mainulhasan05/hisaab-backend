@@ -68,6 +68,8 @@ router.get('/sms/stats', adminController.getSMSStats);
 
 const shopCategoryController = require('../controllers/shopCategory.controller');
 
+const geminiKeyController = require('../controllers/geminiKey.controller');
+
 // Audit logs
 router.get('/audit-logs', adminController.getAuditLogs);
 
@@ -78,8 +80,18 @@ router.post('/shop-categories', shopCategoryController.createShopCategory);
 router.put('/shop-categories/:id', shopCategoryController.updateShopCategory);
 router.delete('/shop-categories/:id', shopCategoryController.deleteShopCategory);
 
+// Gemini AI Keys Management & Usage Tracking (Admin)
+router.get('/gemini-keys', geminiKeyController.getAllKeys);
+router.post('/gemini-keys', geminiKeyController.createKey);
+router.put('/gemini-keys/:id', geminiKeyController.updateKey);
+router.delete('/gemini-keys/:id', geminiKeyController.deleteKey);
+router.post('/gemini-keys/:id/test', geminiKeyController.testKey);
+router.post('/gemini-keys/:id/reset', geminiKeyController.resetUsage);
+router.post('/gemini-keys/test-prompt', geminiKeyController.testPrompt);
+
 // Admin management (super admin only)
 router.post('/admins', adminController.createAdmin);
 
 module.exports = router;
+
 

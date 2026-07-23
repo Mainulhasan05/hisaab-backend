@@ -15,6 +15,8 @@ module.exports = {
   AuditLog: require('./AuditLog.model'),
   SMSLog: require('./SMSLog.model'),
   SMSQuota: require('./SMSQuota.model'),
-  ShopCategory: require('./ShopCategory.model')
+  ShopCategory: require('./ShopCategory.model'),
+  GeminiKey: require('./GeminiKey.model')
 };
+
 
