@@ -399,3 +399,14 @@ exports.deleteShopBranch = asyncHandler(async (req, res) => {
     messageBn: 'দোকানের শাখা সফলভাবে নিষ্ক্রিয় করা হয়েছে',
   });
 });
+
+// Purge shop and all associated data completely
+exports.purgeShop = asyncHandler(async (req, res) => {
+  const result = await adminService.purgeShop(req.admin._id, req.params.id);
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Shop and all associated data purged successfully',
+    messageBn: 'দোকান এবং এর সমস্ত ডাটা চিরতরে মুছে ফেলা হয়েছে',
+  });
+});
+

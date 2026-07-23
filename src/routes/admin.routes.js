@@ -30,6 +30,7 @@ router.get('/shops/:id/branches', adminController.getShopBranches);
 router.post('/shops/:id/branches', adminController.addShopBranch);
 router.patch('/shops/:id/branches/:branchId', adminController.updateShopBranch);
 router.delete('/shops/:id/branches/:branchId', adminController.deleteShopBranch);
+router.delete('/shops/:id', adminController.purgeShop);
 
 // Users (all shops) — list + impersonation
 router.get('/users', adminController.getAllUsers);

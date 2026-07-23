@@ -1070,6 +1070,55 @@ class AdminService {
     return shop;
   }
 
+  // Completely delete/purge shop and all associated data
+  async purgeShop(adminId, shopId) {
+    const shop = await Shop.findById(shopId);
+    if (!shop) {
+      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
+    }
+
+    const shopObjectId = new mongoose.Types.ObjectId(shopId);
+
+    const models = [
+      { name: 'Product', model: require('../models/Product.model') },
+      { name: 'Sale', model: require('../models/Sale.model') },
+      { name: 'SalesReturn', model: require('../models/SalesReturn.model') },
+      { name: 'Customer', model: require('../models/Customer.model') },
+      { name: 'Supplier', model: require('../models/Supplier.model') },
+      { name: 'Expense', model: require('../models/Expense.model') },
+      { name: 'Purchase', model: require('../models/Purchase.model') },
+      { name: 'CashRegister', model: require('../models/CashRegister.model') },
+      { name: 'Category', model: require('../models/Category.model') },
+      { name: 'Branch', model: require('../models/Branch.model') },
+      { name: 'Role', model: require('../models/Role.model') },
+      { name: 'AuditLog', model: require('../models/AuditLog.model') },
+      { name: 'SMSLog', model: require('../models/SMSLog.model') },
+      { name: 'SMSQuota', model: require('../models/SMSQuota.model') },
+      { name: 'User', model: require('../models/User.model') },
+    ];
+
+    const stats = {};
+    for (const m of models) {
+      const res = await m.model.deleteMany({ shop: shopObjectId });
+      stats[m.name] = res.deletedCount;
+    }
+
+    await Shop.findByIdAndDelete(shopId);
+
+    // Create audit log for admin
+    await AuditLog.create({
+      admin: adminId,
+      action: 'shop_purge',
+      actionBn: 'দোকান ও সম্পূর্ণ তথ্য মুছে ফেলা হয়েছে',
+      description: `Shop ${shop.name} (${shopId}) and all associated data purged completely.`,
+      descriptionBn: `${shop.name} এবং এর সমস্ত ডাটা চিরতরে মুছে ফেলা হয়েছে।`,
+      metadata: { stats },
+    });
+
+    return { shopId, name: shop.name, stats };
+  }
+
+
   // Get online users (from cache/heartbeat tracking)
   async getOnlineUsers(options = {}) {
     const onlineTrackingService = require('./onlineTracking.service');
@@ -1132,13 +1181,14 @@ class AdminService {
 
     const [logs, total] = await Promise.all([
       AuditLog.find(query)
-        .populate('user', 'name phone')
-        .populate('admin', 'name phone')
+        .populate('user', 'name phone email')
+        .populate('admin', 'name phone email')
         .populate('shop', 'name')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(parseInt(limit))
         .lean(),
+
       AuditLog.countDocuments(query),
     ]);
 
