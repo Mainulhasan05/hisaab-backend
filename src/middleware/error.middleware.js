@@ -172,8 +172,12 @@ const notFoundHandler = (req, res, next) => {
   next(err);
 };
 
+const asyncHandler = require('../utils/asyncHandler.util');
+
 module.exports = {
   AppError,
   errorHandler,
-  notFoundHandler
+  notFoundHandler,
+  asyncHandler,
 };
+

@@ -1,6 +1,8 @@
 const ShopCategory = require('../models/ShopCategory.model');
 const ApiResponse = require('../utils/response.util');
-const { asyncHandler } = require('../middleware/error.middleware');
+const asyncHandler = require('../utils/asyncHandler.util');
+
+
 
 /**
  * Public: Get active shop categories for user signup/onboarding
