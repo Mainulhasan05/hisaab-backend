@@ -1,4 +1,4 @@
-﻿const { Joi, commonSchemas } = require('../middleware/validate.middleware');
+const { Joi, commonSchemas } = require('../middleware/validate.middleware');
 
 const variant = Joi.object({
   _id: commonSchemas.objectId.optional(),
@@ -34,7 +34,12 @@ const baseProduct = {
   }),
   images: Joi.array().items(Joi.string().uri()).default([]),
   tags: Joi.array().items(Joi.string().trim().max(50)).default([]),
+  isAvailableOnline: Joi.boolean().default(true),
+  onlinePrice: Joi.number().min(0).allow(null, ''),
+  onlineDescription: Joi.string().trim().max(2000).allow('', null),
+  isFeaturedOnline: Joi.boolean().default(false),
 };
+
 
 const createProduct = Joi.object(baseProduct).custom((value, helpers) => {
   if (!value.hasVariants && value.stock === undefined) {

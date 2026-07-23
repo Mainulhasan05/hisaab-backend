@@ -14,5 +14,7 @@ module.exports = {
   StockTransaction: require('./StockTransaction.model'),
   AuditLog: require('./AuditLog.model'),
   SMSLog: require('./SMSLog.model'),
-  SMSQuota: require('./SMSQuota.model')
+  SMSQuota: require('./SMSQuota.model'),
+  ShopCategory: require('./ShopCategory.model')
 };
+

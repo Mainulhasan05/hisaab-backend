@@ -1,16 +1,32 @@
 const Category = require('../models/Category.model');
+const ShopCategory = require('../models/ShopCategory.model');
 const CATEGORY_SEEDS = require('./categorySeeds');
 
 /**
  * Seed categories for a newly created shop based on shop type.
  * Called during shop onboarding (registration).
+ * Uses dynamic DB ShopCategory templates if present, falling back to static seeds.
  *
  * @param {ObjectId} shopId - The shop's MongoDB _id
- * @param {string} shopType - One of: cloth, grocery, electronics, pharmacy, hardware, cosmetics, other
+ * @param {string} shopType - Key of shop category (e.g. cloth, grocery, pharmacy)
  * @returns {Promise<{ categories: number, subcategories: number }>} Count of created items
  */
 async function seedCategories(shopId, shopType) {
-  const seeds = CATEGORY_SEEDS[shopType];
+  let seeds = null;
+
+  try {
+    const dbShopCat = await ShopCategory.findOne({ key: shopType });
+    if (dbShopCat && dbShopCat.defaultCategories && dbShopCat.defaultCategories.length > 0) {
+      seeds = dbShopCat.defaultCategories;
+    }
+  } catch (error) {
+    console.error('Error fetching dynamic shop category from DB:', error.message);
+  }
+
+  if (!seeds) {
+    seeds = CATEGORY_SEEDS[shopType] || [];
+  }
+
   if (!seeds || seeds.length === 0) {
     return { categories: 0, subcategories: 0 };
   }

@@ -129,6 +129,23 @@ const productSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  // Online Selling
+  isAvailableOnline: {
+    type: Boolean,
+    default: true
+  },
+  onlinePrice: {
+    type: Number,
+    min: [0, 'অনলাইন বিক্রয় মূল্য ০ এর কম হতে পারবে না']
+  },
+  onlineDescription: {
+    type: String,
+    maxlength: [2000, 'অনলাইন বিবরণ ২০০০ অক্ষরের বেশি হতে পারবে না']
+  },
+  isFeaturedOnline: {
+    type: Boolean,
+    default: false
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
@@ -147,6 +164,7 @@ productSchema.index({ shop: 1, category: 1, isActive: 1 }); // Category listing 
 productSchema.index({ shop: 1, 'variants.sku': 1 }, { sparse: true }); // Variant SKU lookup
 productSchema.index({ shop: 1, 'variants.barcode': 1 }, { sparse: true }); // Variant barcode scan
 productSchema.index({ shop: 1, createdAt: -1 }); // Listing by date
+productSchema.index({ shop: 1, isAvailableOnline: 1, isActive: 1 }); // Online product listing
 // Note: Text search removed for scalability - use regex or external search (Elasticsearch) for large datasets
 
 // Virtual: Is low stock

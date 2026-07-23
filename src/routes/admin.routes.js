@@ -66,10 +66,20 @@ router.get('/sms/logs', adminController.getSMSLogs);
 router.get('/sms/allocations', adminController.getSMSAllocations);
 router.get('/sms/stats', adminController.getSMSStats);
 
+const shopCategoryController = require('../controllers/shopCategory.controller');
+
 // Audit logs
 router.get('/audit-logs', adminController.getAuditLogs);
+
+// Shop Categories Management (Admin)
+router.get('/shop-categories', shopCategoryController.getAllShopCategories);
+router.get('/shop-categories/:id', shopCategoryController.getShopCategoryById);
+router.post('/shop-categories', shopCategoryController.createShopCategory);
+router.put('/shop-categories/:id', shopCategoryController.updateShopCategory);
+router.delete('/shop-categories/:id', shopCategoryController.deleteShopCategory);
 
 // Admin management (super admin only)
 router.post('/admins', adminController.createAdmin);
 
 module.exports = router;
+

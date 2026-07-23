@@ -14,7 +14,7 @@ const register = Joi.object({
     'string.max': 'Shop name cannot exceed 100 characters',
     'any.required': 'Shop name is required'
   }),
-  shopType: Joi.string().valid(...Object.values(SHOP_TYPES)).default('other'),
+  shopType: Joi.string().trim().default('other'),
   shopAddress: Joi.string().trim().max(500).allow(''),
   shopPhone: commonSchemas.phone
 });

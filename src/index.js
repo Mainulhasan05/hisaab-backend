@@ -46,7 +46,17 @@ connectDB().then(async () => {
   } catch (err) {
     logger.warn('Page content seeding skipped:', err.message);
   }
+
+  // Seed shop categories
+  try {
+    const { seedShopCategories } = require('./seeds/shopCategorySeeder');
+    await seedShopCategories();
+    logger.info('Default shop categories seeded');
+  } catch (err) {
+    logger.warn('Shop category seeding skipped:', err.message);
+  }
 });
+
 
 // Initialize Redis (with in-memory fallback)
 initializeRedis().then((connected) => {

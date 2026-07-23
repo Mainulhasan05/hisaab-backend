@@ -48,6 +48,14 @@ class ProductService {
       query.isActive = false;
     }
 
+    // Filter by online availability
+    if (options.isAvailableOnline === 'true' || options.isAvailableOnline === true) {
+      query.isAvailableOnline = true;
+    } else if (options.isAvailableOnline === 'false' || options.isAvailableOnline === false) {
+      query.isAvailableOnline = false;
+    }
+
+
     // Filter low stock items (works for both non-variant and variant products)
     let lowStockOr = null;
     const branchId = req?.branchId;

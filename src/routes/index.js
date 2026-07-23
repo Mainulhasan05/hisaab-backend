@@ -24,12 +24,15 @@ const staffRoutes = require('./staff.routes');
 const couponRoutes = require('./coupon.routes');
 const imageRoutes = require('./image.routes');
 const branchRoutes = require('./branch.routes');
+const shopCategoryRoutes = require('./shopCategory.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
 router.use('/products', productRoutes);
 router.use('/categories', categoryRoutes);
+router.use('/shop-categories', shopCategoryRoutes);
 router.use('/customers', customerRoutes);
+
 router.use('/sales', saleRoutes);
 router.use('/sms', smsRoutes);
 router.use('/reports', reportRoutes);

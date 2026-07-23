@@ -16,12 +16,10 @@ const shopSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: {
-      values: Object.values(SHOP_TYPES),
-      message: 'অবৈধ দোকানের ধরন'
-    },
-    default: SHOP_TYPES.OTHER
+    trim: true,
+    default: 'other'
   },
+
   address: {
     type: String,
     trim: true,
