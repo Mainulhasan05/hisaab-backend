@@ -37,6 +37,15 @@ class SMSService {
     const formattedPhone = formatPhone(phone);
     const message = `আপনার হিসাব OTP: ${otp}\nমেয়াদ: ৫ মিনিট`;
 
+    console.log('\n========================================');
+    console.log(`[DEVELOPMENT OTP] Phone: ${formattedPhone} | OTP Code: ${otp}`);
+    console.log('========================================\n');
+    logger.info(`[DEVELOPMENT OTP] Phone: ${formattedPhone} | OTP Code: ${otp}`);
+
+    if (process.env.NODE_ENV === 'development' || process.env.SKIP_SMS === 'true') {
+      return { success: true, message: 'OTP logged to console' };
+    }
+
     try {
       const response = await axios.post(MIMSMS.BASE_URL + MIMSMS.SINGLE, {
         UserName: process.env.MIMSMS_USERNAME,

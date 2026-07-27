@@ -68,13 +68,21 @@ class SaleService {
 
   // Build query from filters (shared by getSales and getSalesSummary)
   _buildQuery(shopId, options = {}) {
-    const { search, status, customerId, startDate, endDate, paymentMethod, branchId } = options;
+    const { search, status, customerId, startDate, endDate, paymentMethod, branchId, isOnline, channel } = options;
 
     const query = { shop: shopId };
 
     // Branch scoping
     if (branchId) {
       query.branch = branchId;
+    }
+
+    if (isOnline !== undefined && isOnline !== '') {
+      query.isOnline = isOnline === 'true' || isOnline === true;
+    }
+
+    if (channel) {
+      query.channel = channel;
     }
 
     if (search) {
@@ -211,6 +219,12 @@ class SaleService {
       paid = 0,
       paymentMethod = 'cash',
       notes,
+      isOnline = false,
+      channel = 'pos',
+      deliveryCharge = 0,
+      advancePaid = 0,
+      courierName,
+      shippingAddress
     } = saleData;
     const customerId = rawCustomerId || rawCustomer;
 
@@ -480,7 +494,9 @@ class SaleService {
       discountAmount = (subtotal * discount) / 100;
     }
 
-    const total = subtotal - discountAmount + tax;
+    const numDeliveryCharge = Number(deliveryCharge) || 0;
+    const numAdvancePaid = Number(advancePaid) || 0;
+    const total = subtotal - discountAmount + tax + numDeliveryCharge;
     const due = Math.max(0, total - paid);
     const status = due <= 0 ? 'completed' : (paid > 0 ? 'partial' : 'unpaid');
 
@@ -533,6 +549,12 @@ class SaleService {
           paymentMethod,
           status,
           notes,
+          isOnline: Boolean(isOnline),
+          channel: channel || 'pos',
+          deliveryCharge: numDeliveryCharge,
+          advancePaid: numAdvancePaid,
+          courierName,
+          shippingAddress,
           createdBy: userId,
         });
         break; // Success — exit retry loop

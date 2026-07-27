@@ -148,6 +148,32 @@ const saleSchema = new mongoose.Schema({
     default: 0,
     min: [0, 'ফেরত ০ এর কম হতে পারবে না']
   },
+  // Online sale tracking & logistics
+  isOnline: {
+    type: Boolean,
+    default: false
+  },
+  channel: {
+    type: String,
+    enum: ['pos', 'facebook', 'instagram', 'whatsapp', 'website', 'other'],
+    default: 'pos'
+  },
+  deliveryCharge: {
+    type: Number,
+    default: 0,
+    min: [0, 'ডেলিভারি চার্জ ০ এর কম হতে পারবে না']
+  },
+  advancePaid: {
+    type: Number,
+    default: 0,
+    min: [0, 'এডভান্স পরিশোধ ০ এর কম হতে পারবে না']
+  },
+  courierName: {
+    type: String
+  },
+  shippingAddress: {
+    type: String
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -164,6 +190,7 @@ saleSchema.index({ shop: 1, invoiceNo: 1 }, { unique: true }); // Invoice lookup
 saleSchema.index({ shop: 1, customer: 1, createdAt: -1 }); // Customer purchase history
 saleSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Main listing with branch filter
 saleSchema.index({ shop: 1, branch: 1, status: 1, createdAt: -1 }); // Due/pending sales with branch
+saleSchema.index({ shop: 1, isOnline: 1, createdAt: -1 }); // Online sales filter index
 
 // Calculate totals before saving
 saleSchema.pre('save', function(next) {
@@ -176,7 +203,8 @@ saleSchema.pre('save', function(next) {
     discountAmount = (this.subtotal * this.discount) / 100;
   }
 
-  this.total = this.subtotal - discountAmount + this.tax;
+  const delivery = this.deliveryCharge || 0;
+  this.total = this.subtotal - discountAmount + this.tax + delivery;
   this.due = Math.max(0, this.total - this.paid);
 
   // Calculate profit

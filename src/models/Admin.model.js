@@ -66,9 +66,7 @@ const adminSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Indexes
-adminSchema.index({ role: 1 });
-adminSchema.index({ isActive: 1 });
+// Indexes (email is indexed via unique constraint on schema definition)
 
 // Normalize phone before saving
 adminSchema.pre('save', function(next) {

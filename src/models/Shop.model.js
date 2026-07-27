@@ -139,7 +139,6 @@ const shopSchema = new mongoose.Schema({
 // Indexes
 shopSchema.index({ owner: 1 });
 shopSchema.index({ 'subscription.status': 1 });
-shopSchema.index({ isActive: 1 });
 shopSchema.index({ createdAt: -1 });
 
 // Generate slug before saving
