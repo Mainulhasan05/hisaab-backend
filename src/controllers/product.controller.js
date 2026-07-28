@@ -136,3 +136,18 @@ exports.toggleStatus = asyncHandler(async (req, res) => {
     messageBn: isActive ? 'পণ্য সক্রিয় হয়েছে' : 'পণ্য নিষ্ক্রিয় হয়েছে',
   });
 });
+
+// Bulk import products
+exports.bulkImport = asyncHandler(async (req, res) => {
+  const results = await productService.bulkImportProducts(
+    req.shop._id,
+    req.user._id,
+    req.body.products,
+    req
+  );
+  return ApiResponse.success(res, {
+    data: results,
+    message: 'Bulk import completed',
+    messageBn: 'বাল্ক পণ্য ইম্পোর্ট সম্পন্ন হয়েছে',
+  });
+});

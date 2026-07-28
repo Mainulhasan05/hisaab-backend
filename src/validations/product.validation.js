@@ -77,10 +77,30 @@ const bulkUpdateStock = Joi.object({
   })).min(1).required(),
 });
 
+const bulkImportProducts = Joi.object({
+  products: Joi.array().items(Joi.object({
+    name: Joi.string().trim().min(1).max(200).required(),
+    code: Joi.string().trim().max(100).allow('', null),
+    barcode: Joi.string().trim().max(100).allow('', null),
+    categoryName: Joi.string().trim().max(100).allow('', null),
+    buyingPrice: Joi.number().min(0).default(0),
+    costPrice: Joi.number().min(0).optional(),
+    sellingPrice: Joi.number().min(0).default(0),
+    stock: Joi.number().integer().min(0).default(0),
+    unit: Joi.string().trim().allow('', null).default('piece'),
+    minStock: Joi.number().integer().min(0).default(5),
+    description: Joi.string().trim().max(2000).allow('', null),
+    trackBatches: Joi.boolean().default(false),
+    batchNumber: Joi.string().trim().allow('', null),
+    expiryDate: Joi.date().allow('', null),
+  })).min(1).max(2000).required(),
+});
+
 module.exports = {
   createProduct,
   updateProduct,
   updateStock,
   toggleStatus,
   bulkUpdateStock,
+  bulkImportProducts,
 };

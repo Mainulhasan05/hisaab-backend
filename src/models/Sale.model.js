@@ -221,7 +221,10 @@ saleSchema.pre('save', function(next) {
   }
 
   const delivery = this.deliveryCharge || 0;
-  this.total = this.subtotal - discountAmount + this.tax + delivery;
+  this.total = Math.min(Math.max(0, this.subtotal - discountAmount + this.tax + delivery), 1e11);
+  if (!Number.isFinite(this.paid) || this.paid > this.total) {
+    this.paid = Math.min(Math.max(0, this.paid || 0), this.total);
+  }
   this.due = Math.max(0, this.total - this.paid);
 
   // Calculate profit

@@ -1078,6 +1078,145 @@ class ProductService {
 
     return p;
   }
+
+  // Bulk import products from array (e.g. CSV/Excel upload)
+  async bulkImportProducts(shopId, userId, productsArray, req = null) {
+    const results = {
+      total: productsArray.length,
+      importedCount: 0,
+      skippedCount: 0,
+      errors: [],
+      importedProducts: [],
+    };
+
+    // Pre-fetch categories for this shop or global
+    const categories = await Category.find({ $or: [{ shop: shopId }, { shop: null }] });
+    const categoryMap = new Map();
+    categories.forEach(c => {
+      if (c.name) categoryMap.set(c.name.toLowerCase().trim(), c._id);
+    });
+
+    // Fetch existing product codes & barcodes for this shop to prevent duplicates
+    const existingProducts = await Product.find({ shop: shopId }, { code: 1, barcode: 1 });
+    const existingCodes = new Set();
+    existingProducts.forEach(p => {
+      if (p.code) existingCodes.add(p.code.toUpperCase().trim());
+      if (p.barcode) existingCodes.add(p.barcode.trim());
+    });
+
+    for (let i = 0; i < productsArray.length; i++) {
+      const item = productsArray[i];
+      const rowNumber = i + 1;
+
+      try {
+        const name = item.name ? String(item.name).trim() : '';
+        if (!name) {
+          results.skippedCount++;
+          results.errors.push({ row: rowNumber, reason: 'পণ্য নাম (Name) আবশ্যক' });
+          continue;
+        }
+
+        let code = item.code ? String(item.code).trim().toUpperCase() : '';
+        const barcode = item.barcode ? String(item.barcode).trim() : (item.code ? String(item.code).trim() : '');
+
+        if (code && existingCodes.has(code)) {
+          results.skippedCount++;
+          results.errors.push({ row: rowNumber, code, name, reason: 'কোড ইতিমধ্যে বিদ্যমান' });
+          continue;
+        }
+
+        if (!code) {
+          code = `PRD-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000)}`;
+        }
+
+        let categoryId = null;
+        if (item.categoryName && String(item.categoryName).trim()) {
+          const catNameClean = String(item.categoryName).trim();
+          const catLower = catNameClean.toLowerCase();
+          if (categoryMap.has(catLower)) {
+            categoryId = categoryMap.get(catLower);
+          } else {
+            const newCat = await Category.create({
+              shop: shopId,
+              name: catNameClean,
+              slug: catNameClean.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, '') || `cat-${Date.now()}`,
+              createdBy: userId,
+            });
+            categoryId = newCat._id;
+            categoryMap.set(catLower, newCat._id);
+          }
+        }
+
+        const buyingPrice = Number(item.buyingPrice ?? item.costPrice ?? 0);
+        const sellingPrice = Number(item.sellingPrice ?? 0);
+        const stock = Number(item.stock ?? 0);
+        const minStock = Number(item.minStock ?? 5);
+        const unit = item.unit ? String(item.unit).trim() : 'piece';
+        const trackBatches = Boolean(item.trackBatches);
+
+        const batches = [];
+        if (trackBatches && item.batchNumber && stock > 0) {
+          batches.push({
+            batchNumber: String(item.batchNumber).trim(),
+            expiryDate: item.expiryDate ? new Date(item.expiryDate) : null,
+            quantity: stock,
+            costPrice: buyingPrice,
+          });
+        }
+
+        const product = await Product.create({
+          shop: shopId,
+          code,
+          barcode,
+          name,
+          category: categoryId,
+          buyingPrice,
+          sellingPrice,
+          stock,
+          minStock,
+          unit,
+          description: item.description || '',
+          trackBatches,
+          batches,
+          createdBy: userId,
+        });
+
+        if (req?.shop?.multiBranchEnabled) {
+          const targetBranchId = getBranchForCreate(req);
+          if (targetBranchId) {
+            await BranchStock.create({
+              shop: shopId,
+              branch: targetBranchId,
+              product: product._id,
+              stock,
+            });
+          }
+        }
+
+        existingCodes.add(code);
+        if (barcode) existingCodes.add(barcode);
+
+        results.importedCount++;
+        results.importedProducts.push({ _id: product._id, name: product.name, code: product.code });
+      } catch (err) {
+        results.skippedCount++;
+        results.errors.push({ row: rowNumber, name: item.name, reason: err.message });
+      }
+    }
+
+    if (results.importedCount > 0) {
+      await AuditLog.log({
+        shop: shopId,
+        user: userId,
+        action: 'product_bulk_import',
+        description: `Bulk imported ${results.importedCount} products (${results.skippedCount} skipped)`,
+        entity: { type: 'product', id: null, name: 'Bulk Product Import' },
+        req,
+      });
+    }
+
+    return results;
+  }
 }
 
 module.exports = new ProductService();

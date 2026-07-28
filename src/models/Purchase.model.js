@@ -118,8 +118,14 @@ purchaseSchema.index({ shop: 1, branch: 1, date: -1 }); // Date-based listing wi
 purchaseSchema.index({ shop: 1, supplier: 1, date: -1 }); // Supplier purchase history
 purchaseSchema.index({ shop: 1, invoiceNo: 1 }, { unique: true, sparse: true }); // Invoice lookup
 
-// Pre-save: calculate due and status
+// Pre-save: calculate due and status with numeric boundary checks
 purchaseSchema.pre('save', function(next) {
+  if (!Number.isFinite(this.totalAmount) || this.totalAmount > 1e11) {
+    this.totalAmount = Math.min(Math.max(0, this.totalAmount || 0), 1e11);
+  }
+  if (!Number.isFinite(this.paid) || this.paid > this.totalAmount) {
+    this.paid = Math.min(Math.max(0, this.paid || 0), this.totalAmount);
+  }
   this.due = Math.max(0, this.totalAmount - this.paid);
   if (this.due === 0) {
     this.status = 'completed';

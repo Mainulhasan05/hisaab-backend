@@ -244,10 +244,6 @@ class CustomerService {
     });
   }
 
-    return { customer, payment };
-    });
-  }
-
   // Get customer purchase history
   async getCustomerHistory(shopId, customerId, options = {}) {
     const { page = 1, limit = 20 } = options;
