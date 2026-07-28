@@ -121,6 +121,15 @@ const productSchema = new mongoose.Schema({
     receivedDate: { type: Date, default: Date.now },
     purchaseRef: { type: mongoose.Schema.Types.ObjectId, ref: 'Purchase' },
   }],
+  // Serial / IMEI Number tracking (electronics, mobile shops)
+  trackSerials: {
+    type: Boolean,
+    default: false,
+  },
+  serials: [{
+    type: String,
+    trim: true,
+  }],
   // For variant products
   variants: [variantSchema],
   images: [{

@@ -38,6 +38,15 @@ const baseProduct = {
   onlinePrice: Joi.number().min(0).allow(null, ''),
   onlineDescription: Joi.string().trim().max(2000).allow('', null),
   isFeaturedOnline: Joi.boolean().default(false),
+  trackBatches: Joi.boolean().default(false),
+  batches: Joi.array().items(Joi.object({
+    batchNumber: Joi.string().trim().required(),
+    expiryDate: Joi.date().allow('', null),
+    quantity: Joi.number().min(0).required(),
+    costPrice: Joi.number().min(0).optional(),
+  })).default([]),
+  trackSerials: Joi.boolean().default(false),
+  serials: Joi.array().items(Joi.string().trim()).default([]),
 };
 
 
