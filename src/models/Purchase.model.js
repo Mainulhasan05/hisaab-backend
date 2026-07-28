@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { immutableGuard } = require('../utils/immutableGuard.util');
 
 const purchaseItemSchema = new mongoose.Schema({
   product: {
@@ -177,6 +178,9 @@ purchaseSchema.statics.getSummary = async function(shopId, startDate, endDate) {
     totalItems: 0
   };
 };
+
+// Apply immutable ledger guard — prevents hard deletion of purchase records
+purchaseSchema.plugin(immutableGuard, { modelName: 'Purchase' });
 
 const Purchase = mongoose.model('Purchase', purchaseSchema);
 

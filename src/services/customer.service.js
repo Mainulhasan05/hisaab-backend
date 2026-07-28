@@ -3,6 +3,7 @@ const Sale = require('../models/Sale.model');
 const Payment = require('../models/Payment.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
+const { runInTransaction } = require('../utils/transaction.util');
 
 class CustomerService {
   // Get all customers with filtering, searching, pagination
@@ -190,9 +191,11 @@ class CustomerService {
 
   // Record due payment
   async collectDuePayment(shopId, userId, customerId, paymentData) {
-    const { amount, method, transactionId, notes } = paymentData;
+    return await runInTransaction(async (session) => {
+      const sessionOpt = session ? { session } : {};
+      const { amount, method, transactionId, notes } = paymentData;
 
-    const customer = await Customer.findOne({ _id: customerId, shop: shopId });
+    const customer = await Customer.findOne({ _id: customerId, shop: shopId }).session(session || null);
     if (!customer) {
       throw new AppError('কাস্টমার পাওয়া যায়নি', 'Customer not found', 404);
     }
@@ -202,7 +205,7 @@ class CustomerService {
     }
 
     // Create payment record
-    const payment = await Payment.create({
+    const [payment] = await Payment.create([{
       shop: shopId,
       customer: customerId,
       amount,
@@ -211,12 +214,12 @@ class CustomerService {
       type: 'due_collection',
       notes,
       receivedBy: userId,
-    });
+    }], sessionOpt);
 
     // Update customer balance
     customer.totalPaid += amount;
     customer.totalDue -= amount;
-    await customer.save();
+    await customer.save(sessionOpt);
 
     // Create audit log
     await AuditLog.create({
@@ -238,6 +241,7 @@ class CustomerService {
     });
 
     return { customer, payment };
+    });
   }
 
   // Get customer purchase history
@@ -388,6 +392,58 @@ class CustomerService {
     }
 
     return results;
+  }
+
+  /**
+   * Due Aging Analysis — Groups customer dues by age buckets
+   * Returns per-customer breakdown: 0-30 days, 31-60 days, 60+ days
+   */
+  async getDueAging(shopId, branchId = null) {
+    const now = new Date();
+    const days30 = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const days60 = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000);
+
+    const matchStage = {
+      shop: require('mongoose').Types.ObjectId.createFromHexString(shopId.toString()),
+      due: { $gt: 0 },
+      status: { $ne: 'cancelled' }
+    };
+    if (branchId) matchStage.branch = require('mongoose').Types.ObjectId.createFromHexString(branchId.toString());
+
+    const result = await Sale.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: '$customer',
+          customerName: { $first: '$customerName' },
+          customerPhone: { $first: '$customerPhone' },
+          totalDue: { $sum: '$due' },
+          due0to30: {
+            $sum: { $cond: [{ $gte: ['$createdAt', days30] }, '$due', 0] }
+          },
+          due31to60: {
+            $sum: { $cond: [{ $and: [{ $lt: ['$createdAt', days30] }, { $gte: ['$createdAt', days60] }] }, '$due', 0] }
+          },
+          due60plus: {
+            $sum: { $cond: [{ $lt: ['$createdAt', days60] }, '$due', 0] }
+          },
+          oldestDue: { $min: '$createdAt' },
+          saleCount: { $sum: 1 }
+        }
+      },
+      { $sort: { totalDue: -1 } }
+    ]);
+
+    // Summary totals
+    const summary = result.reduce((acc, c) => ({
+      totalDue: acc.totalDue + c.totalDue,
+      due0to30: acc.due0to30 + c.due0to30,
+      due31to60: acc.due31to60 + c.due31to60,
+      due60plus: acc.due60plus + c.due60plus,
+      customerCount: acc.customerCount + 1,
+    }), { totalDue: 0, due0to30: 0, due31to60: 0, due60plus: 0, customerCount: 0 });
+
+    return { customers: result, summary };
   }
 }
 

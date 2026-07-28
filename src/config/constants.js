@@ -70,7 +70,9 @@ module.exports = {
     SALE: 'sale',
     ADJUSTMENT: 'adjustment',
     RETURN: 'return',
-    DAMAGE: 'damage'
+    DAMAGE: 'damage',
+    TRANSFER_OUT: 'transfer_out',
+    TRANSFER_IN: 'transfer_in',
   },
 
   // SMS Types

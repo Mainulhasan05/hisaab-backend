@@ -6,7 +6,8 @@ const {
   setUserTokenCookie,
   setAdminTokenCookie,
   clearUserTokenCookie,
-  clearAdminTokenCookie
+  clearAdminTokenCookie,
+  COOKIE_NAMES
 } = require('../utils/cookie.util');
 
 /**
@@ -82,17 +83,53 @@ const login = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc    Logout user
+ * @desc    Logout user and revoke tokens
  * @route   POST /api/auth/logout
  * @access  Private
  */
 const logout = asyncHandler(async (req, res) => {
+  const accessToken = req.cookies?.[COOKIE_NAMES.USER_TOKEN] || (req.headers.authorization?.startsWith('Bearer') ? req.headers.authorization.split(' ')[1] : null);
+  const refreshTokenStr = req.cookies?.refreshToken || req.body?.refreshToken;
+
+  await AuthService.logout(accessToken, refreshTokenStr);
+
   // Clear the httpOnly cookie
   clearUserTokenCookie(res);
+  if (res.clearCookie) {
+    res.clearCookie('refreshToken');
+  }
 
   return ApiResponse.success(res, {
     message: 'Logout successful',
     messageBn: 'লগআউট সফল'
+  });
+});
+
+/**
+ * @desc    Refresh access token using refresh token
+ * @route   POST /api/auth/refresh
+ * @access  Public
+ */
+const refreshToken = asyncHandler(async (req, res) => {
+  const tokenFromCookie = req.cookies?.refreshToken || req.cookies?.[COOKIE_NAMES.USER_TOKEN];
+  const refreshTokenStr = req.body?.refreshToken || tokenFromCookie;
+
+  const result = await AuthService.refreshToken(refreshTokenStr);
+
+  setUserTokenCookie(res, result.accessToken);
+  if (res.cookie) {
+    res.cookie('refreshToken', result.refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    });
+  }
+
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Token refreshed successfully',
+    messageBn: 'টোকেন সফলভাবে রিফ্রেশ করা হয়েছে'
   });
 });
 
@@ -406,6 +443,7 @@ module.exports = {
   verifyOTP,
   login,
   logout,
+  refreshToken,
   getMe,
   changePassword,
   adminLogin,

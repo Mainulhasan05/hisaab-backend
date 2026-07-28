@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { PAYMENT_METHODS } = require('../config/constants');
+const { immutableGuard } = require('../utils/immutableGuard.util');
 
 const expenseSchema = new mongoose.Schema({
   shop: {
@@ -95,6 +96,9 @@ expenseSchema.statics.getTotal = async function(shopId, startDate, endDate) {
 
   return result[0] || { total: 0, count: 0 };
 };
+
+// Apply immutable ledger guard
+expenseSchema.plugin(immutableGuard, { modelName: 'Expense' });
 
 const Expense = mongoose.model('Expense', expenseSchema);
 

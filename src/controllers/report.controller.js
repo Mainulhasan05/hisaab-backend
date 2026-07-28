@@ -1,4 +1,5 @@
 const reportService = require('../services/report.service');
+const customerService = require('../services/customer.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 
@@ -111,5 +112,15 @@ exports.exportReport = asyncHandler(async (req, res) => {
     data: report,
     message: 'Report exported successfully',
     messageBn: 'রিপোর্ট সফলভাবে এক্সপোর্ট হয়েছে',
+  });
+});
+
+// Due Aging Analysis
+exports.getDueAging = asyncHandler(async (req, res) => {
+  const result = await customerService.getDueAging(req.shop._id, req.branchId);
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Due aging report generated',
+    messageBn: 'বাকি এজিং রিপোর্ট তৈরি হয়েছে',
   });
 });

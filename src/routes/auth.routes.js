@@ -15,6 +15,7 @@ router.post('/register', validate(authValidation.register), authController.regis
 router.post('/send-otp', validate(authValidation.sendOTP), authController.sendOTP);
 router.post('/verify-otp', validate(authValidation.verifyOTP), authController.verifyOTP);
 router.post('/login', validate(authValidation.login), authController.login);
+router.post('/refresh', authController.refreshToken);
 router.post('/admin/login', validate(authValidation.adminLogin), authController.adminLogin);
 router.post('/admin/logout', authController.adminLogout);
 

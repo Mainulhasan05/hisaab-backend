@@ -108,6 +108,19 @@ const productSchema = new mongoose.Schema({
     default: 5,
     min: [0, 'নূন্যতম স্টক ০ এর কম হতে পারবে না']
   },
+  // Batch / Expiry tracking (opt-in per product)
+  trackBatches: {
+    type: Boolean,
+    default: false,
+  },
+  batches: [{
+    batchNumber: { type: String, required: true, trim: true },
+    expiryDate: { type: Date },
+    quantity: { type: Number, required: true, min: 0 },
+    costPrice: { type: Number, min: 0 },
+    receivedDate: { type: Date, default: Date.now },
+    purchaseRef: { type: mongoose.Schema.Types.ObjectId, ref: 'Purchase' },
+  }],
   // For variant products
   variants: [variantSchema],
   images: [{

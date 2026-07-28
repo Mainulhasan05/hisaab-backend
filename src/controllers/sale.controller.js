@@ -1,12 +1,14 @@
 const saleService = require('../services/sale.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
+const { sanitizeSales } = require('../utils/dataSanitizer.util');
 
 // Get all sales
 exports.getSales = asyncHandler(async (req, res) => {
   const options = { ...req.query };
   if (req.branchId) options.branchId = req.branchId;
   const result = await saleService.getSales(req.shop._id, options);
+  result.data = sanitizeSales(result.data, req);
   return ApiResponse.paginated(res, {
     ...result,
     message: 'Sales retrieved successfully',
@@ -18,7 +20,7 @@ exports.getSales = asyncHandler(async (req, res) => {
 exports.getSale = asyncHandler(async (req, res) => {
   const sale = await saleService.getSaleById(req.shop._id, req.params.id, req.branchId);
   return ApiResponse.success(res, {
-    data: sale,
+    data: sanitizeSales(sale, req),
     message: 'Sale retrieved successfully',
     messageBn: 'বিক্রয় সফলভাবে লোড হয়েছে',
   });
@@ -28,7 +30,7 @@ exports.getSale = asyncHandler(async (req, res) => {
 exports.createSale = asyncHandler(async (req, res) => {
   const sale = await saleService.createSale(req.shop._id, req.user._id, req.body, req);
   return ApiResponse.success(res, {
-    data: sale,
+    data: sanitizeSales(sale, req),
     message: 'Sale created successfully',
     messageBn: 'বিক্রয় সফলভাবে সম্পন্ন হয়েছে',
     statusCode: 201,

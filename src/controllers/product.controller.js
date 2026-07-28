@@ -1,10 +1,12 @@
 const productService = require('../services/product.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
+const { sanitizeProducts } = require('../utils/dataSanitizer.util');
 
 // Get all products
 exports.getProducts = asyncHandler(async (req, res) => {
   const result = await productService.getProducts(req.shop._id, req.query, req);
+  result.data = sanitizeProducts(result.data, req);
   return ApiResponse.paginated(res, {
     ...result,
     message: 'Products retrieved successfully',
@@ -16,7 +18,7 @@ exports.getProducts = asyncHandler(async (req, res) => {
 exports.getProduct = asyncHandler(async (req, res) => {
   const product = await productService.getProductById(req.shop._id, req.params.id, req);
   return ApiResponse.success(res, {
-    data: product,
+    data: sanitizeProducts(product, req),
     message: 'Product retrieved successfully',
     messageBn: 'পণ্য সফলভাবে লোড হয়েছে',
   });
@@ -26,9 +28,9 @@ exports.getProduct = asyncHandler(async (req, res) => {
 exports.searchProductsForSale = asyncHandler(async (req, res) => {
   const result = await productService.searchProductsForSale(req.shop._id, req.query, req);
   return ApiResponse.success(res, {
-    data: result.data,
+    data: sanitizeProducts(result.data, req),
     message: 'Products searched successfully',
-    messageBn: '???? ????????? ??? ??????',
+    messageBn: 'পণ্য খোঁজা সম্পন্ন হয়েছে',
   });
 });
 
@@ -36,7 +38,7 @@ exports.searchProductsForSale = asyncHandler(async (req, res) => {
 exports.getProductByCode = asyncHandler(async (req, res) => {
   const product = await productService.getProductByCode(req.shop._id, req.params.code, req);
   return ApiResponse.success(res, {
-    data: product,
+    data: sanitizeProducts(product, req),
     message: 'Product retrieved successfully',
     messageBn: 'পণ্য সফলভাবে লোড হয়েছে',
   });

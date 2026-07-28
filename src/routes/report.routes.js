@@ -16,6 +16,7 @@ router.get('/daily-summary', reportController.getDailySummary);
 router.get('/date-wise', rbac('reports', 'view'), reportController.getDateWiseSummary);
 router.get('/date-wise/:date', rbac('reports', 'view'), reportController.getSalesByDate);
 router.get('/trending-products', rbac('reports', 'view'), reportController.getTrendingProducts);
+router.get('/due-aging', rbac('reports', 'view'), reportController.getDueAging);
 router.get('/:type/export/:format', rbac('reports', 'view'), reportController.exportReport);
 
 module.exports = router;

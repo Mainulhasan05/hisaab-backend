@@ -5,18 +5,20 @@
 
 // All modules and their available actions
 const MODULES = {
-  products:      { key: 'products',      label: 'পণ্য',              labelEn: 'Products',        actions: ['view', 'create', 'update', 'delete'] },
+  products:      { key: 'products',      label: 'পণ্য',              labelEn: 'Products',        actions: ['view', 'create', 'update', 'delete', 'view_cost'] },
   categories:    { key: 'categories',    label: 'ক্যাটাগরি',          labelEn: 'Categories',      actions: ['view', 'create', 'update', 'delete'] },
-  sales:         { key: 'sales',         label: 'বিক্রয়',            labelEn: 'Sales',           actions: ['view', 'create', 'update', 'delete'] },
+  sales:         { key: 'sales',         label: 'বিক্রয়',            labelEn: 'Sales',           actions: ['view', 'create', 'update', 'delete', 'view_profit'] },
   customers:     { key: 'customers',     label: 'কাস্টমার',          labelEn: 'Customers',       actions: ['view', 'create', 'update', 'delete'] },
   purchases:     { key: 'purchases',     label: 'ক্রয়',              labelEn: 'Purchases',       actions: ['view', 'create', 'update', 'delete'] },
   suppliers:     { key: 'suppliers',     label: 'সরবরাহকারী',        labelEn: 'Suppliers',       actions: ['view', 'create', 'update', 'delete'] },
   expenses:      { key: 'expenses',      label: 'খরচ',               labelEn: 'Expenses',        actions: ['view', 'create', 'update', 'delete'] },
   cash_register: { key: 'cash_register', label: 'ক্যাশ রেজিস্টার',    labelEn: 'Cash Register',   actions: ['view', 'create', 'update', 'delete'] },
-  reports:       { key: 'reports',       label: 'রিপোর্ট',            labelEn: 'Reports',         actions: ['view'] },
+  reports:       { key: 'reports',       label: 'রিপোর্ট',            labelEn: 'Reports',         actions: ['view', 'view_profit'] },
   settings:      { key: 'settings',      label: 'সেটিংস',            labelEn: 'Settings',        actions: ['view', 'update'] },
   sms:           { key: 'sms',           label: 'এসএমএস',            labelEn: 'SMS',             actions: ['view', 'create'] },
   staff:         { key: 'staff',         label: 'স্টাফ ম্যানেজমেন্ট', labelEn: 'Staff Management', actions: ['view', 'create', 'update', 'delete'] },
+  stock:         { key: 'stock',         label: 'স্টক সমন্বয়',       labelEn: 'Stock Adjustment', actions: ['view', 'manual_adjust'] },
+  stock_transfers: { key: 'stock_transfers', label: 'শাখা ট্রান্সফার', labelEn: 'Stock Transfers', actions: ['view', 'create', 'update'] },
 };
 
 // List of all module keys
@@ -60,18 +62,20 @@ const ROLE_PRESETS = {
     name: 'ম্যানেজার',
     nameEn: 'Manager',
     permissions: buildPermissionsFromConfig({
-      products:      ['view', 'create', 'update'],
+      products:      ['view', 'create', 'update', 'view_cost'],
       categories:    ['view', 'create', 'update'],
-      sales:         ['view', 'create', 'update'],
+      sales:         ['view', 'create', 'update', 'view_profit'],
       customers:     ['view', 'create', 'update'],
       purchases:     ['view', 'create', 'update'],
       suppliers:     ['view', 'create', 'update'],
       expenses:      ['view', 'create', 'update'],
       cash_register: ['view', 'create', 'update'],
-      reports:       ['view'],
+      reports:       ['view', 'view_profit'],
       settings:      ['view'],
       sms:           ['view', 'create'],
       staff:         ['view'],
+      stock:         ['view', 'manual_adjust'],
+      stock_transfers: ['view', 'create', 'update'],
     }),
   },
   cashier: {
@@ -90,6 +94,8 @@ const ROLE_PRESETS = {
       settings:      [],
       sms:           [],
       staff:         [],
+      stock:         ['view'],
+      stock_transfers: ['view'],
     }),
   },
 };

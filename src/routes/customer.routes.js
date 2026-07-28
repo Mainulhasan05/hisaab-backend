@@ -3,6 +3,7 @@ const router = express.Router();
 const customerController = require('../controllers/customer.controller');
 const { protect } = require('../middleware/auth.middleware');
 const { rbac } = require('../middleware/permission.middleware');
+const idempotency = require('../middleware/idempotency.middleware');
 
 router.use(protect);
 
@@ -16,7 +17,7 @@ router.get('/phone/:phone', rbac('customers', 'view'), customerController.getCus
 router.get('/:id([0-9a-fA-F]{24})', rbac('customers', 'view'), customerController.getCustomer);
 router.put('/:id([0-9a-fA-F]{24})', rbac('customers', 'update'), customerController.updateCustomer);
 router.delete('/:id([0-9a-fA-F]{24})', rbac('customers', 'delete'), customerController.deleteCustomer);
-router.post('/:id([0-9a-fA-F]{24})/collect-due', rbac('customers', 'update'), customerController.collectDue);
+router.post('/:id([0-9a-fA-F]{24})/collect-due', idempotency(), rbac('customers', 'update'), customerController.collectDue);
 router.get('/:id([0-9a-fA-F]{24})/history', rbac('customers', 'view'), customerController.getCustomerHistory);
 
 module.exports = router;

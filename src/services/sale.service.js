@@ -11,6 +11,7 @@ const { KEYS } = require('../config/cacheKeys');
 const { getBranchForCreate, getBranchCode } = require('../utils/branchScope.util');
 const BranchStock = require('../models/BranchStock.model');
 const mongoose = require('mongoose');
+const { runInTransaction } = require('../utils/transaction.util');
 
 // Bangladesh is UTC+6
 const BD_OFFSET_MS = 6 * 60 * 60 * 1000;
@@ -207,7 +208,9 @@ class SaleService {
 
   // Create new sale
   async createSale(shopId, userId, saleData, req) {
-    const {
+    return await runInTransaction(async (session) => {
+      const sessionOpt = session ? { session } : {};
+      const {
       items,
       customerId: rawCustomerId,
       customer: rawCustomer,
@@ -216,8 +219,9 @@ class SaleService {
       discount = 0,
       discountType = 'fixed',
       tax = 0,
-      paid = 0,
-      paymentMethod = 'cash',
+      paid: rawPaid = 0,
+      paymentMethod: rawPaymentMethod = 'cash',
+      payments: rawPayments,
       notes,
       isOnline = false,
       channel = 'pos',
@@ -228,13 +232,27 @@ class SaleService {
     } = saleData;
     const customerId = rawCustomerId || rawCustomer;
 
+    // --- Split Payment Support ---
+    // If payments[] array is provided, calculate paid and primary paymentMethod from it
+    let paid = rawPaid;
+    let paymentMethod = rawPaymentMethod;
+    let payments = rawPayments || [];
+    if (payments.length > 0) {
+      paid = payments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+      // Primary method = the one with the largest amount
+      paymentMethod = payments.reduce((max, p) => (p.amount > max.amount ? p : max), payments[0]).method;
+    } else if (paid > 0) {
+      // Legacy single-method: auto-create payments array for consistency
+      payments = [{ method: paymentMethod, amount: paid }];
+    }
+
     // Validate items and calculate totals
     let subtotal = 0;
     const processedItems = [];
 
     // --- BATCH: Fetch all products in a single query ---
     const productIds = [...new Set(items.map(item => item.productId))];
-    const products = await Product.find({ _id: { $in: productIds }, shop: shopId });
+    const products = await Product.find({ _id: { $in: productIds }, shop: shopId }).session(session || null);
     const productMap = new Map(products.map(p => [p._id.toString(), p]));
 
     const branchId = req ? getBranchForCreate(req) : null;
@@ -245,7 +263,7 @@ class SaleService {
         shop: shopId,
         branch: branchId,
         product: { $in: productIds }
-      }).lean();
+      }).session(session || null).lean();
 
       const branchStockMap = {};
       branchStocks.forEach(bs => {
@@ -269,6 +287,7 @@ class SaleService {
     const bulkStockOps = [];
     const branchStockOps = [];
     const stockTransactions = [];
+    let expectedStockOps = 0;
 
     for (const item of items) {
       const product = productMap.get(item.productId?.toString());
@@ -308,19 +327,21 @@ class SaleService {
         if (isMultiBranchActive) {
           branchStockOps.push({
             updateOne: {
-              filter: { shop: shopId, branch: branchId, product: product._id, variantId: variant._id },
+              filter: { shop: shopId, branch: branchId, product: product._id, variantId: variant._id, stock: { $gte: item.quantity } },
               update: { $inc: { stock: -item.quantity } },
-              upsert: true,
+              upsert: false,
             },
           });
+          expectedStockOps++;
         } else {
-          // Queue bulkWrite operation for variant stock
+          // Queue bulkWrite operation for variant stock with atomic $gte guard
           bulkStockOps.push({
             updateOne: {
-              filter: { _id: product._id, 'variants._id': variant._id },
+              filter: { _id: product._id, variants: { $elemMatch: { _id: variant._id, stock: { $gte: item.quantity } } } },
               update: { $inc: { 'variants.$.stock': -item.quantity } },
             },
           });
+          expectedStockOps++;
         }
 
         // Queue stock transaction
@@ -364,19 +385,21 @@ class SaleService {
         if (isMultiBranchActive) {
           branchStockOps.push({
             updateOne: {
-              filter: { shop: shopId, branch: branchId, product: product._id, variantId: null },
+              filter: { shop: shopId, branch: branchId, product: product._id, variantId: null, stock: { $gte: item.quantity } },
               update: { $inc: { stock: -item.quantity } },
-              upsert: true,
+              upsert: false,
             },
           });
+          expectedStockOps++;
         } else {
-          // Queue bulkWrite operation for product stock
+          // Queue bulkWrite operation for product stock with atomic $gte guard
           bulkStockOps.push({
             updateOne: {
-              filter: { _id: product._id },
+              filter: { _id: product._id, stock: { $gte: item.quantity } },
               update: { $inc: { stock: -item.quantity } },
             },
           });
+          expectedStockOps++;
         }
 
         // Queue stock transaction
@@ -400,6 +423,27 @@ class SaleService {
           notes: 'Sale item',
           createdBy: userId,
         });
+
+        // FEFO batch deduction for batch-tracked products
+        if (product.trackBatches && product.batches?.length > 0) {
+          let remaining = item.quantity;
+          // Sort batches by expiryDate ascending (FEFO), null expiry last
+          const sorted = product.batches
+            .filter(b => b.quantity > 0)
+            .sort((a, b) => {
+              if (!a.expiryDate) return 1;
+              if (!b.expiryDate) return -1;
+              return new Date(a.expiryDate) - new Date(b.expiryDate);
+            });
+          for (const batch of sorted) {
+            if (remaining <= 0) break;
+            const deduct = Math.min(remaining, batch.quantity);
+            batch.quantity -= deduct;
+            remaining -= deduct;
+          }
+          // Remove empty batches
+          product.batches = product.batches.filter(b => b.quantity > 0);
+        }
       }
 
       const itemDiscount = item.discount || 0;
@@ -422,10 +466,17 @@ class SaleService {
       subtotal += itemTotal;
     }
 
-    // --- BATCH: Execute all stock updates in one bulkWrite ---
+    // --- BATCH: Execute all stock updates in one bulkWrite with race-condition guard ---
     if (isMultiBranchActive) {
       if (branchStockOps.length > 0) {
-        await BranchStock.bulkWrite(branchStockOps);
+        const branchResult = await BranchStock.bulkWrite(branchStockOps, sessionOpt);
+        if (branchResult.modifiedCount < expectedStockOps) {
+          throw new AppError(
+            'Insufficient stock — another sale may have just reduced inventory. Please retry.',
+            'পর্যাপ্ত স্টক নেই — অন্য একটি বিক্রয় ইতোমধ্যে স্টক কমিয়ে ফেলেছে। পুনরায় চেষ্টা করুন।',
+            409
+          );
+        }
       }
 
       // Now sync the Product total stocks in the database
@@ -442,7 +493,7 @@ class SaleService {
             totalStock: { $sum: '$stock' }
           }
         }
-      ]);
+      ]).option(sessionOpt);
 
       const totalStockMap = {};
       branchStocks.forEach(bs => {
@@ -476,17 +527,24 @@ class SaleService {
         }
       }
       if (productSyncOps.length > 0) {
-        await Product.bulkWrite(productSyncOps);
+        await Product.bulkWrite(productSyncOps, sessionOpt);
       }
     } else {
       if (bulkStockOps.length > 0) {
-        await Product.bulkWrite(bulkStockOps);
+        const stockResult = await Product.bulkWrite(bulkStockOps, sessionOpt);
+        if (stockResult.modifiedCount < expectedStockOps) {
+          throw new AppError(
+            'Insufficient stock — another sale may have just reduced inventory. Please retry.',
+            'পর্যাপ্ত স্টক নেই — অন্য একটি বিক্রয় ইতোমধ্যে স্টক কমিয়ে ফেলেছে। পুনরায় চেষ্টা করুন।',
+            409
+          );
+        }
       }
     }
 
     // --- BATCH: Insert all stock transactions in one call ---
     if (stockTransactions.length > 0) {
-      await StockTransaction.insertMany(stockTransactions);
+      await StockTransaction.insertMany(stockTransactions, sessionOpt);
     }
 
     let discountAmount = discount;
@@ -506,21 +564,22 @@ class SaleService {
     let finalCustomerPhone = customerPhone;
 
     if (customerId) {
-      customer = await Customer.findOne({ _id: customerId, shop: shopId });
+      customer = await Customer.findOne({ _id: customerId, shop: shopId }).session(session || null);
       if (customer) {
         finalCustomerName = customer.name;
         finalCustomerPhone = customer.phone;
       }
     } else if (customerPhone) {
       // Try to find existing customer or create new one
-      customer = await Customer.findOne({ shop: shopId, phone: customerPhone });
+      customer = await Customer.findOne({ shop: shopId, phone: customerPhone }).session(session || null);
       if (!customer && customerName) {
-        customer = await Customer.create({
+        const [newCustomer] = await Customer.create([{
           shop: shopId,
           phone: customerPhone,
           name: customerName,
           createdBy: userId,
-        });
+        }], sessionOpt);
+        customer = newCustomer;
       }
     }
 
@@ -531,7 +590,7 @@ class SaleService {
       try {
         const branchCode = req ? getBranchCode(req) : null;
         const invoiceNo = await this.generateInvoiceNumber(shopId, branchCode);
-        sale = await Sale.create({
+        const [newSale] = await Sale.create([{
           shop: shopId,
           branch: branchId,
           invoiceNo,
@@ -547,6 +606,7 @@ class SaleService {
           paid,
           due,
           paymentMethod,
+          payments,
           status,
           notes,
           isOnline: Boolean(isOnline),
@@ -556,7 +616,8 @@ class SaleService {
           courierName,
           shippingAddress,
           createdBy: userId,
-        });
+        }], sessionOpt);
+        sale = newSale;
         break; // Success — exit retry loop
       } catch (err) {
         if (err.code === 11000 && attempt < maxRetries - 1) {
@@ -574,12 +635,12 @@ class SaleService {
       customer.totalDue += due;
       customer.purchaseCount += 1;
       customer.lastPurchase = new Date();
-      await customer.save();
+      await customer.save(sessionOpt);
     }
 
     // Create payment record if paid amount > 0
     if (paid > 0) {
-      await Payment.create({
+      await Payment.create([{
         shop: shopId,
         branch: branchId,
         sale: sale._id,
@@ -588,13 +649,13 @@ class SaleService {
         method: paymentMethod,
         type: 'sale_payment',
         receivedBy: userId,
-      });
+      }], sessionOpt);
     }
 
     // Update shop statistics
     await Shop.findByIdAndUpdate(shopId, {
       $inc: { 'stats.totalSales': 1 },
-    });
+    }, sessionOpt);
 
     // Create audit log
     await AuditLog.create({
@@ -632,6 +693,7 @@ class SaleService {
     this.invalidateCache(shopId).catch(() => {}); // Non-blocking
 
     return sale;
+    });
   }
 
   // Record payment for existing sale

@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { PAYMENT_METHODS, SALE_STATUS } = require('../config/constants');
+const { immutableGuard } = require('../utils/immutableGuard.util');
 
 const saleItemSchema = new mongoose.Schema({
   product: {
@@ -123,6 +124,22 @@ const saleSchema = new mongoose.Schema({
     enum: Object.values(PAYMENT_METHODS),
     default: PAYMENT_METHODS.CASH
   },
+  // Split payment support: array of payment method + amount pairs
+  payments: [{
+    method: {
+      type: String,
+      enum: Object.values(PAYMENT_METHODS),
+      required: true
+    },
+    amount: {
+      type: Number,
+      required: true,
+      min: [0, 'পেমেন্ট ০ এর কম হতে পারবে না']
+    },
+    reference: {
+      type: String // MFS transaction ID, card auth code, etc.
+    }
+  }],
   status: {
     type: String,
     enum: Object.values(SALE_STATUS),
@@ -324,6 +341,9 @@ saleSchema.methods.cancelSale = async function(userId, reason) {
   this.cancelReason = reason;
   await this.save();
 };
+
+// Apply immutable ledger guard — prevents hard deletion of sale records
+saleSchema.plugin(immutableGuard, { modelName: 'Sale' });
 
 const Sale = mongoose.model('Sale', saleSchema);
 

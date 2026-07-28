@@ -106,18 +106,21 @@ userSchema.methods.comparePassword = async function(candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
+const crypto = require('crypto');
+
 /**
- * Generate JWT Token with embedded permissions
- * Owner gets permissions: null (bypasses all checks)
- * Employee gets the full permissions object from their Role
+ * Generate Access Token with embedded permissions and jti
  */
-userSchema.methods.generateToken = function() {
+userSchema.methods.generateAccessToken = function() {
+  const jti = crypto.randomUUID();
   const payload = {
     id: this._id,
     shop: this.shop._id || this.shop,
     isOwner: this.isOwner,
     permissions: null, // default for owners
     branch: this.branch?._id || this.branch || null, // branch assignment (null for owners/single-branch)
+    jti,
+    type: 'access',
   };
 
   // If not owner and role is populated with permissions, embed them
@@ -126,8 +129,39 @@ userSchema.methods.generateToken = function() {
   }
 
   return jwt.sign(payload, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '30d'
+    expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m'
   });
+};
+
+/**
+ * Generate Refresh Token with jti
+ */
+userSchema.methods.generateRefreshToken = function() {
+  const jti = crypto.randomUUID();
+  const payload = {
+    id: this._id,
+    shop: this.shop._id || this.shop,
+    jti,
+    type: 'refresh',
+  };
+
+  return jwt.sign(payload, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET, {
+    expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d'
+  });
+};
+
+/**
+ * Generate Auth Token Pair (Access + Refresh)
+ */
+userSchema.methods.generateAuthTokens = function() {
+  return {
+    accessToken: this.generateAccessToken(),
+    refreshToken: this.generateRefreshToken(),
+  };
+};
+
+userSchema.methods.generateToken = function() {
+  return this.generateAccessToken();
 };
 
 // Check if password changed after token was issued

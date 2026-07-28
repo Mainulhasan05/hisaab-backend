@@ -11,6 +11,7 @@ const { getBranchForCreate } = require('../utils/branchScope.util');
 const saleService = require('./sale.service');
 const BranchStock = require('../models/BranchStock.model');
 const mongoose = require('mongoose');
+const { runInTransaction } = require('../utils/transaction.util');
 
 const getInvoiceDiscountAmount = (sale) => {
   const discount = Number(sale.discount) || 0;
@@ -39,10 +40,12 @@ class SalesReturnService {
    * Create a sales return
    */
   async createReturn(shopId, userId, returnData, req) {
-    const { saleId, items, refundMethod, paymentMethod, reason, notes } = returnData;
+    return await runInTransaction(async (session) => {
+      const sessionOpt = session ? { session } : {};
+      const { saleId, items, refundMethod, paymentMethod, reason, notes } = returnData;
 
     // 1. Fetch the sale
-    const sale = await Sale.findOne({ _id: saleId, shop: shopId });
+    const sale = await Sale.findOne({ _id: saleId, shop: shopId }).session(session || null);
     if (!sale) {
       throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }
@@ -69,7 +72,7 @@ class SalesReturnService {
     }
 
     // 4. Build already-returned map from existing returns
-    const existingReturns = await SalesReturn.find({ shop: shopId, sale: saleId });
+    const existingReturns = await SalesReturn.find({ shop: shopId, sale: saleId }).session(session || null);
     const alreadyReturnedMap = {};
     for (const ret of existingReturns) {
       for (const ri of ret.items) {
@@ -147,7 +150,7 @@ class SalesReturnService {
     const returnNo = await SalesReturn.generateReturnNo(shopId);
 
     // 7. Create SalesReturn document
-    const salesReturn = await SalesReturn.create({
+    const [salesReturn] = await SalesReturn.create([{
       shop: shopId,
       branch: branchId,
       returnNo,
@@ -164,11 +167,11 @@ class SalesReturnService {
       reason,
       notes,
       createdBy: userId,
-    });
+    }], sessionOpt);
 
     // 8. Restore stock for each returned item
     for (const item of processedItems) {
-      const product = await Product.findById(item.product);
+      const product = await Product.findById(item.product).session(session || null);
       if (product) {
         let previousStock, newStock;
         const isMultiBranchActive = branchId && req?.shop?.multiBranchEnabled;
@@ -191,7 +194,7 @@ class SalesReturnService {
           } else {
             product.stock = totalStock;
           }
-          await product.save();
+          await product.save(sessionOpt);
         } else {
           if (item.variantId && product.hasVariants) {
             const variant = product.variants.id(item.variantId);
@@ -206,11 +209,11 @@ class SalesReturnService {
             product.stock += item.quantity;
             newStock = product.stock;
           }
-          await product.save();
+          await product.save(sessionOpt);
         }
 
         // Create stock transaction
-        await StockTransaction.create({
+        await StockTransaction.create([{
           shop: shopId,
           branch: branchId,
           product: item.product,
@@ -230,7 +233,7 @@ class SalesReturnService {
           },
           notes: `মাল ফেরত: ${returnNo} (বিক্রয়: ${sale.invoiceNo})`,
           createdBy: userId,
-        });
+        }], sessionOpt);
       }
     }
 
@@ -270,13 +273,14 @@ class SalesReturnService {
 
     await Sale.updateOne(
       { _id: sale._id },
-      { $set: saleUpdate }
+      { $set: saleUpdate },
+      sessionOpt
     );
 
     // 10. Handle refund by method
     if (refundMethod === 'cash') {
       // Create refund payment
-      await Payment.create({
+      await Payment.create([{
         shop: shopId,
         branch: branchId,
         sale: sale._id,
@@ -287,7 +291,7 @@ class SalesReturnService {
         reference: returnNo,
         notes: `মাল ফেরত: ${returnNo}`,
         receivedBy: userId,
-      });
+      }], sessionOpt);
 
       // Adjust customer totals for cash refund
       if (sale.customer) {
@@ -296,21 +300,21 @@ class SalesReturnService {
             totalPurchases: -totalRefundAmount,
             totalPaid: -totalRefundAmount,
           },
-        });
+        }, sessionOpt);
         // Recalculate due
-        const customer = await Customer.findById(sale.customer);
+        const customer = await Customer.findById(sale.customer).session(session || null);
         if (customer) {
           customer.totalDue = Math.max(0, customer.totalPurchases - customer.totalPaid);
-          await customer.save();
+          await customer.save(sessionOpt);
         }
       }
     } else if (refundMethod === 'adjustment' && sale.customer) {
       // Reduce customer's totalPurchases → recalc due
-      const customer = await Customer.findById(sale.customer);
+      const customer = await Customer.findById(sale.customer).session(session || null);
       if (customer) {
         customer.totalPurchases -= totalRefundAmount;
         customer.totalDue = Math.max(0, customer.totalPurchases - customer.totalPaid);
-        await customer.save();
+        await customer.save(sessionOpt);
       }
     }
     // store_credit: no financial changes, just recorded
@@ -343,6 +347,7 @@ class SalesReturnService {
     saleService.invalidateCache(shopId).catch(() => {});
 
     return salesReturn;
+    });
   }
 
   /**

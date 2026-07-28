@@ -7,7 +7,8 @@ const SMSService = require('./sms.service');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS, TRIAL_PERIOD_DAYS } = require('../config/constants');
 const { ROLE_PRESETS, buildPermissionsFromConfig, buildPermissions, LEGACY_PERMISSION_MAP } = require('../config/permissions');
-const { normalizePhone } = require('../utils/phone.util');
+const jwt = require('jsonwebtoken');
+const cacheService = require('./cache.service');
 const { seedCategories } = require('../seeds/categorySeeder');
 
 class AuthService {
@@ -429,8 +430,8 @@ class AuthService {
       req
     });
 
-    // Generate token (permissions embedded via populated role)
-    const token = user.generateToken();
+    // Generate auth tokens (access token + refresh token)
+    const tokens = user.generateAuthTokens();
 
     // Build permissions response for frontend
     let permissions = null;
@@ -442,12 +443,94 @@ class AuthService {
       user: user.toJSON(),
       shop: shop.toJSON(),
       permissions,
-      token,
+      token: tokens.accessToken,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
       ...(subscriptionExpired && {
         subscriptionExpired: true,
         subscriptionMessage: 'আপনার সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে। আপনি ডেটা দেখতে পারবেন, কিন্তু পরিবর্তন করতে পারবেন না।',
       }),
     };
+  }
+
+  /**
+   * Refresh Token service with Token Rotation
+   */
+  async refreshToken(refreshTokenStr) {
+    if (!refreshTokenStr) {
+      throw new AppError('Refresh token required', 'রিফ্রেশ টোকেন প্রয়োজন', 400);
+    }
+
+    let decoded;
+    try {
+      decoded = jwt.verify(refreshTokenStr, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET);
+    } catch (err) {
+      throw new AppError('Invalid or expired refresh token', 'অবৈধ বা মেয়াাদোত্তীর্ণ রিফ্রেশ টোকেন', 401);
+    }
+
+    if (decoded.type !== 'refresh') {
+      throw new AppError('Invalid token type', 'অবৈধ টোকেন টাইপ', 401);
+    }
+
+    // Check if refresh token has been revoked
+    if (decoded.jti) {
+      const isRevoked = await cacheService.get(`blacklist:token:${decoded.jti}`);
+      if (isRevoked) {
+        throw new AppError('Refresh token has been revoked', 'রিফ্রেশ টোকেনটি বাতিল করা হয়েছে', 401);
+      }
+    }
+
+    const user = await User.findById(decoded.id).populate('shop').populate('role');
+    if (!user || !user.isActive) {
+      throw new AppError('User account inactive or not found', 'ইউজার অ্যাকাউন্ট নিষ্ক্রিয়', 401);
+    }
+
+    // Revoke old refresh token (Token Rotation)
+    if (decoded.jti && decoded.exp) {
+      const remainingSeconds = Math.max(1, Math.ceil(decoded.exp - Date.now() / 1000));
+      await cacheService.set(`blacklist:token:${decoded.jti}`, 'revoked', remainingSeconds);
+    }
+
+    // Issue new token pair
+    const tokens = user.generateAuthTokens();
+
+    return {
+      user: user.toJSON(),
+      token: tokens.accessToken,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+    };
+  }
+
+  /**
+   * Logout service with token blacklisting
+   */
+  async logout(accessTokenStr, refreshTokenStr) {
+    if (accessTokenStr) {
+      try {
+        const decodedAccess = jwt.decode(accessTokenStr);
+        if (decodedAccess && decodedAccess.jti && decodedAccess.exp) {
+          const remainingSeconds = Math.max(1, Math.ceil(decodedAccess.exp - Date.now() / 1000));
+          await cacheService.set(`blacklist:token:${decodedAccess.jti}`, 'logout_revoked', remainingSeconds);
+        }
+      } catch (e) {
+        // Silently ignore decode error
+      }
+    }
+
+    if (refreshTokenStr) {
+      try {
+        const decodedRefresh = jwt.decode(refreshTokenStr);
+        if (decodedRefresh && decodedRefresh.jti && decodedRefresh.exp) {
+          const remainingSeconds = Math.max(1, Math.ceil(decodedRefresh.exp - Date.now() / 1000));
+          await cacheService.set(`blacklist:token:${decodedRefresh.jti}`, 'logout_revoked', remainingSeconds);
+        }
+      } catch (e) {
+        // Silently ignore decode error
+      }
+    }
+
+    return { message: 'Logged out successfully', messageBn: 'সফলভাবে লগআউট করা হয়েছে' };
   }
 
   /**

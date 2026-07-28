@@ -95,6 +95,17 @@ const protect = asyncHandler(async (req, res, next) => {
     // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
+    // Check token revocation blacklist
+    if (decoded.jti) {
+      const isBlacklisted = await cacheService.get(`blacklist:token:${decoded.jti}`);
+      if (isBlacklisted) {
+        return ApiResponse.unauthorized(res, {
+          message: 'Session has been revoked or expired. Please log in again',
+          messageBn: 'সেশনটি বাতিল করা হয়েছে। পুনরায় লগইন করুন'
+        });
+      }
+    }
+
     // Check if it's an admin token
     if (decoded.isAdmin) {
       const admin = await getCachedAdmin(decoded.id);

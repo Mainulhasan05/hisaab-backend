@@ -25,6 +25,8 @@ const couponRoutes = require('./coupon.routes');
 const imageRoutes = require('./image.routes');
 const branchRoutes = require('./branch.routes');
 const shopCategoryRoutes = require('./shopCategory.routes');
+const heldCartRoutes = require('./heldCart.routes');
+const stockTransferRoutes = require('./stockTransfer.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
@@ -51,6 +53,8 @@ router.use('/staff', staffRoutes);
 router.use('/coupons', couponRoutes);
 router.use('/images', imageRoutes);
 router.use('/branches', branchRoutes);
+router.use('/held-carts', heldCartRoutes);
+router.use('/stock-transfers', stockTransferRoutes);
 
 // API Info
 router.get('/', (req, res) => {
@@ -79,7 +83,9 @@ router.get('/', (req, res) => {
       pages: '/api/pages',
       coupons: '/api/coupons',
       images: '/api/images',
-      branches: '/api/branches'
+      branches: '/api/branches',
+      heldCarts: '/api/held-carts',
+      stockTransfers: '/api/stock-transfers',
     }
   });
 });

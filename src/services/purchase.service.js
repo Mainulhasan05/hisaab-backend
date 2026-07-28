@@ -8,6 +8,7 @@ const { AppError } = require('../middleware/error.middleware');
 const { getBranchForCreate } = require('../utils/branchScope.util');
 const BranchStock = require('../models/BranchStock.model');
 const mongoose = require('mongoose');
+const { runInTransaction } = require('../utils/transaction.util');
 
 class PurchaseService {
   // Get all purchases with filtering and pagination
@@ -92,7 +93,9 @@ class PurchaseService {
 
   // Create purchase — the main action that increases stock
   async createPurchase(shopId, userId, purchaseData, req) {
-    const { items, supplier, paid, paymentMethod, date, notes } = purchaseData;
+    return await runInTransaction(async (session) => {
+      const sessionOpt = session ? { session } : {};
+      const { items, supplier, paid, paymentMethod, date, notes } = purchaseData;
 
     if (!items || items.length === 0) {
       throw new AppError('কমপক্ষে একটি পণ্য যোগ করুন', 'At least one item is required', 400);
@@ -106,7 +109,7 @@ class PurchaseService {
         _id: supplier,
         shop: shopId,
         isActive: true,
-      });
+      }).session(session || null);
       if (!supplierDoc) {
         throw new AppError('সরবরাহকারী পাওয়া যায়নি', 'Supplier not found', 404);
       }
@@ -122,7 +125,7 @@ class PurchaseService {
         _id: item.product,
         shop: shopId,
         isActive: true,
-      });
+      }).session(session || null);
 
       if (!product) {
         throw new AppError(
@@ -163,7 +166,7 @@ class PurchaseService {
 
     // Create purchase
     const branchId = req ? getBranchForCreate(req) : null;
-    const purchase = await Purchase.create({
+    const [purchase] = await Purchase.create([{
       shop: shopId,
       branch: branchId,
       invoiceNo,
@@ -176,7 +179,7 @@ class PurchaseService {
       date: date ? new Date(date) : new Date(),
       notes: notes?.trim(),
       createdBy: userId,
-    });
+    }], sessionOpt);
 
     // Increase stock for each item
     const isMultiBranchActive = branchId && req?.shop?.multiBranchEnabled;
@@ -202,7 +205,7 @@ class PurchaseService {
         } else {
           product.stock = totalStock;
         }
-        await product.save();
+        await product.save(sessionOpt);
       } else {
         previousStock = item.variantId
           ? product.variants?.id(item.variantId)?.stock || 0
@@ -217,15 +220,28 @@ class PurchaseService {
         } else {
           product.stock += item.quantity;
         }
-        await product.save();
+        await product.save(sessionOpt);
 
         newStock = item.variantId
           ? product.variants?.id(item.variantId)?.stock || 0
           : product.stock;
       }
 
+      // Batch tracking: push batch entry if product has trackBatches enabled
+      if (product.trackBatches && !item.variantId) {
+        product.batches.push({
+          batchNumber: item.batchNumber || `B-${purchase.invoiceNo}-${Date.now()}`,
+          expiryDate: item.expiryDate || null,
+          quantity: item.quantity,
+          costPrice: item.unitPrice,
+          receivedDate: new Date(),
+          purchaseRef: purchase._id,
+        });
+        await product.save(sessionOpt);
+      }
+
       // Create stock transaction
-      await StockTransaction.create({
+      await StockTransaction.create([{
         shop: shopId,
         branch: branchId,
         product: item.product,
@@ -245,7 +261,7 @@ class PurchaseService {
         },
         supplier: supplierName,
         createdBy: userId,
-      });
+      }], sessionOpt);
     }
 
     // Update supplier stats
@@ -253,7 +269,7 @@ class PurchaseService {
       supplierDoc.totalPurchases += 1;
       supplierDoc.totalAmount += totalAmount;
       supplierDoc.totalDue += purchase.due;
-      await supplierDoc.save();
+      await supplierDoc.save(sessionOpt);
     }
 
     // Audit log
@@ -287,6 +303,7 @@ class PurchaseService {
     await purchase.populate('createdBy', 'name');
 
     return purchase;
+    });
   }
 
   // Cancel purchase (reverse stock)
