@@ -10,6 +10,7 @@ const { ROLE_PRESETS, buildPermissionsFromConfig, buildPermissions, LEGACY_PERMI
 const jwt = require('jsonwebtoken');
 const cacheService = require('./cache.service');
 const { seedCategories } = require('../seeds/categorySeeder');
+const { normalizePhone } = require('../utils/phone.util');
 
 class AuthService {
   /**
