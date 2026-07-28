@@ -98,6 +98,7 @@ module.exports = {
     USER_REGISTER: { en: 'user_register', bn: 'নিবন্ধন' },
     USER_LOGIN: { en: 'user_login', bn: 'লগইন' },
     USER_LOGOUT: { en: 'user_logout', bn: 'লগআউট' },
+    AUTH_FAILED: { en: 'auth_failed', bn: 'লগইন ব্যর্থ' },
     PASSWORD_CHANGE: { en: 'password_change', bn: 'পাসওয়ার্ড পরিবর্তন' },
     PROFILE_UPDATE: { en: 'profile_update', bn: 'প্রোফাইল আপডেট' },
 

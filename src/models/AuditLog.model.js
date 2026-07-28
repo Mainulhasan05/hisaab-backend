@@ -21,6 +21,11 @@ const auditLogSchema = new mongoose.Schema({
     ref: 'Admin'
     // For admin actions
   },
+  customer: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Customer',
+    default: null
+  },
   action: {
     type: String,
     required: [true, 'অ্যাকশন দিন']
@@ -64,6 +69,7 @@ const auditLogSchema = new mongoose.Schema({
 // Indexes - Optimized for scalability
 auditLogSchema.index({ shop: 1, createdAt: -1 }); // Main listing with date sort
 auditLogSchema.index({ admin: 1, createdAt: -1 }); // Admin audit trail
+auditLogSchema.index({ customer: 1, createdAt: -1 }); // Customer audit trail
 
 // TTL Index - Auto-delete logs older than 90 days to prevent unbounded growth
 // For compliance, export/archive logs before deletion if needed
@@ -74,6 +80,7 @@ auditLogSchema.statics.log = async function({
   shop,
   user,
   admin,
+  customer,
   action,
   description,
   entity,
@@ -83,10 +90,13 @@ auditLogSchema.statics.log = async function({
   // Get action labels
   const actionConfig = Object.values(AUDIT_ACTIONS).find(a => a.en === action);
 
+  const customerId = customer || (entity?.type === 'customer' && entity.id ? entity.id : null);
+
   const logData = {
     shop,
     user,
     admin,
+    customer: customerId,
     action,
     actionBn: actionConfig?.bn || action,
     description,
@@ -95,14 +105,21 @@ auditLogSchema.statics.log = async function({
     changes
   };
 
-  // Add metadata from request
+  // Add metadata from request with proxy-aware IP extraction
   if (req) {
+    const userAgentStr = req.get ? req.get('User-Agent') : req.headers?.['user-agent'] || '';
+    const rawIp = req.headers?.['x-forwarded-for']?.split(',')[0]?.trim() ||
+                  req.ip ||
+                  req.connection?.remoteAddress ||
+                  req.socket?.remoteAddress ||
+                  '127.0.0.1';
+
     logData.metadata = {
-      ip: req.ip || req.connection?.remoteAddress,
-      userAgent: req.get('User-Agent'),
-      browser: extractBrowser(req.get('User-Agent')),
-      os: extractOS(req.get('User-Agent')),
-      device: extractDevice(req.get('User-Agent'))
+      ip: rawIp,
+      userAgent: userAgentStr,
+      browser: extractBrowser(userAgentStr),
+      os: extractOS(userAgentStr),
+      device: extractDevice(userAgentStr)
     };
   }
 
@@ -111,12 +128,13 @@ auditLogSchema.statics.log = async function({
 
 // Static: Get shop audit logs
 auditLogSchema.statics.getShopLogs = function(shopId, options = {}) {
-  const { page = 1, limit = 50, action, userId, startDate, endDate } = options;
+  const { page = 1, limit = 50, action, userId, customerId, startDate, endDate } = options;
 
   const filter = { shop: shopId };
 
   if (action) filter.action = action;
   if (userId) filter.user = userId;
+  if (customerId) filter.customer = customerId;
   if (startDate && endDate) {
     filter.createdAt = { $gte: startDate, $lte: endDate };
   }
@@ -125,8 +143,9 @@ auditLogSchema.statics.getShopLogs = function(shopId, options = {}) {
     .sort({ createdAt: -1 })
     .skip((page - 1) * limit)
     .limit(limit)
-    .populate('user', 'name phone')
-    .populate('admin', 'name phone');
+    .populate('user', 'name phone email')
+    .populate('admin', 'name phone email')
+    .populate('customer', 'name phone email');
 };
 
 // Static: Get user activity
@@ -142,7 +161,8 @@ auditLogSchema.statics.getUserActivity = function(userId, options = {}) {
   return this.find(filter)
     .sort({ createdAt: -1 })
     .skip((page - 1) * limit)
-    .limit(limit);
+    .limit(limit)
+    .populate('customer', 'name phone email');
 };
 
 // Static: Get entity history
@@ -156,7 +176,8 @@ auditLogSchema.statics.getEntityHistory = function(entityType, entityId, options
     .sort({ createdAt: -1 })
     .skip((page - 1) * limit)
     .limit(limit)
-    .populate('user', 'name phone');
+    .populate('user', 'name phone')
+    .populate('customer', 'name phone email');
 };
 
 // Static: Get admin logs
@@ -175,6 +196,7 @@ auditLogSchema.statics.getAdminLogs = function(options = {}) {
     .skip((page - 1) * limit)
     .limit(limit)
     .populate('admin', 'name phone')
+    .populate('customer', 'name phone email')
     .populate('shop', 'name');
 };
 

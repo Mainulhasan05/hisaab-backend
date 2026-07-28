@@ -74,7 +74,7 @@ class CustomerService {
   }
 
   // Create new customer
-  async createCustomer(shopId, userId, customerData) {
+  async createCustomer(shopId, userId, customerData, req) {
     const { phone, name, address, notes } = customerData;
 
     // Check if customer with same phone exists
@@ -92,14 +92,13 @@ class CustomerService {
       createdBy: userId,
     });
 
-    // Create audit log
-    await AuditLog.create({
+    // Create audit log with request metadata & customer reference
+    await AuditLog.log({
       shop: shopId,
       user: userId,
+      customer: customer._id,
       action: 'customer_create',
-      actionBn: 'নতুন কাস্টমার যোগ',
-      description: `Created customer: ${name}`,
-      descriptionBn: `নতুন কাস্টমার যোগ করা হয়েছে: ${name}`,
+      description: `Created customer: ${name} (${phone})`,
       entity: {
         type: 'customer',
         id: customer._id,
@@ -108,13 +107,14 @@ class CustomerService {
       changes: {
         after: customer.toObject(),
       },
+      req,
     });
 
     return customer;
   }
 
   // Update customer
-  async updateCustomer(shopId, userId, customerId, updateData) {
+  async updateCustomer(shopId, userId, customerId, updateData, req) {
     const customer = await Customer.findOne({ _id: customerId, shop: shopId });
     if (!customer) {
       throw new AppError('কাস্টমার পাওয়া যায়নি', 'Customer not found', 404);
@@ -134,14 +134,13 @@ class CustomerService {
     Object.assign(customer, updateData);
     await customer.save();
 
-    // Create audit log
-    await AuditLog.create({
+    // Create audit log with request metadata & customer reference
+    await AuditLog.log({
       shop: shopId,
       user: userId,
+      customer: customer._id,
       action: 'customer_update',
-      actionBn: 'কাস্টমার আপডেট',
-      description: `Updated customer: ${customer.name}`,
-      descriptionBn: `কাস্টমার আপডেট করা হয়েছে: ${customer.name}`,
+      description: `Updated customer: ${customer.name} (${customer.phone})`,
       entity: {
         type: 'customer',
         id: customer._id,
@@ -151,13 +150,14 @@ class CustomerService {
         before: beforeData,
         after: customer.toObject(),
       },
+      req,
     });
 
     return customer;
   }
 
   // Delete customer (soft delete)
-  async deleteCustomer(shopId, userId, customerId) {
+  async deleteCustomer(shopId, userId, customerId, req) {
     const customer = await Customer.findOne({ _id: customerId, shop: shopId });
     if (!customer) {
       throw new AppError('কাস্টমার পাওয়া যায়নি', 'Customer not found', 404);
@@ -171,26 +171,26 @@ class CustomerService {
     customer.isActive = false;
     await customer.save();
 
-    // Create audit log
-    await AuditLog.create({
+    // Create audit log with request metadata & customer reference
+    await AuditLog.log({
       shop: shopId,
       user: userId,
+      customer: customer._id,
       action: 'customer_delete',
-      actionBn: 'কাস্টমার মুছে ফেলা',
-      description: `Deleted customer: ${customer.name}`,
-      descriptionBn: `কাস্টমার মুছে ফেলা হয়েছে: ${customer.name}`,
+      description: `Deleted customer: ${customer.name} (${customer.phone})`,
       entity: {
         type: 'customer',
         id: customer._id,
         name: customer.name,
       },
+      req,
     });
 
     return { success: true };
   }
 
   // Record due payment
-  async collectDuePayment(shopId, userId, customerId, paymentData) {
+  async collectDuePayment(shopId, userId, customerId, paymentData, req) {
     return await runInTransaction(async (session) => {
       const sessionOpt = session ? { session } : {};
       const { amount, method, transactionId, notes } = paymentData;
@@ -221,14 +221,13 @@ class CustomerService {
     customer.totalDue -= amount;
     await customer.save(sessionOpt);
 
-    // Create audit log
-    await AuditLog.create({
+    // Create audit log with request metadata & customer reference
+    await AuditLog.log({
       shop: shopId,
       user: userId,
+      customer: customer._id,
       action: 'due_collection',
-      actionBn: 'বাকি আদায়',
-      description: `Collected ৳${amount} from ${customer.name}`,
-      descriptionBn: `${customer.name} থেকে ৳${amount} বাকি আদায় করা হয়েছে`,
+      description: `Collected ৳${amount} from ${customer.name} (${customer.phone})`,
       entity: {
         type: 'customer',
         id: customer._id,
@@ -238,7 +237,12 @@ class CustomerService {
         before: { totalDue: customer.totalDue + amount },
         after: { totalDue: customer.totalDue },
       },
+      req,
     });
+
+    return { customer, payment };
+    });
+  }
 
     return { customer, payment };
     });
@@ -372,7 +376,7 @@ class CustomerService {
   }
 
   // Bulk import customers
-  async bulkImportCustomers(shopId, userId, customers) {
+  async bulkImportCustomers(shopId, userId, customers, req) {
     const results = [];
 
     for (const customerData of customers) {
@@ -384,7 +388,7 @@ class CustomerService {
           continue;
         }
 
-        const customer = await this.createCustomer(shopId, userId, customerData);
+        const customer = await this.createCustomer(shopId, userId, customerData, req);
         results.push({ phone: customerData.phone, success: true, customerId: customer._id });
       } catch (error) {
         results.push({ phone: customerData.phone, success: false, error: error.message });

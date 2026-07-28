@@ -34,7 +34,7 @@ exports.getCustomerByPhone = asyncHandler(async (req, res) => {
 
 // Create customer
 exports.createCustomer = asyncHandler(async (req, res) => {
-  const customer = await customerService.createCustomer(req.shop._id, req.user._id, req.body);
+  const customer = await customerService.createCustomer(req.shop._id, req.user._id, req.body, req);
   return ApiResponse.success(res, {
     data: customer,
     message: 'Customer created successfully',
@@ -45,7 +45,7 @@ exports.createCustomer = asyncHandler(async (req, res) => {
 
 // Update customer
 exports.updateCustomer = asyncHandler(async (req, res) => {
-  const customer = await customerService.updateCustomer(req.shop._id, req.user._id, req.params.id, req.body);
+  const customer = await customerService.updateCustomer(req.shop._id, req.user._id, req.params.id, req.body, req);
   return ApiResponse.success(res, {
     data: customer,
     message: 'Customer updated successfully',
@@ -55,7 +55,7 @@ exports.updateCustomer = asyncHandler(async (req, res) => {
 
 // Delete customer
 exports.deleteCustomer = asyncHandler(async (req, res) => {
-  await customerService.deleteCustomer(req.shop._id, req.user._id, req.params.id);
+  await customerService.deleteCustomer(req.shop._id, req.user._id, req.params.id, req);
   return ApiResponse.success(res, {
     message: 'Customer deleted successfully',
     messageBn: 'কাস্টমার সফলভাবে মুছে ফেলা হয়েছে',
@@ -64,7 +64,7 @@ exports.deleteCustomer = asyncHandler(async (req, res) => {
 
 // Collect due payment
 exports.collectDue = asyncHandler(async (req, res) => {
-  const result = await customerService.collectDuePayment(req.shop._id, req.user._id, req.params.id, req.body);
+  const result = await customerService.collectDuePayment(req.shop._id, req.user._id, req.params.id, req.body, req);
   return ApiResponse.success(res, {
     data: result,
     message: 'Due payment collected successfully',
@@ -115,7 +115,7 @@ exports.getCustomerLeaderboard = asyncHandler(async (req, res) => {
 
 // Bulk import customers
 exports.bulkImport = asyncHandler(async (req, res) => {
-  const results = await customerService.bulkImportCustomers(req.shop._id, req.user._id, req.body.customers);
+  const results = await customerService.bulkImportCustomers(req.shop._id, req.user._id, req.body.customers, req);
   return ApiResponse.success(res, {
     data: results,
     message: 'Bulk import completed',

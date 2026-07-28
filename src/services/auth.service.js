@@ -342,6 +342,15 @@ class AuthService {
 
 
     if (!user) {
+      await AuditLog.log({
+        shop: null,
+        user: null,
+        action: AUDIT_ACTIONS.AUTH_FAILED.en,
+        description: `Failed login attempt for phone: ${normalizedPhone} (Account not found)`,
+        entity: { type: 'auth', name: normalizedPhone },
+        req
+      }).catch(() => {});
+
       throw new AppError(
         'Invalid phone number or password',
         'ফোন নম্বর বা পাসওয়ার্ড ভুল',
@@ -353,6 +362,15 @@ class AuthService {
     const userWithPassword = await User.findById(user._id).select('+password');
 
     if (!(await userWithPassword.comparePassword(password))) {
+      await AuditLog.log({
+        shop: user.shop,
+        user: user._id,
+        action: AUDIT_ACTIONS.AUTH_FAILED.en,
+        description: `Failed login attempt for ${user.name} (${normalizedPhone}) — Incorrect password`,
+        entity: { type: 'auth', id: user._id, name: user.name },
+        req
+      }).catch(() => {});
+
       throw new AppError(
         'Invalid phone number or password',
         'ফোন নম্বর বা পাসওয়ার্ড ভুল',
@@ -362,6 +380,15 @@ class AuthService {
 
     // Check if phone is verified
     if (!user.isPhoneVerified) {
+      await AuditLog.log({
+        shop: user.shop,
+        user: user._id,
+        action: AUDIT_ACTIONS.AUTH_FAILED.en,
+        description: `Failed login attempt for ${user.name} (${normalizedPhone}) — Phone not verified`,
+        entity: { type: 'auth', id: user._id, name: user.name },
+        req
+      }).catch(() => {});
+
       let otpMessage = 'ফোন নম্বর যাচাই করা হয়নি।';
 
       // Only send a new OTP if there's no active one
@@ -393,6 +420,15 @@ class AuthService {
     // Check if shop is active
     const shop = await Shop.findById(user.shop);
     if (!shop || !shop.isActive) {
+      await AuditLog.log({
+        shop: user.shop,
+        user: user._id,
+        action: AUDIT_ACTIONS.AUTH_FAILED.en,
+        description: `Failed login attempt for ${user.name} (${normalizedPhone}) — Shop deactivated`,
+        entity: { type: 'auth', id: user._id, name: user.name },
+        req
+      }).catch(() => {});
+
       throw new AppError(
         'Shop is deactivated',
         'দোকান নিষ্ক্রিয়',

@@ -1167,15 +1167,31 @@ class AdminService {
 
   // Get audit logs (system level)
   async getAuditLogs(options = {}) {
-    const { page = 1, limit = 50, shopId, action, userId } = options;
+    const { page = 1, limit = 50, shopId, action, userId, customerId, entityType } = options;
 
     const query = {};
     if (shopId) query.shop = shopId;
-    // Support prefix-based action filtering (e.g., "product" matches "product_create", "product_update")
+    // Support prefix-based action filtering (e.g., "customer" matches "customer_create", "customer_update", "due_collection")
     if (action) {
-      query.action = { $regex: `^${action}`, $options: 'i' };
+      if (action === 'customer') {
+        query.$or = [
+          { action: { $regex: '^customer', $options: 'i' } },
+          { action: 'due_collection' },
+          { 'entity.type': 'customer' },
+        ];
+      } else if (action === 'auth') {
+        query.$or = [
+          { action: { $regex: '^user_', $options: 'i' } },
+          { action: 'auth_failed' },
+          { action: 'password_change' },
+        ];
+      } else {
+        query.action = { $regex: `^${action}`, $options: 'i' };
+      }
     }
     if (userId) query.user = userId;
+    if (customerId) query.customer = customerId;
+    if (entityType) query['entity.type'] = entityType;
 
     const skip = (page - 1) * limit;
 
@@ -1183,6 +1199,7 @@ class AdminService {
       AuditLog.find(query)
         .populate('user', 'name phone email')
         .populate('admin', 'name phone email')
+        .populate('customer', 'name phone email')
         .populate('shop', 'name')
         .sort({ createdAt: -1 })
         .skip(skip)
