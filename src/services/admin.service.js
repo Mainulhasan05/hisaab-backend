@@ -14,7 +14,6 @@ const Payment = require('../models/Payment.model');
 const Product = require('../models/Product.model');
 const Branch = require('../models/Branch.model');
 const BranchStock = require('../models/BranchStock.model');
-const ShopCategory = require('../models/ShopCategory.model');
 const mongoose = require('mongoose');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const bcrypt = require('bcryptjs');
@@ -1252,13 +1251,6 @@ class AdminService {
         ...settingsData.smsSettings,
       };
     }
-    if (settingsData.enabledModules !== undefined && typeof settingsData.enabledModules === 'object') {
-      shop.enabledModules = {
-        ...(shop.enabledModules?.toObject ? shop.enabledModules.toObject() : shop.enabledModules),
-        ...settingsData.enabledModules,
-        inventory: true,
-      };
-    }
 
     await shop.save();
 
@@ -1573,66 +1565,6 @@ class AdminService {
     });
 
     return branch;
-  }
-
-  /**
-   * Apply a ShopCategory (business profile) to a shop.
-   * Copies enabledModules, terminology, businessModel, dashboardWidgets from the category.
-   */
-  async applyProfileToShop(adminId, shopId, profileId) {
-    const shop = await Shop.findById(shopId);
-    if (!shop) {
-      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
-    }
-
-    const profile = await ShopCategory.findById(profileId);
-    if (!profile) {
-      throw new AppError('ব্যবসার প্রোফাইল পাওয়া যায়নি', 'Business profile not found', 404);
-    }
-
-    // Copy enabledModules from the profile (additive merge — keeps inventory always true)
-    const profileModules = profile.enabledModules?.toObject ? profile.enabledModules.toObject() : (profile.enabledModules || {});
-    shop.enabledModules = {
-      ...profileModules,
-      inventory: true,
-    };
-
-    // Copy terminology if the profile has it
-    if (profile.terminology) {
-      const termData = profile.terminology?.toObject ? profile.terminology.toObject() : profile.terminology;
-      shop.terminology = termData;
-    }
-
-    // Copy businessModel if the profile has it
-    if (profile.businessModel) {
-      shop.businessModel = profile.businessModel;
-    }
-
-    // Copy dashboardWidgets if the profile has it
-    if (profile.dashboardWidgets && profile.dashboardWidgets.length > 0) {
-      shop.dashboardWidgets = profile.dashboardWidgets;
-    }
-
-    // Link the shop to this category
-    shop.shopCategory = profile._id;
-
-    await shop.save();
-
-    // Audit log
-    await AuditLog.create({
-      admin: adminId,
-      action: 'shop_profile_applied',
-      actionBn: 'ব্যবসার প্রোফাইল প্রয়োগ',
-      description: `Applied profile "${profile.name}" to shop "${shop.name}"`,
-      descriptionBn: `"${profile.name}" প্রোফাইল "${shop.name}" দোকানে প্রয়োগ করা হয়েছে`,
-      entity: { type: 'shop', id: shop._id, name: shop.name },
-      changes: {
-        before: { profileId: null },
-        after: { profileId: profile._id, profileName: profile.name },
-      },
-    });
-
-    return { shop, appliedProfile: profile.name };
   }
 }
 

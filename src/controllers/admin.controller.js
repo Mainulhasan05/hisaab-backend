@@ -410,12 +410,3 @@ exports.purgeShop = asyncHandler(async (req, res) => {
   });
 });
 
-// Apply a ShopCategory (business profile) to a shop
-exports.applyProfile = asyncHandler(async (req, res) => {
-  const result = await adminService.applyProfileToShop(req.admin._id, req.params.id, req.body.profileId);
-  return ApiResponse.success(res, {
-    data: result,
-    message: 'Business profile applied successfully',
-    messageBn: 'ব্যবসার প্রোফাইল সফলভাবে প্রয়োগ করা হয়েছে',
-  });
-});

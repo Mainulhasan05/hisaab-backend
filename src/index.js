@@ -73,16 +73,6 @@ initializeRedis().then((connected) => {
 const PORT = process.env.PORT || 5000;
 
 const server = app.listen(PORT, () => {
-  // Start cron jobs
-  if (process.env.NODE_ENV !== 'test') {
-    try {
-      const { startAppointmentReminderCron } = require('./cron/appointmentReminder.cron');
-      startAppointmentReminderCron();
-    } catch (err) {
-      logger.warn('Appointment reminder cron setup skipped:', err.message);
-    }
-  }
-
   logger.info(`
     ╔═══════════════════════════════════════════════════════╗
     ║                                                       ║

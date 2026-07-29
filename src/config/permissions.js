@@ -19,11 +19,6 @@ const MODULES = {
   staff:         { key: 'staff',         label: 'স্টাফ ম্যানেজমেন্ট', labelEn: 'Staff Management', actions: ['view', 'create', 'update', 'delete'] },
   stock:         { key: 'stock',         label: 'স্টক সমন্বয়',       labelEn: 'Stock Adjustment', actions: ['view', 'manual_adjust'] },
   stock_transfers: { key: 'stock_transfers', label: 'শাখা ট্রান্সফার', labelEn: 'Stock Transfers', actions: ['view', 'create', 'update'] },
-  // Service-based business modules
-  services:     { key: 'services',     label: 'সেবা',              labelEn: 'Services',        actions: ['view', 'create', 'update', 'delete'] },
-  appointments: { key: 'appointments', label: 'অ্যাপয়েন্টমেন্ট',    labelEn: 'Appointments',    actions: ['view', 'create', 'update', 'delete'] },
-  treatments:   { key: 'treatments',   label: 'ট্রিটমেন্ট',         labelEn: 'Treatments',      actions: ['view', 'create', 'update', 'delete'] },
-  equipment:    { key: 'equipment',    label: 'যন্ত্রপাতি',          labelEn: 'Equipment',       actions: ['view', 'create', 'update', 'delete'] },
 };
 
 // List of all module keys

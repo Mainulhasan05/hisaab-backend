@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const { SUBSCRIPTION_PLANS, SUBSCRIPTION_STATUS, DEFAULT_SETTINGS } = require('../config/constants');
+const { SHOP_TYPES, SUBSCRIPTION_PLANS, SUBSCRIPTION_STATUS, DEFAULT_SETTINGS } = require('../config/constants');
 
 const shopSchema = new mongoose.Schema({
   name: {
@@ -18,48 +18,6 @@ const shopSchema = new mongoose.Schema({
     type: String,
     trim: true,
     default: 'other'
-  },
-  // Business model type — inherited from ShopCategory on creation
-  businessModel: {
-    type: String,
-    enum: ['retail', 'service', 'hybrid'],
-    default: 'retail'
-  },
-  // Module visibility — inherited from ShopCategory, can be overridden per shop
-  enabledModules: {
-    products:        { type: Boolean, default: true },
-    services:        { type: Boolean, default: false },
-    appointments:    { type: Boolean, default: false },
-    treatments:      { type: Boolean, default: false },
-    equipment:       { type: Boolean, default: false },
-    beforeAfterPhotos: { type: Boolean, default: false },
-    sales:           { type: Boolean, default: true },
-    customers:       { type: Boolean, default: true },
-    expenses:        { type: Boolean, default: true },
-    cashRegister:    { type: Boolean, default: true },
-    reports:         { type: Boolean, default: true },
-    sms:             { type: Boolean, default: true },
-    staff:           { type: Boolean, default: true },
-    suppliers:       { type: Boolean, default: true },
-    purchases:       { type: Boolean, default: true },
-    stockTransfers:  { type: Boolean, default: true },
-    coupons:         { type: Boolean, default: true },
-    categories:      { type: Boolean, default: true },
-    auditLogs:       { type: Boolean, default: true },
-  },
-  // Terminology overrides — inherited from ShopCategory
-  terminology: {
-    product:  { bn: { type: String, default: 'পণ্য' },  en: { type: String, default: 'Product' } },
-    sale:     { bn: { type: String, default: 'বিক্রয়' }, en: { type: String, default: 'Sale' } },
-    customer: { bn: { type: String, default: 'কাস্টমার' }, en: { type: String, default: 'Customer' } },
-    invoice:  { bn: { type: String, default: 'ইনভয়েস' }, en: { type: String, default: 'Invoice' } },
-    purchase: { bn: { type: String, default: 'ক্রয়' }, en: { type: String, default: 'Purchase' } },
-    supplier: { bn: { type: String, default: 'সরবরাহকারী' }, en: { type: String, default: 'Supplier' } },
-  },
-  // Dashboard widgets — inherited from ShopCategory
-  dashboardWidgets: {
-    type: [String],
-    default: ['todayRevenue', 'todayProfit', 'totalDue', 'lowStock', 'recentSales', 'topProducts', 'salesChart']
   },
 
   address: {
