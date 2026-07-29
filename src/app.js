@@ -71,8 +71,7 @@ if (process.env.NODE_ENV === 'development') {
   app.use(morgan('combined', { stream: logger.stream }));
 }
 
-// Rate Limiting
-app.use('/api/auth', authLimiter);
+// Rate Limiting — general API limiter for all endpoints
 app.use('/api', apiLimiter);
 
 // Health Check Endpoint

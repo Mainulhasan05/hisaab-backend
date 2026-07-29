@@ -134,6 +134,35 @@ const protect = asyncHandler(async (req, res, next) => {
 
       req.admin = admin;
       req.isAdmin = true;
+
+      // If accessing a shop route (not /api/admin), resolve shop context or deny
+      const isAdminRoute = req.originalUrl.startsWith('/api/admin') ||
+        req.originalUrl.startsWith('/api/pages') ||
+        req.originalUrl.startsWith('/api/contact');
+
+      if (!isAdminRoute) {
+        const shopId = req.headers['x-shop-id'] || req.cookies?.activeShopId || req.query?.shopId;
+        if (shopId) {
+          const shop = await Shop.findById(shopId);
+          if (shop) {
+            req.shop = shop;
+            req.user = {
+              _id: admin._id,
+              name: admin.name,
+              email: admin.email,
+              role: 'admin',
+              isOwner: true,
+              shop: shop._id,
+            };
+            return next();
+          }
+        }
+        return ApiResponse.unauthorized(res, {
+          message: 'Shop session required. Please log in with a shop account.',
+          messageBn: 'দোকান অ্যাকাউন্ট দিয়ে লগইন করুন।'
+        });
+      }
+
       return next();
     }
 

@@ -10,13 +10,15 @@ const jwt = require('jsonwebtoken');
 const Admin = require('../models/Admin.model');
 const ApiResponse = require('../utils/response.util');
 
+const { authLimiter } = require('../middleware/rateLimiter.middleware');
+
 // Public routes
-router.post('/register', validate(authValidation.register), authController.register);
-router.post('/send-otp', validate(authValidation.sendOTP), authController.sendOTP);
-router.post('/verify-otp', validate(authValidation.verifyOTP), authController.verifyOTP);
-router.post('/login', validate(authValidation.login), authController.login);
+router.post('/register', authLimiter, validate(authValidation.register), authController.register);
+router.post('/send-otp', authLimiter, validate(authValidation.sendOTP), authController.sendOTP);
+router.post('/verify-otp', authLimiter, validate(authValidation.verifyOTP), authController.verifyOTP);
+router.post('/login', authLimiter, validate(authValidation.login), authController.login);
 router.post('/refresh', authController.refreshToken);
-router.post('/admin/login', validate(authValidation.adminLogin), authController.adminLogin);
+router.post('/admin/login', authLimiter, validate(authValidation.adminLogin), authController.adminLogin);
 router.post('/admin/logout', authController.adminLogout);
 
 // Dedicated admin auth check — explicitly reads admin cookie only
