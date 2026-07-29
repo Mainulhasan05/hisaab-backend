@@ -2,6 +2,7 @@ const AuthService = require('../services/auth.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 const User = require('../models/User.model');
+const cacheService = require('../services/cache.service');
 const {
   setUserTokenCookie,
   setAdminTokenCookie,
@@ -332,6 +333,7 @@ const updateShopSettings = asyncHandler(async (req, res) => {
     'invoicePrefix',
     'taxEnabled',
     'taxRate',
+    'showUnitOnInvoice',
     'enabledVariantTypes'
   ];
 
@@ -363,6 +365,8 @@ const updateShopSettings = asyncHandler(async (req, res) => {
     { $set: updates },
     { new: true }
   );
+
+  await cacheService.deletePattern('auth:user:*');
 
   return ApiResponse.success(res, {
     data: { shop },

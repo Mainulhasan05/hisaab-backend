@@ -580,6 +580,7 @@ class AdminService {
     // Only suspended shops should be deactivated — trial/active/expired shops remain accessible
     shop.isActive = status !== 'suspended';
     await shop.save();
+    await cacheService.deletePattern('auth:user:*');
 
     // Create audit log
     await AuditLog.create({
@@ -616,6 +617,7 @@ class AdminService {
     shop.subscription.status = 'active';
     shop.isActive = true;
     await shop.save();
+    await cacheService.deletePattern('auth:user:*');
 
     // Create audit log
     await AuditLog.create({
@@ -703,6 +705,7 @@ class AdminService {
     shop.subscription.status = 'active';
     shop.isActive = true;
     await shop.save();
+    await cacheService.deletePattern('auth:user:*');
 
     // Create audit log
     await AuditLog.create({
@@ -1051,6 +1054,7 @@ class AdminService {
     }
 
     await shop.save();
+    await cacheService.deletePattern('auth:user:*');
 
     // Create audit log
     await AuditLog.create({
@@ -1239,6 +1243,9 @@ class AdminService {
     if (settingsData.taxRate !== undefined) {
       shop.settings.taxRate = settingsData.taxRate;
     }
+    if (settingsData.showUnitOnInvoice !== undefined) {
+      shop.settings.showUnitOnInvoice = settingsData.showUnitOnInvoice;
+    }
     if (settingsData.lowStockThreshold !== undefined) {
       shop.settings.lowStockThreshold = settingsData.lowStockThreshold;
     }
@@ -1253,6 +1260,7 @@ class AdminService {
     }
 
     await shop.save();
+    await cacheService.deletePattern('auth:user:*');
 
     // Create audit log
     await AuditLog.create({

@@ -8,8 +8,8 @@ const asyncHandler = require('../utils/asyncHandler.util');
 const { COOKIE_NAMES } = require('../utils/cookie.util');
 const cacheService = require('../services/cache.service');
 
-// Auth cache TTL: 30 seconds — short enough to reflect password changes quickly
-const AUTH_CACHE_TTL = 30;
+// Auth cache TTL: 10 seconds — short enough to reflect settings/module changes quickly
+const AUTH_CACHE_TTL = 10;
 
 /**
  * Extract token from cookies/headers based on route type
