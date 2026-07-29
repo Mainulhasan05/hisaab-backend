@@ -3,10 +3,21 @@ const { PAYMENT_METHODS, SALE_STATUS } = require('../config/constants');
 const { immutableGuard } = require('../utils/immutableGuard.util');
 
 const saleItemSchema = new mongoose.Schema({
+  // Item type: product (default) or service
+  itemType: {
+    type: String,
+    enum: ['product', 'service'],
+    default: 'product'
+  },
   product: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Product',
-    required: true
+    required: function() { return this.itemType !== 'service'; }
+  },
+  // Service reference (for service-type items)
+  service: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Service'
   },
   productName: {
     type: String,
@@ -23,6 +34,15 @@ const saleItemSchema = new mongoose.Schema({
   },
   variantAttributes: {
     type: mongoose.Schema.Types.Mixed
+  },
+  // Duration in minutes (for service items)
+  duration: {
+    type: Number
+  },
+  // Provider/therapist (for service items)
+  provider: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
   },
   quantity: {
     type: Number,

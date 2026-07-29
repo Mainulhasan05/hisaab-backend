@@ -1,6 +1,7 @@
 const User = require('../models/User.model');
 const Role = require('../models/Role.model');
 const Shop = require('../models/Shop.model');
+const ShopCategory = require('../models/ShopCategory.model');
 const Admin = require('../models/Admin.model');
 const AuditLog = require('../models/AuditLog.model');
 const SMSService = require('./sms.service');
@@ -46,8 +47,11 @@ class AuthService {
       other: ['size', 'color', 'weight']
     };
 
-    // Create shop first
-    const shop = await Shop.create({
+    // Look up the ShopCategory to inherit business config
+    const shopCategory = await ShopCategory.findOne({ key: shopType || 'other', isActive: true });
+
+    // Build shop creation data with inherited config
+    const shopData = {
       name: shopName,
       type: shopType || 'other',
       address: shopAddress,
@@ -59,9 +63,48 @@ class AuthService {
         expiresAt: new Date(Date.now() + TRIAL_PERIOD_DAYS * 24 * 60 * 60 * 1000)
       },
       settings: {
-        enabledVariantTypes: defaultVariantTypesMap[shopType || 'other']
+        enabledVariantTypes: shopCategory?.defaultVariantTypes || defaultVariantTypesMap[shopType || 'other']
       }
-    });
+    };
+
+    // Inherit business config from ShopCategory if available
+    if (shopCategory) {
+      shopData.businessModel = shopCategory.businessModel || 'retail';
+      if (shopCategory.terminology) {
+        shopData.terminology = shopCategory.terminology.toObject ? shopCategory.terminology.toObject() : shopCategory.terminology;
+      }
+      if (shopCategory.dashboardWidgets && shopCategory.dashboardWidgets.length > 0) {
+        shopData.dashboardWidgets = [...shopCategory.dashboardWidgets];
+      }
+    }
+
+    // Default setup: Basic Hisaab for all shops on registration.
+    // Specialized modules (services, appointments, treatments, equipment) start disabled
+    // and are enabled by Super Admin HQ when requested/subscribed.
+    shopData.enabledModules = {
+      services: false,
+      appointments: false,
+      treatments: false,
+      equipment: false,
+      beforeAfterPhotos: false,
+      products: true,
+      sales: true,
+      customers: true,
+      expenses: true,
+      cashRegister: true,
+      reports: true,
+      sms: true,
+      staff: true,
+      suppliers: true,
+      purchases: true,
+      stockTransfers: true,
+      coupons: true,
+      categories: true,
+      auditLogs: true
+    };
+
+    // Create shop
+    const shop = await Shop.create(shopData);
 
     // Seed default categories for this shop type
     try {

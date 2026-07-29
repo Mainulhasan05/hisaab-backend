@@ -51,7 +51,7 @@ exports.getShopCategoryById = asyncHandler(async (req, res) => {
  * Admin: Create new shop category
  */
 exports.createShopCategory = asyncHandler(async (req, res) => {
-  const { key, name, icon, description, sortOrder, defaultVariantTypes, defaultCategories, isActive } = req.body;
+  const { key, name, icon, description, sortOrder, defaultVariantTypes, defaultCategories, isActive, businessModel, enabledModules, terminology, dashboardWidgets } = req.body;
 
   if (!name) {
     return ApiResponse.badRequest(res, 'ক্যাটাগরির নাম বাধ্যতামূলক');
@@ -77,6 +77,10 @@ exports.createShopCategory = asyncHandler(async (req, res) => {
     icon: icon || '🏪',
     description: description || '',
     sortOrder: sortOrder || 0,
+    businessModel: businessModel || 'retail',
+    enabledModules: enabledModules || {},
+    terminology: terminology || {},
+    dashboardWidgets: Array.isArray(dashboardWidgets) ? dashboardWidgets : [],
     defaultVariantTypes: Array.isArray(defaultVariantTypes) ? defaultVariantTypes : ['size', 'color'],
     defaultCategories: Array.isArray(defaultCategories) ? defaultCategories : [],
     isActive: isActive !== undefined ? isActive : true
@@ -93,7 +97,7 @@ exports.createShopCategory = asyncHandler(async (req, res) => {
  */
 exports.updateShopCategory = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { key, name, icon, description, sortOrder, defaultVariantTypes, defaultCategories, isActive } = req.body;
+  const { key, name, icon, description, sortOrder, defaultVariantTypes, defaultCategories, isActive, businessModel, enabledModules, terminology, dashboardWidgets } = req.body;
 
   const category = await ShopCategory.findById(id);
   if (!category) {
@@ -115,6 +119,11 @@ exports.updateShopCategory = asyncHandler(async (req, res) => {
   if (defaultVariantTypes !== undefined) category.defaultVariantTypes = defaultVariantTypes;
   if (defaultCategories !== undefined) category.defaultCategories = defaultCategories;
   if (isActive !== undefined) category.isActive = isActive;
+  // New business-type config fields
+  if (businessModel !== undefined) category.businessModel = businessModel;
+  if (enabledModules !== undefined) category.enabledModules = enabledModules;
+  if (terminology !== undefined) category.terminology = terminology;
+  if (dashboardWidgets !== undefined) category.dashboardWidgets = dashboardWidgets;
 
   await category.save();
 

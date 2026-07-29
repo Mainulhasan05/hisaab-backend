@@ -27,6 +27,12 @@ const branchRoutes = require('./branch.routes');
 const shopCategoryRoutes = require('./shopCategory.routes');
 const heldCartRoutes = require('./heldCart.routes');
 const stockTransferRoutes = require('./stockTransfer.routes');
+// Service-based business modules
+const serviceRoutes = require('./service.routes');
+const appointmentRoutes = require('./appointment.routes');
+const treatmentRoutes = require('./treatment.routes');
+const equipmentRoutes = require('./equipment.routes');
+const shopRoutes = require('./shop.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
@@ -55,6 +61,12 @@ router.use('/images', imageRoutes);
 router.use('/branches', branchRoutes);
 router.use('/held-carts', heldCartRoutes);
 router.use('/stock-transfers', stockTransferRoutes);
+// Service-based business modules
+router.use('/services', serviceRoutes);
+router.use('/appointments', appointmentRoutes);
+router.use('/treatments', treatmentRoutes);
+router.use('/equipment', equipmentRoutes);
+router.use('/shop', shopRoutes);
 
 // API Info
 router.get('/', (req, res) => {
@@ -86,6 +98,10 @@ router.get('/', (req, res) => {
       branches: '/api/branches',
       heldCarts: '/api/held-carts',
       stockTransfers: '/api/stock-transfers',
+      services: '/api/services',
+      appointments: '/api/appointments',
+      treatments: '/api/treatments',
+      equipment: '/api/equipment',
     }
   });
 });

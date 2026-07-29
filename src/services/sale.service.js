@@ -1,5 +1,6 @@
 const Sale = require('../models/Sale.model');
 const Product = require('../models/Product.model');
+const Service = require('../models/Service.model');
 const Customer = require('../models/Customer.model');
 const Payment = require('../models/Payment.model');
 const StockTransaction = require('../models/StockTransaction.model');
@@ -197,7 +198,9 @@ class SaleService {
     const sale = await Sale.findOne(query)
       .populate('customer', 'name phone address totalDue')
       .populate('createdBy', 'name phone')
-      .populate('items.product', 'name code unit barcode');
+      .populate('items.product', 'name code unit barcode')
+      .populate('items.service', 'name code duration')
+      .populate('items.provider', 'name');
 
     if (!sale) {
       throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
@@ -251,9 +254,18 @@ class SaleService {
     const processedItems = [];
 
     // --- BATCH: Fetch all products in a single query ---
-    const productIds = [...new Set(items.map(item => item.productId))];
-    const products = await Product.find({ _id: { $in: productIds }, shop: shopId }).session(session || null);
+    const productItems = items.filter(item => item.itemType !== 'service');
+    const serviceItems = items.filter(item => item.itemType === 'service');
+
+    const productIds = [...new Set(productItems.map(item => item.productId))];
+    const serviceIds = [...new Set(serviceItems.map(item => item.serviceId))];
+
+    const [products, services] = await Promise.all([
+      productIds.length > 0 ? Product.find({ _id: { $in: productIds }, shop: shopId }).session(session || null) : [],
+      serviceIds.length > 0 ? Service.find({ _id: { $in: serviceIds }, shop: shopId }).session(session || null) : [],
+    ]);
     const productMap = new Map(products.map(p => [p._id.toString(), p]));
+    const serviceMap = new Map(services.map(s => [s._id.toString(), s]));
 
     const branchId = req ? getBranchForCreate(req) : null;
     const isMultiBranchActive = branchId && req?.shop?.multiBranchEnabled;
@@ -290,6 +302,37 @@ class SaleService {
     let expectedStockOps = 0;
 
     for (const item of items) {
+      // === SERVICE ITEM: no stock deduction, just pricing ===
+      if (item.itemType === 'service') {
+        const svc = serviceMap.get(item.serviceId?.toString());
+        if (!svc) {
+          throw new AppError(`Service not found: ${item.serviceId}`, `সেবা পাওয়া যায়নি: ${item.productName || item.serviceId}`, 404);
+        }
+
+        const unitPrice = item.unitPrice || svc.price;
+        const buyingPrice = 0; // Services have no buying price (pure revenue)
+        const itemDiscount = item.discount || 0;
+        const itemTotal = (unitPrice * (item.quantity || 1)) - itemDiscount;
+
+        processedItems.push({
+          itemType: 'service',
+          service: svc._id,
+          productName: svc.name,
+          productCode: svc.code,
+          duration: svc.duration,
+          provider: item.provider || null,
+          quantity: item.quantity || 1,
+          unitPrice,
+          buyingPrice,
+          discount: itemDiscount,
+          total: itemTotal,
+        });
+
+        subtotal += itemTotal;
+        continue;
+      }
+
+      // === PRODUCT ITEM: existing stock deduction flow ===
       const product = productMap.get(item.productId?.toString());
       if (!product) {
         throw new AppError(`Product not found: ${item.productId}`, `পণ্য পাওয়া যায়নি: ${item.productName || item.productId}`, 404);
@@ -453,6 +496,7 @@ class SaleService {
       stockTransactions[stockTransactions.length - 1].totalPrice = itemTotal;
 
       processedItems.push({
+        itemType: 'product',
         product: product._id,
         productName: product.name,
         ...variantInfo,
