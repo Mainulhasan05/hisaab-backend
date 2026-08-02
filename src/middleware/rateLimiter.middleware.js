@@ -12,40 +12,66 @@ const { isConnected, getClient } = require('../config/redis.config');
  */
 class HybridStore {
   constructor(prefix) {
-    this.redisStore = new RedisStore({
-      prefix,
-      sendCommand: (...args) => getClient().sendCommand(args),
-    });
+    this.prefix = prefix;
+    // Created lazily: RedisStore's constructor immediately issues SCRIPT LOAD
+    // commands, which would reject (and crash via unhandledRejection) when the
+    // client is not connected at module load time.
+    this.redisStore = null;
     this.memoryStore = new MemoryStore();
+    this.options = null;
   }
 
   init(options) {
-    if (this.redisStore.init) this.redisStore.init(options);
+    this.options = options;
     if (this.memoryStore.init) this.memoryStore.init(options);
   }
 
+  getRedisStore() {
+    if (!isConnected()) return null;
+    if (!this.redisStore) {
+      this.redisStore = new RedisStore({
+        prefix: this.prefix,
+        sendCommand: (...args) => {
+          const client = getClient();
+          if (!client) return Promise.reject(new Error('Redis not connected'));
+          return client.sendCommand(args);
+        },
+      });
+      // The constructor's eager SCRIPT LOAD promises reject unhandled if Redis
+      // drops mid-load; attach no-op handlers (awaiting them later still throws
+      // into our try/catch fallbacks).
+      Promise.resolve(this.redisStore.incrementScriptSha).catch(() => {});
+      Promise.resolve(this.redisStore.getScriptSha).catch(() => {});
+      if (this.options && this.redisStore.init) this.redisStore.init(this.options);
+    }
+    return this.redisStore;
+  }
+
   async increment(key) {
-    if (isConnected()) {
+    const redisStore = this.getRedisStore();
+    if (redisStore) {
       try {
-        return await this.redisStore.increment(key);
+        return await redisStore.increment(key);
       } catch (err) { /* fall through to memory */ }
     }
     return this.memoryStore.increment(key);
   }
 
   async decrement(key) {
-    if (isConnected()) {
+    const redisStore = this.getRedisStore();
+    if (redisStore) {
       try {
-        return await this.redisStore.decrement(key);
+        return await redisStore.decrement(key);
       } catch (err) { /* fall through */ }
     }
     return this.memoryStore.decrement(key);
   }
 
   async resetKey(key) {
-    if (isConnected()) {
+    const redisStore = this.getRedisStore();
+    if (redisStore) {
       try {
-        await this.redisStore.resetKey(key);
+        await redisStore.resetKey(key);
       } catch (err) { /* fall through */ }
     }
     return this.memoryStore.resetKey(key);
