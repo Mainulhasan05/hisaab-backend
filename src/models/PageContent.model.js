@@ -47,7 +47,6 @@ const pageContentSchema = new mongoose.Schema({
 });
 
 // Indexes
-pageContentSchema.index({ isActive: 1 });
 
 // Static: Get page by slug
 pageContentSchema.statics.getBySlug = function(slug) {

@@ -34,21 +34,26 @@ class GeminiService {
   async checkAndResetDailyCounters() {
     try {
       const todayStr = new Date().toISOString().split('T')[0];
-      const outdatedKeys = await GeminiKey.find({
-        lastResetDate: { $ne: todayStr }
-      });
+      // Cheap in-process guard: the reset is only meaningful once per day, so
+      // don't hit the DB for it on every AI request
+      if (this._lastCounterResetDay === todayStr) return;
 
-      if (outdatedKeys.length > 0) {
-        for (const key of outdatedKeys) {
-          key.requestsToday = 0;
-          key.lastResetDate = todayStr;
-          if (key.status === 'quota_exceeded') {
-            key.status = 'active';
-            key.lastErrorMessage = null;
-          }
-          await key.save();
-        }
-        logger.info(`Reset daily Gemini usage counters for ${outdatedKeys.length} keys.`);
+      const result = await GeminiKey.updateMany(
+        { lastResetDate: { $ne: todayStr } },
+        [
+          {
+            $set: {
+              requestsToday: 0,
+              lastResetDate: todayStr,
+              status: { $cond: [{ $eq: ['$status', 'quota_exceeded'] }, 'active', '$status'] },
+              lastErrorMessage: { $cond: [{ $eq: ['$status', 'quota_exceeded'] }, null, '$lastErrorMessage'] },
+            },
+          },
+        ]
+      );
+      this._lastCounterResetDay = todayStr;
+      if (result.modifiedCount > 0) {
+        logger.info(`Reset daily Gemini usage counters for ${result.modifiedCount} keys.`);
       }
     } catch (error) {
       logger.warn('Failed to reset daily Gemini key counters:', error.message);
@@ -114,8 +119,10 @@ class GeminiService {
   /**
    * Generate content using Gemini AI with automatic key rotation & failover
    */
-  async generateContent(prompt, model = 'gemini-1.5-flash', retryCount = 0) {
-    if (retryCount >= 3) {
+  async generateContent(prompt, model = 'gemini-1.5-flash', retryCount = 0, startedAt = Date.now()) {
+    // Bounded by attempts AND wall-clock: this is awaited inline in the HTTP
+    // request, so failover must not hold the request beyond ~20s total
+    if (retryCount >= 3 || Date.now() - startedAt > 20000) {
       throw new AppError(
         'AI request failed after multiple key retries.',
         'একাধিক এপিআই কি ট্রাই করার পরও রিকোয়েস্ট ব্যর্থ হয়েছে।',
@@ -153,12 +160,12 @@ class GeminiService {
       if (status === 429 || errMsg.toLowerCase().includes('quota') || errMsg.toLowerCase().includes('rate limit')) {
         await this.markQuotaExceeded(keyDoc._id, errMsg);
         // Failover recursively to next key
-        return this.generateContent(prompt, model, retryCount + 1);
+        return this.generateContent(prompt, model, retryCount + 1, startedAt);
       } else if (status === 400 || status === 403) {
         await GeminiKey.findByIdAndUpdate(keyDoc._id, {
           $set: { status: 'invalid', lastErrorMessage: errMsg }
         });
-        return this.generateContent(prompt, model, retryCount + 1);
+        return this.generateContent(prompt, model, retryCount + 1, startedAt);
       }
 
       throw new AppError(

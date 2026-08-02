@@ -100,6 +100,7 @@ const stockTransactionSchema = new mongoose.Schema({
 // Indexes - Optimized for scalability
 stockTransactionSchema.index({ shop: 1, branch: 1, product: 1, createdAt: -1 }); // Product stock history with branch
 stockTransactionSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Main listing with branch
+stockTransactionSchema.index({ shop: 1, product: 1, createdAt: -1 }); // Product history when branch unscoped
 
 // Virtual: Is stock in
 stockTransactionSchema.virtual('isStockIn').get(function() {

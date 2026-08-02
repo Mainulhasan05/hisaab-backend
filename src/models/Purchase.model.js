@@ -117,6 +117,8 @@ const purchaseSchema = new mongoose.Schema({
 purchaseSchema.index({ shop: 1, branch: 1, date: -1 }); // Date-based listing with branch
 purchaseSchema.index({ shop: 1, supplier: 1, date: -1 }); // Supplier purchase history
 purchaseSchema.index({ shop: 1, invoiceNo: 1 }, { unique: true, sparse: true }); // Invoice lookup
+purchaseSchema.index({ shop: 1, status: 1, date: -1 }); // Status-filtered listing
+purchaseSchema.index({ shop: 1, createdAt: -1 }); // Invoice-number day count, unbranched listing
 
 // Pre-save: calculate due and status with numeric boundary checks
 purchaseSchema.pre('save', function(next) {

@@ -56,10 +56,12 @@ class ReportService {
 
   // Get dashboard statistics
   async getDashboardStats(shopId, branchId = null) {
-    // Try cache first (include branchId in cache key)
+    // Try cache first (include branchId and shop cache version in the key —
+    // sale writes bump the version instead of deleting keys)
+    const version = await cacheService.getShopCacheVersion(shopId);
     const cacheKey = branchId
-      ? `${KEYS.DASHBOARD_STATS(shopId)}:branch:${branchId}`
-      : KEYS.DASHBOARD_STATS(shopId);
+      ? `${KEYS.DASHBOARD_STATS(shopId)}:branch:${branchId}:v${version}`
+      : `${KEYS.DASHBOARD_STATS(shopId)}:v${version}`;
     const cached = await cacheService.get(cacheKey);
     if (cached) return cached;
     const { startOfDay, endOfDay } = getBangladeshDayRange(getBangladeshTodayStr());
@@ -593,10 +595,13 @@ class ReportService {
     // Use Bangladesh today if no date provided
     const dateStr = date || getBangladeshTodayStr();
 
-    // Try cache first
-    const cacheKey = branchId
+    // Try cache first. Only today's summary changes as sales come in, so only
+    // today's key carries the shop cache version; past dates cache on TTL alone.
+    const isToday = dateStr === getBangladeshTodayStr();
+    const versionSuffix = isToday ? `:v${await cacheService.getShopCacheVersion(shopId)}` : '';
+    const cacheKey = (branchId
       ? `${KEYS.DAILY_SUMMARY(shopId, dateStr)}:branch:${branchId}`
-      : KEYS.DAILY_SUMMARY(shopId, dateStr);
+      : KEYS.DAILY_SUMMARY(shopId, dateStr)) + versionSuffix;
     const cached = await cacheService.get(cacheKey);
     if (cached) return cached;
 
@@ -910,10 +915,11 @@ class ReportService {
   async getProfitLoss(shopId, options = {}, branchId = null) {
     const { startDate, endDate } = options;
 
-    // Try cache first
-    const cacheKey = branchId
+    // Try cache first (versioned — invalidated by shop cache-version bumps)
+    const plVersion = await cacheService.getShopCacheVersion(shopId);
+    const cacheKey = (branchId
       ? `${KEYS.PROFIT_LOSS(shopId, startDate, endDate)}:branch:${branchId}`
-      : KEYS.PROFIT_LOSS(shopId, startDate, endDate);
+      : KEYS.PROFIT_LOSS(shopId, startDate, endDate)) + `:v${plVersion}`;
     const cached = await cacheService.get(cacheKey);
     if (cached) return cached;
 

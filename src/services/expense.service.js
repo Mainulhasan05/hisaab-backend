@@ -45,7 +45,8 @@ class ExpenseService {
     }
 
     const skip = (page - 1) * limit;
-    const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
+    const sortField = ['date', 'createdAt', 'amount'].includes(sortBy) ? sortBy : 'date';
+    const sort = { [sortField]: sortOrder === 'asc' ? 1 : -1 };
 
     const [expenses, total] = await Promise.all([
       Expense.find(query)

@@ -5,6 +5,7 @@ const BranchStock = require('../models/BranchStock.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const cacheService = require('./cache.service');
+const { invalidateBranchCache } = require('../utils/authCache.util');
 
 class BranchService {
   /**
@@ -54,7 +55,7 @@ class BranchService {
     });
 
     // Invalidate default branch cache
-    await cacheService.delete(`shop:${shopId}:default_branch`);
+    await invalidateBranchCache(shopId, branch._id);
 
     // Log audit
     await AuditLog.log({
@@ -100,7 +101,7 @@ class BranchService {
     await branch.save();
 
     // Invalidate default branch cache
-    await cacheService.delete(`shop:${shopId}:default_branch`);
+    await invalidateBranchCache(shopId, branch._id);
 
     // Log audit
     await AuditLog.log({
@@ -149,7 +150,7 @@ class BranchService {
     await branch.save();
 
     // Invalidate default branch cache
-    await cacheService.delete(`shop:${shopId}:default_branch`);
+    await invalidateBranchCache(shopId, branch._id);
 
     // Log audit
     await AuditLog.log({

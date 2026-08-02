@@ -53,7 +53,7 @@ const categorySchema = new mongoose.Schema({
 // Indexes
 categorySchema.index({ shop: 1, parent: 1 });
 categorySchema.index({ shop: 1, name: 1 }, { unique: true, sparse: true });
-categorySchema.index({ shop: 1, slug: 1 });
+categorySchema.index({ parent: 1, isActive: 1 }); // Subcategory populate (queries by parent without shop)
 categorySchema.index({ shop: 1, order: 1 });
 
 // Generate slug before saving

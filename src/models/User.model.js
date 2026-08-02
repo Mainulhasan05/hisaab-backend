@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { normalizePhone } = require('../utils/phone.util');
 
@@ -90,7 +90,7 @@ userSchema.pre('save', function(next) {
 userSchema.pre('save', async function(next) {
   if (!this.isModified('password')) return next();
 
-  const salt = await bcrypt.genSalt(12);
+  const salt = await bcrypt.genSalt(11);
   this.password = await bcrypt.hash(this.password, salt);
 
   // Update passwordChangedAt

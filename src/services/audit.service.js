@@ -46,7 +46,8 @@ class AuditService {
     }
 
     const skip = (page - 1) * limit;
-    const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
+    const sortField = ['createdAt', 'action'].includes(sortBy) ? sortBy : 'createdAt';
+    const sort = { [sortField]: sortOrder === 'asc' ? 1 : -1 };
 
     const [logs, total] = await Promise.all([
       AuditLog.find(query)

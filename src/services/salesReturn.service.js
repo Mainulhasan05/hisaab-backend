@@ -392,7 +392,8 @@ class SalesReturnService {
     }
 
     const skip = (page - 1) * limit;
-    const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
+    const sortField = ['createdAt', 'total', 'returnNo'].includes(sortBy) ? sortBy : 'createdAt';
+    const sort = { [sortField]: sortOrder === 'asc' ? 1 : -1 };
 
     const [returns, total] = await Promise.all([
       SalesReturn.find(query)

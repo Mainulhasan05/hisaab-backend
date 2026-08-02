@@ -7,6 +7,7 @@ const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const { normalizePhone } = require('../utils/phone.util');
 const { getBranchForCreate } = require('../utils/branchScope.util');
+const { invalidateUserAuthCache } = require('../utils/authCache.util');
 
 class StaffService {
   /**
@@ -154,6 +155,8 @@ class StaffService {
     }
 
     await staff.save();
+    // Role/branch/active changes must take effect before the auth cache TTL
+    await invalidateUserAuthCache(staff._id);
 
     // Log action
     await AuditLog.log({
@@ -179,6 +182,8 @@ class StaffService {
 
     staff.isActive = false;
     await staff.save();
+    // Deactivation must take effect before the auth cache TTL
+    await invalidateUserAuthCache(staff._id);
 
     // Log action
     await AuditLog.log({

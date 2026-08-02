@@ -19,7 +19,7 @@ const imageUpload = multer({
   fileFilter: imageFileFilter,
   limits: {
     fileSize: imageService.getMaxSize(),
-    files: Number(process.env.IMAGE_UPLOAD_MAX_FILES) || 10,
+    files: Number(process.env.IMAGE_UPLOAD_MAX_FILES) || 5,
   },
 });
 

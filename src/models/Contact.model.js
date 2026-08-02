@@ -57,8 +57,6 @@ const contactSchema = new mongoose.Schema({
 // Indexes
 contactSchema.index({ status: 1 });
 contactSchema.index({ createdAt: -1 });
-contactSchema.index({ email: 1 });
-contactSchema.index({ phone: 1 });
 contactSchema.index({ ipAddress: 1, createdAt: -1 }); // For rate limiting queries
 
 // Static method to get counts by status

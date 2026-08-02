@@ -8,7 +8,7 @@
 
 require('dotenv').config();
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcrypt');
 
 // ─── Models ──────────────────────────────────────────────────
 const User = require('../src/models/User.model');

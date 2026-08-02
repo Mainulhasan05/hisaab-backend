@@ -45,12 +45,15 @@ function getRedisConfig() {
   const username = process.env.REDIS_USERNAME;
   const password = process.env.REDIS_PASSWORD;
 
+  // Reconnect indefinitely with capped backoff. Returning false here would
+  // destroy the client permanently — a >20s Redis blip would silently downgrade
+  // the process to per-process memory cache (breaking idempotency locks and
+  // token revocation across processes) until someone restarts Node.
   const reconnectStrategy = (retries) => {
-    if (retries > 10) {
-      logger.warn('Redis max reconnection attempts reached, falling back to memory');
-      return false;
+    if (retries > 5 && retries % 10 === 0) {
+      logger.warn(`Redis still reconnecting (attempt ${retries}); serving from memory cache meanwhile`);
     }
-    return Math.min(retries * 100, 3000);
+    return Math.min(retries * 200, 10000);
   };
 
   // Priority 1: Unix Socket (for shared hosting)
@@ -181,8 +184,26 @@ function cleanExpiredMemoryCache() {
   }
 }
 
-// Clean memory cache periodically (every 5 minutes)
-setInterval(cleanExpiredMemoryCache, 5 * 60 * 1000);
+// Clean memory cache periodically (every 5 minutes).
+// unref() so this timer never keeps the process alive after server.close().
+const memoryCacheJanitor = setInterval(cleanExpiredMemoryCache, 5 * 60 * 1000);
+memoryCacheJanitor.unref();
+
+// Hard cap on the fallback cache: it must never grow unbounded (it holds
+// idempotency bodies, auth entries, presence sets while Redis is down).
+// Evicts oldest-inserted entries first — Map preserves insertion order.
+const MEMORY_CACHE_MAX_ENTRIES = parseInt(process.env.MEMORY_CACHE_MAX_ENTRIES, 10) || 20000;
+function enforceMemoryCacheCap() {
+  if (memoryCache.size <= MEMORY_CACHE_MAX_ENTRIES) return;
+  const excess = memoryCache.size - MEMORY_CACHE_MAX_ENTRIES;
+  let removed = 0;
+  for (const key of memoryCache.keys()) {
+    memoryCache.delete(key);
+    memoryCacheTTL.delete(key);
+    if (++removed >= excess) break;
+  }
+  logger.warn(`Memory cache cap reached — evicted ${removed} oldest entries`);
+}
 
 /**
  * Get Redis client status
@@ -243,5 +264,6 @@ module.exports = {
   getCacheInfo,
   closeConnection,
   memoryCache,
-  memoryCacheTTL
+  memoryCacheTTL,
+  enforceMemoryCacheCap
 };

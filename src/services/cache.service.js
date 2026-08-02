@@ -4,8 +4,17 @@
  * Designed for high-scale SaaS with millions of users
  */
 
-const { isConnected, getClient, memoryCache, memoryCacheTTL } = require('../config/redis.config');
+const { isConnected, getClient, memoryCache, memoryCacheTTL, enforceMemoryCacheCap } = require('../config/redis.config');
 const logger = require('../utils/logger.util');
+
+// Every memory-fallback write MUST carry a TTL and respect the size cap —
+// TTL-less entries were invisible to the janitor and leaked until restart.
+const MEMORY_FALLBACK_DEFAULT_TTL_SECONDS = 24 * 60 * 60;
+function memWrite(key, stringValue, ttlSeconds = MEMORY_FALLBACK_DEFAULT_TTL_SECONDS) {
+  memoryCache.set(key, stringValue);
+  memoryCacheTTL.set(key, Date.now() + (ttlSeconds * 1000));
+  enforceMemoryCacheCap();
+}
 
 class CacheService {
   /**
@@ -28,8 +37,7 @@ class CacheService {
     }
 
     // Fallback to in-memory
-    memoryCache.set(key, stringValue);
-    memoryCacheTTL.set(key, Date.now() + (ttlSeconds * 1000));
+    memWrite(key, stringValue, ttlSeconds);
     return true;
   }
 
@@ -83,7 +91,11 @@ class CacheService {
 
   /**
    * Delete keys matching a pattern
-   * Uses SCAN instead of KEYS to avoid blocking Redis
+   * Uses SCAN instead of KEYS to avoid blocking Redis.
+   * WARNING: SCAN MATCH still iterates the ENTIRE keyspace — cost is O(total keys),
+   * not O(matches). Do NOT call this on hot paths (checkout, auth). Use versioned
+   * keys (bumpShopCacheVersion) or explicit key deletes instead. This remains only
+   * for admin tooling and rare administrative invalidations.
    * @param {string} pattern - Pattern to match (e.g., 'user:*')
    */
   async deletePattern(pattern) {
@@ -92,7 +104,7 @@ class CacheService {
         const client = getClient();
         // Use SCAN cursor to find matching keys without blocking Redis
         const keysToDelete = [];
-        for await (const key of client.scanIterator({ MATCH: pattern, COUNT: 100 })) {
+        for await (const key of client.scanIterator({ MATCH: pattern, COUNT: 1000 })) {
           keysToDelete.push(key);
         }
         if (keysToDelete.length > 0) {
@@ -104,13 +116,72 @@ class CacheService {
     }
 
     // For memory cache, iterate and delete matching keys
-    const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$');
+    const regex = new RegExp('^' + pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
     for (const key of memoryCache.keys()) {
       if (regex.test(key)) {
         memoryCache.delete(key);
         memoryCacheTTL.delete(key);
       }
     }
+    return true;
+  }
+
+  /**
+   * Set a value only if the key does not already exist (atomic).
+   * @param {string} key - Cache key
+   * @param {any} value - Value to store
+   * @param {number} ttlSeconds - Time to live in seconds
+   * @returns {boolean} true if the key was set, false if it already existed
+   */
+  async setNX(key, value, ttlSeconds) {
+    if (isConnected()) {
+      try {
+        const client = getClient();
+        const result = await client.set(key, JSON.stringify(value), { NX: true, EX: ttlSeconds });
+        return result === 'OK';
+      } catch (error) {
+        logger.error('Redis SETNX error, falling back to memory:', error.message);
+      }
+    }
+
+    // Memory fallback
+    const expiry = memoryCacheTTL.get(key);
+    if (memoryCache.has(key) && (!expiry || expiry > Date.now())) {
+      return false;
+    }
+    memWrite(key, JSON.stringify(value), ttlSeconds);
+    return true;
+  }
+
+  /**
+   * Current cache version for a shop. Readers embed this in their cache keys
+   * (e.g. `shop:{id}:dashboard:v{ver}`) so invalidation is a single O(1) INCR
+   * instead of a keyspace SCAN; superseded entries simply age out via TTL.
+   * @param {string} shopId
+   * @returns {number} current version
+   */
+  async getShopCacheVersion(shopId) {
+    const key = `shop:${shopId}:cachev`;
+    let version = await this.get(key);
+    if (version == null) {
+      version = await this.incr(key);
+    }
+    return version;
+  }
+
+  /**
+   * Invalidate all versioned cache entries for a shop by bumping its version.
+   * Debounced: bumps at most once per `debounceSeconds` so report caches survive
+   * bursts of writes (dashboards tolerate ≤30s staleness).
+   * @param {string} shopId
+   * @param {number} debounceSeconds - minimum interval between bumps (default 30)
+   * @returns {boolean} true if the version was bumped, false if debounced
+   */
+  async bumpShopCacheVersion(shopId, debounceSeconds = 30) {
+    const guardKey = `shop:${shopId}:cachev:guard`;
+    const acquired = await this.setNX(guardKey, 1, debounceSeconds);
+    if (!acquired) return false;
+    await this.incr(`shop:${shopId}:cachev`);
     return true;
   }
 
@@ -161,10 +232,8 @@ class CacheService {
     }
 
     // Fallback to in-memory
-    const expiryTime = Date.now() + (ttlSeconds * 1000);
     for (const [key, value] of entries) {
-      memoryCache.set(key, JSON.stringify(value));
-      memoryCacheTTL.set(key, expiryTime);
+      memWrite(key, JSON.stringify(value), ttlSeconds);
     }
     return true;
   }
@@ -215,7 +284,10 @@ class CacheService {
     // Fallback to memory
     const current = parseInt(memoryCache.get(key) || '0', 10);
     const newValue = current + amount;
+    const existingExpiry = memoryCacheTTL.get(key);
     memoryCache.set(key, String(newValue));
+    memoryCacheTTL.set(key, existingExpiry || (Date.now() + MEMORY_FALLBACK_DEFAULT_TTL_SECONDS * 1000));
+    enforceMemoryCacheCap();
     return newValue;
   }
 
@@ -241,7 +313,7 @@ class CacheService {
     const existing = memoryCache.get(setKey);
     const set = existing ? JSON.parse(existing) : {};
     set[member] = score;
-    memoryCache.set(setKey, JSON.stringify(set));
+    memWrite(setKey, JSON.stringify(set));
     return true;
   }
 
@@ -318,7 +390,7 @@ class CacheService {
     const set = existing ? JSON.parse(existing) : [];
     if (!set.includes(member)) {
       set.push(member);
-      memoryCache.set(setKey, JSON.stringify(set));
+      memWrite(setKey, JSON.stringify(set));
     }
     return true;
   }

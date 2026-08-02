@@ -74,6 +74,7 @@ paymentSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Main listing with
 paymentSchema.index({ shop: 1, customer: 1, createdAt: -1 }); // Customer payment history
 paymentSchema.index({ shop: 1, sale: 1 }); // Sale payments lookup
 paymentSchema.index({ shop: 1, purchase: 1 }, { sparse: true }); // Purchase payments
+paymentSchema.index({ type: 1, createdAt: -1 }); // Admin subscription-payment queries (no shop predicate)
 
 // Virtual: Is refund
 paymentSchema.virtual('isRefund').get(function() {

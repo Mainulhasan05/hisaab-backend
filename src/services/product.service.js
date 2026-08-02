@@ -7,6 +7,14 @@ const { AppError } = require('../middleware/error.middleware');
 const mongoose = require('mongoose');
 const { getBranchForCreate } = require('../utils/branchScope.util');
 const logger = require('../utils/logger.util');
+const cacheService = require('./cache.service');
+
+// Escape user input before embedding it in a $regex (prevents regex injection/ReDoS)
+const escapeRegex = (str) => String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Client-controllable sort fields must be whitelisted — arbitrary fields force
+// unindexed in-memory sorts that hard-fail at 32MB on large collections
+const PRODUCT_SORT_FIELDS = new Set(['createdAt', 'name', 'code', 'stock', 'sellingPrice', 'buyingPrice', 'updatedAt']);
 
 class ProductService {
   // Get all products with filtering, searching, pagination
@@ -28,12 +36,15 @@ class ProductService {
 
     const query = { shop: shopId };
 
-    // Search by name or code
-    const searchOr = search ? [
-      { name: { $regex: search, $options: 'i' } },
-      { code: { $regex: search, $options: 'i' } },
-      { 'variants.sku': { $regex: search, $options: 'i' } },
-      { 'variants.barcode': { $regex: search, $options: 'i' } },
+    // Search by name or code. Input is regex-escaped; each field carries a
+    // {shop, field} compound index so the $or branches run as shop-bounded
+    // index scans instead of full document scans.
+    const searchRegex = search ? escapeRegex(search.trim()) : null;
+    const searchOr = searchRegex ? [
+      { name: { $regex: searchRegex, $options: 'i' } },
+      { code: { $regex: searchRegex, $options: 'i' } },
+      { 'variants.sku': { $regex: searchRegex, $options: 'i' } },
+      { 'variants.barcode': { $regex: searchRegex, $options: 'i' } },
     ] : null;
 
     // Filter by category
@@ -108,12 +119,25 @@ class ProductService {
     }
 
     const skip = (pageNum - 1) * limitNum;
-    const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
+    const sortField = PRODUCT_SORT_FIELDS.has(sortBy) ? sortBy : 'createdAt';
+    const sort = { [sortField]: sortOrder === 'asc' ? 1 : -1 };
 
-    // Calculate total stock and stock values
+    // Calculate total stock and stock values.
+    // These are shop-wide (independent of search/pagination), so: skip entirely
+    // for search requests (fired per keystroke from the POS picker) and cache
+    // for 60s otherwise — previously this aggregate ran on every request.
     let inventoryStats = { totalStock: 0, totalBuyingValue: 0, totalSellingValue: 0 };
+    const wantStats = !search;
+    const statsCacheKey = `shop:${shopId}:invstats:${(branchId && req?.shop?.multiBranchEnabled) ? branchId : 'all'}`;
+    let statsCached = null;
+    if (wantStats) {
+      statsCached = await cacheService.get(statsCacheKey);
+      if (statsCached) inventoryStats = statsCached;
+    }
     try {
-      if (branchId && req?.shop?.multiBranchEnabled) {
+      if (!wantStats || statsCached) {
+        // skip aggregation
+      } else if (branchId && req?.shop?.multiBranchEnabled) {
         const statsResult = await BranchStock.aggregate([
           {
             $match: {
@@ -168,6 +192,9 @@ class ProductService {
             totalSellingValue: statsResult[0].totalSellingValue || 0,
           };
         }
+      }
+      if (wantStats && !statsCached) {
+        cacheService.set(statsCacheKey, inventoryStats, 60).catch(() => {});
       }
     } catch (err) {
       logger.warn('Failed to calculate inventory stats:', err.message);

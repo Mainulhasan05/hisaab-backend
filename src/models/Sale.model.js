@@ -208,6 +208,9 @@ saleSchema.index({ shop: 1, customer: 1, createdAt: -1 }); // Customer purchase 
 saleSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Main listing with branch filter
 saleSchema.index({ shop: 1, branch: 1, status: 1, createdAt: -1 }); // Due/pending sales with branch
 saleSchema.index({ shop: 1, isOnline: 1, createdAt: -1 }); // Online sales filter index
+saleSchema.index({ shop: 1, createdAt: -1 }); // Single-branch listing, recent sales, invoice-number day count
+saleSchema.index({ shop: 1, due: 1 }); // Dues listing/sort
+saleSchema.index({ shop: 1, total: -1 }); // Sort by amount (whitelisted sort field)
 
 // Calculate totals before saving
 saleSchema.pre('save', function(next) {

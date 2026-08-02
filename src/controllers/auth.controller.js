@@ -3,6 +3,7 @@ const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 const User = require('../models/User.model');
 const cacheService = require('../services/cache.service');
+const { invalidateShopAuthCache } = require('../utils/authCache.util');
 const {
   setUserTokenCookie,
   setAdminTokenCookie,
@@ -366,7 +367,7 @@ const updateShopSettings = asyncHandler(async (req, res) => {
     { new: true }
   );
 
-  await cacheService.deletePattern('auth:user:*');
+  await invalidateShopAuthCache(req.shop._id);
 
   return ApiResponse.success(res, {
     data: { shop },

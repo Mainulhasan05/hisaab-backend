@@ -19,11 +19,12 @@ class CustomerService {
 
     const query = { shop: shopId, isActive: true };
 
-    // Search by name or phone
+    // Search by name or phone (regex-escaped — raw input is a ReDoS vector)
     if (search) {
+      const escaped = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { phone: { $regex: search, $options: 'i' } },
+        { name: { $regex: escaped, $options: 'i' } },
+        { phone: { $regex: escaped, $options: 'i' } },
       ];
     }
 
@@ -33,7 +34,8 @@ class CustomerService {
     }
 
     const skip = (page - 1) * limit;
-    const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
+    const sortField = ['createdAt', 'name', 'totalDue', 'totalPurchases', 'lastPurchase'].includes(sortBy) ? sortBy : 'createdAt';
+    const sort = { [sortField]: sortOrder === 'asc' ? 1 : -1 };
 
     const [customers, total] = await Promise.all([
       Customer.find(query)

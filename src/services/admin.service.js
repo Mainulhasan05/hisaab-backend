@@ -16,10 +16,11 @@ const Branch = require('../models/Branch.model');
 const BranchStock = require('../models/BranchStock.model');
 const mongoose = require('mongoose');
 const { AUDIT_ACTIONS } = require('../config/constants');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { AppError } = require('../middleware/error.middleware');
 const cacheService = require('./cache.service');
+const { invalidateShopAuthCache } = require('../utils/authCache.util');
 const { KEYS, getTTL } = require('../config/cacheKeys');
 
 class AdminService {
@@ -441,7 +442,8 @@ class AdminService {
     }
 
     const skip = (page - 1) * limit;
-    const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
+    const sortField = ['createdAt', 'name', 'subscription.expiresAt'].includes(sortBy) ? sortBy : 'createdAt';
+    const sort = { [sortField]: sortOrder === 'asc' ? 1 : -1 };
 
     const [shops, total] = await Promise.all([
       Shop.find(query)
@@ -580,7 +582,7 @@ class AdminService {
     // Only suspended shops should be deactivated — trial/active/expired shops remain accessible
     shop.isActive = status !== 'suspended';
     await shop.save();
-    await cacheService.deletePattern('auth:user:*');
+    await invalidateShopAuthCache(shop._id);
 
     // Create audit log
     await AuditLog.create({
@@ -617,7 +619,7 @@ class AdminService {
     shop.subscription.status = 'active';
     shop.isActive = true;
     await shop.save();
-    await cacheService.deletePattern('auth:user:*');
+    await invalidateShopAuthCache(shop._id);
 
     // Create audit log
     await AuditLog.create({
@@ -705,7 +707,7 @@ class AdminService {
     shop.subscription.status = 'active';
     shop.isActive = true;
     await shop.save();
-    await cacheService.deletePattern('auth:user:*');
+    await invalidateShopAuthCache(shop._id);
 
     // Create audit log
     await AuditLog.create({
@@ -1054,7 +1056,7 @@ class AdminService {
     }
 
     await shop.save();
-    await cacheService.deletePattern('auth:user:*');
+    await invalidateShopAuthCache(shop._id);
 
     // Create audit log
     await AuditLog.create({
@@ -1260,7 +1262,7 @@ class AdminService {
     }
 
     await shop.save();
-    await cacheService.deletePattern('auth:user:*');
+    await invalidateShopAuthCache(shop._id);
 
     // Create audit log
     await AuditLog.create({
@@ -1294,7 +1296,7 @@ class AdminService {
     }
 
     // Hash password
-    const hashedPassword = await bcrypt.hash(password, 12);
+    const hashedPassword = await bcrypt.hash(password, 11);
 
     const admin = await Admin.create({
       phone,
@@ -1417,7 +1419,7 @@ class AdminService {
     });
 
     // Invalidate cache
-    await cacheService.deletePattern(`auth:user:*`);
+    await invalidateShopAuthCache(shopId);
 
     return {
       shop: shop.toObject(),
@@ -1457,7 +1459,7 @@ class AdminService {
     });
 
     // Invalidate cache
-    await cacheService.deletePattern(`auth:user:*`);
+    await invalidateShopAuthCache(shopId);
 
     return shop.toObject();
   }

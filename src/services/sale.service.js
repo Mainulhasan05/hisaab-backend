@@ -7,7 +7,6 @@ const Shop = require('../models/Shop.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const cacheService = require('./cache.service');
-const { KEYS } = require('../config/cacheKeys');
 const { getBranchForCreate, getBranchCode } = require('../utils/branchScope.util');
 const BranchStock = require('../models/BranchStock.model');
 const mongoose = require('mongoose');
@@ -34,19 +33,13 @@ function netSaleAmountExpr() {
 }
 
 class SaleService {
-  // Invalidate related caches when sales data changes
+  // Invalidate related caches when sales data changes.
+  // Bumps the shop's cache version (O(1), debounced to once per 30s) instead of
+  // SCAN-deleting patterns — report readers embed the version in their keys and
+  // superseded entries age out via TTL. Admin stats are left to their own short
+  // TTL (60s) rather than being deleted on every sale platform-wide.
   async invalidateCache(shopId) {
-    const { dateStr: today } = getBangladeshTodayRange();
-    await Promise.all([
-      cacheService.deletePattern(`${KEYS.DASHBOARD_STATS(shopId)}*`),
-      cacheService.deletePattern(`${KEYS.DAILY_SUMMARY(shopId, today)}*`),
-      cacheService.deletePattern(KEYS.PROFIT_LOSS(shopId, '*', '*')),
-      cacheService.deletePattern(`${KEYS.PROFIT_LOSS(shopId, '*', '*')}:branch:*`),
-      cacheService.deletePattern(KEYS.SALES_REPORT(shopId, '*', '*', '*')),
-      // Admin caches too since they aggregate all shops
-      cacheService.delete(KEYS.ADMIN_STATS()),
-      cacheService.delete(KEYS.ADMIN_TOP_PERFORMERS()),
-    ]);
+    await cacheService.bumpShopCacheVersion(shopId);
   }
 
   // Generate invoice number (with optional branch code)
@@ -87,10 +80,12 @@ class SaleService {
     }
 
     if (search) {
+      // Escape regex metacharacters — raw user input in $regex is a ReDoS vector
+      const escaped = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       query.$or = [
-        { invoiceNo: { $regex: search, $options: 'i' } },
-        { customerName: { $regex: search, $options: 'i' } },
-        { customerPhone: { $regex: search, $options: 'i' } },
+        { invoiceNo: { $regex: escaped, $options: 'i' } },
+        { customerName: { $regex: escaped, $options: 'i' } },
+        { customerPhone: { $regex: escaped, $options: 'i' } },
       ];
     }
 
@@ -133,11 +128,11 @@ class SaleService {
 
     const skip = (page - 1) * limit;
 
+    // Whitelisted sort fields only — arbitrary client-supplied fields force
+    // unindexed in-memory sorts that abort at 32MB on large shops
     let sortField = 'createdAt';
     if (sortBy === 'due' || sortBy === 'dueAmount') sortField = 'due';
     else if (sortBy === 'total' || sortBy === 'totalAmount' || sortBy === 'amount') sortField = 'total';
-    else if (sortBy === 'createdAt' || sortBy === 'date') sortField = 'createdAt';
-    else if (sortBy) sortField = sortBy;
 
     const sort = { [sortField]: sortOrder === 'asc' || sortOrder === '1' ? 1 : -1 };
 

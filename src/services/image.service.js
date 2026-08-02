@@ -7,7 +7,7 @@ const { AppError } = require('../middleware/error.middleware');
 
 const IMGBB_UPLOAD_URL = 'https://api.imgbb.com/1/upload';
 const DEFAULT_TIMEOUT_MS = 30000;
-const DEFAULT_MAX_SIZE = 32 * 1024 * 1024;
+const DEFAULT_MAX_SIZE = 5 * 1024 * 1024;
 const DEFAULT_ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'];
 
 class ImageService {

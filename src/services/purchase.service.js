@@ -50,7 +50,8 @@ class PurchaseService {
     }
 
     const skip = (page - 1) * limit;
-    const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
+    const sortField = ['date', 'createdAt', 'total', 'invoiceNo'].includes(sortBy) ? sortBy : 'date';
+    const sort = { [sortField]: sortOrder === 'asc' ? 1 : -1 };
 
     const [purchases, total] = await Promise.all([
       Purchase.find(query)

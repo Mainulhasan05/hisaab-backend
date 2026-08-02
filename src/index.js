@@ -17,8 +17,10 @@ process.on('uncaughtException', (err) => {
   process.exit(1);
 });
 
-// Connect to Database and initialize services
-connectDB().then(async () => {
+const PORT = process.env.PORT || 5000;
+let server = null;
+
+async function runSeeders() {
   try {
     const ExpenseCategory = require('./models/ExpenseCategory.model');
     await ExpenseCategory.seedDefaults();
@@ -55,25 +57,25 @@ connectDB().then(async () => {
   } catch (err) {
     logger.warn('Shop category seeding skipped:', err.message);
   }
-});
+}
 
+async function start() {
+  // Redis init runs in parallel with Mongo — it has an in-memory fallback and
+  // must not delay startup, but the HTTP listener waits for Mongo: accepting
+  // traffic before the DB is up just buffers requests into 10s timeouts.
+  const redisInit = initializeRedis()
+    .then((connected) => {
+      logger.info(connected ? 'Redis cache initialized' : 'Using in-memory cache (Redis not available)');
+    })
+    .catch((err) => {
+      logger.warn('Redis initialization error, using in-memory cache:', err.message);
+    });
 
-// Initialize Redis (with in-memory fallback)
-initializeRedis().then((connected) => {
-  if (connected) {
-    logger.info('Redis cache initialized');
-  } else {
-    logger.info('Using in-memory cache (Redis not available)');
-  }
-}).catch((err) => {
-  logger.warn('Redis initialization error, using in-memory cache:', err.message);
-});
+  await connectDB();
+  await redisInit;
 
-// Start Server
-const PORT = process.env.PORT || 5000;
-
-const server = app.listen(PORT, () => {
-  logger.info(`
+  server = app.listen(PORT, () => {
+    logger.info(`
     ╔═══════════════════════════════════════════════════════╗
     ║                                                       ║
     ║   হিসাব - Hisaab Backend Server                       ║
@@ -83,23 +85,64 @@ const server = app.listen(PORT, () => {
     ║   URL: http://localhost:${PORT}                          ║
     ║                                                       ║
     ╚═══════════════════════════════════════════════════════╝
-  `);
+    `);
+  });
+
+  // Must exceed any upstream proxy's keepalive (nginx default 75s is on the
+  // proxy side; what matters is Node's timeout being LONGER than the proxy's
+  // idle reuse window to avoid sporadic 502s from closed-connection reuse)
+  server.keepAliveTimeout = 65000;
+  server.headersTimeout = 66000;
+
+  // Seeders run after the server is accepting traffic — they're idempotent
+  // and must not delay startup
+  runSeeders().catch((err) => logger.warn('Seeding error:', err.message));
+}
+
+start().catch((err) => {
+  logger.error(`Startup failed: ${err.message}`);
+  process.exit(1);
 });
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (err) => {
   logger.error('UNHANDLED REJECTION! 💥 Shutting down...');
   logger.error(err.name, err.message);
-  server.close(() => {
-    process.exit(1);
-  });
+  shutdown(1);
 });
 
-// Handle SIGTERM
-process.on('SIGTERM', async () => {
+let shuttingDown = false;
+async function shutdown(code = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  // Force-exit fallback: never hang longer than 10s on shutdown
+  const forceExit = setTimeout(() => {
+    logger.error('Forced shutdown after 10s timeout');
+    process.exit(code || 1);
+  }, 10000);
+  forceExit.unref();
+
+  try {
+    if (server) {
+      await new Promise((resolve) => server.close(resolve));
+      logger.info('HTTP server closed');
+    }
+    await closeRedis();
+    const mongoose = require('mongoose');
+    await mongoose.connection.close();
+    logger.info('Connections closed. Bye 👋');
+  } catch (err) {
+    logger.error(`Error during shutdown: ${err.message}`);
+  }
+  process.exit(code);
+}
+
+process.on('SIGTERM', () => {
   logger.info('👋 SIGTERM RECEIVED. Shutting down gracefully');
-  await closeRedis();
-  server.close(() => {
-    logger.info('💥 Process terminated!');
-  });
+  shutdown(0);
+});
+process.on('SIGINT', () => {
+  logger.info('👋 SIGINT RECEIVED. Shutting down gracefully');
+  shutdown(0);
 });

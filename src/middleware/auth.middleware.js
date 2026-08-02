@@ -8,8 +8,12 @@ const asyncHandler = require('../utils/asyncHandler.util');
 const { COOKIE_NAMES } = require('../utils/cookie.util');
 const cacheService = require('../services/cache.service');
 
-// Auth cache TTL: 10 seconds — short enough to reflect settings/module changes quickly
-const AUTH_CACHE_TTL = 10;
+// Auth cache TTL: 5 minutes. Mutations that must take effect immediately
+// (shop status/subscription/settings changes, staff deactivation) explicitly
+// invalidate the affected keys via utils/authCache.util.js.
+const AUTH_CACHE_TTL = 300;
+// Branch documents change very rarely; branch.service invalidates these keys on change.
+const BRANCH_CACHE_TTL = 600;
 
 /**
  * Extract token from cookies/headers based on route type
@@ -40,8 +44,42 @@ function extractToken(req) {
 }
 
 /**
- * Fetch user with shop, using a short-lived cache to avoid DB hit on every request.
- * Cache key is based on user ID; invalidated naturally by 30s TTL.
+ * Fetch a branch after validating it belongs to the shop, with caching —
+ * previously an uncached Mongo query on every request for multi-branch shops.
+ * Only positive results are cached; invalidated by branch.service on change.
+ */
+async function getCachedBranchOwnership(branchId, shopId) {
+  const cacheKey = `shop:${shopId}:branch:${branchId}:own`;
+  const cached = await cacheService.get(cacheKey);
+  if (cached) return Branch.hydrate(cached);
+
+  const branch = await Branch.validateBranchOwnership(branchId, shopId);
+  if (branch) {
+    await cacheService.set(cacheKey, branch.toObject(), BRANCH_CACHE_TTL);
+  }
+  return branch;
+}
+
+/**
+ * First active branch of a shop (used as the default write target for owners
+ * in "All Branches" view), cached. branch.service invalidates this key.
+ */
+async function getCachedDefaultBranch(shopId) {
+  const cacheKey = `shop:${shopId}:default_branch`;
+  const cached = await cacheService.get(cacheKey);
+  if (cached) return Branch.hydrate(cached);
+
+  const branch = await Branch.findOne({ shop: shopId, isActive: true }).sort({ createdAt: 1 });
+  if (branch) {
+    await cacheService.set(cacheKey, branch.toObject(), BRANCH_CACHE_TTL);
+  }
+  return branch;
+}
+
+/**
+ * Fetch user with shop, using a cache to avoid DB hits on every request.
+ * Cache key is based on user ID; explicitly invalidated on relevant mutations,
+ * with the TTL as a backstop.
  */
 async function getCachedUser(userId) {
   const cacheKey = `auth:user:${userId}`;
@@ -208,9 +246,17 @@ const protect = asyncHandler(async (req, res, next) => {
         user.shop.subscription.expiresAt &&
         user.shop.subscription.expiresAt < new Date()
       ) {
-        Shop.findByIdAndUpdate(user.shop._id, {
-          'subscription.status': 'expired',
-        }).catch(() => {}); // fire-and-forget, don't block the response
+        // SET NX marker so this write fires once per 5 min, not on every
+        // request from every terminal of the expired shop
+        cacheService.setNX(`shop:${user.shop._id}:expmarked`, 1, 300)
+          .then((acquired) => {
+            if (acquired) {
+              return Shop.findByIdAndUpdate(user.shop._id, {
+                'subscription.status': 'expired',
+              });
+            }
+          })
+          .catch(() => {}); // fire-and-forget, don't block the response
       }
 
       // Read-only grace mode: GET requests are allowed so users can still view their data
@@ -247,24 +293,24 @@ const protect = asyncHandler(async (req, res, next) => {
       if (decoded.isOwner) {
         const activeBranchId = req.headers['x-active-branch'] || req.cookies?.activeBranch;
         if (activeBranchId && activeBranchId !== 'all') {
-          const branch = await Branch.validateBranchOwnership(activeBranchId, user.shop._id);
+          const branch = await getCachedBranchOwnership(activeBranchId, user.shop._id);
           if (branch) {
             req.branch = branch;
             req.branchId = branch._id;
           }
         }
-        
+
         // If owner is in "All Branches" view (or activeBranchId is not set)
         // AND it is a write request, automatically default req.branchId to the first active branch.
         if (!req.branchId && req.method !== 'GET') {
-          const defaultBranch = await Branch.findOne({ shop: user.shop._id, isActive: true }).sort({ createdAt: 1 });
+          const defaultBranch = await getCachedDefaultBranch(user.shop._id);
           if (defaultBranch) {
             req.branch = defaultBranch;
             req.branchId = defaultBranch._id;
           }
         }
       } else if (decoded.branch) {
-        const branch = await Branch.validateBranchOwnership(decoded.branch, user.shop._id);
+        const branch = await getCachedBranchOwnership(decoded.branch, user.shop._id);
         if (!branch) {
           return ApiResponse.forbidden(res, {
             message: 'Your assigned branch is inactive or invalid',
@@ -399,7 +445,7 @@ const softProtect = asyncHandler(async (req, res, next) => {
           if (decoded.isOwner) {
             const activeBranchId = req.headers['x-active-branch'] || req.cookies?.activeBranch;
             if (activeBranchId && activeBranchId !== 'all') {
-              const branch = await Branch.validateBranchOwnership(activeBranchId, user.shop._id);
+              const branch = await getCachedBranchOwnership(activeBranchId, user.shop._id);
               if (branch) {
                 req.branch = branch;
                 req.branchId = branch._id;
@@ -408,7 +454,7 @@ const softProtect = asyncHandler(async (req, res, next) => {
               // They just fall back to all branches view (branch = null).
             }
           } else if (decoded.branch) {
-            const branch = await Branch.validateBranchOwnership(decoded.branch, user.shop._id);
+            const branch = await getCachedBranchOwnership(decoded.branch, user.shop._id);
             if (branch) {
               req.branch = branch;
               req.branchId = branch._id;

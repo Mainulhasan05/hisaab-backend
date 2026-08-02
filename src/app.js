@@ -18,7 +18,22 @@ const app = express();
 
 // Trust proxy (for rate limiting behind reverse proxy)
 app.set('trust proxy', 1);
-// testing deployment comment
+
+// Health Check Endpoint — registered before the middleware stack so load-balancer
+// probes stay cheap and don't pollute logs or rate-limit buckets
+app.get('/health', (req, res) => {
+  const mongoose = require('mongoose');
+  const cacheInfo = getCacheInfo();
+  const dbReady = mongoose.connection.readyState === 1;
+  res.status(dbReady ? 200 : 503).json({
+    success: dbReady,
+    message: dbReady ? 'Server is healthy' : 'Database not connected',
+    messageBn: dbReady ? 'সার্ভার সচল আছে' : 'ডাটাবেস সংযোগ নেই',
+    timestamp: new Date().toISOString(),
+    db: { readyState: mongoose.connection.readyState },
+    cache: cacheInfo
+  });
+});
 
 // Security Middleware
 app.use(helmet());
@@ -45,10 +60,23 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
-// Response Compression (gzip/deflate) — reduces transfer size by 60-80%
-app.use(compression());
-// Body Parsing
-const bodyLimit = process.env.REQUEST_BODY_LIMIT || '10mb';
+// Rate Limiting — BEFORE body parsing so rejected/flooding requests never pay
+// for a multi-MB JSON.parse + sanitize walk (previously the limiter ran last)
+app.use('/api', apiLimiter);
+
+// Response Compression (gzip/deflate) — reduces transfer size by 60-80%.
+// Level 4 gives ~90% of the size reduction of the default (6) at a fraction of the CPU.
+app.use(compression({ level: 4, threshold: 2048 }));
+
+// Body Parsing. Bulk-import endpoints get a larger limit; everything else is
+// capped at 1 MB — a 10 MB global limit meant ~50-100ms of blocked event loop
+// per oversized payload, available to any client.
+const bulkBodyLimit = process.env.REQUEST_BODY_LIMIT_BULK || process.env.REQUEST_BODY_LIMIT || '10mb';
+app.use(
+  ['/api/products/bulk-import', '/api/products/bulk-stock', '/api/customers/bulk-import'],
+  express.json({ limit: bulkBodyLimit })
+);
+const bodyLimit = process.env.REQUEST_BODY_LIMIT_DEFAULT || '1mb';
 app.use(express.json({ limit: bodyLimit }));
 app.use(express.urlencoded({ extended: true, limit: bodyLimit }));
 
@@ -70,21 +98,6 @@ if (process.env.NODE_ENV === 'development') {
 } else {
   app.use(morgan('combined', { stream: logger.stream }));
 }
-
-// Rate Limiting — general API limiter for all endpoints
-app.use('/api', apiLimiter);
-
-// Health Check Endpoint
-app.get('/health', (req, res) => {
-  const cacheInfo = getCacheInfo();
-  res.status(200).json({
-    success: true,
-    message: 'Server is healthy',
-    messageBn: 'সার্ভার সচল আছে',
-    timestamp: new Date().toISOString(),
-    cache: cacheInfo
-  });
-});
 
 // API Routes
 app.use('/api', require('./routes'));

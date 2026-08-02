@@ -181,7 +181,7 @@ const productSchema = new mongoose.Schema({
 // Indexes - Optimized for scalability
 // Essential indexes only - removed redundant and rarely-used indexes
 productSchema.index({ shop: 1, code: 1 }, { unique: true }); // Product code lookup
-productSchema.index({ shop: 1, barcode: 1 }, { sparse: true }); // Barcode scan
+productSchema.index({ shop: 1, name: 1 }); // Search: lets name-regex $or clauses run as shop-bounded index scans
 productSchema.index({ shop: 1, category: 1, isActive: 1 }); // Category listing with active filter
 productSchema.index({ shop: 1, 'variants.sku': 1 }, { sparse: true }); // Variant SKU lookup
 productSchema.index({ shop: 1, 'variants.barcode': 1 }, { sparse: true }); // Variant barcode scan

@@ -23,7 +23,8 @@ class SupplierService {
     }
 
     const skip = (page - 1) * limit;
-    const sort = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
+    const sortField = ['name', 'createdAt', 'totalDue'].includes(sortBy) ? sortBy : 'name';
+    const sort = { [sortField]: sortOrder === 'desc' ? -1 : 1 };
 
     const [suppliers, total] = await Promise.all([
       Supplier.find(query)

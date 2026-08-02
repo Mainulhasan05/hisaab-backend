@@ -140,7 +140,6 @@ salesReturnSchema.index({ shop: 1, returnNo: 1 }, { unique: true });
 salesReturnSchema.index({ shop: 1, sale: 1 });
 salesReturnSchema.index({ shop: 1, customer: 1 });
 salesReturnSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Main listing with branch
-salesReturnSchema.index({ shop: 1, createdBy: 1 });
 
 // Virtual: Item count
 salesReturnSchema.virtual('itemCount').get(function() {

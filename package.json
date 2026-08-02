@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "jest"
+    "test": "jest",
+    "sync-indexes": "node scripts/sync-indexes.js",
+    "sync-indexes:apply": "node scripts/sync-indexes.js --apply"
   },
   "keywords": [
     "pos",
@@ -19,7 +21,7 @@
   "type": "commonjs",
   "dependencies": {
     "axios": "^1.6.2",
-    "bcryptjs": "^2.4.3",
+    "bcrypt": "^6.0.0",
     "compression": "^1.8.1",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
@@ -35,6 +37,7 @@
     "mongoose": "^8.0.3",
     "morgan": "^1.10.0",
     "multer": "^2.0.2",
+    "rate-limit-redis": "^4.3.1",
     "redis": "^4.6.12",
     "winston": "^3.11.0"
   },

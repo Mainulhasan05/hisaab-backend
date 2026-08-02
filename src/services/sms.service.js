@@ -1,4 +1,7 @@
 const axios = require('axios');
+// All gateway calls share a hard timeout — Node's default is none, so a hung
+// gateway would otherwise leak sockets and pending promises indefinitely
+const smsHttp = axios.create({ timeout: Number(process.env.SMS_HTTP_TIMEOUT_MS) || 10000 });
 const SMSLog = require('../models/SMSLog.model');
 const SMSQuota = require('../models/SMSQuota.model');
 const { formatPhone } = require('../utils/phone.util');
@@ -37,17 +40,14 @@ class SMSService {
     const formattedPhone = formatPhone(phone);
     const message = `আপনার হিসাব OTP: ${otp}\nমেয়াদ: ৫ মিনিট`;
 
-    console.log('\n========================================');
-    console.log(`[DEVELOPMENT OTP] Phone: ${formattedPhone} | OTP Code: ${otp}`);
-    console.log('========================================\n');
-    logger.info(`[DEVELOPMENT OTP] Phone: ${formattedPhone} | OTP Code: ${otp}`);
-
+    // OTPs are secrets — only log them in development, never in production logs
     if (process.env.NODE_ENV === 'development' || process.env.SKIP_SMS === 'true') {
+      logger.info(`[DEVELOPMENT OTP] Phone: ${formattedPhone} | OTP Code: ${otp}`);
       return { success: true, message: 'OTP logged to console' };
     }
 
     try {
-      const response = await axios.post(MIMSMS.BASE_URL + MIMSMS.SINGLE, {
+      const response = await smsHttp.post(MIMSMS.BASE_URL + MIMSMS.SINGLE, {
         UserName: process.env.MIMSMS_USERNAME,
         Apikey: process.env.MIMSMS_API_KEY,
         MobileNumber: formattedPhone,
@@ -80,7 +80,7 @@ class SMSService {
     const formattedPhone = formatPhone(phone);
 
     try {
-      const response = await axios.post(MIMSMS.BASE_URL + MIMSMS.SINGLE, {
+      const response = await smsHttp.post(MIMSMS.BASE_URL + MIMSMS.SINGLE, {
         UserName: process.env.MIMSMS_USERNAME,
         Apikey: process.env.MIMSMS_API_KEY,
         MobileNumber: formattedPhone,
@@ -156,7 +156,7 @@ class SMSService {
     const phoneNumbers = formattedRecipients.map(r => r.phone).join(',');
 
     try {
-      const response = await axios.post(MIMSMS.BASE_URL + MIMSMS.BULK, {
+      const response = await smsHttp.post(MIMSMS.BASE_URL + MIMSMS.BULK, {
         UserName: process.env.MIMSMS_USERNAME,
         Apikey: process.env.MIMSMS_API_KEY,
         MobileNumber: phoneNumbers,
@@ -237,7 +237,7 @@ class SMSService {
     }));
 
     try {
-      const response = await axios.post(MIMSMS.BASE_URL + MIMSMS.DYNAMIC, {
+      const response = await smsHttp.post(MIMSMS.BASE_URL + MIMSMS.DYNAMIC, {
         UserName: process.env.MIMSMS_USERNAME,
         Apikey: process.env.MIMSMS_API_KEY,
         SenderName: process.env.MIMSMS_SENDER_ID,
@@ -299,7 +299,7 @@ class SMSService {
    */
   async checkBalance() {
     try {
-      const response = await axios.get(MIMSMS.BASE_URL + MIMSMS.BALANCE, {
+      const response = await smsHttp.get(MIMSMS.BASE_URL + MIMSMS.BALANCE, {
         params: {
           UserName: process.env.MIMSMS_USERNAME,
           Apikey: process.env.MIMSMS_API_KEY

@@ -70,6 +70,8 @@ const auditLogSchema = new mongoose.Schema({
 auditLogSchema.index({ shop: 1, createdAt: -1 }); // Main listing with date sort
 auditLogSchema.index({ admin: 1, createdAt: -1 }); // Admin audit trail
 auditLogSchema.index({ customer: 1, createdAt: -1 }); // Customer audit trail
+auditLogSchema.index({ shop: 1, user: 1, createdAt: -1 }); // Per-user activity within a shop
+auditLogSchema.index({ shop: 1, 'entity.type': 1, 'entity.id': 1, createdAt: -1 }); // Entity history lookup
 
 // TTL Index - Auto-delete logs older than 90 days to prevent unbounded growth
 // For compliance, export/archive logs before deletion if needed

@@ -54,6 +54,7 @@ const expenseSchema = new mongoose.Schema({
 // Indexes - Optimized for scalability
 expenseSchema.index({ shop: 1, branch: 1, date: -1 }); // Date-based listing with branch
 expenseSchema.index({ shop: 1, branch: 1, category: 1, date: -1 }); // Category-wise expenses with branch
+expenseSchema.index({ shop: 1, date: -1 }); // All-branch date-range reports (P&L, daily summary)
 
 // Static: Get summary by category for a date range
 expenseSchema.statics.getSummaryByCategory = async function(shopId, startDate, endDate) {
