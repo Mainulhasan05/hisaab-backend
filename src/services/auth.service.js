@@ -349,9 +349,12 @@ class AuthService {
       }
 
       // Single usable account (or all shops inactive — fall through so the
-      // shop-deactivated error below fires with the right message)
-      user = activeMatches[0] || matches[0];
-      user.password = undefined; // was selected for comparison; never expose
+      // shop-deactivated error below fires with the right message).
+      // Re-fetch WITHOUT the password field: the comparison copy has +password
+      // selected, and any later save() on it would mark password modified and
+      // re-hash undefined ("data and salt arguments required").
+      const chosen = activeMatches[0] || matches[0];
+      user = await User.findById(chosen._id).populate('shop').populate('role');
     }
 
     // Check if phone is verified
