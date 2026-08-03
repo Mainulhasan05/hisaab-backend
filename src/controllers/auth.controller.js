@@ -71,6 +71,16 @@ const verifyOTP = asyncHandler(async (req, res) => {
 const login = asyncHandler(async (req, res) => {
   const result = await AuthService.login(req.body, req);
 
+  // Same phone with valid credentials in multiple shops: no session yet —
+  // the client shows a shop picker and re-submits with shopSlug
+  if (result.requiresShopSelection) {
+    return ApiResponse.success(res, {
+      data: result,
+      message: 'Select a shop to continue',
+      messageBn: 'কোন দোকানে ঢুকবেন তা নির্বাচন করুন'
+    });
+  }
+
   // Set httpOnly cookie for user (admin cookie stays intact for coexistence)
   setUserTokenCookie(res, result.token);
 

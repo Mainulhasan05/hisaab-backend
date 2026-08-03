@@ -2,6 +2,11 @@ const StaffService = require('../services/staff.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 
+const checkPhone = asyncHandler(async (req, res) => {
+  const result = await StaffService.checkPhone(req.shop._id, req.query.phone);
+  return ApiResponse.success(res, { data: result, message: 'Phone checked', messageBn: 'নম্বর যাচাই হয়েছে' });
+});
+
 const getStaff = asyncHandler(async (req, res) => {
   const staff = await StaffService.getStaff(req.shop._id);
   return ApiResponse.success(res, { data: { staff }, message: 'Staff retrieved', messageBn: 'কর্মচারী তালিকা' });
@@ -27,4 +32,4 @@ const deactivateStaff = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, { message: 'Staff member deactivated', messageBn: 'কর্মচারী নিষ্ক্রিয় করা হয়েছে' });
 });
 
-module.exports = { getStaff, getStaffMember, createStaff, updateStaff, deactivateStaff };
+module.exports = { getStaff, getStaffMember, createStaff, updateStaff, deactivateStaff, checkPhone };

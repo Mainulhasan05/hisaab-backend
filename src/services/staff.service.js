@@ -9,6 +9,10 @@ const { normalizePhone } = require('../utils/phone.util');
 const { getBranchForCreate } = require('../utils/branchScope.util');
 const { invalidateUserAuthCache } = require('../utils/authCache.util');
 
+// One phone may hold accounts in multiple shops (owner of one, staff at
+// another), but unbounded reuse is abuse — cap total memberships per phone.
+const MAX_SHOPS_PER_PHONE = 5;
+
 class StaffService {
   /**
    * List all non-owner employees in the shop
@@ -37,6 +41,25 @@ class StaffService {
   }
 
   /**
+   * Pre-create phone check for the staff form: does this phone already exist
+   * in this shop, and in how many other shops?
+   */
+  async checkPhone(shopId, phone) {
+    const normalizedPhone = normalizePhone(phone);
+    const [inThisShop, otherShopCount] = await Promise.all([
+      User.findOne({ phone: normalizedPhone, shop: shopId }).select('isActive').lean(),
+      User.countDocuments({ phone: normalizedPhone, shop: { $ne: shopId } }),
+    ]);
+    return {
+      existsInThisShop: !!inThisShop,
+      isDeactivatedHere: !!inThisShop && inThisShop.isActive === false,
+      otherShopCount,
+      maxShops: MAX_SHOPS_PER_PHONE,
+      capReached: otherShopCount >= MAX_SHOPS_PER_PHONE,
+    };
+  }
+
+  /**
    * Create a new staff member (employee)
    */
   async createStaff(shopId, ownerId, data, req) {
@@ -57,6 +80,20 @@ class StaffService {
       throw new AppError(
         'Phone number already registered in this shop',
         'এই ফোন নম্বর এই দোকানে ইতোমধ্যে নিবন্ধিত',
+        409
+      );
+    }
+
+    // Cross-shop check: cap total memberships, and remember whether this
+    // phone belongs to someone with accounts elsewhere
+    const otherShopCount = await User.countDocuments({
+      phone: normalizedPhone,
+      shop: { $ne: shopId },
+    });
+    if (otherShopCount >= MAX_SHOPS_PER_PHONE) {
+      throw new AppError(
+        `This phone number is already used in ${otherShopCount} shops (maximum ${MAX_SHOPS_PER_PHONE})`,
+        `এই ফোন নম্বর ইতোমধ্যে ${otherShopCount}টি দোকানে ব্যবহৃত হচ্ছে (সর্বোচ্চ ${MAX_SHOPS_PER_PHONE}টি)`,
         409
       );
     }
@@ -91,6 +128,11 @@ class StaffService {
       }
     }
 
+    // Consent: if this phone already belongs to someone in another shop, the
+    // real owner of the number must verify via OTP at their first login here.
+    // A phone new to the platform stays pre-verified (owner vouches for it).
+    const requiresConsent = otherShopCount > 0;
+
     const user = await User.create({
       phone: normalizedPhone,
       password,
@@ -99,7 +141,7 @@ class StaffService {
       isOwner: false,
       role: role._id,
       branch: resolvedBranchId,
-      isPhoneVerified: true, // Owner-created employees are pre-verified
+      isPhoneVerified: !requiresConsent,
       createdBy: ownerId,
     });
 

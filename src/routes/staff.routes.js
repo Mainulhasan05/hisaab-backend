@@ -10,6 +10,10 @@ router.use(protect);
 
 // Read — staff.view permission
 router.get('/', rbac('staff', 'view'), staffController.getStaff);
+
+// Pre-create phone check for the staff form — owner only (before /:id!)
+router.get('/check-phone', ownerOnly, staffController.checkPhone);
+
 router.get('/:id', rbac('staff', 'view'), staffController.getStaffMember);
 
 // Mutations — owner only (staff able to edit staff could escalate privileges)

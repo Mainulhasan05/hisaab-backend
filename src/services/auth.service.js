@@ -153,7 +153,11 @@ class AuthService {
   async sendOTP(phone) {
     const normalizedPhone = normalizePhone(phone);
 
-    const user = await User.findOne({ phone: normalizedPhone });
+    // The same phone may hold accounts in multiple shops — target the one
+    // still awaiting verification, not an arbitrary (already verified) match
+    const user =
+      (await User.findOne({ phone: normalizedPhone, isPhoneVerified: false })) ||
+      (await User.findOne({ phone: normalizedPhone }));
     if (!user) {
       throw new AppError(
         'User not found',
@@ -197,7 +201,10 @@ class AuthService {
   async verifyOTP(phone, otp) {
     const normalizedPhone = normalizePhone(phone);
 
-    const user = await User.findOne({ phone: normalizedPhone });
+    // Prefer the account awaiting verification (multi-shop phones)
+    const user =
+      (await User.findOne({ phone: normalizedPhone, isPhoneVerified: false })) ||
+      (await User.findOne({ phone: normalizedPhone }));
     if (!user) {
       throw new AppError(
         'User not found',
@@ -231,7 +238,7 @@ class AuthService {
     let user;
 
     if (shopSlug) {
-      // Team member login with shop slug
+      // Explicit shop selection (second step of a multi-shop login, or direct)
       const shop = await Shop.findBySlug(shopSlug);
       if (!shop) {
         throw new AppError(
@@ -241,50 +248,110 @@ class AuthService {
         );
       }
       user = await User.findByPhoneAndShop(normalizedPhone, shop._id).populate('shop').populate('role');
+
+      if (!user) {
+        await AuditLog.log({
+          shop: null,
+          user: null,
+          action: AUDIT_ACTIONS.AUTH_FAILED.en,
+          description: `Failed login attempt for phone: ${normalizedPhone} (Account not found)`,
+          entity: { type: 'auth', name: normalizedPhone },
+          req
+        }).catch(() => {});
+
+        throw new AppError(
+          'Invalid phone number or password',
+          'ফোন নম্বর বা পাসওয়ার্ড ভুল',
+          401
+        );
+      }
+
+      const userWithPassword = await User.findById(user._id).select('+password');
+      if (!(await userWithPassword.comparePassword(password))) {
+        await AuditLog.log({
+          shop: user.shop,
+          user: user._id,
+          action: AUDIT_ACTIONS.AUTH_FAILED.en,
+          description: `Failed login attempt for ${user.name} (${normalizedPhone}) — Incorrect password`,
+          entity: { type: 'auth', id: user._id, name: user.name },
+          req
+        }).catch(() => {});
+
+        throw new AppError(
+          'Invalid phone number or password',
+          'ফোন নম্বর বা পাসওয়ার্ড ভুল',
+          401
+        );
+      }
     } else {
-      // Find active user by phone (supports both Shop Owner and Staff logins)
-      user = await User.findOne({
+      // The same phone may hold accounts in multiple shops ({phone, shop} is
+      // the unique key — e.g. an owner of one shop working as staff in another).
+      // Verify the password against every candidate; ask the client to pick a
+      // shop only when more than one account matches these credentials.
+      const candidates = await User.find({
         phone: normalizedPhone,
         isActive: true
-      }).sort({ isOwner: -1 }).populate('shop').populate('role');
-    }
+      }).sort({ isOwner: -1 }).select('+password').populate('shop').populate('role');
 
+      if (candidates.length === 0) {
+        await AuditLog.log({
+          shop: null,
+          user: null,
+          action: AUDIT_ACTIONS.AUTH_FAILED.en,
+          description: `Failed login attempt for phone: ${normalizedPhone} (Account not found)`,
+          entity: { type: 'auth', name: normalizedPhone },
+          req
+        }).catch(() => {});
 
-    if (!user) {
-      await AuditLog.log({
-        shop: null,
-        user: null,
-        action: AUDIT_ACTIONS.AUTH_FAILED.en,
-        description: `Failed login attempt for phone: ${normalizedPhone} (Account not found)`,
-        entity: { type: 'auth', name: normalizedPhone },
-        req
-      }).catch(() => {});
+        throw new AppError(
+          'Invalid phone number or password',
+          'ফোন নম্বর বা পাসওয়ার্ড ভুল',
+          401
+        );
+      }
 
-      throw new AppError(
-        'Invalid phone number or password',
-        'ফোন নম্বর বা পাসওয়ার্ড ভুল',
-        401
-      );
-    }
+      const matches = [];
+      for (const candidate of candidates) {
+        if (await candidate.comparePassword(password)) matches.push(candidate);
+      }
 
-    // Get password for comparison
-    const userWithPassword = await User.findById(user._id).select('+password');
+      if (matches.length === 0) {
+        await AuditLog.log({
+          shop: candidates[0].shop,
+          user: candidates[0]._id,
+          action: AUDIT_ACTIONS.AUTH_FAILED.en,
+          description: `Failed login attempt for ${candidates[0].name} (${normalizedPhone}) — Incorrect password`,
+          entity: { type: 'auth', id: candidates[0]._id, name: candidates[0].name },
+          req
+        }).catch(() => {});
 
-    if (!(await userWithPassword.comparePassword(password))) {
-      await AuditLog.log({
-        shop: user.shop,
-        user: user._id,
-        action: AUDIT_ACTIONS.AUTH_FAILED.en,
-        description: `Failed login attempt for ${user.name} (${normalizedPhone}) — Incorrect password`,
-        entity: { type: 'auth', id: user._id, name: user.name },
-        req
-      }).catch(() => {});
+        throw new AppError(
+          'Invalid phone number or password',
+          'ফোন নম্বর বা পাসওয়ার্ড ভুল',
+          401
+        );
+      }
 
-      throw new AppError(
-        'Invalid phone number or password',
-        'ফোন নম্বর বা পাসওয়ার্ড ভুল',
-        401
-      );
+      const activeMatches = matches.filter((m) => m.shop && m.shop.isActive);
+
+      if (activeMatches.length > 1) {
+        // Credentials verified — let the client choose which shop to enter.
+        // Only shop identity is disclosed, and only after password check.
+        return {
+          requiresShopSelection: true,
+          accounts: activeMatches.map((m) => ({
+            shopSlug: m.shop.slug,
+            shopName: m.shop.name,
+            isOwner: m.isOwner === true,
+            roleName: m.isOwner ? null : (m.role?.name || null),
+          })),
+        };
+      }
+
+      // Single usable account (or all shops inactive — fall through so the
+      // shop-deactivated error below fires with the right message)
+      user = activeMatches[0] || matches[0];
+      user.password = undefined; // was selected for comparison; never expose
     }
 
     // Check if phone is verified
