@@ -33,8 +33,6 @@ function extractToken(req) {
   } else {
     if (req.cookies && req.cookies[COOKIE_NAMES.USER_TOKEN]) {
       token = req.cookies[COOKIE_NAMES.USER_TOKEN];
-    } else if (req.cookies && req.cookies[COOKIE_NAMES.ADMIN_TOKEN]) {
-      token = req.cookies[COOKIE_NAMES.ADMIN_TOKEN];
     }
   }
   if (!token && req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
