@@ -1,7 +1,7 @@
 const saleService = require('../services/sale.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
-const { sanitizeSales } = require('../utils/dataSanitizer.util');
+const { sanitizeSales, sanitizeReport } = require('../utils/dataSanitizer.util');
 
 // Get all sales
 exports.getSales = asyncHandler(async (req, res) => {
@@ -41,7 +41,7 @@ exports.createSale = asyncHandler(async (req, res) => {
 exports.recordPayment = asyncHandler(async (req, res) => {
   const result = await saleService.recordPayment(req.shop._id, req.user._id, req.params.id, req.body, req.branchId);
   return ApiResponse.success(res, {
-    data: result,
+    data: sanitizeReport(result, req),
     message: 'Payment recorded successfully',
     messageBn: 'পেমেন্ট সফলভাবে রেকর্ড করা হয়েছে',
   });
@@ -51,7 +51,7 @@ exports.recordPayment = asyncHandler(async (req, res) => {
 exports.cancelSale = asyncHandler(async (req, res) => {
   const sale = await saleService.cancelSale(req.shop._id, req.user._id, req.params.id, req.body.reason, req.branchId);
   return ApiResponse.success(res, {
-    data: sale,
+    data: sanitizeSales(sale, req),
     message: 'Sale cancelled successfully',
     messageBn: 'বিক্রয় সফলভাবে বাতিল করা হয়েছে',
   });
@@ -63,7 +63,7 @@ exports.getSalesSummary = asyncHandler(async (req, res) => {
   if (req.branchId) options.branchId = req.branchId;
   const summary = await saleService.getSalesSummary(req.shop._id, options);
   return ApiResponse.success(res, {
-    data: summary,
+    data: sanitizeReport(summary, req),
     message: 'Sales summary retrieved successfully',
     messageBn: 'বিক্রয় সারাংশ সফলভাবে লোড হয়েছে',
   });
@@ -73,7 +73,7 @@ exports.getSalesSummary = asyncHandler(async (req, res) => {
 exports.getTodaySummary = asyncHandler(async (req, res) => {
   const summary = await saleService.getTodaySummary(req.shop._id, req.branchId);
   return ApiResponse.success(res, {
-    data: summary,
+    data: sanitizeReport(summary, req),
     message: 'Today\'s summary retrieved successfully',
     messageBn: 'আজকের সারাংশ সফলভাবে লোড হয়েছে',
   });
@@ -84,7 +84,7 @@ exports.getRecentSales = asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
   const sales = await saleService.getRecentSales(req.shop._id, limit, req.branchId);
   return ApiResponse.success(res, {
-    data: sales,
+    data: sanitizeReport(sales, req),
     message: 'Recent sales retrieved successfully',
     messageBn: 'সাম্প্রতিক বিক্রয় সফলভাবে লোড হয়েছে',
   });

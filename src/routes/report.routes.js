@@ -6,13 +6,13 @@ const { rbac } = require('../middleware/permission.middleware');
 
 router.use(protect);
 
-// Dashboard is accessible to all authenticated users
-router.get('/dashboard', reportController.getDashboard);
+router.get('/dashboard', rbac('reports', 'view'), reportController.getDashboard);
 router.get('/sales', rbac('reports', 'view'), reportController.getSalesReport);
 router.get('/products', rbac('reports', 'view'), reportController.getProductReport);
 router.get('/customers', rbac('reports', 'view'), reportController.getCustomerReport);
-router.get('/profit-loss', rbac('reports', 'view'), reportController.getProfitLoss);
-router.get('/daily-summary', reportController.getDailySummary);
+router.get('/profit-loss', rbac('reports', 'view_profit'), reportController.getProfitLoss);
+router.get('/daily-summary', rbac('reports', 'view'), reportController.getDailySummary);
+router.get('/staff', rbac('reports', 'view'), reportController.getStaffReport);
 router.get('/date-wise', rbac('reports', 'view'), reportController.getDateWiseSummary);
 router.get('/date-wise/:date', rbac('reports', 'view'), reportController.getSalesByDate);
 router.get('/trending-products', rbac('reports', 'view'), reportController.getTrendingProducts);

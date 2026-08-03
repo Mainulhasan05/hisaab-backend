@@ -58,21 +58,6 @@ const adminLogin = Joi.object({
   password: Joi.string().required()
 });
 
-const createTeamMember = Joi.object({
-  phone: commonSchemas.phone.required(),
-  password: commonSchemas.password.required(),
-  name: Joi.string().trim().min(2).max(100).required(),
-  role: Joi.string().valid('manager', 'staff').default('staff'),
-  permissions: Joi.array().items(Joi.string()).default([])
-});
-
-const updateTeamMember = Joi.object({
-  name: Joi.string().trim().min(2).max(100),
-  role: Joi.string().valid('manager', 'staff'),
-  permissions: Joi.array().items(Joi.string()),
-  isActive: Joi.boolean()
-});
-
 const updateProfile = Joi.object({
   name: Joi.string().trim().min(2).max(100).messages({
     'string.min': 'Name must be at least 2 characters',
@@ -90,7 +75,5 @@ module.exports = {
   login,
   changePassword,
   adminLogin,
-  createTeamMember,
-  updateTeamMember,
   updateProfile
 };

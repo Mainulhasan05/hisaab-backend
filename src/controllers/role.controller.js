@@ -32,4 +32,9 @@ const getPresets = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, { data: { presets }, message: 'Role presets', messageBn: 'প্রিসেট ভূমিকা' });
 });
 
-module.exports = { getRoles, getRole, createRole, updateRole, deleteRole, getPresets };
+const getMatrix = asyncHandler(async (req, res) => {
+  const matrix = RoleService.getMatrix();
+  return ApiResponse.success(res, { data: { matrix }, message: 'Permission matrix', messageBn: 'অনুমতি তালিকা' });
+});
+
+module.exports = { getRoles, getRole, createRole, updateRole, deleteRole, getPresets, getMatrix };

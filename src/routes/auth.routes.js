@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 
 const authController = require('../controllers/auth.controller');
-const { protect, softProtect, ownerOnly } = require('../middleware/auth.middleware');
+const { protect, softProtect } = require('../middleware/auth.middleware');
+const { rbac } = require('../middleware/permission.middleware');
 const { validate } = require('../middleware/validate.middleware');
 const authValidation = require('../validations/auth.validation');
 const { COOKIE_NAMES } = require('../utils/cookie.util');
@@ -79,16 +80,12 @@ router.post('/change-password', validate(authValidation.changePassword), authCon
 router.post('/verify-password', authController.verifyPassword);
 router.patch('/profile', validate(authValidation.updateProfile), authController.updateProfile);
 
-// Team management (Owner only)
-router.route('/team')
-  .get(ownerOnly, authController.getTeamMembers)
-  .post(ownerOnly, validate(authValidation.createTeamMember), authController.createTeamMember);
+// Legacy /team routes removed — staff management lives at /api/staff + /api/roles.
+// The old handlers wrote string roles into an ObjectId field and raw permission
+// arrays into a field that no longer exists, and hard-deleted users without
+// invalidating their auth cache.
 
-router.route('/team/:id')
-  .put(ownerOnly, validate(authValidation.updateTeamMember), authController.updateTeamMember)
-  .delete(ownerOnly, authController.deleteTeamMember);
-
-// Shop settings (Owner only)
-router.patch('/shop/settings', ownerOnly, authController.updateShopSettings);
+// Shop settings — owner, or staff granted settings.update
+router.patch('/shop/settings', rbac('settings', 'update'), authController.updateShopSettings);
 
 module.exports = router;

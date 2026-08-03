@@ -82,9 +82,58 @@ function sanitizeSales(sales, req) {
   return sanitizeSaleDoc(sales, allowCost, allowProfit);
 }
 
+// Keys stripped when the user lacks the corresponding permission
+const PROFIT_KEYS = new Set([
+  'profit', 'totalProfit', 'todayProfit', 'profitLoss', 'grossProfit',
+  'netProfit', 'profitMargin', 'profitReduction', 'cogs',
+]);
+const COST_KEYS = new Set([
+  'buyingPrice', 'unitCost', 'totalCost', 'totalBuyingValue', 'inventoryValue',
+]);
+
+function isPlainObject(val) {
+  return val !== null && typeof val === 'object' &&
+    (val.constructor === Object || val.constructor === undefined);
+}
+
+function stripKeysDeep(data, keys) {
+  if (Array.isArray(data)) {
+    return data.map((item) => stripKeysDeep(item, keys));
+  }
+  if (!isPlainObject(data)) return data;
+  const out = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (keys.has(k)) continue;
+    out[k] = stripKeysDeep(v, keys);
+  }
+  return out;
+}
+
+/**
+ * Sanitize an aggregated report payload (dashboard, sales/product reports,
+ * daily summary, trending, exports) based on the requester's permissions.
+ * Documents should be plain objects (aggregate/lean results, or .toObject()'d).
+ */
+function sanitizeReport(data, req) {
+  const allowProfit = canViewProfit(req);
+  const allowCost = canViewCost(req);
+  if (allowProfit && allowCost) return data;
+
+  // Normalize Mongoose docs/ObjectIds/Dates to their JSON form (identical to
+  // what res.json would emit) so the deep strip sees only plain objects.
+  let result = JSON.parse(JSON.stringify(data));
+  if (!allowProfit) result = stripKeysDeep(result, PROFIT_KEYS);
+  if (!allowCost) result = stripKeysDeep(result, COST_KEYS);
+  return result;
+}
+
 module.exports = {
   canViewCost,
   canViewProfit,
   sanitizeProducts,
   sanitizeSales,
+  sanitizeReport,
+  stripKeysDeep,
+  PROFIT_KEYS,
+  COST_KEYS,
 };

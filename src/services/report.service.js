@@ -1489,6 +1489,114 @@ class ReportService {
     };
   }
 
+  /**
+   * Staff-wise sales report: per-staff totals (net sales, paid, due, profit,
+   * count, returns) over an optional date range, sorted by net sales.
+   * Includes the owner's own sales — everyone who created a sale appears.
+   */
+  async getStaffReport(shopId, options = {}, branchId = null) {
+    const { startDate, endDate, staffId } = options;
+
+    const match = {
+      ...this._baseMatch(shopId, branchId),
+      status: { $ne: 'cancelled' },
+    };
+    if (startDate || endDate) {
+      match.createdAt = {};
+      if (startDate) match.createdAt.$gte = new Date(startDate);
+      if (endDate) match.createdAt.$lte = new Date(endDate);
+    }
+    if (staffId) {
+      match.createdBy = new mongoose.Types.ObjectId(staffId);
+    }
+
+    const returnMatch = { ...match };
+    delete returnMatch.status; // returns have their own lifecycle
+
+    const [salesByStaff, returnsByStaff] = await Promise.all([
+      Sale.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: '$createdBy',
+            totalSales: { $sum: netSaleAmountExpr() },
+            totalPaid: { $sum: '$paid' },
+            totalDue: { $sum: '$due' },
+            totalProfit: { $sum: '$profit' },
+            saleCount: { $sum: 1 },
+            avgSale: { $avg: netSaleAmountExpr() },
+            lastSaleAt: { $max: '$createdAt' },
+          },
+        },
+        { $sort: { totalSales: -1 } },
+      ]),
+      SalesReturn.aggregate([
+        { $match: returnMatch },
+        {
+          $group: {
+            _id: '$createdBy',
+            totalReturned: { $sum: '$totalAmount' },
+            returnCount: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    // Resolve staff identities (name, phone, role, active) in one query
+    const User = require('../models/User.model');
+    const userIds = [
+      ...new Set([
+        ...salesByStaff.map((s) => String(s._id)),
+        ...returnsByStaff.map((r) => String(r._id)),
+      ]),
+    ].filter(Boolean);
+
+    const users = await User.find({ _id: { $in: userIds } })
+      .select('name phone isOwner isActive role')
+      .populate('role', 'name')
+      .lean();
+    const userMap = new Map(users.map((u) => [String(u._id), u]));
+    const returnMap = new Map(returnsByStaff.map((r) => [String(r._id), r]));
+
+    const staff = salesByStaff.map((s) => {
+      const user = userMap.get(String(s._id));
+      const returns = returnMap.get(String(s._id));
+      return {
+        staffId: s._id,
+        name: user?.name || 'Unknown',
+        phone: user?.phone || null,
+        roleName: user?.isOwner ? 'Owner' : (user?.role?.name || null),
+        isOwner: user?.isOwner === true,
+        isActive: user?.isActive !== false,
+        totalSales: s.totalSales,
+        totalPaid: s.totalPaid,
+        totalDue: s.totalDue,
+        totalProfit: s.totalProfit,
+        saleCount: s.saleCount,
+        avgSale: Math.round(s.avgSale || 0),
+        lastSaleAt: s.lastSaleAt,
+        totalReturned: returns?.totalReturned || 0,
+        returnCount: returns?.returnCount || 0,
+      };
+    });
+
+    const summary = staff.reduce(
+      (acc, s) => {
+        acc.totalSales += s.totalSales || 0;
+        acc.totalPaid += s.totalPaid || 0;
+        acc.totalDue += s.totalDue || 0;
+        acc.totalProfit += s.totalProfit || 0;
+        acc.saleCount += s.saleCount || 0;
+        acc.totalReturned += s.totalReturned || 0;
+        acc.returnCount += s.returnCount || 0;
+        return acc;
+      },
+      { totalSales: 0, totalPaid: 0, totalDue: 0, totalProfit: 0, saleCount: 0, totalReturned: 0, returnCount: 0 }
+    );
+
+    return { staff, summary, startDate: startDate || null, endDate: endDate || null };
+  }
+
   // Export report (placeholder - implement actual export logic)
   async exportReport(shopId, type, format, options, branchId = null) {
     // This would generate actual PDF/Excel/CSV files
@@ -1503,6 +1611,9 @@ class ReportService {
         break;
       case 'customers':
         data = await this.getCustomerReport(shopId, options, branchId);
+        break;
+      case 'staff':
+        data = await this.getStaffReport(shopId, options, branchId);
         break;
       default:
         throw new Error('Invalid report type');

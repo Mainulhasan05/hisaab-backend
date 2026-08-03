@@ -43,9 +43,17 @@ class StaffService {
     const { phone, password, name, roleId } = data;
     const normalizedPhone = normalizePhone(phone);
 
-    // Check if phone already exists in this shop
-    const existing = await User.findByPhoneAndShop(normalizedPhone, shopId);
+    // Check if phone already exists in this shop — including deactivated
+    // accounts, which the {phone, shop} unique index would reject anyway
+    const existing = await User.findOne({ phone: normalizedPhone, shop: shopId });
     if (existing) {
+      if (!existing.isActive) {
+        throw new AppError(
+          'This phone belongs to a deactivated staff account. Reactivate it from the staff list instead.',
+          'এই নম্বরে একটি নিষ্ক্রিয় স্টাফ অ্যাকাউন্ট আছে। নতুন না বানিয়ে তালিকা থেকে সক্রিয় করুন।',
+          409
+        );
+      }
       throw new AppError(
         'Phone number already registered in this shop',
         'এই ফোন নম্বর এই দোকানে ইতোমধ্যে নিবন্ধিত',

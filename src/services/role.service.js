@@ -1,14 +1,63 @@
 const Role = require('../models/Role.model');
 const User = require('../models/User.model');
 const { AppError } = require('../middleware/error.middleware');
-const { ROLE_PRESETS, buildPermissions } = require('../config/permissions');
+const {
+  ROLE_PRESETS,
+  buildPermissions,
+  mergePermissions,
+  findUnknownPermissionKeys,
+  getPermissionMatrix,
+} = require('../config/permissions');
+const { invalidateUserAuthCache } = require('../utils/authCache.util');
 
 class RoleService {
   /**
-   * Get all roles for a shop
+   * Get all roles for a shop.
+   * Self-heals: if a shop somehow has zero roles (e.g. seeding failed at
+   * registration), the default presets are re-seeded here.
    */
   async getRoles(shopId) {
+    const roles = await Role.find({ shop: shopId, isActive: true }).sort({ isDefault: -1, name: 1 });
+    if (roles.length > 0) return roles;
+
+    const presets = Object.values(ROLE_PRESETS).map((p) => ({
+      shop: shopId,
+      name: p.name,
+      permissions: p.permissions,
+      isDefault: true,
+    }));
+    await Role.insertMany(presets, { ordered: false }).catch(() => {});
     return await Role.find({ shop: shopId, isActive: true }).sort({ isDefault: -1, name: 1 });
+  }
+
+  /**
+   * Assert the client-sent permissions object has no unknown keys
+   */
+  _assertKnownPermissionKeys(permissions) {
+    const unknown = findUnknownPermissionKeys(permissions);
+    if (unknown.length > 0) {
+      throw new AppError(
+        `Unknown permission keys: ${unknown.join(', ')}`,
+        `অজানা অনুমতি: ${unknown.join(', ')}`,
+        400
+      );
+    }
+  }
+
+  /**
+   * Flush the auth cache for every user assigned to a role, so permission
+   * changes take effect on their next request instead of at next login.
+   */
+  async _invalidateRoleUsers(roleId, shopId) {
+    const users = await User.find({ shop: shopId, role: roleId }).select('_id').lean();
+    await Promise.all(users.map((u) => invalidateUserAuthCache(u._id).catch(() => {})));
+  }
+
+  /**
+   * The full module × action matrix, for clients to render the roles UI from
+   */
+  getMatrix() {
+    return getPermissionMatrix();
   }
 
   /**
@@ -38,10 +87,14 @@ class RoleService {
       );
     }
 
+    this._assertKnownPermissionKeys(permissions);
+
     const role = await Role.create({
       shop: shopId,
       name: name.trim(),
-      permissions: permissions || buildPermissions(false),
+      permissions: permissions
+        ? mergePermissions(buildPermissions(false), permissions)
+        : buildPermissions(false),
       isDefault: false,
     });
 
@@ -67,10 +120,18 @@ class RoleService {
     }
 
     if (data.permissions !== undefined) {
-      role.permissions = data.permissions;
+      this._assertKnownPermissionKeys(data.permissions);
+      // Merge onto the role's current permissions: modules the client didn't
+      // send stay untouched, so a stale/partial client can't wipe them.
+      const current = role.permissions?.toObject ? role.permissions.toObject() : (role.permissions || {});
+      role.permissions = mergePermissions(current, data.permissions);
     }
 
     await role.save();
+
+    // Permissions changed → make it effective for logged-in staff now
+    await this._invalidateRoleUsers(roleId, shopId);
+
     return role;
   }
 
@@ -96,6 +157,7 @@ class RoleService {
 
     role.isActive = false;
     await role.save();
+    await this._invalidateRoleUsers(roleId, shopId);
     return { message: 'Role deleted' };
   }
 

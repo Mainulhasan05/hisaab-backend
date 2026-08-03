@@ -45,6 +45,45 @@ const rbac = (module, action) => {
 };
 
 /**
+ * RBAC middleware allowing ANY of several module/action pairs.
+ * Usage: rbacAny([['products', 'update'], ['stock', 'manual_adjust']])
+ * Same bypass rules as rbac(); the error message names the first pair.
+ */
+const rbacAny = (pairs) => {
+  return (req, res, next) => {
+    if (req.isAdmin) return next();
+
+    if (!req.user) {
+      return ApiResponse.unauthorized(res, {
+        message: 'Authentication required',
+        messageBn: 'লগইন করুন'
+      });
+    }
+
+    if (req.user.isOwner) return next();
+
+    const perms = req.user.permissions;
+    if (perms) {
+      for (const [module, action] of pairs) {
+        if (perms[module] && perms[module][action] === true) {
+          return next();
+        }
+      }
+    }
+
+    const [module, action] = pairs[0];
+    const moduleLabel = MODULES[module]?.label || module;
+    const actionLabels = { view: 'দেখার', create: 'তৈরি করার', update: 'সম্পাদনা করার', delete: 'মুছে ফেলার' };
+    const actionLabel = actionLabels[action] || action;
+
+    return ApiResponse.forbidden(res, {
+      message: `You do not have permission to ${action} ${module}`,
+      messageBn: `আপনার ${moduleLabel} ${actionLabel} অনুমতি নেই`
+    });
+  };
+};
+
+/**
  * Owner-only middleware
  * For routes that should ONLY be accessible by the tenant owner
  * (managing roles, managing staff, deleting sensitive data)
@@ -71,5 +110,6 @@ const ownerOnly = (req, res, next) => {
 
 module.exports = {
   rbac,
+  rbacAny,
   ownerOnly,
 };

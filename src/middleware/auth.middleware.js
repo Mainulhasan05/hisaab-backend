@@ -88,16 +88,38 @@ async function getCachedUser(userId) {
     // Reconstruct Mongoose-like object with method support
     const user = await User.hydrate(cached.user);
     user.shop = cached.shop ? Shop.hydrate(cached.shop) : null;
+    // Non-schema property: `role` is an ObjectId path, so the populated doc
+    // is carried separately as a plain object (only permissions/isActive are read)
+    user.roleDoc = cached.role || null;
     return user;
   }
-  const user = await User.findById(userId).populate('shop');
+  const user = await User.findById(userId).populate('shop').populate('role');
   if (user) {
+    const roleDoc = user.role ? user.role.toObject() : null;
+    user.depopulate('role'); // keep user.role an ObjectId, matching the cache-hit shape
+    user.roleDoc = roleDoc;
     await cacheService.set(cacheKey, {
       user: user.toObject(),
       shop: user.shop ? user.shop.toObject() : null,
+      role: roleDoc,
     }, AUTH_CACHE_TTL);
   }
   return user;
+}
+
+/**
+ * Resolve RBAC context from the DB-backed user document (NOT the JWT).
+ * Permissions used to be embedded in the access token, which made every role
+ * edit invisible until re-login. The user+role doc is cached (TTL 300s) and
+ * explicitly invalidated by staff/role mutations, so changes apply live.
+ */
+function resolveRbacContext(user) {
+  const isOwner = user.isOwner === true;
+  let permissions = null;
+  if (!isOwner && user.roleDoc && user.roleDoc.isActive !== false && user.roleDoc.permissions) {
+    permissions = user.roleDoc.permissions;
+  }
+  return { isOwner, permissions };
 }
 
 /**
@@ -259,10 +281,15 @@ const protect = asyncHandler(async (req, res, next) => {
           .catch(() => {}); // fire-and-forget, don't block the response
       }
 
-      // Read-only grace mode: GET requests are allowed so users can still view their data
+      // Read-only grace mode: GET requests are allowed so users can still view their data.
+      // RBAC context must still be set here — without it rbac() denies every GET
+      // for owners and staff alike, inverting the intended access.
       if (req.method === 'GET') {
         req.user = user;
         req.shop = user.shop;
+        const rbacCtx = resolveRbacContext(user);
+        req.user.isOwner = rbacCtx.isOwner;
+        req.user.permissions = rbacCtx.permissions;
         req.subscriptionExpired = true; // Route handlers can check this if needed
         return next();
       }
@@ -277,20 +304,22 @@ const protect = asyncHandler(async (req, res, next) => {
     req.user = user;
     req.shop = user.shop;
 
-    // Inject RBAC data from JWT payload (no additional DB lookup needed)
-    req.user.isOwner = decoded.isOwner === true;
-    req.user.permissions = decoded.permissions || null;
+    // Inject RBAC data from the DB-backed user (cached + invalidated on change),
+    // so role edits and reassignments take effect without re-login
+    const rbacCtx = resolveRbacContext(user);
+    req.user.isOwner = rbacCtx.isOwner;
+    req.user.permissions = rbacCtx.permissions;
 
     // ── Branch Context Resolution ──
     // For single-branch shops: skip entirely (branch = null)
     // For multi-branch shops:
     //   Owner: read X-Active-Branch header (switchable)
-    //   Staff: use branch from JWT (fixed)
+    //   Staff: use assigned branch from the user document
     req.branch = null;
     req.branchId = null;
 
     if (user.shop && user.shop.multiBranchEnabled) {
-      if (decoded.isOwner) {
+      if (rbacCtx.isOwner) {
         const activeBranchId = req.headers['x-active-branch'] || req.cookies?.activeBranch;
         if (activeBranchId && activeBranchId !== 'all') {
           const branch = await getCachedBranchOwnership(activeBranchId, user.shop._id);
@@ -309,8 +338,8 @@ const protect = asyncHandler(async (req, res, next) => {
             req.branchId = defaultBranch._id;
           }
         }
-      } else if (decoded.branch) {
-        const branch = await getCachedBranchOwnership(decoded.branch, user.shop._id);
+      } else if (user.branch) {
+        const branch = await getCachedBranchOwnership(user.branch, user.shop._id);
         if (!branch) {
           return ApiResponse.forbidden(res, {
             message: 'Your assigned branch is inactive or invalid',
@@ -434,15 +463,16 @@ const softProtect = asyncHandler(async (req, res, next) => {
       if (user.shop && user.shop.isActive) {
         req.user = user;
         req.shop = user.shop;
-        req.user.isOwner = decoded.isOwner === true;
-        req.user.permissions = decoded.permissions || null;
+        const rbacCtx = resolveRbacContext(user);
+        req.user.isOwner = rbacCtx.isOwner;
+        req.user.permissions = rbacCtx.permissions;
 
         // ── Branch Context Resolution (same as protect) ──
         req.branch = null;
         req.branchId = null;
 
         if (user.shop.multiBranchEnabled) {
-          if (decoded.isOwner) {
+          if (rbacCtx.isOwner) {
             const activeBranchId = req.headers['x-active-branch'] || req.cookies?.activeBranch;
             if (activeBranchId && activeBranchId !== 'all') {
               const branch = await getCachedBranchOwnership(activeBranchId, user.shop._id);
@@ -453,8 +483,8 @@ const softProtect = asyncHandler(async (req, res, next) => {
               // If branch is invalid, we do NOT clear req.user for owners.
               // They just fall back to all branches view (branch = null).
             }
-          } else if (decoded.branch) {
-            const branch = await getCachedBranchOwnership(decoded.branch, user.shop._id);
+          } else if (user.branch) {
+            const branch = await getCachedBranchOwnership(user.branch, user.shop._id);
             if (branch) {
               req.branch = branch;
               req.branchId = branch._id;

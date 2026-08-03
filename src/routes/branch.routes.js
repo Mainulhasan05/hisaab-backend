@@ -2,8 +2,16 @@ const express = require('express');
 const router = express.Router();
 const branchService = require('../services/branch.service');
 const { protect, ownerOnly } = require('../middleware/auth.middleware');
+const { rbacAny } = require('../middleware/permission.middleware');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
+
+// Branch reads expose the shop's branch list + staff counts. Owner bypasses;
+// staff need a permission whose UI legitimately consumes the branch list.
+const canViewBranches = rbacAny([
+  ['stock_transfers', 'view'],
+  ['staff', 'view'],
+]);
 
 /**
  * All branch routes require:
@@ -26,6 +34,7 @@ const requireMultiBranch = (req, res, next) => {
 // GET /api/branches — List all branches
 router.get('/',
   protect,
+  canViewBranches,
   requireMultiBranch,
   asyncHandler(async (req, res) => {
     const branches = await branchService.getBranchesWithStaffCount(req.shop._id);
@@ -40,6 +49,7 @@ router.get('/',
 // GET /api/branches/:id — Get single branch
 router.get('/:id',
   protect,
+  canViewBranches,
   requireMultiBranch,
   asyncHandler(async (req, res) => {
     const branch = await branchService.getBranch(req.params.id, req.shop._id);

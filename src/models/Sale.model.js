@@ -211,6 +211,7 @@ saleSchema.index({ shop: 1, isOnline: 1, createdAt: -1 }); // Online sales filte
 saleSchema.index({ shop: 1, createdAt: -1 }); // Single-branch listing, recent sales, invoice-number day count
 saleSchema.index({ shop: 1, due: 1 }); // Dues listing/sort
 saleSchema.index({ shop: 1, total: -1 }); // Sort by amount (whitelisted sort field)
+saleSchema.index({ shop: 1, createdBy: 1, createdAt: -1 }); // Staff attribution filter + staff sales report
 
 // Calculate totals before saving
 saleSchema.pre('save', function(next) {

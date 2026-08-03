@@ -213,109 +213,7 @@ const adminLogin = asyncHandler(async (req, res) => {
   });
 });
 
-/**
- * @desc    Create team member
- * @route   POST /api/auth/team
- * @access  Private (Owner only)
- */
-const createTeamMember = asyncHandler(async (req, res) => {
-  const user = await AuthService.createTeamMember(
-    req.shop._id,
-    req.user._id,
-    req.body,
-    req
-  );
-
-  return ApiResponse.created(res, {
-    data: { user },
-    message: 'Team member created successfully',
-    messageBn: 'টিম মেম্বার যোগ করা হয়েছে'
-  });
-});
-
-/**
- * @desc    Get team members
- * @route   GET /api/auth/team
- * @access  Private (Owner/Manager)
- */
-const getTeamMembers = asyncHandler(async (req, res) => {
-  const User = require('../models/User.model');
-
-  const members = await User.find({
-    shop: req.shop._id,
-    _id: { $ne: req.user._id }
-  }).select('-password').sort({ createdAt: -1 });
-
-  return ApiResponse.success(res, {
-    data: { members },
-    message: 'Team members retrieved',
-    messageBn: 'টিম মেম্বার লিস্ট'
-  });
-});
-
-/**
- * @desc    Update team member
- * @route   PUT /api/auth/team/:id
- * @access  Private (Owner only)
- */
-const updateTeamMember = asyncHandler(async (req, res) => {
-  const User = require('../models/User.model');
-
-  const member = await User.findOne({
-    _id: req.params.id,
-    shop: req.shop._id,
-    isOwner: false
-  });
-
-  if (!member) {
-    return ApiResponse.notFound(res, {
-      message: 'Team member not found',
-      messageBn: 'টিম মেম্বার পাওয়া যায়নি'
-    });
-  }
-
-  const { name, role, permissions, isActive } = req.body;
-
-  if (name) member.name = name;
-  if (role) member.role = role;
-  if (permissions) member.permissions = permissions;
-  if (typeof isActive === 'boolean') member.isActive = isActive;
-
-  await member.save();
-
-  return ApiResponse.success(res, {
-    data: { member },
-    message: 'Team member updated',
-    messageBn: 'টিম মেম্বার আপডেট হয়েছে'
-  });
-});
-
-/**
- * @desc    Delete team member
- * @route   DELETE /api/auth/team/:id
- * @access  Private (Owner only)
- */
-const deleteTeamMember = asyncHandler(async (req, res) => {
-  const User = require('../models/User.model');
-
-  const member = await User.findOneAndDelete({
-    _id: req.params.id,
-    shop: req.shop._id,
-    isOwner: false
-  });
-
-  if (!member) {
-    return ApiResponse.notFound(res, {
-      message: 'Team member not found',
-      messageBn: 'টিম মেম্বার পাওয়া যায়নি'
-    });
-  }
-
-  return ApiResponse.success(res, {
-    message: 'Team member deleted',
-    messageBn: 'টিম মেম্বার মুছে ফেলা হয়েছে'
-  });
-});
+// Legacy /api/auth/team handlers removed — superseded by /api/staff + /api/roles.
 
 /**
  * @desc    Update shop settings
@@ -453,10 +351,6 @@ module.exports = {
   changePassword,
   adminLogin,
   adminLogout,
-  createTeamMember,
-  getTeamMembers,
-  updateTeamMember,
-  deleteTeamMember,
   updateShopSettings,
   updateProfile,
   verifyPassword

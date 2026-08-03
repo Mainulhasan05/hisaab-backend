@@ -62,13 +62,18 @@ class SaleService {
 
   // Build query from filters (shared by getSales and getSalesSummary)
   _buildQuery(shopId, options = {}) {
-    const { search, status, customerId, startDate, endDate, paymentMethod, branchId, isOnline, channel } = options;
+    const { search, status, customerId, startDate, endDate, paymentMethod, branchId, isOnline, channel, staffId } = options;
 
     const query = { shop: shopId };
 
     // Branch scoping
     if (branchId) {
       query.branch = branchId;
+    }
+
+    // Staff attribution filter ("sales by this staff member")
+    if (staffId) {
+      query.createdBy = staffId;
     }
 
     if (isOnline !== undefined && isOnline !== '') {

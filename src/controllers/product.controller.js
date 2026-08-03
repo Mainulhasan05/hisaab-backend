@@ -1,12 +1,16 @@
 const productService = require('../services/product.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
-const { sanitizeProducts } = require('../utils/dataSanitizer.util');
+const { sanitizeProducts, sanitizeReport } = require('../utils/dataSanitizer.util');
 
 // Get all products
 exports.getProducts = asyncHandler(async (req, res) => {
   const result = await productService.getProducts(req.shop._id, req.query, req);
   result.data = sanitizeProducts(result.data, req);
+  // inventoryStats (total buying value) sits outside `data` — sanitize it too
+  if (result.inventoryStats) {
+    result.inventoryStats = sanitizeReport(result.inventoryStats, req);
+  }
   return ApiResponse.paginated(res, {
     ...result,
     message: 'Products retrieved successfully',
@@ -89,7 +93,7 @@ exports.getLowStock = asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
   const products = await productService.getLowStockProducts(req.shop._id, limit, req);
   return ApiResponse.success(res, {
-    data: products,
+    data: sanitizeProducts(products, req),
     message: 'Low stock products retrieved successfully',
     messageBn: 'কম স্টক পণ্য সফলভাবে লোড হয়েছে',
   });
@@ -98,6 +102,7 @@ exports.getLowStock = asyncHandler(async (req, res) => {
 // Get stock transactions
 exports.getStockTransactions = asyncHandler(async (req, res) => {
   const result = await productService.getStockTransactions(req.shop._id, req.params.id, req.query, req);
+  result.data = sanitizeReport(result.data, req); // strips unitCost/totalCost without view_cost
   return ApiResponse.paginated(res, {
     ...result,
     message: 'Stock transactions retrieved successfully',

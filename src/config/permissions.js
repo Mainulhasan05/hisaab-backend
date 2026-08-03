@@ -12,17 +12,89 @@ const MODULES = {
   purchases:     { key: 'purchases',     label: 'ক্রয়',              labelEn: 'Purchases',       actions: ['view', 'create', 'update', 'delete'] },
   suppliers:     { key: 'suppliers',     label: 'সরবরাহকারী',        labelEn: 'Suppliers',       actions: ['view', 'create', 'update', 'delete'] },
   expenses:      { key: 'expenses',      label: 'খরচ',               labelEn: 'Expenses',        actions: ['view', 'create', 'update', 'delete'] },
-  cash_register: { key: 'cash_register', label: 'ক্যাশ রেজিস্টার',    labelEn: 'Cash Register',   actions: ['view', 'create', 'update', 'delete'] },
+  cash_register: { key: 'cash_register', label: 'ক্যাশ রেজিস্টার',    labelEn: 'Cash Register',   actions: ['view', 'create', 'update'] },
   reports:       { key: 'reports',       label: 'রিপোর্ট',            labelEn: 'Reports',         actions: ['view', 'view_profit'] },
   settings:      { key: 'settings',      label: 'সেটিংস',            labelEn: 'Settings',        actions: ['view', 'update'] },
   sms:           { key: 'sms',           label: 'এসএমএস',            labelEn: 'SMS',             actions: ['view', 'create'] },
-  staff:         { key: 'staff',         label: 'স্টাফ ম্যানেজমেন্ট', labelEn: 'Staff Management', actions: ['view', 'create', 'update', 'delete'] },
+  // Staff mutations are deliberately owner-only (a staff member who can edit
+  // other staff could escalate their own privileges) — so only `view` is offered
+  staff:         { key: 'staff',         label: 'স্টাফ ম্যানেজমেন্ট', labelEn: 'Staff Management', actions: ['view'] },
   stock:         { key: 'stock',         label: 'স্টক সমন্বয়',       labelEn: 'Stock Adjustment', actions: ['view', 'manual_adjust'] },
   stock_transfers: { key: 'stock_transfers', label: 'শাখা ট্রান্সফার', labelEn: 'Stock Transfers', actions: ['view', 'create', 'update'] },
 };
 
 // List of all module keys
 const MODULE_KEYS = Object.keys(MODULES);
+
+// Bengali labels for actions (used in error messages and the roles UI matrix)
+const ACTION_LABELS = {
+  view:          { label: 'দেখা',           labelEn: 'View' },
+  create:        { label: 'তৈরি',           labelEn: 'Create' },
+  update:        { label: 'সম্পাদনা',       labelEn: 'Update' },
+  delete:        { label: 'মুছে ফেলা',      labelEn: 'Delete' },
+  view_cost:     { label: 'ক্রয়মূল্য দেখা', labelEn: 'View cost' },
+  view_profit:   { label: 'লাভ দেখা',       labelEn: 'View profit' },
+  manual_adjust: { label: 'স্টক সমন্বয়',    labelEn: 'Adjust stock' },
+};
+
+/**
+ * Serializable matrix for clients — the roles UI must render from this,
+ * never from a hardcoded copy.
+ */
+const getPermissionMatrix = () => {
+  return MODULE_KEYS.map((key) => ({
+    key,
+    label: MODULES[key].label,
+    labelEn: MODULES[key].labelEn,
+    actions: MODULES[key].actions.map((action) => ({
+      key: action,
+      label: ACTION_LABELS[action]?.label || action,
+      labelEn: ACTION_LABELS[action]?.labelEn || action,
+    })),
+  }));
+};
+
+/**
+ * Deep-merge a client-supplied permissions object onto a base matrix.
+ * Only known module/action keys are applied; values are coerced to booleans.
+ * Modules absent from `input` keep their `base` values — so a client that
+ * renders a subset of the matrix can never silently wipe the rest.
+ */
+const mergePermissions = (base, input) => {
+  const perms = {};
+  for (const [modKey, mod] of Object.entries(MODULES)) {
+    perms[modKey] = {};
+    for (const action of mod.actions) {
+      const baseVal = base?.[modKey]?.[action] === true;
+      const inputVal = input?.[modKey]?.[action];
+      perms[modKey][action] = inputVal === undefined ? baseVal : inputVal === true;
+    }
+  }
+  return perms;
+};
+
+/**
+ * Collect module/action keys in `input` that don't exist in the matrix,
+ * so the API can reject typos instead of silently dropping them.
+ */
+const findUnknownPermissionKeys = (input) => {
+  const unknown = [];
+  if (!input || typeof input !== 'object') return unknown;
+  for (const [modKey, actions] of Object.entries(input)) {
+    if (!MODULES[modKey]) {
+      unknown.push(modKey);
+      continue;
+    }
+    if (actions && typeof actions === 'object') {
+      for (const action of Object.keys(actions)) {
+        if (!MODULES[modKey].actions.includes(action)) {
+          unknown.push(`${modKey}.${action}`);
+        }
+      }
+    }
+  }
+  return unknown;
+};
 
 /**
  * Build a full permissions object with all flags set to a given value
@@ -145,9 +217,13 @@ const LEGACY_PERMISSION_MAP = {
 module.exports = {
   MODULES,
   MODULE_KEYS,
+  ACTION_LABELS,
   ROLE_PRESETS,
   buildPermissions,
   buildPermissionsFromConfig,
+  getPermissionMatrix,
+  mergePermissions,
+  findUnknownPermissionKeys,
   checkPerm,
   LEGACY_PERMISSION_MAP,
 };
