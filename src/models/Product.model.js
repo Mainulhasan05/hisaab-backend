@@ -151,6 +151,20 @@ const productSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  // Soft delete — distinct from isActive (deactivate). Deleted products are
+  // hidden from every listing/lookup but the document is kept so historical
+  // sales, purchases and stock transactions keep resolving.
+  isDeleted: {
+    type: Boolean,
+    default: false
+  },
+  deletedAt: {
+    type: Date
+  },
+  deletedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
   // Online Selling
   isAvailableOnline: {
     type: Boolean,

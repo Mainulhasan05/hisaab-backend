@@ -290,6 +290,12 @@ class SaleService {
         throw new AppError(`Product not found: ${item.productId}`, `পণ্য পাওয়া যায়নি: ${item.productName || item.productId}`, 404);
       }
 
+      // Deleted products can still arrive via held carts or offline-synced
+      // sales — block them so a removed product can never be sold again
+      if (product.isDeleted) {
+        throw new AppError(`Product has been deleted: ${product.name}`, `পণ্যটি মুছে ফেলা হয়েছে, বিক্রি করা যাবে না: ${product.name}`, 400);
+      }
+
       let unitPrice, buyingPrice, variantInfo = {};
 
       if (item.variantId) {

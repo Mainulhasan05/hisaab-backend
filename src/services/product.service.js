@@ -34,7 +34,9 @@ class ProductService {
     const pageNum = parseInt(page) || 1;
     const limitNum = parseInt(limit) || 20;
 
-    const query = { shop: shopId };
+    // Soft-deleted products are hidden from every listing ($ne covers older
+    // documents created before the isDeleted field existed)
+    const query = { shop: shopId, isDeleted: { $ne: true } };
 
     // Search by name or code. Input is regex-escaped; each field carries a
     // {shop, field} compound index so the $or branches run as shop-bounded
@@ -317,7 +319,7 @@ class ProductService {
 
   // Get single product by ID
   async getProductById(shopId, productId, req = null) {
-    const product = await Product.findOne({ _id: productId, shop: shopId })
+    const product = await Product.findOne({ _id: productId, shop: shopId, isDeleted: { $ne: true } })
       .populate('category', 'name')
       .populate('createdBy', 'name phone');
 
@@ -380,6 +382,7 @@ class ProductService {
   async getProductByCode(shopId, code, req = null) {
     const product = await Product.findOne({
       shop: shopId,
+      isDeleted: { $ne: true },
       $or: [
         { code: code },
         { 'variants.sku': code },
@@ -525,7 +528,7 @@ class ProductService {
 
   // Update product
   async updateProduct(shopId, userId, productId, updateData, req = null) {
-    const product = await Product.findOne({ _id: productId, shop: shopId });
+    const product = await Product.findOne({ _id: productId, shop: shopId, isDeleted: { $ne: true } });
     if (!product) {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
     }
@@ -735,19 +738,41 @@ class ProductService {
     return this._transformProduct(product);
   }
 
-  // Delete product (soft delete)
+  // Delete product (soft delete). The document is kept so past sales,
+  // purchases and stock transactions still resolve — only new activity is
+  // blocked and the product disappears from all listings.
   async deleteProduct(shopId, userId, productId, req = null) {
     if (req?.shop?.multiBranchEnabled) {
       getBranchForCreate(req);
     }
 
-    const product = await Product.findOne({ _id: productId, shop: shopId });
+    const product = await Product.findOne({ _id: productId, shop: shopId, isDeleted: { $ne: true } });
     if (!product) {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
     }
 
+    const originalCode = product.code;
+
+    product.isDeleted = true;
+    product.deletedAt = new Date();
+    product.deletedBy = userId;
+    // Also flip the visibility flags so every existing isActive/online-filtered
+    // query (reports, barcode lookup, online store) stays consistent
     product.isActive = false;
+    product.isAvailableOnline = false;
+    // Free the code for reuse — {shop, code} carries a unique index, so keeping
+    // it would block re-creating a product with the same code later. Invoices
+    // and stock history store their own productCode snapshot, so they are
+    // unaffected by this rename.
+    product.code = `${originalCode}~DEL~${Date.now().toString(36)}`;
     await product.save();
+
+    // Invalidate the cached inventory stats so totals reflect the deletion
+    const statsKeyBase = `shop:${shopId}:invstats:`;
+    cacheService.delete(`${statsKeyBase}all`).catch(() => {});
+    if (req?.branchId) {
+      cacheService.delete(`${statsKeyBase}${req.branchId}`).catch(() => {});
+    }
 
     // Create audit log
     await AuditLog.create({
@@ -755,12 +780,16 @@ class ProductService {
       user: userId,
       action: 'product_delete',
       actionBn: 'পণ্য মুছে ফেলা',
-      description: `Deleted product: ${product.name}`,
-      descriptionBn: `পণ্য মুছে ফেলা হয়েছে: ${product.name}`,
+      description: `Deleted product: ${product.name} (${originalCode})`,
+      descriptionBn: `পণ্য মুছে ফেলা হয়েছে: ${product.name} (${originalCode})`,
       entity: {
         type: 'product',
         id: product._id,
         name: product.name,
+      },
+      changes: {
+        before: { code: originalCode, isDeleted: false },
+        after: { code: product.code, isDeleted: true },
       },
     });
 
@@ -769,7 +798,7 @@ class ProductService {
 
   // Toggle product active status
   async toggleProductStatus(shopId, userId, productId, isActive) {
-    const product = await Product.findOne({ _id: productId, shop: shopId });
+    const product = await Product.findOne({ _id: productId, shop: shopId, isDeleted: { $ne: true } });
     if (!product) {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
     }
@@ -804,7 +833,7 @@ class ProductService {
   async updateStock(shopId, userId, productId, stockData, req = null) {
     const { quantity, type, variantId, notes } = stockData;
 
-    const product = await Product.findOne({ _id: productId, shop: shopId });
+    const product = await Product.findOne({ _id: productId, shop: shopId, isDeleted: { $ne: true } });
     if (!product) {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
     }
@@ -1124,7 +1153,7 @@ class ProductService {
     });
 
     // Fetch existing product codes & barcodes for this shop to prevent duplicates
-    const existingProducts = await Product.find({ shop: shopId }, { code: 1, barcode: 1 });
+    const existingProducts = await Product.find({ shop: shopId, isDeleted: { $ne: true } }, { code: 1, barcode: 1 });
     const existingCodes = new Set();
     existingProducts.forEach(p => {
       if (p.code) existingCodes.add(p.code.toUpperCase().trim());
