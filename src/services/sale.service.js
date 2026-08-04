@@ -246,12 +246,25 @@ class SaleService {
       payments = [{ method: paymentMethod, amount: paid }];
     }
 
+    // Helper to safely extract a string ObjectId from item.productId or item.product (string, ObjectId, or object)
+    const extractProductId = (item) => {
+      if (!item) return null;
+      let id = item.productId || item.product;
+      if (!id) return null;
+      while (typeof id === 'object' && id !== null) {
+        if (id._id) id = id._id;
+        else if (id.id) id = id.id;
+        else break;
+      }
+      return id ? id.toString() : null;
+    };
+
     // Validate items and calculate totals
     let subtotal = 0;
     const processedItems = [];
 
     // --- BATCH: Fetch all products in a single query ---
-    const productIds = [...new Set(items.map(item => item.productId))];
+    const productIds = [...new Set(items.map(extractProductId).filter(Boolean))];
     const products = await Product.find({ _id: { $in: productIds }, shop: shopId }).session(session || null);
     const productMap = new Map(products.map(p => [p._id.toString(), p]));
 
@@ -290,9 +303,13 @@ class SaleService {
     let expectedStockOps = 0;
 
     for (const item of items) {
-      const product = productMap.get(item.productId?.toString());
+      const cleanProductId = extractProductId(item);
+      const product = cleanProductId ? productMap.get(cleanProductId) : null;
       if (!product) {
-        throw new AppError(`Product not found: ${item.productId}`, `পণ্য পাওয়া যায়নি: ${item.productName || item.productId}`, 404);
+        const displayId = cleanProductId || (typeof item.productId === 'object' || typeof item.product === 'object'
+          ? JSON.stringify(item.productId || item.product)
+          : (item.productId || item.product));
+        throw new AppError(`Product not found: ${displayId}`, `পণ্য পাওয়া যায়নি: ${item.productName || displayId}`, 404);
       }
 
       // Deleted products can still arrive via held carts or offline-synced

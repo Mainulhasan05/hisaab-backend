@@ -122,16 +122,22 @@ class PurchaseService {
     let totalAmount = 0;
 
     for (const item of items) {
+      let rawProdId = item.product || item.productId;
+      if (typeof rawProdId === 'object' && rawProdId !== null) {
+        rawProdId = rawProdId._id || rawProdId.id;
+      }
+
       const product = await Product.findOne({
-        _id: item.product,
+        _id: rawProdId,
         shop: shopId,
         isActive: true,
       }).session(session || null);
 
       if (!product) {
+        const displayId = typeof rawProdId === 'object' ? JSON.stringify(rawProdId) : rawProdId;
         throw new AppError(
-          `পণ্য "${item.productName || item.product}" পাওয়া যায়নি`,
-          `Product not found: ${item.product}`,
+          `পণ্য "${item.productName || displayId}" পাওয়া যায়নি`,
+          `Product not found: ${displayId}`,
           404
         );
       }
