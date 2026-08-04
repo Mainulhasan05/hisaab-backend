@@ -8,7 +8,7 @@ class HeldCartService {
    */
   async holdCart(shopId, userId, cartData, req) {
     const branchId = req ? getBranchForCreate(req) : null;
-    const { items, customer, customerName, customerPhone, discount, discountType, notes, label } = cartData;
+    const { items, customer, customerName, customerPhone, discount, discountType, deliveryCharge, notes, label } = cartData;
 
     if (!items || items.length === 0) {
       throw new AppError('Cart is empty', 'কার্ট খালি', 400);
@@ -23,6 +23,7 @@ class HeldCartService {
       customerPhone,
       discount: discount || 0,
       discountType: discountType || 'fixed',
+      deliveryCharge: Number(deliveryCharge) || 0,
       notes,
       label: label || customerName || `Cart #${Date.now().toString(36).slice(-4).toUpperCase()}`,
       heldBy: userId,

@@ -44,6 +44,7 @@ const heldCartSchema = new mongoose.Schema({
     enum: ['fixed', 'percentage'],
     default: 'fixed'
   },
+  deliveryCharge: { type: Number, default: 0, min: 0 },
   notes: { type: String, maxlength: 500 },
   label: { type: String, maxlength: 100 }, // Quick identifier like "Table 3" or customer name
   heldBy: {
@@ -87,7 +88,8 @@ heldCartSchema.virtual('estimatedTotal').get(function() {
   if (this.discountType === 'percentage') {
     discountAmount = (subtotal * this.discount) / 100;
   }
-  return subtotal - discountAmount;
+  const delivery = this.deliveryCharge || 0;
+  return Math.max(0, subtotal - discountAmount + delivery);
 });
 
 const HeldCart = mongoose.model('HeldCart', heldCartSchema);
