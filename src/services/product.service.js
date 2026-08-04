@@ -177,13 +177,59 @@ class ProductService {
         }
       } else {
         const statsResult = await Product.aggregate([
-          { $match: { shop: new mongoose.Types.ObjectId(shopId), isActive: true } },
+          { $match: { shop: new mongoose.Types.ObjectId(shopId), isActive: true, isDeleted: { $ne: true } } },
           {
             $group: {
               _id: null,
-              totalStock: { $sum: '$stock' },
-              totalBuyingValue: { $sum: { $multiply: ['$stock', { $ifNull: ['$buyingPrice', 0] }] } },
-              totalSellingValue: { $sum: { $multiply: ['$stock', { $ifNull: ['$sellingPrice', 0] }] } }
+              totalStock: {
+                $sum: {
+                  $cond: [
+                    { $eq: ['$hasVariants', true] },
+                    { $reduce: { input: '$variants', initialValue: 0, in: { $add: ['$$value', { $ifNull: ['$$this.stock', 0] }] } } },
+                    { $ifNull: ['$stock', 0] }
+                  ]
+                }
+              },
+              totalBuyingValue: {
+                $sum: {
+                  $cond: [
+                    { $eq: ['$hasVariants', true] },
+                    {
+                      $reduce: {
+                        input: '$variants',
+                        initialValue: 0,
+                        in: {
+                          $add: [
+                            '$$value',
+                            { $multiply: [{ $ifNull: ['$$this.stock', 0] }, { $ifNull: ['$$this.buyingPrice', 0] }] }
+                          ]
+                        }
+                      }
+                    },
+                    { $multiply: [{ $ifNull: ['$stock', 0] }, { $ifNull: ['$buyingPrice', 0] }] }
+                  ]
+                }
+              },
+              totalSellingValue: {
+                $sum: {
+                  $cond: [
+                    { $eq: ['$hasVariants', true] },
+                    {
+                      $reduce: {
+                        input: '$variants',
+                        initialValue: 0,
+                        in: {
+                          $add: [
+                            '$$value',
+                            { $multiply: [{ $ifNull: ['$$this.stock', 0] }, { $ifNull: ['$$this.sellingPrice', 0] }] }
+                          ]
+                        }
+                      }
+                    },
+                    { $multiply: [{ $ifNull: ['$stock', 0] }, { $ifNull: ['$sellingPrice', 0] }] }
+                  ]
+                }
+              }
             }
           }
         ]);
