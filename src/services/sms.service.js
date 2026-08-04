@@ -38,7 +38,7 @@ class SMSService {
    */
   async sendOTP(phone, otp) {
     const formattedPhone = formatPhone(phone);
-    const message = `আপনার হিসাব OTP: ${otp}\nমেয়াদ: ৫ মিনিট`;
+    const message = `Your Hisaab OTP: ${otp}\nValid for 5 minutes`;
 
     // OTPs are secrets — only log them in development, never in production logs
     if (process.env.NODE_ENV === 'development' || process.env.SKIP_SMS === 'true') {
@@ -387,7 +387,7 @@ class SMSService {
       phone: customer.phone,
       customerId: customer._id,
       customerName: customer.name,
-      message: `প্রিয় ${customer.name},\nআপনার বকেয়া: ৳${customer.totalDue}\n${shop.name} থেকে অনুরোধ করা হচ্ছে যত দ্রুত সম্ভব বকেয়া পরিশোধ করুন।\nধন্যবাদ।`,
+      message: `Dear ${customer.name},\nYour due: Tk${formatSmsAmount(customer.totalDue)}\nPlease pay as soon as possible.\nThank you - ${getGsmSafeShopName(shop.name)}`,
     }));
 
     return this.sendDynamic(shopId, userId, recipients, req);
@@ -455,7 +455,7 @@ class SMSService {
 
         // Get customer phone
         let customerPhone = saleData.customerPhone;
-        let customerName = saleData.customerName || 'গ্রাহক';
+        let customerName = saleData.customerName || 'Customer';
 
         if (!customerPhone && saleData.customerId) {
           const customer = await Customer.findById(saleData.customerId);
@@ -479,7 +479,8 @@ class SMSService {
         }
 
         // Keep sale receipt SMS ASCII/GSM-7 so it usually costs one segment.
-        const message = `${getGsmSafeShopName(shop.name)}\nInv:${saleData.invoiceNumber}\nTotal:Tk${formatSmsAmount(saleData.total)}\nPaid:Tk${formatSmsAmount(saleData.paid)}\nDue:Tk${formatSmsAmount(saleData.due)}\nThanks for visiting`;
+        const shopLabel = getGsmSafeShopName(shop.name);
+        const message = `${shopLabel}\nInv:${saleData.invoiceNumber}\nTotal:Tk${formatSmsAmount(saleData.total)}\nPaid:Tk${formatSmsAmount(saleData.paid)}\nDue:Tk${formatSmsAmount(saleData.due)}\nThanks for visiting\n- ${shopLabel}`;
 
         // Send SMS
         await this.sendSingle(shopId, userId, customerPhone, message, saleData.customerId);
@@ -516,7 +517,8 @@ class SMSService {
         const quota = await SMSQuota.findOne({ shop: shopId });
         if (!quota || !quota.isEnabled || quota.remainingQuota < 1) return;
 
-        const message = `${customer.name},\n৳${paymentData.amount} পেমেন্ট পাওয়া গেছে।\nবর্তমান বকেয়া: ৳${customer.totalDue}\nধন্যবাদ - ${shop.name}`;
+        const shopLabel = getGsmSafeShopName(shop.name);
+        const message = `${customer.name},\nTk${formatSmsAmount(paymentData.amount)} payment received.\nCurrent due: Tk${formatSmsAmount(customer.totalDue)}\nThank you - ${shopLabel}`;
 
         await this.sendSingle(shopId, userId, customer.phone, message, customer._id);
         logger.info(`SMS: Payment receipt sent to ${customer.phone}`);
@@ -533,13 +535,13 @@ class SMSService {
    * Get SMS templates with dynamic shop name
    */
   async getTemplates(shopId = null) {
-    let shopName = 'আপনার দোকান';
+    let shopName = 'Your Shop';
     if (shopId) {
       try {
         const Shop = require('../models/Shop.model');
         const shop = await Shop.findById(shopId).select('name').lean();
         if (shop?.name) {
-          shopName = shop.name;
+          shopName = getGsmSafeShopName(shop.name);
         }
       } catch (err) {
         logger.error(`SMS: Failed to fetch shop name for templates: ${err.message}`);
@@ -549,30 +551,30 @@ class SMSService {
     return [
       {
         id: 'due_reminder',
-        name: 'বকেয়া স্মারক',
+        name: 'Due Reminder',
         nameEn: 'Due Reminder',
-        template: `প্রিয় {customer_name},\nআপনার বকেয়া: ৳{due_amount}\nঅনুগ্রহ করে যত দ্রুত সম্ভব পরিশোধ করুন।\nধন্যবাদ - ${shopName}`,
+        template: `Dear {customer_name},\nYour due: Tk{due_amount}\nPlease pay as soon as possible.\nThank you - ${shopName}`,
         variables: ['customer_name', 'due_amount', 'shop_name'],
       },
       {
         id: 'payment_received',
-        name: 'পেমেন্ট প্রাপ্তি',
+        name: 'Payment Received',
         nameEn: 'Payment Received',
-        template: `প্রিয় {customer_name},\nআপনার ৳{amount} পেমেন্ট পাওয়া গেছে।\nবর্তমান বকেয়া: ৳{remaining_due}\nধন্যবাদ - ${shopName}`,
+        template: `Dear {customer_name},\nTk{amount} payment received.\nCurrent due: Tk{remaining_due}\nThank you - ${shopName}`,
         variables: ['customer_name', 'amount', 'remaining_due', 'shop_name'],
       },
       {
         id: 'sale_receipt',
-        name: 'বিক্রয় রশিদ',
+        name: 'Sale Receipt',
         nameEn: 'Sale Receipt',
-        template: `${shopName}\nInv:{invoice_no}\nTotal:Tk{total}\nPaid:Tk{paid}\nDue:Tk{due}\nThanks for visiting`,
+        template: `${shopName}\nInv:{invoice_no}\nTotal:Tk{total}\nPaid:Tk{paid}\nDue:Tk{due}\nThanks for visiting\n- ${shopName}`,
         variables: ['shop_name', 'invoice_no', 'total', 'paid', 'due'],
       },
       {
         id: 'custom',
-        name: 'কাস্টম মেসেজ',
+        name: 'Custom Message',
         nameEn: 'Custom Message',
-        template: `প্রিয় গ্রাহক, আমাদের দোকানে কেনাকাটা করার জন্য ধন্যবাদ! - ${shopName}`,
+        template: `Dear Customer, thank you for shopping with us! - ${shopName}`,
         variables: ['shop_name'],
       },
     ];

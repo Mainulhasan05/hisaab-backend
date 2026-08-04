@@ -242,6 +242,13 @@ class CustomerService {
       req,
     });
 
+    // Send payment receipt SMS (non-blocking — runs in background)
+    const SMSService = require('./sms.service');
+    SMSService.sendPaymentReceiptAsync(shopId, userId, {
+      customerId: customer._id,
+      amount,
+    });
+
     return { customer, payment };
     });
   }

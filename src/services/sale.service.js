@@ -784,6 +784,15 @@ class SaleService {
       },
     });
 
+    // Send payment receipt SMS (non-blocking — runs in background)
+    if (sale.customer) {
+      const SMSService = require('./sms.service');
+      SMSService.sendPaymentReceiptAsync(shopId, userId, {
+        customerId: sale.customer,
+        amount,
+      });
+    }
+
     // Invalidate related caches
     this.invalidateCache(shopId).catch(() => {}); // Non-blocking
 
