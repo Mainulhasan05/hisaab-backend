@@ -85,7 +85,8 @@ exports.getHistory = asyncHandler(async (req, res) => {
 
 // Get SMS templates
 exports.getTemplates = asyncHandler(async (req, res) => {
-  const templates = smsService.getTemplates();
+  const shopId = req.shopId || req.user?.shop;
+  const templates = await smsService.getTemplates(shopId);
   return ApiResponse.success(res, {
     data: templates,
     message: 'SMS templates retrieved successfully',

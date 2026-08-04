@@ -530,37 +530,50 @@ class SMSService {
   }
 
   /**
-   * Get SMS templates
+   * Get SMS templates with dynamic shop name
    */
-  getTemplates() {
+  async getTemplates(shopId = null) {
+    let shopName = 'আপনার দোকান';
+    if (shopId) {
+      try {
+        const Shop = require('../models/Shop.model');
+        const shop = await Shop.findById(shopId).select('name').lean();
+        if (shop?.name) {
+          shopName = shop.name;
+        }
+      } catch (err) {
+        logger.error(`SMS: Failed to fetch shop name for templates: ${err.message}`);
+      }
+    }
+
     return [
       {
         id: 'due_reminder',
         name: 'বকেয়া স্মারক',
         nameEn: 'Due Reminder',
-        template: 'প্রিয় {customer_name},\nআপনার বকেয়া: ৳{due_amount}\nঅনুগ্রহ করে যত দ্রুত সম্ভব পরিশোধ করুন।\n{shop_name}',
+        template: `প্রিয় {customer_name},\nআপনার বকেয়া: ৳{due_amount}\nঅনুগ্রহ করে যত দ্রুত সম্ভব পরিশোধ করুন।\nধন্যবাদ - ${shopName}`,
         variables: ['customer_name', 'due_amount', 'shop_name'],
       },
       {
         id: 'payment_received',
         name: 'পেমেন্ট প্রাপ্তি',
         nameEn: 'Payment Received',
-        template: 'প্রিয় {customer_name},\nআপনার ৳{amount} পেমেন্ট পাওয়া গেছে।\nবর্তমান বকেয়া: ৳{remaining_due}\nধন্যবাদ - {shop_name}',
+        template: `প্রিয় {customer_name},\nআপনার ৳{amount} পেমেন্ট পাওয়া গেছে।\nবর্তমান বকেয়া: ৳{remaining_due}\nধন্যবাদ - ${shopName}`,
         variables: ['customer_name', 'amount', 'remaining_due', 'shop_name'],
       },
       {
         id: 'sale_receipt',
         name: 'বিক্রয় রশিদ',
         nameEn: 'Sale Receipt',
-        template: '{shop_name}\nInv:{invoice_no}\nTotal:Tk{total}\nPaid:Tk{paid}\nDue:Tk{due}\nThanks for visiting',
+        template: `${shopName}\nInv:{invoice_no}\nTotal:Tk{total}\nPaid:Tk{paid}\nDue:Tk{due}\nThanks for visiting`,
         variables: ['shop_name', 'invoice_no', 'total', 'paid', 'due'],
       },
       {
         id: 'custom',
         name: 'কাস্টম মেসেজ',
         nameEn: 'Custom Message',
-        template: '',
-        variables: [],
+        template: `প্রিয় গ্রাহক, আমাদের দোকানে কেনাকাটা করার জন্য ধন্যবাদ! - ${shopName}`,
+        variables: ['shop_name'],
       },
     ];
   }
