@@ -1597,6 +1597,221 @@ class ReportService {
     return { staff, summary, startDate: startDate || null, endDate: endDate || null };
   }
 
+  /**
+   * Detailed Staff Sales Report (Date-wise & Item-wise):
+   * Provides complete breakdown of which staff member sold what products on which days.
+   */
+  async getDetailedStaffReport(shopId, options = {}, branchId = null) {
+    const { startDate, endDate, staffId, search } = options;
+
+    const match = {
+      ...this._baseMatch(shopId, branchId),
+      status: { $ne: 'cancelled' },
+    };
+
+    if (startDate || endDate) {
+      match.createdAt = {};
+      if (startDate) match.createdAt.$gte = new Date(startDate);
+      if (endDate) match.createdAt.$lte = new Date(endDate);
+    }
+    if (staffId) {
+      match.createdBy = new mongoose.Types.ObjectId(staffId);
+    }
+
+    const aggregationPipeline = [
+      { $match: match },
+      { $unwind: '$items' },
+      {
+        $group: {
+          _id: {
+            createdBy: '$createdBy',
+            date: {
+              $dateToString: {
+                format: '%Y-%m-%d',
+                date: '$createdAt',
+                timezone: '+06:00', // Bangladesh local time
+              },
+            },
+            product: '$items.product',
+            productName: '$items.productName',
+          },
+          quantitySold: { $sum: '$items.quantity' },
+          totalRevenue: { $sum: '$items.total' },
+          unitPrice: { $avg: '$items.unitPrice' },
+          buyingPrice: { $avg: { $ifNull: ['$items.buyingPrice', 0] } },
+          totalCost: {
+            $sum: {
+              $multiply: [{ $ifNull: ['$items.buyingPrice', 0] }, '$items.quantity'],
+            },
+          },
+          totalProfit: {
+            $sum: {
+              $subtract: [
+                '$items.total',
+                { $multiply: [{ $ifNull: ['$items.buyingPrice', 0] }, '$items.quantity'] },
+              ],
+            },
+          },
+          invoices: { $addToSet: '$invoiceNo' },
+          salesCount: { $addToSet: '$_id' },
+        },
+      },
+      {
+        $project: {
+          createdBy: '$_id.createdBy',
+          date: '$_id.date',
+          product: '$_id.product',
+          productName: '$_id.productName',
+          quantitySold: 1,
+          totalRevenue: 1,
+          unitPrice: 1,
+          buyingPrice: 1,
+          totalCost: 1,
+          totalProfit: 1,
+          invoiceCount: { $size: '$invoices' },
+          invoices: 1,
+          salesCount: { $size: '$salesCount' },
+        },
+      },
+      {
+        $sort: { date: -1, totalRevenue: -1 },
+      },
+    ];
+
+    const rawResults = await Sale.aggregate(aggregationPipeline);
+
+    // Collect staff IDs to fetch staff user details
+    const User = require('../models/User.model');
+    const userIds = [...new Set(rawResults.map((r) => String(r.createdBy)))].filter(Boolean);
+
+    const users = await User.find({ _id: { $in: userIds } })
+      .select('name phone isOwner isActive role')
+      .populate('role', 'name')
+      .lean();
+
+    const userMap = new Map(users.map((u) => [String(u._id), u]));
+
+    // Build flat records and hierarchical records
+    const flatItems = [];
+    const staffMap = new Map();
+
+    let grandTotalRevenue = 0;
+    let grandTotalQuantity = 0;
+    let grandTotalProfit = 0;
+
+    for (const item of rawResults) {
+      const staffUser = userMap.get(String(item.createdBy));
+      const staffName = staffUser?.name || 'Unknown Staff';
+      const staffRole = staffUser?.isOwner ? 'Owner' : (staffUser?.role?.name || 'Staff');
+
+      // Filtering search query (if search provided)
+      if (search) {
+        const query = search.toLowerCase();
+        const matchesStaff = staffName.toLowerCase().includes(query);
+        const matchesProduct = (item.productName || '').toLowerCase().includes(query);
+        const matchesDate = (item.date || '').toLowerCase().includes(query);
+        if (!matchesStaff && !matchesProduct && !matchesDate) {
+          continue;
+        }
+      }
+
+      grandTotalRevenue += item.totalRevenue || 0;
+      grandTotalQuantity += item.quantitySold || 0;
+      grandTotalProfit += item.totalProfit || 0;
+
+      const flatRecord = {
+        staffId: item.createdBy,
+        staffName,
+        staffPhone: staffUser?.phone || '',
+        roleName: staffRole,
+        date: item.date,
+        productId: item.product,
+        productName: item.productName,
+        quantitySold: item.quantitySold,
+        unitPrice: Math.round(item.unitPrice || 0),
+        totalRevenue: Math.round(item.totalRevenue || 0),
+        totalProfit: Math.round(item.totalProfit || 0),
+        invoiceCount: item.invoiceCount,
+        invoices: item.invoices,
+      };
+
+      flatItems.push(flatRecord);
+
+      // Hierarchical grouping: Staff -> Date -> Products
+      const sIdStr = String(item.createdBy);
+      if (!staffMap.has(sIdStr)) {
+        staffMap.set(sIdStr, {
+          staffId: item.createdBy,
+          staffName,
+          staffPhone: staffUser?.phone || '',
+          roleName: staffRole,
+          isOwner: staffUser?.isOwner === true,
+          isActive: staffUser?.isActive !== false,
+          totalRevenue: 0,
+          totalQuantity: 0,
+          totalProfit: 0,
+          datesMap: new Map(),
+        });
+      }
+
+      const staffNode = staffMap.get(sIdStr);
+      staffNode.totalRevenue += item.totalRevenue || 0;
+      staffNode.totalQuantity += item.quantitySold || 0;
+      staffNode.totalProfit += item.totalProfit || 0;
+
+      if (!staffNode.datesMap.has(item.date)) {
+        staffNode.datesMap.set(item.date, {
+          date: item.date,
+          totalRevenue: 0,
+          totalQuantity: 0,
+          totalProfit: 0,
+          products: [],
+        });
+      }
+
+      const dateNode = staffNode.datesMap.get(item.date);
+      dateNode.totalRevenue += item.totalRevenue || 0;
+      dateNode.totalQuantity += item.quantitySold || 0;
+      dateNode.totalProfit += item.totalProfit || 0;
+
+      dateNode.products.push({
+        productId: item.product,
+        productName: item.productName,
+        quantitySold: item.quantitySold,
+        unitPrice: Math.round(item.unitPrice || 0),
+        totalRevenue: Math.round(item.totalRevenue || 0),
+        totalProfit: Math.round(item.totalProfit || 0),
+        invoiceCount: item.invoiceCount,
+        invoices: item.invoices,
+      });
+    }
+
+    // Convert Maps to Arrays
+    const staffDetails = Array.from(staffMap.values()).map((s) => ({
+      ...s,
+      totalRevenue: Math.round(s.totalRevenue),
+      totalProfit: Math.round(s.totalProfit),
+      dates: Array.from(s.datesMap.values()).map((d) => ({
+        ...d,
+        totalRevenue: Math.round(d.totalRevenue),
+        totalProfit: Math.round(d.totalProfit),
+      })),
+    }));
+
+    return {
+      staffDetails,
+      flatItems,
+      summary: {
+        totalStaff: staffDetails.length,
+        totalRevenue: Math.round(grandTotalRevenue),
+        totalQuantity: grandTotalQuantity,
+        totalProfit: Math.round(grandTotalProfit),
+      },
+      startDate: startDate || null,
+      endDate: endDate || null,
+    };
+  }
+
   // Export report (placeholder - implement actual export logic)
   async exportReport(shopId, type, format, options, branchId = null) {
     // This would generate actual PDF/Excel/CSV files
@@ -1614,6 +1829,9 @@ class ReportService {
         break;
       case 'staff':
         data = await this.getStaffReport(shopId, options, branchId);
+        break;
+      case 'staff-detailed':
+        data = await this.getDetailedStaffReport(shopId, options, branchId);
         break;
       default:
         throw new Error('Invalid report type');

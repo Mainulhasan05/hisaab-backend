@@ -43,7 +43,7 @@ const setUserTokenCookie = (res, token, maxAgeDays = 30) => {
  * @param {string} token - JWT token
  * @param {number} maxAgeDays - Cookie expiry in days (default: 7)
  */
-const setAdminTokenCookie = (res, token, maxAgeDays = 7) => {
+const setAdminTokenCookie = (res, token, maxAgeDays = 30) => {
   const maxAge = maxAgeDays * 24 * 60 * 60 * 1000; // Convert days to ms
   res.cookie(COOKIE_NAMES.ADMIN_TOKEN, token, getCookieOptions(maxAge));
 };

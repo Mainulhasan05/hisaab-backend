@@ -13,6 +13,7 @@ router.get('/customers', rbac('reports', 'view'), reportController.getCustomerRe
 router.get('/profit-loss', rbac('reports', 'view_profit'), reportController.getProfitLoss);
 router.get('/daily-summary', rbac('reports', 'view'), reportController.getDailySummary);
 router.get('/staff', rbac('reports', 'view'), reportController.getStaffReport);
+router.get('/staff-detailed', rbac('reports', 'view'), reportController.getDetailedStaffReport);
 router.get('/date-wise', rbac('reports', 'view'), reportController.getDateWiseSummary);
 router.get('/date-wise/:date', rbac('reports', 'view'), reportController.getSalesByDate);
 router.get('/trending-products', rbac('reports', 'view'), reportController.getTrendingProducts);

@@ -64,6 +64,16 @@ exports.getStaffReport = asyncHandler(async (req, res) => {
   });
 });
 
+// Get detailed staff-wise date-wise itemized sales report
+exports.getDetailedStaffReport = asyncHandler(async (req, res) => {
+  const report = await reportService.getDetailedStaffReport(req.shop._id, req.query, req.branchId);
+  return ApiResponse.success(res, {
+    data: sanitizeReport(report, req),
+    message: 'Detailed staff sales report retrieved successfully',
+    messageBn: 'বিস্তারিত স্টাফ বিক্রয় রিপোর্ট সফলভাবে লোড হয়েছে',
+  });
+});
+
 // Get Profit & Loss statement
 exports.getProfitLoss = asyncHandler(async (req, res) => {
   const report = await reportService.getProfitLoss(req.shop._id, req.query, req.branchId);

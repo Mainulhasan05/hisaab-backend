@@ -129,7 +129,7 @@ userSchema.methods.generateAccessToken = function() {
   }
 
   return jwt.sign(payload, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m'
+    expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || process.env.JWT_EXPIRES_IN || '30d'
   });
 };
 
@@ -146,7 +146,7 @@ userSchema.methods.generateRefreshToken = function() {
   };
 
   return jwt.sign(payload, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d'
+    expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || process.env.JWT_EXPIRES_IN || '30d'
   });
 };
 
