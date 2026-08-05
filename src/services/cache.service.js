@@ -416,15 +416,18 @@ class CacheService {
   }
 
   /**
-   * Remove from set
+   * Remove member(s) from set
    * @param {string} key - Set key
-   * @param {string} member - Member to remove
+   * @param {string|string[]} members - Member or array of members to remove
    */
-  async sRem(key, member) {
+  async sRem(key, members) {
+    const memberArray = Array.isArray(members) ? members : [members];
+    if (memberArray.length === 0) return true;
+
     if (isConnected()) {
       try {
         const client = getClient();
-        await client.sRem(key, member);
+        await client.sRem(key, memberArray);
         return true;
       } catch (error) {
         logger.error('Redis SREM error:', error.message);
@@ -435,12 +438,39 @@ class CacheService {
     const setKey = `set:${key}`;
     const existing = memoryCache.get(setKey);
     if (existing) {
-      const set = JSON.parse(existing);
-      const index = set.indexOf(member);
-      if (index > -1) {
-        set.splice(index, 1);
-        memoryCache.set(setKey, JSON.stringify(set));
+      let set = JSON.parse(existing);
+      set = set.filter(item => !memberArray.includes(item));
+      memoryCache.set(setKey, JSON.stringify(set));
+    }
+    return true;
+  }
+
+  /**
+   * Non-blocking delete of one or more keys using UNLINK in Redis.
+   * Async reclamation of memory without blocking the main event thread.
+   * @param {string|string[]} keys - Key or array of keys to unlink
+   */
+  async unlink(keys) {
+    const keyArray = Array.isArray(keys) ? keys : [keys];
+    if (keyArray.length === 0) return true;
+
+    if (isConnected()) {
+      try {
+        const client = getClient();
+        if (typeof client.unlink === 'function') {
+          await client.unlink(keyArray);
+        } else {
+          await client.del(keyArray);
+        }
+      } catch (error) {
+        logger.error('Redis UNLINK error:', error.message);
       }
+    }
+
+    // Memory fallback cleanup
+    for (const key of keyArray) {
+      memoryCache.delete(key);
+      memoryCacheTTL.delete(key);
     }
     return true;
   }

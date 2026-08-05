@@ -9,16 +9,18 @@ const { normalizePhone } = require('../utils/phone.util');
 const { getBranchForCreate } = require('../utils/branchScope.util');
 const { invalidateUserAuthCache } = require('../utils/authCache.util');
 
+const userActivityService = require('./userActivity.service');
+
 // One phone may hold accounts in multiple shops (owner of one, staff at
 // another), but unbounded reuse is abuse — cap total memberships per phone.
 const MAX_SHOPS_PER_PHONE = 5;
 
 class StaffService {
   /**
-   * List all non-owner employees in the shop
+   * List all non-owner employees in the shop with merged real-time lastActiveAt
    */
   async getStaff(shopId) {
-    return await User.find({
+    const staffList = await User.find({
       shop: shopId,
       isOwner: false,
     })
@@ -26,6 +28,24 @@ class StaffService {
       .populate('branch', 'name code')
       .select('-password -otp')
       .sort({ createdAt: -1 });
+
+    if (!staffList || staffList.length === 0) return [];
+
+    try {
+      const userIds = staffList.map(s => s._id.toString());
+      const lastActiveMap = await userActivityService.getMultipleLastActive(userIds);
+
+      return staffList.map(s => {
+        const obj = s.toObject();
+        const lastActive = lastActiveMap[s._id.toString()] || s.lastActiveAt || s.lastLogin || null;
+        obj.lastActiveAt = lastActive;
+        // Online if active within the last 5 minutes (300,000 ms)
+        obj.isOnline = lastActive ? (Date.now() - new Date(lastActive).getTime()) < 5 * 60 * 1000 : false;
+        return obj;
+      });
+    } catch {
+      return staffList;
+    }
   }
 
   /**

@@ -7,6 +7,8 @@ const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 const { COOKIE_NAMES } = require('../utils/cookie.util');
 const cacheService = require('../services/cache.service');
+const userActivityService = require('../services/userActivity.service');
+const logger = require('../utils/logger.util');
 
 // Auth cache TTL: 5 minutes. Mutations that must take effect immediately
 // (shop status/subscription/settings changes, staff deactivation) explicitly
@@ -352,7 +354,10 @@ const protect = asyncHandler(async (req, res, next) => {
           messageBn: '?? ????? ??????????? ???? ???? ????????? ???',
         });
       }
-    }
+    // Non-blocking activity tracking (0ms added request latency)
+    userActivityService.recordActivity(user._id, decoded.jti).catch(err => {
+      logger.error('Background user activity tracking error:', err.message);
+    });
 
     next();
   } catch (error) {

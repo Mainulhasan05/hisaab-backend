@@ -7,6 +7,8 @@ const connectDB = require('./config/database');
 const { initializeRedis, closeConnection: closeRedis } = require('./config/redis.config');
 const logger = require('./utils/logger.util');
 
+const { startSyncJob, stopSyncJob } = require('./jobs/userActivitySync.job');
+
 // Register all models early so Mongoose can resolve populate refs
 require('./models/Role.model');
 
@@ -97,6 +99,9 @@ async function start() {
   // Seeders run after the server is accepting traffic — they're idempotent
   // and must not delay startup
   runSeeders().catch((err) => logger.warn('Seeding error:', err.message));
+
+  // Start 5-minute background user activity database sync job
+  startSyncJob();
 }
 
 start().catch((err) => {
@@ -124,6 +129,7 @@ async function shutdown(code = 0) {
   forceExit.unref();
 
   try {
+    stopSyncJob();
     if (server) {
       await new Promise((resolve) => server.close(resolve));
       logger.info('HTTP server closed');

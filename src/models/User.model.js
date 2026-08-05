@@ -56,6 +56,10 @@ const userSchema = new mongoose.Schema({
   lastLogin: {
     type: Date
   },
+  lastActiveAt: {
+    type: Date,
+    index: true
+  },
   passwordChangedAt: {
     type: Date
   },
