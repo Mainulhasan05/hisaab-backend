@@ -25,10 +25,9 @@ const formatSmsAmount = (amount) => {
 };
 
 const getGsmSafeShopName = (shopName) => {
-  if (!shopName || isUnicode(shopName)) {
+  if (!shopName) {
     return 'Hisaab';
   }
-
   return shopName;
 };
 

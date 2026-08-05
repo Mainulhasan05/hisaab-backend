@@ -2,6 +2,7 @@ const Sale = require('../models/Sale.model');
 const Product = require('../models/Product.model');
 const Customer = require('../models/Customer.model');
 const Payment = require('../models/Payment.model');
+const User = require('../models/User.model');
 const StockTransaction = require('../models/StockTransaction.model');
 const Shop = require('../models/Shop.model');
 const AuditLog = require('../models/AuditLog.model');
