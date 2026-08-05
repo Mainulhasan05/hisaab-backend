@@ -40,8 +40,21 @@ const upload = multer({
   fileFilter,
 });
 
+const handleUploadError = (err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return next(new AppError('File size exceeds the limit', 'ফাইল সাইজ সীমার বাইরে', 400));
+    }
+    return next(new AppError(err.message, err.message, 400));
+  }
+  next(err);
+};
+
 module.exports = {
   upload,
+  imageUpload: upload,
+  handleUploadError,
   maxSizeBytes,
   allowedMimeTypes,
 };
+
