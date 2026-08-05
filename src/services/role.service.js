@@ -17,17 +17,38 @@ class RoleService {
    * registration), the default presets are re-seeded here.
    */
   async getRoles(shopId) {
-    const roles = await Role.find({ shop: shopId, isActive: true }).sort({ isDefault: -1, name: 1 });
-    if (roles.length > 0) return roles;
+    let roles = await Role.find({ shop: shopId, isActive: true }).sort({ isDefault: -1, name: 1 });
+    if (roles.length === 0) {
+      const presets = Object.values(ROLE_PRESETS).map((p) => ({
+        shop: shopId,
+        name: p.name,
+        permissions: p.permissions,
+        isDefault: true,
+      }));
+      await Role.insertMany(presets, { ordered: false }).catch(() => {});
+      roles = await Role.find({ shop: shopId, isActive: true }).sort({ isDefault: -1, name: 1 });
+    }
 
-    const presets = Object.values(ROLE_PRESETS).map((p) => ({
-      shop: shopId,
-      name: p.name,
-      permissions: p.permissions,
-      isDefault: true,
-    }));
-    await Role.insertMany(presets, { ordered: false }).catch(() => {});
-    return await Role.find({ shop: shopId, isActive: true }).sort({ isDefault: -1, name: 1 });
+    // Self-heal: Ensure Cashier role has SMS view & create permissions enabled
+    const cashierRole = roles.find(r => r.name === ROLE_PRESETS.cashier.name || r.name === 'Cashier');
+    if (cashierRole && (!cashierRole.permissions?.sms?.view || !cashierRole.permissions?.sms?.create)) {
+      await Role.updateOne(
+        { _id: cashierRole._id },
+        {
+          $set: {
+            'permissions.sms.view': true,
+            'permissions.sms.create': true
+          }
+        }
+      );
+      if (cashierRole.permissions) {
+        if (!cashierRole.permissions.sms) cashierRole.permissions.sms = {};
+        cashierRole.permissions.sms.view = true;
+        cashierRole.permissions.sms.create = true;
+      }
+    }
+
+    return roles;
   }
 
   /**

@@ -66,7 +66,7 @@ class SMSService {
   /**
    * Send single SMS
    */
-  async sendSingle(shopId, userId, phone, message, customerId = null, req = null) {
+  async sendSingle(shopId, userId, phone, message, customerId = null, req = null, options = {}) {
     // Calculate segment cost
     const smsInfo = countSms(message);
     const segmentCost = smsInfo.segments || 1;
@@ -104,7 +104,9 @@ class SMSService {
         status: SMS_STATUS.SENT,
         sentCount: 1,
         apiResponse: response.data,
-        sentBy: userId
+        sentBy: userId,
+        invoiceNumber: options.invoiceNumber || null,
+        sale: options.saleId || null
       });
 
       // Deduct quota (segment-aware)
@@ -427,10 +429,42 @@ class SMSService {
   sendSaleReceiptAsync(shopId, userId, saleData) {
     const Shop = require('../models/Shop.model');
     const Customer = require('../models/Customer.model');
+    const Sale = require('../models/Sale.model');
 
     // Run in background (non-blocking) using setImmediate
     setImmediate(async () => {
       try {
+        const invoiceNo = saleData.invoiceNumber || saleData.invoiceNo;
+        if (!invoiceNo) return;
+
+        // Deduplication Guard 1: Check if Sale document has smsSent = true
+        const saleId = saleData.id || saleData._id;
+        let saleDoc = null;
+        if (saleId) {
+          saleDoc = await Sale.findById(saleId);
+        } else {
+          saleDoc = await Sale.findOne({ shop: shopId, invoiceNo });
+        }
+
+        if (saleDoc?.smsSent) {
+          logger.warn(`SMS: Duplicate send attempt prevented for invoice ${invoiceNo}`);
+          return;
+        }
+
+        // Deduplication Guard 2: Check if an SMSLog already exists for this invoice
+        const existingLog = await SMSLog.findOne({
+          shop: shopId,
+          invoiceNumber: invoiceNo,
+          status: { $in: [SMS_STATUS.SENT, SMS_STATUS.DELIVERED, SMS_STATUS.PENDING] }
+        });
+        if (existingLog) {
+          logger.warn(`SMS: Duplicate SMSLog prevented for invoice ${invoiceNo}`);
+          if (saleDoc && !saleDoc.smsSent) {
+            await Sale.updateOne({ _id: saleDoc._id }, { $set: { smsSent: true, smsSentAt: existingLog.createdAt } });
+          }
+          return;
+        }
+
         // Get shop with settings
         const shop = await Shop.findById(shopId);
         if (!shop) {
@@ -466,7 +500,7 @@ class SMSService {
 
         // Check if we should send (customer has phone)
         if (!customerPhone) {
-          logger.info(`SMS: No phone number for customer in sale ${saleData.invoiceNumber}`);
+          logger.info(`SMS: No phone number for customer in sale ${invoiceNo}`);
           return;
         }
 
@@ -479,11 +513,23 @@ class SMSService {
 
         // Keep sale receipt SMS ASCII/GSM-7 so it usually costs one segment.
         const shopLabel = getGsmSafeShopName(shop.name);
-        const message = `${shopLabel}\nInv:${saleData.invoiceNumber}\nTotal:Tk${formatSmsAmount(saleData.total)}\nPaid:Tk${formatSmsAmount(saleData.paid)}\nDue:Tk${formatSmsAmount(saleData.due)}\nThanks for visiting\n- ${shopLabel}`;
+        const message = `${shopLabel}\nInv:${invoiceNo}\nTotal:Tk${formatSmsAmount(saleData.total)}\nPaid:Tk${formatSmsAmount(saleData.paid)}\nDue:Tk${formatSmsAmount(saleData.due)}\nThanks for visiting\n- ${shopLabel}`;
 
-        // Send SMS
-        await this.sendSingle(shopId, userId, customerPhone, message, saleData.customerId);
-        logger.info(`SMS: Sale receipt sent for ${saleData.invoiceNumber} to ${customerPhone}`);
+        // Send SMS with invoice metadata
+        const sendResult = await this.sendSingle(shopId, userId, customerPhone, message, saleData.customerId, null, {
+          invoiceNumber: invoiceNo,
+          saleId: saleDoc?._id || null
+        });
+
+        // Mark Sale document as smsSent: true
+        if (sendResult?.success && saleDoc) {
+          await Sale.updateOne(
+            { _id: saleDoc._id },
+            { $set: { smsSent: true, smsSentAt: new Date() } }
+          );
+        }
+
+        logger.info(`SMS: Sale receipt sent for ${invoiceNo} to ${customerPhone}`);
 
       } catch (error) {
         logger.error(`SMS: Failed to send sale receipt: ${error.message}`);

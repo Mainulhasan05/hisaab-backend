@@ -164,7 +164,7 @@ const ROLE_PRESETS = {
       cash_register: ['view', 'create'],
       reports:       ['view'],
       settings:      [],
-      sms:           [],
+      sms:           ['view', 'create'],
       staff:         [],
       stock:         ['view'],
       stock_transfers: ['view'],

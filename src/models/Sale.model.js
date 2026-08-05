@@ -191,6 +191,13 @@ const saleSchema = new mongoose.Schema({
   shippingAddress: {
     type: String
   },
+  smsSent: {
+    type: Boolean,
+    default: false
+  },
+  smsSentAt: {
+    type: Date
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

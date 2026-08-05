@@ -85,6 +85,16 @@ const smsLogSchema = new mongoose.Schema({
   scheduledAt: {
     type: Date
   },
+  invoiceNumber: {
+    type: String,
+    trim: true,
+    index: true
+  },
+  sale: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Sale',
+    default: null
+  },
   sentBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -98,6 +108,7 @@ const smsLogSchema = new mongoose.Schema({
 
 // Indexes - Optimized for scalability
 smsLogSchema.index({ shop: 1, createdAt: -1 }); // Main listing
+smsLogSchema.index({ shop: 1, invoiceNumber: 1 }, { sparse: true }); // Duplicate SMS prevention for invoices
 smsLogSchema.index({ transactionId: 1 }, { sparse: true }); // Webhook status updates
 
 // TTL Index - Auto-delete logs older than 60 days
