@@ -506,8 +506,36 @@ class AdminService {
       };
     }));
 
+    // Fetch registration audit logs (IP/device) for all shops in this page
+    const registrationLogs = await AuditLog.find({
+      shop: { $in: shopIds },
+      action: 'user_register',
+    }).sort({ createdAt: 1 }).lean();
+
+    // Map: first registration log per shop
+    const regLogMap = new Map();
+    for (const log of registrationLogs) {
+      const sid = log.shop.toString();
+      if (!regLogMap.has(sid)) regLogMap.set(sid, log);
+    }
+
+    // Merge registration info
+    const shopsWithRegInfo = shopsWithQuota.map(shop => {
+      const regLog = regLogMap.get(shop._id.toString());
+      return {
+        ...shop,
+        registrationInfo: regLog?.metadata ? {
+          ip: regLog.metadata.ip || null,
+          browser: regLog.metadata.browser || null,
+          os: regLog.metadata.os || null,
+          device: regLog.metadata.device || null,
+          userAgent: regLog.metadata.userAgent || null,
+        } : null,
+      };
+    });
+
     return {
-      data: shopsWithQuota,
+      data: shopsWithRegInfo,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -552,9 +580,22 @@ class AdminService {
     // Fetch branches for this shop
     const branches = await Branch.find({ shop: shopId }).sort({ createdAt: -1 });
 
+    // Fetch registration audit log for IP/device info
+    const registrationLog = await AuditLog.findOne({
+      shop: shopId,
+      action: 'user_register',
+    }).sort({ createdAt: 1 }).lean();
+
     return {
       ...shop.toObject(),
       branches: branches.map(b => b.toObject()),
+      registrationInfo: registrationLog?.metadata ? {
+        ip: registrationLog.metadata.ip || null,
+        browser: registrationLog.metadata.browser || null,
+        os: registrationLog.metadata.os || null,
+        device: registrationLog.metadata.device || null,
+        userAgent: registrationLog.metadata.userAgent || null,
+      } : null,
       statistics: {
         usersCount,
         customersCount,
@@ -566,6 +607,58 @@ class AdminService {
           used: smsQuota.usedQuota,
           remaining: smsQuota.remainingQuota,
         } : null,
+      },
+    };
+  }
+
+  // Get all products across all shops
+  async getAllProducts(options = {}) {
+    const {
+      page = 1,
+      limit = 20,
+      search,
+      shopId,
+      sortBy = 'createdAt',
+      sortOrder = 'desc',
+    } = options;
+
+    const query = {};
+
+    if (shopId) {
+      query.shop = shopId;
+    }
+
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { code: { $regex: search, $options: 'i' } },
+        { barcode: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const skip = (page - 1) * limit;
+    const validSortFields = ['createdAt', 'name', 'sellingPrice', 'stock'];
+    const sortField = validSortFields.includes(sortBy) ? sortBy : 'createdAt';
+    const sort = { [sortField]: sortOrder === 'asc' ? 1 : -1 };
+
+    const [products, total] = await Promise.all([
+      Product.find(query)
+        .populate('shop', 'name phone')
+        .populate('category', 'name')
+        .sort(sort)
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      Product.countDocuments(query),
+    ]);
+
+    return {
+      data: products,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit),
       },
     };
   }

@@ -410,3 +410,12 @@ exports.purgeShop = asyncHandler(async (req, res) => {
   });
 });
 
+// Get all products across all shops
+exports.getAllProducts = asyncHandler(async (req, res) => {
+  const result = await adminService.getAllProducts(req.query);
+  return ApiResponse.paginated(res, {
+    ...result,
+    message: 'Products retrieved successfully',
+    messageBn: 'পণ্য তালিকা সফলভাবে লোড হয়েছে',
+  });
+});

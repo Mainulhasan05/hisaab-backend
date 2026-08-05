@@ -42,6 +42,9 @@ router.get('/customers', adminController.getAllCustomers);
 // Sales (all shops)
 router.get('/sales', adminController.getAllSales);
 
+// Products (all shops)
+router.get('/products', adminController.getAllProducts);
+
 // Online users (from heartbeat)
 router.get('/online-users', adminController.getOnlineUsers);
 
