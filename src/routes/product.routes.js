@@ -6,6 +6,8 @@ const { rbac, rbacAny } = require('../middleware/permission.middleware');
 const { validate } = require('../middleware/validate.middleware');
 const productValidation = require('../validations/product.validation');
 
+const { upload } = require('../middleware/upload.middleware');
+
 // All routes require authentication
 router.use(protect);
 
@@ -26,5 +28,6 @@ router.delete('/:id', rbac('products', 'delete'), productController.deleteProduc
 router.patch('/:id/stock', rbacAny([['products', 'update'], ['stock', 'manual_adjust']]), validate(productValidation.updateStock), productController.updateStock);
 router.patch('/:id/status', rbac('products', 'update'), validate(productValidation.toggleStatus), productController.toggleStatus);
 router.get('/:id/stock-transactions', rbacAny([['products', 'view'], ['stock', 'view']]), productController.getStockTransactions);
+router.post('/:id/images', rbac('products', 'update'), upload.array('images', 5), productController.uploadProductImages);
 
 module.exports = router;

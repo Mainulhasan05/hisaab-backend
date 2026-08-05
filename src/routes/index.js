@@ -27,10 +27,14 @@ const branchRoutes = require('./branch.routes');
 const shopCategoryRoutes = require('./shopCategory.routes');
 const heldCartRoutes = require('./heldCart.routes');
 const stockTransferRoutes = require('./stockTransfer.routes');
+const imageUploadRoutes = require('./imageUpload.routes');
+const userRoutes = require('./user.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
+router.use('/users', userRoutes);
 router.use('/products', productRoutes);
+router.use('/upload', imageUploadRoutes);
 router.use('/categories', categoryRoutes);
 router.use('/shop-categories', shopCategoryRoutes);
 router.use('/customers', customerRoutes);

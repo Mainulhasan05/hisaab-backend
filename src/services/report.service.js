@@ -56,6 +56,33 @@ class ReportService {
     return match;
   }
 
+  /**
+   * Build date range match object for queries.
+   * Ensures end of day (23:59:59.999) is used when endDate is date-only string or midnight timestamp.
+   */
+  _buildDateMatch(startDate, endDate) {
+    if (!startDate && !endDate) return null;
+    const match = {};
+
+    if (startDate) {
+      match.$gte = new Date(startDate);
+    }
+
+    if (endDate) {
+      const end = new Date(endDate);
+      if (typeof endDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(endDate.trim())) {
+        const { endOfDay } = getBangladeshDayRange(endDate.trim());
+        match.$lte = endOfDay;
+      } else if (end.getUTCHours() === 0 && end.getUTCMinutes() === 0 && end.getUTCSeconds() === 0 && end.getUTCMilliseconds() === 0) {
+        match.$lte = new Date(end.getTime() + (24 * 60 * 60 * 1000 - 1));
+      } else {
+        match.$lte = end;
+      }
+    }
+
+    return match;
+  }
+
   // Get dashboard statistics
   async getDashboardStats(shopId, branchId = null) {
     // Try cache first (include branchId and shop cache version in the key —
@@ -262,10 +289,9 @@ class ReportService {
       status: { $ne: 'cancelled' },
     };
 
-    if (startDate || endDate) {
-      matchStage.createdAt = {};
-      if (startDate) matchStage.createdAt.$gte = new Date(startDate);
-      if (endDate) matchStage.createdAt.$lte = new Date(endDate);
+    const dateMatch = this._buildDateMatch(startDate, endDate);
+    if (dateMatch) {
+      matchStage.createdAt = dateMatch;
     }
 
     let dateFormat;
@@ -340,10 +366,9 @@ class ReportService {
       status: { $ne: 'cancelled' },
     };
 
-    if (startDate || endDate) {
-      matchStage.createdAt = {};
-      if (startDate) matchStage.createdAt.$gte = new Date(startDate);
-      if (endDate) matchStage.createdAt.$lte = new Date(endDate);
+    const dateMatch = this._buildDateMatch(startDate, endDate);
+    if (dateMatch) {
+      matchStage.createdAt = dateMatch;
     }
 
     const topSelling = await Sale.aggregate([
@@ -551,10 +576,9 @@ class ReportService {
       isActive: true,
     };
 
-    if (startDate || endDate) {
-      matchStage.createdAt = {};
-      if (startDate) matchStage.createdAt.$gte = new Date(startDate);
-      if (endDate) matchStage.createdAt.$lte = new Date(endDate);
+    const dateMatch = this._buildDateMatch(startDate, endDate);
+    if (dateMatch) {
+      matchStage.createdAt = dateMatch;
     }
 
     const newCustomers = await Customer.find(matchStage)
@@ -927,19 +951,9 @@ class ReportService {
 
     const shopObjId = new mongoose.Types.ObjectId(shopId);
 
-    const dateMatch = {};
-    if (startDate || endDate) {
-      dateMatch.createdAt = {};
-      if (startDate) dateMatch.createdAt.$gte = new Date(startDate);
-      if (endDate) dateMatch.createdAt.$lte = new Date(endDate);
-    }
-
-    const expenseDateMatch = {};
-    if (startDate || endDate) {
-      expenseDateMatch.date = {};
-      if (startDate) expenseDateMatch.date.$gte = new Date(startDate);
-      if (endDate) expenseDateMatch.date.$lte = new Date(endDate);
-    }
+    const dateQuery = this._buildDateMatch(startDate, endDate);
+    const dateMatch = dateQuery ? { createdAt: dateQuery } : {};
+    const expenseDateMatch = dateQuery ? { date: dateQuery } : {};
 
     // Run all aggregations in parallel
     const [
@@ -1503,10 +1517,9 @@ class ReportService {
       ...this._baseMatch(shopId, branchId),
       status: { $ne: 'cancelled' },
     };
-    if (startDate || endDate) {
-      match.createdAt = {};
-      if (startDate) match.createdAt.$gte = new Date(startDate);
-      if (endDate) match.createdAt.$lte = new Date(endDate);
+    const dateMatch = this._buildDateMatch(startDate, endDate);
+    if (dateMatch) {
+      match.createdAt = dateMatch;
     }
     if (staffId) {
       match.createdBy = new mongoose.Types.ObjectId(staffId);
@@ -1611,10 +1624,9 @@ class ReportService {
       status: { $ne: 'cancelled' },
     };
 
-    if (startDate || endDate) {
-      match.createdAt = {};
-      if (startDate) match.createdAt.$gte = new Date(startDate);
-      if (endDate) match.createdAt.$lte = new Date(endDate);
+    const dateMatch = this._buildDateMatch(startDate, endDate);
+    if (dateMatch) {
+      match.createdAt = dateMatch;
     }
     if (staffId) {
       match.createdBy = new mongoose.Types.ObjectId(staffId);

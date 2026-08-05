@@ -1,43 +1,47 @@
 const multer = require('multer');
-
-const imageService = require('../services/image.service');
 const { AppError } = require('./error.middleware');
 
+// Memory storage for high-performance direct buffer processing
 const storage = multer.memoryStorage();
 
-const imageFileFilter = (req, file, callback) => {
-  try {
-    imageService.validateImage(file);
-    callback(null, true);
-  } catch (error) {
-    callback(error);
+// Max file size: 20MB limit (or configurable via process.env)
+const maxSizeBytes = parseInt(process.env.IMAGE_UPLOAD_MAX_SIZE, 10) || 20 * 1024 * 1024; // 20MB
+
+// Allowed MIME types
+const allowedMimeTypes = [
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+  'image/bmp',
+];
+
+const fileFilter = (req, file, cb) => {
+  if (allowedMimeTypes.includes(file.mimetype.toLowerCase())) {
+    cb(null, true);
+  } else {
+    cb(
+      new AppError(
+        `Invalid file type '${file.mimetype}'. Only images (JPEG, PNG, GIF, WebP, BMP) are allowed.`,
+        `অবৈধ ফাইল টাইপ '${file.mimetype}'। শুধুমাত্র ছবি (JPEG, PNG, GIF, WebP, BMP) আপলোড করা যাবে।`,
+        400
+      ),
+      false
+    );
   }
 };
 
-const imageUpload = multer({
+const upload = multer({
   storage,
-  fileFilter: imageFileFilter,
   limits: {
-    fileSize: imageService.getMaxSize(),
-    files: Number(process.env.IMAGE_UPLOAD_MAX_FILES) || 5,
+    fileSize: maxSizeBytes,
   },
+  fileFilter,
 });
 
-const handleUploadError = (err, req, res, next) => {
-  if (!err) return next();
-
-  if (err instanceof multer.MulterError) {
-    const message = err.code === 'LIMIT_FILE_SIZE'
-      ? 'Image file is too large'
-      : err.message;
-
-    return next(new AppError(message, 'ইমেজ ফাইল আপলোড করা যায়নি', 400));
-  }
-
-  return next(err);
-};
-
 module.exports = {
-  imageUpload,
-  handleUploadError,
+  upload,
+  maxSizeBytes,
+  allowedMimeTypes,
 };

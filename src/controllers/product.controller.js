@@ -156,3 +156,61 @@ exports.bulkImport = asyncHandler(async (req, res) => {
     messageBn: 'বাল্ক পণ্য ইম্পোর্ট সম্পন্ন হয়েছে',
   });
 });
+
+// Upload product catalog images (supports multiple files via Promise.all)
+exports.uploadProductImages = asyncHandler(async (req, res) => {
+  const imageUploadService = require('../services/imageUpload.service');
+  const Product = require('../models/Product.model');
+
+  if (!imageUploadService.isConfigured()) {
+    return ApiResponse.error(res, {
+      statusCode: 503,
+      message: 'Image upload service is not configured on this server.',
+      messageBn: 'ইমেজ আপলোড সার্ভিস কনফিগার করা হয়নি',
+    });
+  }
+
+  const productId = req.params.id;
+  const product = await Product.findOne({ _id: productId, shop: req.shop._id });
+  if (!product) {
+    return ApiResponse.notFound(res, {
+      message: 'Product not found',
+      messageBn: 'পণ্য পাওয়া যায়নি',
+    });
+  }
+
+  const files = req.files || (req.file ? [req.file] : []);
+  if (files.length === 0) {
+    return ApiResponse.badRequest(res, {
+      message: 'Please provide at least one image file to upload',
+      messageBn: 'অন্তত একটি ছবি দিন',
+    });
+  }
+
+  // Upload all images in parallel using Promise.all
+  const uploadResults = await Promise.all(
+    files.map((file) => imageUploadService.uploadFromMulter(file))
+  );
+
+  const newCatalogImages = uploadResults.map((result, index) => ({
+    url: result.url,
+    thumbnail: result.thumbnail,
+    isPrimary: (product.catalogImages?.length || 0) === 0 && index === 0,
+  }));
+
+  const imageUrls = uploadResults.map((r) => r.url);
+
+  product.catalogImages = [...(product.catalogImages || []), ...newCatalogImages];
+  product.images = [...(product.images || []), ...imageUrls];
+  await product.save();
+
+  return ApiResponse.success(res, {
+    data: {
+      product,
+      uploadedImages: newCatalogImages,
+    },
+    message: `${uploadResults.length} catalog image(s) uploaded successfully`,
+    messageBn: `${uploadResults.length}টি ক্যাটালগ ছবি আপলোড হয়েছে`,
+  });
+});
+

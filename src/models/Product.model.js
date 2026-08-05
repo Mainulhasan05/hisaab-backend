@@ -131,9 +131,11 @@ const productSchema = new mongoose.Schema({
     trim: true,
   }],
   // For variant products
-  variants: [variantSchema],
-  images: [{
-    type: String
+  images: [mongoose.Schema.Types.Mixed],
+  catalogImages: [{
+    url: { type: String, required: true },
+    thumbnail: { type: String },
+    isPrimary: { type: Boolean, default: false }
   }],
   tags: [{
     type: String,
