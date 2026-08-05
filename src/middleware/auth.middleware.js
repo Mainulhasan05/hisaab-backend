@@ -354,6 +354,8 @@ const protect = asyncHandler(async (req, res, next) => {
           messageBn: '?? ????? ??????????? ???? ???? ????????? ???',
         });
       }
+    }
+
     // Non-blocking activity tracking (0ms added request latency)
     userActivityService.recordActivity(user._id, decoded.jti).catch(err => {
       logger.error('Background user activity tracking error:', err.message);
