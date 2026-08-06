@@ -11,13 +11,14 @@ const jwt = require('jsonwebtoken');
 const cacheService = require('./cache.service');
 const { seedCategories } = require('../seeds/categorySeeder');
 const { normalizePhone } = require('../utils/phone.util');
+const metaCapi = require('./metaCapi.service');
 
 class AuthService {
   /**
    * Register new shop with owner
    */
   async register(data, req) {
-    const { phone, password, name, shopName, shopType, shopAddress, shopPhone } = data;
+    const { phone, password, name, shopName, shopType, shopAddress, shopPhone, tracking } = data;
 
     const normalizedPhone = normalizePhone(phone);
 
@@ -117,11 +118,17 @@ class AuthService {
     // Generate token
     const token = user.generateToken();
 
+    // Meta Conversions API — the phone isn't verified yet, so this is a Lead.
+    // Non-blocking; the returned id is echoed to the browser so its Pixel event
+    // carries the same event_id and Meta dedupes the pair.
+    const metaEventId = metaCapi.trackSignupLead({ user, shop, tracking, req });
+
     return {
       user: user.toJSON(),
       shop: shop.toJSON(),
       token,
-      otpSent: true
+      otpSent: true,
+      metaEventId
     };
   }
 
@@ -198,7 +205,7 @@ class AuthService {
   /**
    * Verify OTP
    */
-  async verifyOTP(phone, otp) {
+  async verifyOTP(phone, otp, { tracking, req } = {}) {
     const normalizedPhone = normalizePhone(phone);
 
     // Prefer the account awaiting verification (multi-shop phones)
@@ -225,7 +232,11 @@ class AuthService {
     user.clearOTP();
     await user.save();
 
-    return { message: 'Phone verified successfully' };
+    // The account only becomes usable here, so this — not the signup form
+    // submit — is the CompleteRegistration worth optimising ad spend against.
+    const metaEventId = metaCapi.trackRegistrationCompleted({ user, tracking, req });
+
+    return { message: 'Phone verified successfully', metaEventId };
   }
 
   /**

@@ -54,7 +54,10 @@ const sendOTP = asyncHandler(async (req, res) => {
  * @access  Public
  */
 const verifyOTP = asyncHandler(async (req, res) => {
-  const result = await AuthService.verifyOTP(req.body.phone, req.body.otp);
+  const result = await AuthService.verifyOTP(req.body.phone, req.body.otp, {
+    tracking: req.body.tracking,
+    req
+  });
 
   return ApiResponse.success(res, {
     data: result,

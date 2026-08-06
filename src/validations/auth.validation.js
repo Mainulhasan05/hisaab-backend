@@ -1,6 +1,16 @@
 const { Joi, commonSchemas } = require('../middleware/validate.middleware');
 const { SHOP_TYPES } = require('../config/constants');
 
+// Meta Pixel attribution forwarded by the browser. The frontend and the API are
+// on different domains, so the _fbp / _fbc cookies never reach us on their own —
+// the client reads them from document.cookie and posts them here. Purely
+// additive: absent or malformed values just lower Meta's match quality.
+const tracking = Joi.object({
+  fbp: Joi.string().trim().max(200),
+  fbc: Joi.string().trim().max(500),
+  eventSourceUrl: Joi.string().trim().uri().max(500)
+}).unknown(false);
+
 const register = Joi.object({
   phone: commonSchemas.phone.required(),
   password: commonSchemas.password.required(),
@@ -16,7 +26,8 @@ const register = Joi.object({
   }),
   shopType: Joi.string().trim().default('other'),
   shopAddress: Joi.string().trim().max(500).allow(''),
-  shopPhone: commonSchemas.phone
+  shopPhone: commonSchemas.phone,
+  tracking
 });
 
 const sendOTP = Joi.object({
@@ -29,7 +40,8 @@ const verifyOTP = Joi.object({
     'string.length': 'OTP must be 6 digits',
     'string.pattern.base': 'OTP must contain only numbers',
     'any.required': 'OTP is required'
-  })
+  }),
+  tracking
 });
 
 const login = Joi.object({

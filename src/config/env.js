@@ -14,6 +14,12 @@ function validateEnv(env = process.env) {
   if (env.IMAGE_UPLOAD_PROVIDER === 'imgbb' && !env.IMGBB_API_KEY) {
     throw new Error('IMAGE_UPLOAD_PROVIDER=imgbb requires IMGBB_API_KEY');
   }
+
+  // Meta Conversions API is optional, but half-configured is worse than off:
+  // it would silently drop every conversion instead of failing loudly here.
+  if (env.META_CAPI_ACCESS_TOKEN && !env.META_PIXEL_ID) {
+    throw new Error('META_CAPI_ACCESS_TOKEN requires META_PIXEL_ID');
+  }
 }
 
 module.exports = { validateEnv };
