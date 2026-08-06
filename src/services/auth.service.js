@@ -10,6 +10,8 @@ const { ROLE_PRESETS, buildPermissionsFromConfig, buildPermissions, LEGACY_PERMI
 const jwt = require('jsonwebtoken');
 const cacheService = require('./cache.service');
 const { seedCategories } = require('../seeds/categorySeeder');
+const { INITIAL_SHOP_CATEGORIES } = require('../seeds/shopCategorySeeder');
+const ShopCategory = require('../models/ShopCategory.model');
 const { normalizePhone } = require('../utils/phone.util');
 const metaCapi = require('./metaCapi.service');
 
@@ -36,21 +38,16 @@ class AuthService {
       );
     }
 
-    const defaultVariantTypesMap = {
-      cloth: ['size', 'color'],
-      grocery: ['weight', 'pack-size'],
-      electronics: ['color', 'storage', 'warranty'],
-      pharmacy: ['strength', 'pack-size'],
-      hardware: ['size', 'weight'],
-      cosmetics: ['shade', 'pack-size', 'weight'],
-      bookshop: [],
-      other: ['size', 'color', 'weight']
-    };
+    // Variant types come from the shop category the owner picked. Admin-managed
+    // categories live in the DB, so read there first and fall back to the seed
+    // definitions (and finally to a generic set for unknown/custom keys).
+    const resolvedShopType = shopType || 'other';
+    const enabledVariantTypes = await this.resolveDefaultVariantTypes(resolvedShopType);
 
     // Create shop first
     const shop = await Shop.create({
       name: shopName,
-      type: shopType || 'other',
+      type: resolvedShopType,
       address: shopAddress,
       phone: shopPhone || normalizedPhone,
       subscription: {
@@ -60,13 +57,13 @@ class AuthService {
         expiresAt: new Date(Date.now() + TRIAL_PERIOD_DAYS * 24 * 60 * 60 * 1000)
       },
       settings: {
-        enabledVariantTypes: defaultVariantTypesMap[shopType || 'other']
+        enabledVariantTypes
       }
     });
 
     // Seed default categories for this shop type
     try {
-      await seedCategories(shop._id, shopType || 'other');
+      await seedCategories(shop._id, resolvedShopType);
     } catch (error) {
       console.error('Failed to seed categories:', error.message);
     }
@@ -130,6 +127,27 @@ class AuthService {
       otpSent: true,
       metaEventId
     };
+  }
+
+  /**
+   * Resolve the variant types a new shop starts with, based on its shop type.
+   * DB (admin-managed) wins over the static seed list; unknown keys get a
+   * generic set so custom categories never register with no variant support.
+   */
+  async resolveDefaultVariantTypes(shopType) {
+    const GENERIC_VARIANT_TYPES = ['size', 'color', 'weight'];
+
+    try {
+      const dbCategory = await ShopCategory.findOne({ key: shopType }).select('defaultVariantTypes').lean();
+      if (dbCategory && Array.isArray(dbCategory.defaultVariantTypes)) {
+        return dbCategory.defaultVariantTypes;
+      }
+    } catch (error) {
+      console.error('Failed to read shop category variant types:', error.message);
+    }
+
+    const seed = INITIAL_SHOP_CATEGORIES.find((cat) => cat.key === shopType);
+    return seed ? seed.defaultVariantTypes : GENERIC_VARIANT_TYPES;
   }
 
   /**

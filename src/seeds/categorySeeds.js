@@ -5,6 +5,10 @@
  * Each category has: name (Bengali by default), icon, order, subcategories[]
  */
 
+// Shorthand for the newer shop types: a list of subcategory names becomes
+// [{ name, order }] with 1-based ordering, matching the expanded shape above.
+const sub = (names) => names.map((name, index) => ({ name, order: index + 1 }));
+
 const CATEGORY_SEEDS = {
   "cloth": [
     {
@@ -2138,6 +2142,133 @@ const CATEGORY_SEEDS = {
       "order": 10,
       "subcategories": []
     }
+  ],
+
+  "computer": [
+    { name: 'ডেস্কটপ কম্পিউটার', icon: 'monitor', order: 1, subcategories: sub(['ব্র্যান্ড পিসি', 'অ্যাসেম্বল পিসি', 'অল-ইন-ওয়ান পিসি', 'গেমিং পিসি']) },
+    { name: 'ল্যাপটপ', icon: 'laptop', order: 2, subcategories: sub(['নোটবুক', 'আল্ট্রাবুক', 'গেমিং ল্যাপটপ', 'ম্যাকবুক']) },
+    { name: 'কম্পিউটার পার্টস', icon: 'cpu', order: 3, subcategories: sub(['প্রসেসর', 'মাদারবোর্ড', 'র‍্যাম', 'গ্রাফিক্স কার্ড', 'পাওয়ার সাপ্লাই', 'কেসিং', 'কুলিং ফ্যান']) },
+    { name: 'স্টোরেজ', icon: 'hard-drive', order: 4, subcategories: sub(['হার্ডডিস্ক (HDD)', 'এসএসডি (SSD)', 'পেনড্রাইভ', 'মেমোরি কার্ড', 'এক্সটার্নাল হার্ডডিস্ক']) },
+    { name: 'মনিটর ও ডিসপ্লে', icon: 'monitor-speaker', order: 5, subcategories: sub(['এলইডি মনিটর', 'গেমিং মনিটর', 'প্রজেক্টর']) },
+    { name: 'প্রিন্টার ও স্ক্যানার', icon: 'printer', order: 6, subcategories: sub(['ইঙ্কজেট প্রিন্টার', 'লেজার প্রিন্টার', 'স্ক্যানার', 'টোনার ও কার্টিজ']) },
+    { name: 'নেটওয়ার্কিং', icon: 'wifi', order: 7, subcategories: sub(['রাউটার', 'সুইচ', 'নেটওয়ার্ক ক্যাবল', 'নেটওয়ার্ক কার্ড']) },
+    { name: 'এক্সেসরিজ', icon: 'mouse', order: 8, subcategories: sub(['কীবোর্ড', 'মাউস', 'হেডফোন', 'ওয়েবক্যাম', 'ইউপিএস', 'ল্যাপটপ ব্যাগ']) },
+    { name: 'সফটওয়্যার ও লাইসেন্স', icon: 'disc', order: 9, subcategories: sub(['অপারেটিং সিস্টেম', 'অ্যান্টিভাইরাস', 'অফিস সফটওয়্যার']) }
+  ],
+
+  "dealership": [
+    { name: 'ব্র্যান্ড পণ্য', icon: 'package', order: 1, subcategories: sub(['মূল পণ্য', 'নতুন পণ্য', 'অফার পণ্য']) },
+    { name: 'পাইকারি প্যাক', icon: 'boxes', order: 2, subcategories: sub(['কার্টন', 'বস্তা', 'ডজন প্যাক']) },
+    { name: 'খাদ্য ও পানীয়', icon: 'utensils', order: 3, subcategories: sub(['বিস্কুট ও চিপস', 'কোমল পানীয়', 'দুধ ও ডেইরি', 'চা ও কফি']) },
+    { name: 'গৃহস্থালি পণ্য', icon: 'home', order: 4, subcategories: sub(['সাবান ও ডিটারজেন্ট', 'টিস্যু ও ন্যাপকিন', 'ক্লিনিং আইটেম']) },
+    { name: 'নির্মাণ সামগ্রী', icon: 'hammer', order: 5, subcategories: sub(['সিমেন্ট', 'রড', 'রং', 'টাইলস']) },
+    { name: 'ইলেকট্রনিক্স', icon: 'zap', order: 6, subcategories: sub(['হোম অ্যাপ্লায়েন্স', 'মোবাইল', 'লাইটিং']) },
+    { name: 'কৃষি পণ্য', icon: 'sprout', order: 7, subcategories: sub(['সার', 'বীজ', 'কীটনাশক']) },
+    { name: 'প্রমোশন ও গিফট', icon: 'gift', order: 8, subcategories: sub(['ফ্রি স্যাম্পল', 'গিফট আইটেম']) }
+  ],
+
+  "ecommerce": [
+    { name: 'ফ্যাশন ও পোশাক', icon: 'shirt', order: 1, subcategories: sub(['পুরুষ পোশাক', 'নারী পোশাক', 'শিশু পোশাক', 'জুতা', 'ব্যাগ']) },
+    { name: 'ইলেকট্রনিক্স ও গ্যাজেট', icon: 'zap', order: 2, subcategories: sub(['মোবাইল', 'স্মার্ট গ্যাজেট', 'হেডফোন', 'এক্সেসরিজ']) },
+    { name: 'স্বাস্থ্য ও সৌন্দর্য', icon: 'heart', order: 3, subcategories: sub(['স্কিন কেয়ার', 'মেকআপ', 'হেয়ার কেয়ার', 'পারফিউম']) },
+    { name: 'গৃহস্থালি ও লাইফস্টাইল', icon: 'home', order: 4, subcategories: sub(['হোম ডেকর', 'কিচেন আইটেম', 'বেডিং']) },
+    { name: 'খাদ্য ও গ্রোসারি', icon: 'shopping-basket', order: 5, subcategories: sub(['শুকনা খাবার', 'স্ন্যাকস', 'অর্গানিক পণ্য']) },
+    { name: 'শিশু ও মা', icon: 'baby', order: 6, subcategories: sub(['বেবি কেয়ার', 'খেলনা', 'ডায়াপার']) },
+    { name: 'বই ও স্টেশনারি', icon: 'book', order: 7, subcategories: sub(['বই', 'খাতা', 'কলম']) },
+    { name: 'গিফট আইটেম', icon: 'gift', order: 8, subcategories: sub(['উপহার সামগ্রী', 'গিফট হ্যাম্পার']) },
+    { name: 'রিটার্ন ও ড্যামেজ', icon: 'rotate-ccw', order: 9, subcategories: sub(['কুরিয়ার রিটার্ন', 'ড্যামেজ পণ্য']) }
+  ],
+
+  "furniture": [
+    { name: 'বেডরুম ফার্নিচার', icon: 'bed', order: 1, subcategories: sub(['খাট', 'ওয়ারড্রব', 'ড্রেসিং টেবিল', 'সাইড টেবিল', 'ম্যাট্রেস']) },
+    { name: 'লিভিং রুম', icon: 'sofa', order: 2, subcategories: sub(['সোফা', 'সেন্টার টেবিল', 'টিভি ক্যাবিনেট', 'ডিভান']) },
+    { name: 'ডাইনিং', icon: 'utensils', order: 3, subcategories: sub(['ডাইনিং টেবিল', 'ডাইনিং চেয়ার', 'ক্রোকারিজ শেলফ']) },
+    { name: 'অফিস ফার্নিচার', icon: 'briefcase', order: 4, subcategories: sub(['অফিস ডেস্ক', 'এক্সিকিউটিভ চেয়ার', 'ফাইল ক্যাবিনেট', 'কনফারেন্স টেবিল']) },
+    { name: 'কিচেন ফার্নিচার', icon: 'chef-hat', order: 5, subcategories: sub(['কিচেন ক্যাবিনেট', 'কিচেন র‍্যাক']) },
+    { name: 'শিশু ফার্নিচার', icon: 'baby', order: 6, subcategories: sub(['বেবি কট', 'স্টাডি টেবিল', 'বাংক বেড']) },
+    { name: 'স্টিল ও প্লাস্টিক ফার্নিচার', icon: 'box', order: 7, subcategories: sub(['স্টিল আলমারি', 'প্লাস্টিক চেয়ার', 'প্লাস্টিক টেবিল']) },
+    { name: 'দরজা ও ইন্টেরিয়র', icon: 'door-open', order: 8, subcategories: sub(['দরজা', 'পার্টিশন', 'ইন্টেরিয়র ডেকর']) },
+    { name: 'ফার্নিচার এক্সেসরিজ', icon: 'wrench', order: 9, subcategories: sub(['হ্যান্ডেল ও লক', 'কব্জা', 'ফোম ও কুশন']) }
+  ],
+
+  "manufacturing": [
+    { name: 'কাঁচামাল', icon: 'package-open', order: 1, subcategories: sub(['মূল কাঁচামাল', 'সহায়ক উপকরণ', 'রাসায়নিক দ্রব্য']) },
+    { name: 'আধা-প্রস্তুত পণ্য', icon: 'layers', order: 2, subcategories: sub(['প্রসেসিং আইটেম', 'অসমাপ্ত পণ্য']) },
+    { name: 'তৈরি পণ্য', icon: 'package-check', order: 3, subcategories: sub(['ফিনিশড গুডস', 'রেডি স্টক']) },
+    { name: 'প্যাকেজিং সামগ্রী', icon: 'box', order: 4, subcategories: sub(['কার্টন', 'পলি ব্যাগ', 'লেবেল ও স্টিকার', 'বোতল ও জার']) },
+    { name: 'মেশিন ও যন্ত্রাংশ', icon: 'cog', order: 5, subcategories: sub(['মেশিন পার্টস', 'স্পেয়ার পার্টস', 'টুলস']) },
+    { name: 'রক্ষণাবেক্ষণ', icon: 'wrench', order: 6, subcategories: sub(['লুব্রিকেন্ট', 'মেরামত সামগ্রী']) },
+    { name: 'রিজেক্ট ও স্ক্র্যাপ', icon: 'trash-2', order: 7, subcategories: sub(['রিজেক্ট পণ্য', 'স্ক্র্যাপ']) },
+    { name: 'উপজাত পণ্য', icon: 'recycle', order: 8, subcategories: [] }
+  ],
+
+  "medical-surgical": [
+    { name: 'সার্জিক্যাল যন্ত্রপাতি', icon: 'scissors', order: 1, subcategories: sub(['কাঁচি ও ফরসেপ', 'স্ক্যালপেল ও ব্লেড', 'সেলাই সরঞ্জাম', 'সার্জিক্যাল ট্রে']) },
+    { name: 'ডিসপোজেবল আইটেম', icon: 'syringe', order: 2, subcategories: sub(['সিরিঞ্জ', 'হ্যান্ড গ্লাভস', 'মাস্ক', 'ক্যাথেটার', 'ক্যানুলা', 'স্যালাইন সেট']) },
+    { name: 'ড্রেসিং ও ব্যান্ডেজ', icon: 'bandage', order: 3, subcategories: sub(['গজ ও ব্যান্ডেজ', 'তুলা', 'প্লাস্টার', 'অ্যান্টিসেপটিক']) },
+    { name: 'ডায়াগনস্টিক যন্ত্র', icon: 'stethoscope', order: 4, subcategories: sub(['স্টেথোস্কোপ', 'ব্লাড প্রেশার মেশিন', 'থার্মোমিটার', 'গ্লুকোমিটার', 'পালস অক্সিমিটার']) },
+    { name: 'হাসপাতাল সরঞ্জাম', icon: 'bed', order: 5, subcategories: sub(['হাসপাতাল বেড', 'হুইলচেয়ার', 'স্ট্রেচার', 'ওয়াকার', 'আইভি স্ট্যান্ড']) },
+    { name: 'ল্যাব সামগ্রী', icon: 'flask-conical', order: 6, subcategories: sub(['টেস্ট টিউব', 'রিএজেন্ট', 'স্লাইড', 'ল্যাব কিট']) },
+    { name: 'অর্থোপেডিক সামগ্রী', icon: 'bone', order: 7, subcategories: sub(['সাপোর্ট বেল্ট', 'নি ক্যাপ', 'সার্ভিক্যাল কলার', 'ক্রাচ']) },
+    { name: 'অক্সিজেন ও থেরাপি', icon: 'wind', order: 8, subcategories: sub(['অক্সিজেন সিলিন্ডার', 'নেবুলাইজার', 'অক্সিজেন মাস্ক']) },
+    { name: 'ডেন্টাল সামগ্রী', icon: 'smile', order: 9, subcategories: sub(['ডেন্টাল যন্ত্র', 'ডেন্টাল ম্যাটেরিয়াল']) }
+  ],
+
+  "mobile": [
+    { name: 'মোবাইল ফোন', icon: 'smartphone', order: 1, subcategories: sub(['স্মার্টফোন', 'ফিচার ফোন', 'রিফার্বিশড ফোন']) },
+    { name: 'ট্যাব ও আইপ্যাড', icon: 'tablet', order: 2, subcategories: sub(['অ্যান্ড্রয়েড ট্যাব', 'আইপ্যাড']) },
+    { name: 'চার্জার ও ক্যাবল', icon: 'cable', order: 3, subcategories: sub(['চার্জার', 'ফাস্ট চার্জার', 'ডাটা ক্যাবল', 'পাওয়ার ব্যাংক']) },
+    { name: 'কভার ও প্রোটেকশন', icon: 'shield', order: 4, subcategories: sub(['ব্যাক কভার', 'স্ক্রিন প্রটেক্টর', 'গ্লাস প্রটেক্টর', 'পপ সকেট']) },
+    { name: 'অডিও এক্সেসরিজ', icon: 'headphones', order: 5, subcategories: sub(['হেডফোন', 'ইয়ারফোন', 'ব্লুটুথ ইয়ারবাড', 'ব্লুটুথ স্পিকার']) },
+    { name: 'স্মার্ট গ্যাজেট', icon: 'watch', order: 6, subcategories: sub(['স্মার্ট ওয়াচ', 'ফিটনেস ব্যান্ড', 'স্মার্ট গ্লাস']) },
+    { name: 'মোবাইল পার্টস', icon: 'cpu', order: 7, subcategories: sub(['ডিসপ্লে', 'ব্যাটারি', 'চার্জিং পোর্ট', 'ক্যামেরা']) },
+    { name: 'সিম ও রিচার্জ', icon: 'signal', order: 8, subcategories: sub(['সিম কার্ড', 'রিচার্জ কার্ড', 'ইন্টারনেট প্যাক']) },
+    { name: 'সার্ভিসিং', icon: 'wrench', order: 9, subcategories: sub(['মেরামত সেবা', 'সফটওয়্যার সার্ভিস']) }
+  ],
+
+  "general-trading": [
+    { name: 'প্রধান পণ্য', icon: 'package', order: 1, subcategories: sub(['নিয়মিত পণ্য', 'নতুন পণ্য', 'অফার পণ্য']) },
+    { name: 'পাইকারি পণ্য', icon: 'boxes', order: 2, subcategories: sub(['কার্টন', 'ডজন', 'বস্তা']) },
+    { name: 'খুচরা পণ্য', icon: 'shopping-bag', order: 3, subcategories: sub(['পিস আইটেম', 'ছোট প্যাক']) },
+    { name: 'কাঁচামাল ও সরবরাহ', icon: 'package-open', order: 4, subcategories: sub(['কাঁচামাল', 'প্যাকেজিং সামগ্রী']) },
+    { name: 'সেবা ও চার্জ', icon: 'receipt', order: 5, subcategories: sub(['ডেলিভারি চার্জ', 'সার্ভিস চার্জ', 'ইনস্টলেশন']) },
+    { name: 'অন্যান্য', icon: 'box', order: 6, subcategories: [] }
+  ],
+
+  "shoe": [
+    { name: 'পুরুষদের জুতা', icon: 'footprints', order: 1, subcategories: sub(['ফরমাল সু', 'লোফার', 'স্যান্ডেল', 'স্লিপার', 'বুট']) },
+    { name: 'নারীদের জুতা', icon: 'footprints', order: 2, subcategories: sub(['হিল', 'ফ্ল্যাট স্যান্ডেল', 'পাম্প সু', 'স্লিপার']) },
+    { name: 'শিশুদের জুতা', icon: 'baby', order: 3, subcategories: sub(['স্কুল সু', 'বেবি সু', 'শিশু স্যান্ডেল']) },
+    { name: 'স্পোর্টস ও স্নিকার্স', icon: 'activity', order: 4, subcategories: sub(['রানিং সু', 'স্নিকার্স', 'ফুটবল বুট', 'জিম সু']) },
+    { name: 'স্কুল ও অফিস', icon: 'briefcase', order: 5, subcategories: sub(['স্কুল সু', 'অফিস সু']) },
+    { name: 'জুতার এক্সেসরিজ', icon: 'brush', order: 6, subcategories: sub(['শু পলিশ', 'ইনসোল', 'ফিতা', 'শু ব্রাশ']) },
+    { name: 'ব্যাগ ও চামড়াজাত', icon: 'backpack', order: 7, subcategories: sub(['ব্যাগ', 'বেল্ট', 'মানিব্যাগ']) }
+  ],
+
+  "supershop": [
+    { name: 'চাল, ডাল ও আটা', icon: 'wheat', order: 1, subcategories: sub(['চাল', 'ডাল', 'আটা ও ময়দা', 'সুজি']) },
+    { name: 'তেল, ঘি ও মসলা', icon: 'droplet', order: 2, subcategories: sub(['সয়াবিন তেল', 'সরিষার তেল', 'ঘি', 'গুঁড়া মসলা', 'আস্ত মসলা']) },
+    { name: 'স্ন্যাকস ও বিস্কুট', icon: 'cookie', order: 3, subcategories: sub(['বিস্কুট', 'চিপস', 'চানাচুর', 'চকলেট ও ক্যান্ডি', 'কেক']) },
+    { name: 'পানীয়', icon: 'cup-soda', order: 4, subcategories: sub(['কোমল পানীয়', 'জুস', 'পানি', 'চা ও কফি', 'এনার্জি ড্রিংক']) },
+    { name: 'ডেইরি ও ফ্রোজেন', icon: 'milk', order: 5, subcategories: sub(['দুধ', 'দই ও মিষ্টি', 'পনির ও বাটার', 'আইসক্রিম', 'ফ্রোজেন ফুড']) },
+    { name: 'তাজা পণ্য', icon: 'carrot', order: 6, subcategories: sub(['শাকসবজি', 'ফলমূল', 'মাছ ও মাংস', 'ডিম']) },
+    { name: 'বেকারি', icon: 'croissant', order: 7, subcategories: sub(['পাউরুটি', 'বান ও কেক', 'পেস্ট্রি']) },
+    { name: 'পরিষ্কার সামগ্রী', icon: 'spray-can', order: 8, subcategories: sub(['ডিটারজেন্ট', 'ডিশ ওয়াশ', 'টয়লেট ক্লিনার', 'ঝাড়ু ও মপ']) },
+    { name: 'পার্সোনাল কেয়ার', icon: 'heart', order: 9, subcategories: sub(['সাবান ও শ্যাম্পু', 'টুথপেস্ট', 'স্কিন কেয়ার', 'স্যানিটারি ন্যাপকিন']) },
+    { name: 'বেবি কেয়ার', icon: 'baby', order: 10, subcategories: sub(['ডায়াপার', 'বেবি ফুড', 'বেবি লোশন']) },
+    { name: 'গৃহস্থালি', icon: 'home', order: 11, subcategories: sub(['কিচেন আইটেম', 'প্লাস্টিক সামগ্রী', 'টিস্যু ও ন্যাপকিন']) },
+    { name: 'স্টেশনারি ও অন্যান্য', icon: 'pen', order: 12, subcategories: sub(['খাতা ও কলম', 'ব্যাটারি', 'লাইটার']) }
+  ],
+
+  "stationery": [
+    { name: 'লেখার সামগ্রী', icon: 'pen', order: 1, subcategories: sub(['বলপেন', 'জেল পেন', 'পেন্সিল', 'মার্কার', 'হাইলাইটার']) },
+    { name: 'খাতা ও কাগজ', icon: 'notebook', order: 2, subcategories: sub(['খাতা', 'নোটবুক', 'এ৪ কাগজ', 'ড্রয়িং খাতা', 'ডায়েরি']) },
+    { name: 'অফিস সামগ্রী', icon: 'paperclip', order: 3, subcategories: sub(['ফাইল ও ফোল্ডার', 'স্ট্যাপলার', 'ক্লিপ ও পিন', 'পাঞ্চ মেশিন', 'ক্যালকুলেটর']) },
+    { name: 'আর্ট ও ক্রাফট', icon: 'palette', order: 4, subcategories: sub(['রং পেন্সিল', 'জলরং', 'ব্রাশ', 'ক্রাফট পেপার', 'ক্লে']) },
+    { name: 'স্কুল সামগ্রী', icon: 'backpack', order: 5, subcategories: sub(['স্কুল ব্যাগ', 'জ্যামিতি বক্স', 'টিফিন বক্স', 'পানির বোতল']) },
+    { name: 'প্রিন্টিং ও কম্পিউটার', icon: 'printer', order: 6, subcategories: sub(['প্রিন্টিং পেপার', 'কার্টিজ ও টোনার', 'পেনড্রাইভ']) },
+    { name: 'আঠা ও কাটিং', icon: 'scissors', order: 7, subcategories: sub(['আঠা', 'স্কচ টেপ', 'কাঁচি', 'কাটার']) },
+    { name: 'গিফট ও কার্ড', icon: 'gift', order: 8, subcategories: sub(['গ্রিটিং কার্ড', 'গিফট পেপার', 'ব্যানার ও পোস্টার']) }
   ]
 };
 

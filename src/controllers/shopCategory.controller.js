@@ -10,10 +10,18 @@ const asyncHandler = require('../utils/asyncHandler.util');
 exports.getPublicShopCategories = asyncHandler(async (req, res) => {
   const categories = await ShopCategory.find({ isActive: true })
     .sort({ sortOrder: 1, createdAt: 1 })
-    .select('key name icon description defaultVariantTypes sortOrder');
+    .select('key name icon description defaultVariantTypes sortOrder')
+    .lean();
+
+  // "অন্যান্য" is the catch-all, so it always renders last on the signup grid
+  // no matter what sortOrder it carries in the database.
+  const ordered = [
+    ...categories.filter((cat) => cat.key !== 'other'),
+    ...categories.filter((cat) => cat.key === 'other')
+  ];
 
   return ApiResponse.success(res, {
-    data: categories,
+    data: ordered,
     message: 'Shop categories retrieved successfully'
   });
 });

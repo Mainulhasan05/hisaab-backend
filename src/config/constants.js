@@ -11,7 +11,8 @@ module.exports = {
     SUPPORT: 'support'
   },
 
-  // Shop Types
+  // Shop Types — keys must match ShopCategory.key (see seeds/shopCategorySeeder.js).
+  // Admins can add more at runtime, so this list is a reference, not a whitelist.
   SHOP_TYPES: {
     CLOTH: 'cloth',
     GROCERY: 'grocery',
@@ -20,6 +21,17 @@ module.exports = {
     HARDWARE: 'hardware',
     COSMETICS: 'cosmetics',
     BOOKSHOP: 'bookshop',
+    COMPUTER: 'computer',
+    DEALERSHIP: 'dealership',
+    ECOMMERCE: 'ecommerce',
+    FURNITURE: 'furniture',
+    MANUFACTURING: 'manufacturing',
+    MEDICAL_SURGICAL: 'medical-surgical',
+    MOBILE: 'mobile',
+    GENERAL_TRADING: 'general-trading',
+    SHOE: 'shoe',
+    SUPERSHOP: 'supershop',
+    STATIONERY: 'stationery',
     OTHER: 'other'
   },
 
