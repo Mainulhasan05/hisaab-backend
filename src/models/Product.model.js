@@ -203,6 +203,10 @@ productSchema.index({ shop: 1, 'variants.sku': 1 }, { sparse: true }); // Varian
 productSchema.index({ shop: 1, 'variants.barcode': 1 }, { sparse: true }); // Variant barcode scan
 productSchema.index({ shop: 1, createdAt: -1 }); // Listing by date
 productSchema.index({ shop: 1, isAvailableOnline: 1, isActive: 1 }); // Online product listing
+// Best-sellers-first ordering for the POS product grid. `isDeleted` is the
+// leading filter on every listing query, so including it here keeps the sort
+// index-backed rather than falling back to an in-memory sort.
+productSchema.index({ shop: 1, isDeleted: 1, totalSold: -1 }); // Popular-first listing
 // Note: Text search removed for scalability - use regex or external search (Elasticsearch) for large datasets
 
 // Virtual: Is low stock

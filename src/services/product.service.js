@@ -14,7 +14,10 @@ const escapeRegex = (str) => String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // Client-controllable sort fields must be whitelisted — arbitrary fields force
 // unindexed in-memory sorts that hard-fail at 32MB on large collections
-const PRODUCT_SORT_FIELDS = new Set(['createdAt', 'name', 'code', 'stock', 'sellingPrice', 'buyingPrice', 'updatedAt']);
+// `totalSold` is a stored counter incremented on each sale (see Product model),
+// so sorting by it costs no extra query — it rides the {shop, isDeleted,
+// totalSold} index the same way createdAt does.
+const PRODUCT_SORT_FIELDS = new Set(['createdAt', 'name', 'code', 'stock', 'sellingPrice', 'buyingPrice', 'updatedAt', 'totalSold']);
 
 class ProductService {
   // Get all products with filtering, searching, pagination
@@ -344,6 +347,9 @@ class ProductService {
         minStock: product.minStock,
         unit: product.unit,
         category: product.category,
+        // Already on the document — surfaced so the POS grid can flag best
+        // sellers without a second request.
+        totalSold: product.totalSold || 0,
         variants: (product.variants || [])
           .filter((variant) => variant.isActive !== false)
           .map((variant) => ({
