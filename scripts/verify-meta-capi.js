@@ -57,14 +57,11 @@ async function main() {
     info(`Could not read permissions: ${errorOf(e).message}`);
   }
 
-  if (perms.length && !perms.includes('ads_management')) {
-    bad('Missing `ads_management` — this token cannot write conversion events.');
-    if (perms.includes('read_ads_dataset_quality')) {
-      info('`read_ads_dataset_quality` alone is the read-only Diagnostics token.');
-    }
-    info('Get the right one: Events Manager > your Pixel > Settings >');
-    info('Conversions API > "Generate access token".');
-  }
+  // Informational only. A pixel-scoped CAPI token grants write access on the
+  // dataset itself, which never shows up in /me/permissions — a token listing
+  // nothing but `read_ads_dataset_quality` can still post events fine. Step 4
+  // is the only trustworthy check.
+  info('(this list does not reflect pixel-scoped CAPI grants — see step 4)');
 
   console.log('\n[4] Write access to the pixel');
   const probe = {

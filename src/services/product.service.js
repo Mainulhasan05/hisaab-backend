@@ -902,7 +902,9 @@ class ProductService {
 
       const totalStock = await BranchStock.getTotalStock(shopId, productId, variantId || null);
       if (variantId) {
-        const variant = product.variants.id(variantId);
+        const variant = (product.variants && typeof product.variants.id === 'function')
+          ? product.variants.id(variantId)
+          : product.variants?.find(v => (v._id || v.id)?.toString() === variantId?.toString());
         if (variant) {
           variant.stock = totalStock;
         }
@@ -913,7 +915,9 @@ class ProductService {
     } else {
       if (variantId) {
         // Update variant stock
-        const variant = product.variants.id(variantId);
+        const variant = (product.variants && typeof product.variants.id === 'function')
+          ? product.variants.id(variantId)
+          : product.variants?.find(v => (v._id || v.id)?.toString() === variantId?.toString());
         if (!variant) {
           throw new AppError('ভেরিয়েন্ট পাওয়া যায়নি', 'Variant not found', 404);
         }

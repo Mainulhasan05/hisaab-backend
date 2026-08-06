@@ -87,7 +87,9 @@ class SalesReturnService {
     let totalProfitReduction = 0;
 
     for (const returnItem of items) {
-      const saleItem = sale.items.id(returnItem.saleItemId);
+      const saleItem = (sale.items && typeof sale.items.id === 'function')
+        ? sale.items.id(returnItem.saleItemId)
+        : sale.items?.find(i => (i._id || i.id)?.toString() === returnItem.saleItemId?.toString());
       if (!saleItem) {
         throw new AppError(
           'বিক্রিত আইটেম পাওয়া যায়নি',
@@ -186,7 +188,9 @@ class SalesReturnService {
           // Sync Product total stock
           const totalStock = await BranchStock.getTotalStock(shopId, item.product, item.variantId || null);
           if (item.variantId && product.hasVariants) {
-            const variant = product.variants.id(item.variantId);
+            const variant = (product.variants && typeof product.variants.id === 'function')
+              ? product.variants.id(item.variantId)
+              : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
             if (variant) {
               variant.stock = totalStock;
             }
@@ -197,7 +201,9 @@ class SalesReturnService {
           await product.save(sessionOpt);
         } else {
           if (item.variantId && product.hasVariants) {
-            const variant = product.variants.id(item.variantId);
+            const variant = (product.variants && typeof product.variants.id === 'function')
+              ? product.variants.id(item.variantId)
+              : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
             if (variant) {
               previousStock = variant.stock;
               variant.stock += item.quantity;

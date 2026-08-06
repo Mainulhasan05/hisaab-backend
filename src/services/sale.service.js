@@ -322,7 +322,9 @@ class SaleService {
       let unitPrice, buyingPrice, variantInfo = {};
 
       if (item.variantId) {
-        const variant = product.variants.id(item.variantId);
+        const variant = (product.variants && typeof product.variants.id === 'function')
+          ? product.variants.id(item.variantId)
+          : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
         if (!variant) {
           throw new AppError('Variant not found', 'ভেরিয়েন্ট পাওয়া যায়নি', 404);
         }
@@ -860,7 +862,9 @@ class SaleService {
           },
         });
       } else if (item.variantId) {
-        const variant = product.variants.id(item.variantId);
+        const variant = (product.variants && typeof product.variants.id === 'function')
+          ? product.variants.id(item.variantId)
+          : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
         previousStock = variant?.stock || 0;
         newStock = previousStock + item.quantity;
         if (variant) variant.stock = newStock;

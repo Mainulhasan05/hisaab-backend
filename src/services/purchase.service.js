@@ -205,7 +205,9 @@ class PurchaseService {
         // Recalculate main product stock
         const totalStock = await BranchStock.getTotalStock(shopId, item.product, item.variantId || null);
         if (item.variantId && product.hasVariants) {
-          const variant = product.variants.id(item.variantId);
+          const variant = (product.variants && typeof product.variants.id === 'function')
+            ? product.variants.id(item.variantId)
+            : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
           if (variant) {
             variant.stock = totalStock;
           }
@@ -214,13 +216,21 @@ class PurchaseService {
         }
         await product.save(sessionOpt);
       } else {
+        const getVariantStock = (p, vId) => {
+          if (!p.variants) return 0;
+          const v = typeof p.variants.id === 'function' ? p.variants.id(vId) : p.variants.find(x => (x._id || x.id)?.toString() === vId?.toString());
+          return v?.stock || 0;
+        };
+
         previousStock = item.variantId
-          ? product.variants?.id(item.variantId)?.stock || 0
+          ? getVariantStock(product, item.variantId)
           : product.stock;
 
         // Update stock
         if (item.variantId && product.hasVariants) {
-          const variant = product.variants.id(item.variantId);
+          const variant = (product.variants && typeof product.variants.id === 'function')
+            ? product.variants.id(item.variantId)
+            : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
           if (variant) {
             variant.stock += item.quantity;
           }
@@ -230,7 +240,7 @@ class PurchaseService {
         await product.save(sessionOpt);
 
         newStock = item.variantId
-          ? product.variants?.id(item.variantId)?.stock || 0
+          ? getVariantStock(product, item.variantId)
           : product.stock;
       }
 
@@ -333,12 +343,20 @@ class PurchaseService {
       const product = await Product.findById(item.product);
       if (!product) continue;
 
+      const getVariantStock = (p, vId) => {
+        if (!p.variants) return 0;
+        const v = typeof p.variants.id === 'function' ? p.variants.id(vId) : p.variants.find(x => (x._id || x.id)?.toString() === vId?.toString());
+        return v?.stock || 0;
+      };
+
       const previousStock = item.variantId
-        ? product.variants?.id(item.variantId)?.stock || 0
+        ? getVariantStock(product, item.variantId)
         : product.stock;
 
       if (item.variantId && product.hasVariants) {
-        const variant = product.variants.id(item.variantId);
+        const variant = (product.variants && typeof product.variants.id === 'function')
+          ? product.variants.id(item.variantId)
+          : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
         if (variant) {
           variant.stock = Math.max(0, variant.stock - item.quantity);
         }
@@ -348,7 +366,7 @@ class PurchaseService {
       await product.save();
 
       const newStock = item.variantId
-        ? product.variants?.id(item.variantId)?.stock || 0
+        ? getVariantStock(product, item.variantId)
         : product.stock;
 
       // Create reversal stock transaction

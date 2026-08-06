@@ -434,11 +434,11 @@ class SMSService {
     // Run in background (non-blocking) using setImmediate
     setImmediate(async () => {
       try {
-        const invoiceNo = saleData.invoiceNumber || saleData.invoiceNo;
+        const invoiceNo = saleData?.invoiceNumber || saleData?.invoiceNo;
         if (!invoiceNo) return;
 
         // Deduplication Guard 1: Check if Sale document has smsSent = true
-        const saleId = saleData.id || saleData._id;
+        const saleId = saleData?.id || saleData?._id;
         let saleDoc = null;
         if (saleId) {
           saleDoc = await Sale.findById(saleId);
