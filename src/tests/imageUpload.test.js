@@ -174,7 +174,22 @@ describe('ImgBB Upload System', () => {
 
       expect(result.success).toBe(true);
       expect(result.url).toBe('https://i.ibb.co/disk.png');
-      expect(fs.existsSync(tempPath)).toBe(false);
+
+      // uploadFromMulter cleans up in a `finally` with an un-awaited
+      // fs.promises.unlink (imageUpload.service.js:245) — deliberately, so the
+      // caller is not made to wait on disk I/O. Asserting existsSync on the
+      // very next line therefore races the unlink: this test failed roughly 1
+      // run in 4 under full-suite parallelism. Poll instead of sleeping, so it
+      // stays fast and still fails if cleanup never happens.
+      const goneWithin = async (p, ms = 2000) => {
+        const deadline = Date.now() + ms;
+        while (Date.now() < deadline) {
+          if (!fs.existsSync(p)) return true;
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        return !fs.existsSync(p);
+      };
+      expect(await goneWithin(tempPath)).toBe(true);
     });
   });
 });

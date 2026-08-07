@@ -437,6 +437,18 @@ async function seedProducts() {
   });
   console.log('✅ Connected to MongoDB');
 
+  // This seeder can Product.deleteMany({ shop }) below. Refuse to run against
+  // the production database at all, matching the guard every script in
+  // /scripts already carries. Set SEED_ALLOW_DB to override deliberately.
+  const dbName = mongoose.connection.name;
+  const allowed = process.env.SEED_ALLOW_DB;
+  if (/^hisaabDB$/i.test(dbName) && allowed !== dbName) {
+    console.error(`❌ Refusing to seed "${dbName}" — that is the production database.`);
+    console.error('   Point MONGODB_URI at a scratch database, or set SEED_ALLOW_DB to override.');
+    await mongoose.connection.close();
+    process.exit(1);
+  }
+
   try {
     // 1. Find user by phone
     const user = await User.findOne({ phone: { $regex: OWNER_PHONE } });

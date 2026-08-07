@@ -9,6 +9,7 @@ const { COOKIE_NAMES } = require('../utils/cookie.util');
 const cacheService = require('../services/cache.service');
 const userActivityService = require('../services/userActivity.service');
 const logger = require('../utils/logger.util');
+const { assertAdminMayDelete } = require('../utils/deletionDisabled.util');
 
 // Auth cache TTL: 5 minutes. Mutations that must take effect immediately
 // (shop status/subscription/settings changes, staff deactivation, branch
@@ -190,6 +191,12 @@ const protect = asyncHandler(async (req, res, next) => {
 
       req.admin = admin;
       req.isAdmin = true;
+
+      // Deny-by-default: a platform admin cannot delete. Enforced here rather
+      // than per route, because an admin reaches the entire shop-facing API via
+      // x-shop-id below, and because a route added later must be blocked
+      // without anyone having to remember this rule. Throws 403.
+      assertAdminMayDelete(req);
 
       // If accessing a shop route (not /api/admin), resolve shop context or deny
       const isAdminRoute = req.originalUrl.startsWith('/api/admin') ||
@@ -496,6 +503,7 @@ const softProtect = asyncHandler(async (req, res, next) => {
       if (admin && admin.isActive && !admin.changedPasswordAfter(decoded.iat)) {
         req.admin = admin;
         req.isAdmin = true;
+        assertAdminMayDelete(req); // same deny-by-default rule as protect()
       }
       return next();
     }

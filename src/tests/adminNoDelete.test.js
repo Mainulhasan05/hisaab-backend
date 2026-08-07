@@ -149,3 +149,118 @@ describe('why purgeShop had to go, pinned so a naive rewrite cannot repeat it', 
     }
   );
 });
+
+describe('deny-by-default guard for platform-admin DELETEs', () => {
+  const { assertAdminMayDelete, isAllowedAdminDelete } = require('../utils/deletionDisabled.util');
+
+  const attempt = (method, originalUrl) => {
+    try {
+      assertAdminMayDelete({ method, originalUrl, path: originalUrl });
+      return null;
+    } catch (e) {
+      return e;
+    }
+  };
+
+  it.each([
+    ['/api/admin/shops/6a716c62d6c231edf6acfd7d/branches/6a75766fbd7bd54927a32ecc', 'branch deactivation'],
+    ['/api/admin/cache/keys/shop%3A123%3Aproducts', 'derived cache data'],
+  ])('allows DELETE %s (%s)', (url) => {
+    expect(attempt('DELETE', url)).toBeNull();
+    expect(isAllowedAdminDelete(url)).toBe(true);
+  });
+
+  // The whole shop-facing API is reachable by an admin via x-shop-id, so the
+  // guard has to cover it too — this is what route removal alone cannot do.
+  it.each([
+    '/api/admin/shops/abc',
+    '/api/admin/shop-categories/abc',
+    '/api/admin/gemini-keys/abc',
+    '/api/pages/abc',
+    '/api/contact/abc',
+    '/api/products/abc',
+    '/api/customers/abc',
+    '/api/categories/abc',
+    '/api/coupons/abc',
+    '/api/suppliers/abc',
+    '/api/roles/abc',
+    '/api/expenses/abc',
+    '/api/expenses/categories/abc',
+    '/api/held-carts/abc',
+    '/api/some/route/invented/next/year',
+  ])('refuses DELETE %s', (url) => {
+    const err = attempt('DELETE', url);
+    expect(err).not.toBeNull();
+    expect(err.code).toBe('DELETION_DISABLED');
+    expect(err.statusCode).toBe(403);
+  });
+
+  it('ignores query strings when matching the allowlist', () => {
+    expect(attempt('DELETE', '/api/admin/cache/keys/foo?confirm=1')).toBeNull();
+  });
+
+  it.each(['GET', 'POST', 'PATCH', 'PUT'])('leaves %s untouched', (method) => {
+    expect(attempt(method, '/api/admin/shops/abc')).toBeNull();
+  });
+});
+
+describe('the guard is wired into both auth paths, not just one route file', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../middleware/auth.middleware.js'), 'utf8');
+
+  it('protect() and softProtect() both call assertAdminMayDelete', () => {
+    // Two call sites: one per auth path. If either is dropped, an admin token
+    // regains delete on whichever routes use that path.
+    expect(src.match(/assertAdminMayDelete\(req\)/g) || []).toHaveLength(2);
+  });
+
+  it('the guard runs where req.isAdmin is set, so new routes are covered', () => {
+    const idx = src.indexOf('req.isAdmin = true;');
+    const guard = src.indexOf('assertAdminMayDelete(req)');
+    expect(idx).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(idx);
+  });
+});
+
+describe('no destructive code remains where the admin can reach it', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  const readAll = (dir) =>
+    fs.readdirSync(dir)
+      .filter((f) => f.endsWith('.js'))
+      .map((f) => [f, fs.readFileSync(path.join(dir, f), 'utf8')]);
+
+  const DESTRUCTIVE = /\.(deleteMany|findByIdAndDelete|findOneAndDelete|findByIdAndRemove)\s*\(/;
+
+  it('admin service and controller contain no hard-delete call', () => {
+    for (const [name, src] of [
+      ['admin.service.js', fs.readFileSync(path.join(__dirname, '../services/admin.service.js'), 'utf8')],
+      ['admin.controller.js', fs.readFileSync(path.join(__dirname, '../controllers/admin.controller.js'), 'utf8')],
+    ]) {
+      const hits = src.split('\n').filter((l) => DESTRUCTIVE.test(l) && !l.trim().startsWith('*') && !l.trim().startsWith('//'));
+      expect({ [name]: hits }).toEqual({ [name]: [] });
+    }
+  });
+
+  it('no admin-facing controller hard-deletes', () => {
+    const adminFacing = ['shopCategory.controller.js', 'geminiKey.controller.js', 'pageContent.controller.js', 'contact.controller.js'];
+    for (const [name, src] of readAll(path.join(__dirname, '../controllers'))) {
+      if (!adminFacing.includes(name)) continue;
+      const hits = src.split('\n').filter((l) => DESTRUCTIVE.test(l) && !l.trim().startsWith('*') && !l.trim().startsWith('//'));
+      expect({ [name]: hits }).toEqual({ [name]: [] });
+    }
+  });
+
+  it('the hardcoded production purge script is gone and stays gone', () => {
+    // src/scripts/purgeTargetShops.js hardcoded 5 live shop ids, connected to
+    // MONGODB_URI, ran deleteMany over 16 models on require with no dry-run and
+    // no confirmation, and swallowed every error so it kept going.
+    expect(fs.existsSync(path.join(__dirname, '../scripts/purgeTargetShops.js'))).toBe(false);
+  });
+
+  it('the product seeder refuses to run against the production database', () => {
+    const seeder = fs.readFileSync(path.join(__dirname, '../seeds/productSeeder.js'), 'utf8');
+    expect(seeder).toContain('Refusing to seed');
+    expect(seeder).toMatch(/hisaabDB/);
+  });
+});
