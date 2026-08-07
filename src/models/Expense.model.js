@@ -57,11 +57,12 @@ expenseSchema.index({ shop: 1, branch: 1, category: 1, date: -1 }); // Category-
 expenseSchema.index({ shop: 1, date: -1 }); // All-branch date-range reports (P&L, daily summary)
 
 // Static: Get summary by category for a date range
-expenseSchema.statics.getSummaryByCategory = async function(shopId, startDate, endDate) {
+expenseSchema.statics.getSummaryByCategory = async function(shopId, startDate, endDate, branchId = null) {
   const match = {
     shop: new mongoose.Types.ObjectId(shopId),
     date: { $gte: startDate, $lte: endDate }
   };
+  if (branchId) match.branch = new mongoose.Types.ObjectId(branchId);
 
   return this.aggregate([
     { $match: match },
@@ -78,11 +79,12 @@ expenseSchema.statics.getSummaryByCategory = async function(shopId, startDate, e
 };
 
 // Static: Get total expenses for a date range
-expenseSchema.statics.getTotal = async function(shopId, startDate, endDate) {
+expenseSchema.statics.getTotal = async function(shopId, startDate, endDate, branchId = null) {
   const match = {
     shop: new mongoose.Types.ObjectId(shopId),
     date: { $gte: startDate, $lte: endDate }
   };
+  if (branchId) match.branch = new mongoose.Types.ObjectId(branchId);
 
   const result = await this.aggregate([
     { $match: match },

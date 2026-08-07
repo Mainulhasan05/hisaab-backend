@@ -27,7 +27,7 @@ exports.getHeldCarts = asyncHandler(async (req, res) => {
 
 // Get single held cart
 exports.getHeldCart = asyncHandler(async (req, res) => {
-  const cart = await heldCartService.getHeldCartById(req.shop._id, req.params.id);
+  const cart = await heldCartService.getHeldCartById(req.shop._id, req.params.id, req);
   return ApiResponse.success(res, {
     data: cart,
     message: 'Held cart retrieved',
@@ -37,7 +37,7 @@ exports.getHeldCart = asyncHandler(async (req, res) => {
 
 // Resume held cart
 exports.resumeCart = asyncHandler(async (req, res) => {
-  const cart = await heldCartService.resumeCart(req.shop._id, req.params.id);
+  const cart = await heldCartService.resumeCart(req.shop._id, req.params.id, req);
   return ApiResponse.success(res, {
     data: cart,
     message: 'Cart resumed',
@@ -47,7 +47,7 @@ exports.resumeCart = asyncHandler(async (req, res) => {
 
 // Discard held cart
 exports.discardCart = asyncHandler(async (req, res) => {
-  await heldCartService.discardCart(req.shop._id, req.params.id);
+  await heldCartService.discardCart(req.shop._id, req.params.id, req);
   return ApiResponse.success(res, {
     message: 'Cart discarded',
     messageBn: 'কার্ট বাতিল করা হয়েছে',
@@ -56,7 +56,7 @@ exports.discardCart = asyncHandler(async (req, res) => {
 
 // Expire old carts
 exports.expireOldCarts = asyncHandler(async (req, res) => {
-  const result = await heldCartService.expireOldCarts();
+  const result = await heldCartService.expireOldCarts(req.shop._id);
   return ApiResponse.success(res, {
     data: result,
     message: 'Old carts expired',

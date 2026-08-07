@@ -33,7 +33,8 @@ exports.getReturns = asyncHandler(async (req, res) => {
 exports.getReturn = asyncHandler(async (req, res) => {
   const salesReturn = await salesReturnService.getReturnById(
     req.shop._id,
-    req.params.id
+    req.params.id,
+    req
   );
   return ApiResponse.success(res, {
     data: salesReturn,
@@ -46,7 +47,8 @@ exports.getReturn = asyncHandler(async (req, res) => {
 exports.getReturnsBySale = asyncHandler(async (req, res) => {
   const returns = await salesReturnService.getReturnsBySale(
     req.shop._id,
-    req.params.saleId
+    req.params.saleId,
+    req
   );
   return ApiResponse.success(res, {
     data: returns,
@@ -59,7 +61,8 @@ exports.getReturnsBySale = asyncHandler(async (req, res) => {
 exports.getReturnableItems = asyncHandler(async (req, res) => {
   const result = await salesReturnService.getReturnableItems(
     req.shop._id,
-    req.params.saleId
+    req.params.saleId,
+    req
   );
   return ApiResponse.success(res, {
     data: result,

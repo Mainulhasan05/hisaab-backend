@@ -18,7 +18,7 @@ exports.getSales = asyncHandler(async (req, res) => {
 
 // Get single sale
 exports.getSale = asyncHandler(async (req, res) => {
-  const sale = await saleService.getSaleById(req.shop._id, req.params.id, req.branchId);
+  const sale = await saleService.getSaleById(req.shop._id, req.params.id, req.branchId, req);
   return ApiResponse.success(res, {
     data: sanitizeSales(sale, req),
     message: 'Sale retrieved successfully',

@@ -42,6 +42,14 @@ const userSchema = new mongoose.Schema({
     ref: 'Branch',
     default: null // null = org-level (owner) or single-branch shop
   },
+  // Owner only: the branch they last had active, so a new session lands where
+  // they left off instead of defaulting to a view they can't write from.
+  // Ignored for staff, who are pinned to `branch` above.
+  lastActiveBranch: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null
+  },
   avatar: {
     type: String
   },
@@ -87,6 +95,7 @@ const userSchema = new mongoose.Schema({
 // Indexes
 userSchema.index({ phone: 1, shop: 1 }, { unique: true });
 userSchema.index({ shop: 1, isActive: 1 });
+userSchema.index({ shop: 1, branch: 1 }); // Staff-per-branch counts + branch deactivation checks
 
 // Normalize phone before saving
 userSchema.pre('save', function(next) {

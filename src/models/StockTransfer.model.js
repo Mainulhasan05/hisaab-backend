@@ -44,7 +44,6 @@ const stockTransferSchema = new mongoose.Schema({
   transferNo: {
     type: String,
     required: true,
-    unique: true,
   },
   fromBranch: {
     type: mongoose.Schema.Types.ObjectId,
@@ -104,6 +103,10 @@ const stockTransferSchema = new mongoose.Schema({
 stockTransferSchema.index({ shop: 1, status: 1, createdAt: -1 });
 stockTransferSchema.index({ shop: 1, fromBranch: 1 });
 stockTransferSchema.index({ shop: 1, toBranch: 1 });
+// transferNo is generated per shop (see the pre-validate hook below), so it must
+// be unique per shop — not globally. A plain `unique: true` on the field made
+// two different shops collide on their first transfer (TRF-000001).
+stockTransferSchema.index({ shop: 1, transferNo: 1 }, { unique: true });
 
 // Auto-generate transfer number
 stockTransferSchema.pre('validate', async function (next) {

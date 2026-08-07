@@ -5,8 +5,7 @@ const Payment = require('../models/Payment.model');
 const StockTransaction = require('../models/StockTransaction.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
-const { getBranchForCreate } = require('../utils/branchScope.util');
-const BranchStock = require('../models/BranchStock.model');
+const { branchFilter, requireBranch } = require('../utils/branchScope.util');
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
 
@@ -76,11 +75,11 @@ class PurchaseService {
   }
 
   // Get single purchase
-  async getPurchaseById(shopId, purchaseId) {
-    const purchase = await Purchase.findOne({
+  async getPurchaseById(shopId, purchaseId, req = null) {
+    const purchase = await Purchase.findOne(branchFilter(req, {
       _id: purchaseId,
       shop: shopId,
-    })
+    }))
       .populate('supplier', 'name phone address')
       .populate('items.product', 'name code stock')
       .populate('createdBy', 'name');
@@ -172,7 +171,7 @@ class PurchaseService {
     const invoiceNo = await Purchase.generateInvoiceNo(shopId);
 
     // Create purchase
-    const branchId = req ? getBranchForCreate(req) : null;
+    const branchId = req ? requireBranch(req) : null;
     const [purchase] = await Purchase.create([{
       shop: shopId,
       branch: branchId,
@@ -188,34 +187,14 @@ class PurchaseService {
       createdBy: userId,
     }], sessionOpt);
 
-    // Increase stock for each item
-    const isMultiBranchActive = branchId && req?.shop?.multiBranchEnabled;
-
+    // Increase stock for each item. Stock lives on the product document, which
+    // belongs to exactly one branch — the separate per-branch stock ledger is
+    // gone, so this is a single path for every shop.
     for (const item of preparedItems) {
       const product = await Product.findById(item.product);
       let previousStock, newStock;
 
-      if (isMultiBranchActive) {
-        const bsRecord = await BranchStock.getOrCreate(shopId, branchId, item.product, item.variantId || null);
-        previousStock = bsRecord.stock;
-        bsRecord.stock += item.quantity;
-        newStock = bsRecord.stock;
-        await bsRecord.save();
-
-        // Recalculate main product stock
-        const totalStock = await BranchStock.getTotalStock(shopId, item.product, item.variantId || null);
-        if (item.variantId && product.hasVariants) {
-          const variant = (product.variants && typeof product.variants.id === 'function')
-            ? product.variants.id(item.variantId)
-            : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
-          if (variant) {
-            variant.stock = totalStock;
-          }
-        } else {
-          product.stock = totalStock;
-        }
-        await product.save(sessionOpt);
-      } else {
+      {
         const getVariantStock = (p, vId) => {
           if (!p.variants) return 0;
           const v = typeof p.variants.id === 'function' ? p.variants.id(vId) : p.variants.find(x => (x._id || x.id)?.toString() === vId?.toString());
@@ -324,11 +303,11 @@ class PurchaseService {
   }
 
   // Cancel purchase (reverse stock)
-  async cancelPurchase(shopId, userId, purchaseId) {
-    const purchase = await Purchase.findOne({
+  async cancelPurchase(shopId, userId, purchaseId, req = null) {
+    const purchase = await Purchase.findOne(branchFilter(req, {
       _id: purchaseId,
       shop: shopId,
-    });
+    }));
 
     if (!purchase) {
       throw new AppError('ক্রয়টি পাওয়া যায়নি', 'Purchase not found', 404);
@@ -425,7 +404,7 @@ class PurchaseService {
   }
 
   // Get purchase summary
-  async getSummary(shopId, options = {}) {
+  async getSummary(shopId, options = {}, req = null) {
     const { startDate, endDate } = options;
 
     let start, end;
@@ -445,9 +424,13 @@ class PurchaseService {
     const todayEnd = new Date();
     todayEnd.setHours(23, 59, 59, 999);
 
+    // Same defect as the expense summary (H-10): shop-wide totals were shown
+    // beside a branch-scoped list.
+    const branchId = req?.branchId || null;
+
     const [monthSummary, todaySummary] = await Promise.all([
-      Purchase.getSummary(shopId, start, end),
-      Purchase.getSummary(shopId, todayStart, todayEnd),
+      Purchase.getSummary(shopId, start, end, branchId),
+      Purchase.getSummary(shopId, todayStart, todayEnd, branchId),
     ]);
 
     return {
@@ -457,10 +440,10 @@ class PurchaseService {
     };
   }
   // Record payment for a purchase
-  async recordPayment(shopId, userId, purchaseId, paymentData) {
+  async recordPayment(shopId, userId, purchaseId, paymentData, req = null) {
     const { amount, method = 'cash', notes } = paymentData;
 
-    const purchase = await Purchase.findOne({ _id: purchaseId, shop: shopId });
+    const purchase = await Purchase.findOne(branchFilter(req, { _id: purchaseId, shop: shopId }));
     if (!purchase) {
       throw new AppError('Purchase not found', 'ক্রয়টি পাওয়া যায়নি', 404);
     }
@@ -522,8 +505,8 @@ class PurchaseService {
   }
 
   // Get payments for a purchase
-  async getPurchasePayments(shopId, purchaseId) {
-    const purchase = await Purchase.findOne({ _id: purchaseId, shop: shopId });
+  async getPurchasePayments(shopId, purchaseId, req = null) {
+    const purchase = await Purchase.findOne(branchFilter(req, { _id: purchaseId, shop: shopId }));
     if (!purchase) {
       throw new AppError('Purchase not found', 'ক্রয়টি পাওয়া যায়নি', 404);
     }

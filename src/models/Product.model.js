@@ -48,6 +48,23 @@ const productSchema = new mongoose.Schema({
     ref: 'Shop',
     required: [true, 'দোকান নির্বাচন করুন']
   },
+  // Each branch manages its own catalogue with its own prices and its own
+  // stock. `null` = single-branch shop, where this field is inert and the
+  // {shop, branch, code} unique index collapses to {shop, code} — exactly the
+  // behaviour these shops have today.
+  branch: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null
+  },
+  // Set when a product was copied into a new branch. Kept as lineage so stock
+  // transfers can match the same item across branches even if a code is later
+  // edited; `code` remains the primary match key.
+  clonedFrom: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Product',
+    default: null
+  },
   code: {
     type: String,
     required: [true, 'পণ্যের কোড দিন'],
@@ -196,7 +213,13 @@ const productSchema = new mongoose.Schema({
 
 // Indexes - Optimized for scalability
 // Essential indexes only - removed redundant and rarely-used indexes
-productSchema.index({ shop: 1, code: 1 }, { unique: true }); // Product code lookup
+// Product codes are unique per branch, not per shop: two branches legitimately
+// stock the same item under the same code as two separate documents. For
+// single-branch shops `branch` is always null, so this is equivalent to the
+// previous {shop, code} unique index — no behaviour change for them.
+productSchema.index({ shop: 1, branch: 1, code: 1 }, { unique: true });
+productSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Branch listing by date
+productSchema.index({ shop: 1, code: 1 }); // Cross-branch code match (stock transfer)
 productSchema.index({ shop: 1, name: 1 }); // Search: lets name-regex $or clauses run as shop-bounded index scans
 productSchema.index({ shop: 1, category: 1, isActive: 1 }); // Category listing with active filter
 productSchema.index({ shop: 1, 'variants.sku': 1 }, { sparse: true }); // Variant SKU lookup
@@ -236,14 +259,17 @@ productSchema.virtual('profitMargin').get(function() {
 });
 
 // Static: Find by code
-productSchema.statics.findByCode = function(shopId, code) {
-  return this.findOne({ shop: shopId, code: code.toUpperCase(), isActive: true });
+productSchema.statics.findByCode = function(shopId, code, branchId = null) {
+  const filter = { shop: shopId, code: code.toUpperCase(), isActive: true };
+  if (branchId) filter.branch = branchId;
+  return this.findOne(filter);
 };
 
 // Static: Find by barcode
-productSchema.statics.findByBarcode = function(shopId, barcode) {
+productSchema.statics.findByBarcode = function(shopId, barcode, branchId = null) {
   return this.findOne({
     shop: shopId,
+    ...(branchId ? { branch: branchId } : {}),
     isActive: true,
     $or: [
       { barcode },
@@ -253,9 +279,10 @@ productSchema.statics.findByBarcode = function(shopId, barcode) {
 };
 
 // Static: Get low stock products
-productSchema.statics.getLowStockProducts = function(shopId, threshold = 5) {
+productSchema.statics.getLowStockProducts = function(shopId, threshold = 5, branchId = null) {
   return this.find({
     shop: shopId,
+    ...(branchId ? { branch: branchId } : {}),
     isActive: true,
     $or: [
       { hasVariants: false, stock: { $lte: threshold } },

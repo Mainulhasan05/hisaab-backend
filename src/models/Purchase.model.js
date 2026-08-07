@@ -154,11 +154,12 @@ purchaseSchema.statics.generateInvoiceNo = async function(shopId) {
 };
 
 // Static: Get purchase summary
-purchaseSchema.statics.getSummary = async function(shopId, startDate, endDate) {
+purchaseSchema.statics.getSummary = async function(shopId, startDate, endDate, branchId = null) {
   const match = {
     shop: new mongoose.Types.ObjectId(shopId),
     status: { $ne: 'cancelled' }
   };
+  if (branchId) match.branch = new mongoose.Types.ObjectId(branchId);
 
   if (startDate && endDate) {
     match.date = { $gte: startDate, $lte: endDate };

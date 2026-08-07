@@ -158,8 +158,34 @@ const getMe = asyncHandler(async (req, res) => {
   if (req.user) {
     const result = await AuthService.getMe(req.user._id);
 
+    // Branch context, already resolved by `protect` for this request — no extra
+    // query. Returning it here is what lets the client hydrate its branch state
+    // on the very first paint: previously the switcher rendered "All Branches"
+    // while axios was already sending a branch header from localStorage, so the
+    // label and the data disagreed (FEATURE_AUDIT.md H-15).
+    //
+    // `branches` is the owner's switcher list; staff get only their own, so the
+    // response never reveals branches they cannot use.
+    const isMultiBranch = Boolean(req.shop?.multiBranchEnabled);
+    const allBranches = req.user.branchList || [];
+    const branches = !isMultiBranch
+      ? []
+      : (result.user.isOwner
+        ? allBranches
+        : allBranches.filter((b) => String(b._id) === String(req.branchId || '')));
+
     return ApiResponse.success(res, {
-      data: { user: result.user, shop: req.shop, permissions: result.permissions },
+      data: {
+        user: result.user,
+        shop: req.shop,
+        permissions: result.permissions,
+        multiBranchEnabled: isMultiBranch,
+        activeBranchId: req.branchId ? String(req.branchId) : null,
+        activeBranch: req.branch
+          ? { _id: String(req.branch._id), name: req.branch.name, code: req.branch.code }
+          : null,
+        branches,
+      },
       message: 'Profile retrieved',
       messageBn: 'প্রোফাইল পাওয়া গেছে'
     });

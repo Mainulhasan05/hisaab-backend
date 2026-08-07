@@ -7,9 +7,8 @@ const StockTransaction = require('../models/StockTransaction.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
-const { getBranchForCreate } = require('../utils/branchScope.util');
+const { branchFilter, requireBranch } = require('../utils/branchScope.util');
 const saleService = require('./sale.service');
-const BranchStock = require('../models/BranchStock.model');
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
 
@@ -44,14 +43,27 @@ class SalesReturnService {
       const sessionOpt = session ? { session } : {};
       const { saleId, items, refundMethod, paymentMethod, reason, notes } = returnData;
 
-    // 1. Fetch the sale
-    const sale = await Sale.findOne({ _id: saleId, shop: shopId }).session(session || null);
+    // 1. Fetch the sale — scoped, so a sale from another branch is not even
+    // visible here. Previously this was shop-only: a cashier could open a
+    // return against another branch's sale, and step 2 below would then book
+    // the refund into that branch (FEATURE_AUDIT.md H-4).
+    const sale = await Sale.findOne(branchFilter(req, { _id: saleId, shop: shopId }))
+      .session(session || null);
     if (!sale) {
       throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }
 
-    // Resolve branch context directly from the original sale
+    // Returns happen at the branch that made the sale (product decision #10).
+    // For an owner in "All Branches" the filter above is a no-op, so the sale's
+    // own branch is enforced here instead of silently accepting the mismatch.
     const branchId = sale.branch || null;
+    if (req?.shop?.multiBranchEnabled && req.branchId && String(req.branchId) !== String(branchId || '')) {
+      throw new AppError(
+        'This sale belongs to another branch. Switch to that branch to process the return.',
+        'এই বিক্রয়টি অন্য শাখার। ফেরত নিতে ওই শাখায় যান।',
+        403
+      );
+    }
 
     // 2. Validate sale status
     if (sale.status === 'cancelled') {
@@ -176,30 +188,7 @@ class SalesReturnService {
       const product = await Product.findById(item.product).session(session || null);
       if (product) {
         let previousStock, newStock;
-        const isMultiBranchActive = branchId && req?.shop?.multiBranchEnabled;
-
-        if (isMultiBranchActive) {
-          const bsRecord = await BranchStock.getOrCreate(shopId, branchId, item.product, item.variantId || null);
-          previousStock = bsRecord.stock;
-          bsRecord.stock += item.quantity;
-          newStock = bsRecord.stock;
-          await bsRecord.save();
-
-          // Sync Product total stock
-          const totalStock = await BranchStock.getTotalStock(shopId, item.product, item.variantId || null);
-          if (item.variantId && product.hasVariants) {
-            const variant = (product.variants && typeof product.variants.id === 'function')
-              ? product.variants.id(item.variantId)
-              : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
-            if (variant) {
-              variant.stock = totalStock;
-            }
-            product.stock = product.variants.reduce((sum, v) => sum + v.stock, 0);
-          } else {
-            product.stock = totalStock;
-          }
-          await product.save(sessionOpt);
-        } else {
+        {
           if (item.variantId && product.hasVariants) {
             const variant = (product.variants && typeof product.variants.id === 'function')
               ? product.variants.id(item.variantId)
@@ -426,8 +415,8 @@ class SalesReturnService {
   /**
    * Get single return by ID
    */
-  async getReturnById(shopId, returnId) {
-    const salesReturn = await SalesReturn.findOne({ _id: returnId, shop: shopId })
+  async getReturnById(shopId, returnId, req = null) {
+    const salesReturn = await SalesReturn.findOne(branchFilter(req, { _id: returnId, shop: shopId }))
       .populate('sale', 'invoiceNo total paid due status')
       .populate('customer', 'name phone address')
       .populate('createdBy', 'name phone');
@@ -442,8 +431,8 @@ class SalesReturnService {
   /**
    * Get all returns for a specific sale
    */
-  async getReturnsBySale(shopId, saleId) {
-    return SalesReturn.find({ shop: shopId, sale: saleId })
+  async getReturnsBySale(shopId, saleId, req = null) {
+    return SalesReturn.find(branchFilter(req, { shop: shopId, sale: saleId }))
       .populate('createdBy', 'name')
       .sort({ createdAt: -1 })
       .lean();
@@ -452,8 +441,8 @@ class SalesReturnService {
   /**
    * Get returnable items for a sale (powers the return modal)
    */
-  async getReturnableItems(shopId, saleId) {
-    const sale = await Sale.findOne({ _id: saleId, shop: shopId });
+  async getReturnableItems(shopId, saleId, req = null) {
+    const sale = await Sale.findOne(branchFilter(req, { _id: saleId, shop: shopId }));
     if (!sale) {
       throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }

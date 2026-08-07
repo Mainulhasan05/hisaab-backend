@@ -1,5 +1,6 @@
 const AuditLog = require('../models/AuditLog.model');
 const mongoose = require('mongoose');
+const { branchFilter, branchMatch } = require('../utils/branchScope.util');
 
 class AuditService {
   // Get audit logs with filtering and pagination
@@ -71,8 +72,8 @@ class AuditService {
   }
 
   // Get audit log by ID
-  async getAuditLogById(shopId, logId) {
-    const log = await AuditLog.findOne({ _id: logId, shop: shopId })
+  async getAuditLogById(shopId, logId, req = null) {
+    const log = await AuditLog.findOne(branchFilter(req, { _id: logId, shop: shopId }))
       .populate('user', 'name phone');
 
     return log;
@@ -85,10 +86,10 @@ class AuditService {
   }
 
   // Get activity summary
-  async getActivitySummary(shopId, options = {}) {
+  async getActivitySummary(shopId, options = {}, req = null) {
     const { startDate, endDate } = options;
 
-    const matchStage = { shop: new mongoose.Types.ObjectId(shopId) };
+    const matchStage = branchMatch(req, { shop: new mongoose.Types.ObjectId(shopId) });
 
     if (startDate || endDate) {
       matchStage.createdAt = {};
@@ -165,18 +166,19 @@ class AuditService {
   }
 
   // Get user activity
-  async getUserActivity(shopId, userId, options = {}) {
+  async getUserActivity(shopId, userId, options = {}, req = null) {
     const { page = 1, limit = 20 } = options;
 
     const skip = (page - 1) * limit;
+    const filter = branchFilter(req, { shop: shopId, user: userId });
 
     const [logs, total] = await Promise.all([
-      AuditLog.find({ shop: shopId, user: userId })
+      AuditLog.find(filter)
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(parseInt(limit))
         .lean(),
-      AuditLog.countDocuments({ shop: shopId, user: userId }),
+      AuditLog.countDocuments(filter),
     ]);
 
     return {
@@ -191,12 +193,12 @@ class AuditService {
   }
 
   // Get entity history
-  async getEntityHistory(shopId, entityType, entityId) {
-    const logs = await AuditLog.find({
+  async getEntityHistory(shopId, entityType, entityId, req = null) {
+    const logs = await AuditLog.find(branchFilter(req, {
       shop: shopId,
       'entity.type': entityType,
       'entity.id': entityId,
-    })
+    }))
       .populate('user', 'name phone')
       .sort({ createdAt: -1 })
       .lean();

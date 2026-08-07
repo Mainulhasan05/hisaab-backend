@@ -16,7 +16,7 @@ exports.getAuditLogs = asyncHandler(async (req, res) => {
 
 // Get single audit log
 exports.getAuditLog = asyncHandler(async (req, res) => {
-  const log = await auditService.getAuditLogById(req.shop._id, req.params.id);
+  const log = await auditService.getAuditLogById(req.shop._id, req.params.id, req);
   return ApiResponse.success(res, {
     data: log,
     message: 'Audit log retrieved successfully',
@@ -26,7 +26,7 @@ exports.getAuditLog = asyncHandler(async (req, res) => {
 
 // Get activity summary
 exports.getActivitySummary = asyncHandler(async (req, res) => {
-  const summary = await auditService.getActivitySummary(req.shop._id, req.query);
+  const summary = await auditService.getActivitySummary(req.shop._id, req.query, req);
   return ApiResponse.success(res, {
     data: summary,
     message: 'Activity summary retrieved successfully',
@@ -36,7 +36,7 @@ exports.getActivitySummary = asyncHandler(async (req, res) => {
 
 // Get user activity
 exports.getUserActivity = asyncHandler(async (req, res) => {
-  const result = await auditService.getUserActivity(req.shop._id, req.params.userId, req.query);
+  const result = await auditService.getUserActivity(req.shop._id, req.params.userId, req.query, req);
   return ApiResponse.paginated(res, {
     ...result,
     message: 'User activity retrieved successfully',
@@ -47,7 +47,7 @@ exports.getUserActivity = asyncHandler(async (req, res) => {
 // Get entity history
 exports.getEntityHistory = asyncHandler(async (req, res) => {
   const { entityType, entityId } = req.params;
-  const logs = await auditService.getEntityHistory(req.shop._id, entityType, entityId);
+  const logs = await auditService.getEntityHistory(req.shop._id, entityType, entityId, req);
   return ApiResponse.success(res, {
     data: logs,
     message: 'Entity history retrieved successfully',

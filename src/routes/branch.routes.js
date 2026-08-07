@@ -6,19 +6,26 @@ const { rbacAny } = require('../middleware/permission.middleware');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 
+/**
+ * Owner-facing branch routes — READ and EDIT only.
+ *
+ * Creating, deleting and enabling/disabling branches are platform-admin
+ * actions, performed from the admin panel on the owner's behalf:
+ *   POST   /api/admin/shops/:id/branches
+ *   DELETE /api/admin/shops/:id/branches/:branchId
+ *   POST   /api/admin/shops/:id/enable-multi-branch
+ *
+ * The owner-facing create/delete endpoints that used to live here are removed
+ * rather than permission-gated, so a guessed URL 404s regardless of whether the
+ * shop has multi-branch enabled (FEATURE_AUDIT.md H-13).
+ */
+
 // Branch reads expose the shop's branch list + staff counts. Owner bypasses;
 // staff need a permission whose UI legitimately consumes the branch list.
 const canViewBranches = rbacAny([
   ['stock_transfers', 'view'],
   ['staff', 'view'],
 ]);
-
-/**
- * All branch routes require:
- * 1. Authentication (protect)
- * 2. Owner access (ownerOnly) — only owners can manage branches
- * 3. Multi-branch to be enabled (checked in handlers)
- */
 
 // Middleware: ensure multi-branch is enabled for this shop
 const requireMultiBranch = (req, res, next) => {
@@ -31,13 +38,17 @@ const requireMultiBranch = (req, res, next) => {
   next();
 };
 
-// GET /api/branches — List all branches
+// GET /api/branches — List branches.
+// Owner sees all; staff see only the branch they are assigned to.
 router.get('/',
   protect,
   canViewBranches,
   requireMultiBranch,
   asyncHandler(async (req, res) => {
-    const branches = await branchService.getBranchesWithStaffCount(req.shop._id);
+    const branches = req.user.isOwner
+      ? await branchService.getBranchesWithStaffCount(req.shop._id)
+      : await branchService.getAssignedBranch(req.shop._id, req.branchId);
+
     return ApiResponse.success(res, {
       data: branches,
       message: 'Branches fetched',
@@ -52,6 +63,14 @@ router.get('/:id',
   canViewBranches,
   requireMultiBranch,
   asyncHandler(async (req, res) => {
+    // Staff may only read their own branch.
+    if (!req.user.isOwner && String(req.branchId || '') !== String(req.params.id)) {
+      return ApiResponse.forbidden(res, {
+        message: 'You can only view your own branch',
+        messageBn: 'আপনি শুধু নিজের শাখাই দেখতে পারবেন'
+      });
+    }
+
     const branch = await branchService.getBranch(req.params.id, req.shop._id);
     return ApiResponse.success(res, {
       data: branch,
@@ -61,22 +80,8 @@ router.get('/:id',
   })
 );
 
-// POST /api/branches — Create new branch
-router.post('/',
-  protect,
-  ownerOnly,
-  requireMultiBranch,
-  asyncHandler(async (req, res) => {
-    const branch = await branchService.createBranch(req.shop._id, req.body, req);
-    return ApiResponse.created(res, {
-      data: branch,
-      message: 'Branch created',
-      messageBn: 'নতুন শাখা তৈরি হয়েছে'
-    });
-  })
-);
-
-// PATCH /api/branches/:id — Update branch
+// PATCH /api/branches/:id — Owner edits their own branch's details
+// (name, address, phone). Code, active state and existence are admin-only.
 router.patch('/:id',
   protect,
   ownerOnly,
@@ -87,21 +92,6 @@ router.patch('/:id',
       data: branch,
       message: 'Branch updated',
       messageBn: 'শাখা আপডেট হয়েছে'
-    });
-  })
-);
-
-// DELETE /api/branches/:id — Deactivate branch (soft delete)
-router.delete('/:id',
-  protect,
-  ownerOnly,
-  requireMultiBranch,
-  asyncHandler(async (req, res) => {
-    const branch = await branchService.deactivateBranch(req.params.id, req.shop._id, req);
-    return ApiResponse.success(res, {
-      data: branch,
-      message: 'Branch deactivated',
-      messageBn: 'শাখা নিষ্ক্রিয় হয়েছে'
     });
   })
 );

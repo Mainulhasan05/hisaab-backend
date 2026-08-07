@@ -26,7 +26,7 @@ exports.createExpense = asyncHandler(async (req, res) => {
 
 // Update expense
 exports.updateExpense = asyncHandler(async (req, res) => {
-  const expense = await expenseService.updateExpense(req.shop._id, req.user._id, req.params.id, req.body);
+  const expense = await expenseService.updateExpense(req.shop._id, req.user._id, req.params.id, req.body, req);
   return ApiResponse.success(res, {
     data: expense,
     message: 'Expense updated successfully',
@@ -36,7 +36,7 @@ exports.updateExpense = asyncHandler(async (req, res) => {
 
 // Delete expense
 exports.deleteExpense = asyncHandler(async (req, res) => {
-  await expenseService.deleteExpense(req.shop._id, req.user._id, req.params.id);
+  await expenseService.deleteExpense(req.shop._id, req.user._id, req.params.id, req);
   return ApiResponse.success(res, {
     message: 'Expense deleted successfully',
     messageBn: 'খরচ সফলভাবে মুছে ফেলা হয়েছে',
@@ -45,7 +45,7 @@ exports.deleteExpense = asyncHandler(async (req, res) => {
 
 // Get expense summary
 exports.getSummary = asyncHandler(async (req, res) => {
-  const summary = await expenseService.getSummary(req.shop._id, req.query);
+  const summary = await expenseService.getSummary(req.shop._id, req.query, req);
   return ApiResponse.success(res, {
     data: summary,
     message: 'Expense summary retrieved',

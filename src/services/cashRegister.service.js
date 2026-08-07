@@ -7,7 +7,7 @@ const Purchase = require('../models/Purchase.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
-const { getBranchForCreate, scopeByBranch } = require('../utils/branchScope.util');
+const { branchFilter, requireBranch, isAllBranchesView } = require('../utils/branchScope.util');
 
 class CashRegisterService {
   // Helper: get start and end of a date
@@ -107,7 +107,16 @@ class CashRegisterService {
   // Get today's register (find or create, auto-calculate)
   async getTodayRegister(shopId, userId, req) {
     const { start, end } = this._dayRange();
-    const branchId = req ? getBranchForCreate(req) : null;
+
+    // A cash register belongs to exactly one branch, so "All Branches" has no
+    // single register to show. Returning one anyway would pick an arbitrary
+    // branch's till and present it as the shop's — say so instead.
+    // (This path previously threw 403 and broke the page outright — H-1.)
+    if (isAllBranchesView(req)) {
+      return { exists: false, allBranchesView: true };
+    }
+
+    const branchId = req?.branchId || null;
     const branchQuery = branchId ? { branch: branchId } : {};
 
     let register = await CashRegister.findOne({
@@ -161,7 +170,8 @@ class CashRegisterService {
   // Open today's register
   async openRegister(shopId, userId, openingBalance, req) {
     const { start, end } = this._dayRange();
-    const branchId = req ? getBranchForCreate(req) : null;
+    // WRITE: opening a till belongs to exactly one branch.
+    const branchId = req ? requireBranch(req) : null;
     const branchQuery = branchId ? { branch: branchId } : {};
 
     // Check if already exists
@@ -208,6 +218,7 @@ class CashRegisterService {
     // Audit log
     await AuditLog.create({
       shop: shopId,
+      branch: branchId || null,
       user: userId,
       action: AUDIT_ACTIONS.CASH_REGISTER_OPEN.en,
       actionBn: AUDIT_ACTIONS.CASH_REGISTER_OPEN.bn,
@@ -228,7 +239,7 @@ class CashRegisterService {
   // Update register (manual entries: other cash in/out)
   async updateRegister(shopId, userId, data, req = null) {
     const { start, end } = this._dayRange();
-    const branchId = req ? getBranchForCreate(req) : null;
+    const branchId = req ? requireBranch(req) : null;
     const branchQuery = branchId ? { branch: branchId } : {};
 
     const register = await CashRegister.findOne({
@@ -273,6 +284,7 @@ class CashRegisterService {
     // Audit log
     await AuditLog.create({
       shop: shopId,
+      branch: branchId || null,
       user: userId,
       action: AUDIT_ACTIONS.CASH_REGISTER_UPDATE.en,
       actionBn: AUDIT_ACTIONS.CASH_REGISTER_UPDATE.bn,
@@ -293,7 +305,7 @@ class CashRegisterService {
   // Close today's register
   async closeRegister(shopId, userId, actualClosing, notes, req = null) {
     const { start, end } = this._dayRange();
-    const branchId = req ? getBranchForCreate(req) : null;
+    const branchId = req ? requireBranch(req) : null;
     const branchQuery = branchId ? { branch: branchId } : {};
 
     const register = await CashRegister.findOne({
@@ -337,6 +349,7 @@ class CashRegisterService {
     // Audit log
     await AuditLog.create({
       shop: shopId,
+      branch: branchId || null,
       user: userId,
       action: AUDIT_ACTIONS.CASH_REGISTER_CLOSE.en,
       actionBn: AUDIT_ACTIONS.CASH_REGISTER_CLOSE.bn,
@@ -360,7 +373,8 @@ class CashRegisterService {
 
   // Close a previous day's register by ID
   async closePreviousRegister(shopId, userId, registerId, actualClosing, notes, req = null) {
-    const branchId = req ? getBranchForCreate(req) : null;
+    // WRITE: settles one branch's till.
+    const branchId = req ? requireBranch(req) : null;
     const branchQuery = branchId ? { branch: branchId } : {};
 
     const register = await CashRegister.findOne({
@@ -396,6 +410,7 @@ class CashRegisterService {
     // Audit log
     await AuditLog.create({
       shop: shopId,
+      branch: branchId || null,
       user: userId,
       action: AUDIT_ACTIONS.CASH_REGISTER_CLOSE.en,
       actionBn: AUDIT_ACTIONS.CASH_REGISTER_CLOSE.bn,
@@ -420,7 +435,8 @@ class CashRegisterService {
   // Reopen a closed register (owner only)
   async reopenRegister(shopId, userId, reason, req = null) {
     const { start, end } = this._dayRange();
-    const branchId = req ? getBranchForCreate(req) : null;
+    // WRITE: reopens one branch's till for today.
+    const branchId = req ? requireBranch(req) : null;
     const branchQuery = branchId ? { branch: branchId } : {};
 
     const register = await CashRegister.findOne({
@@ -473,6 +489,7 @@ class CashRegisterService {
     // Audit log
     await AuditLog.create({
       shop: shopId,
+      branch: branchId || null,
       user: userId,
       action: AUDIT_ACTIONS.CASH_REGISTER_REOPEN.en,
       actionBn: AUDIT_ACTIONS.CASH_REGISTER_REOPEN.bn,
@@ -495,7 +512,7 @@ class CashRegisterService {
   async getHistory(shopId, options = {}, req = null) {
     const { page = 1, limit = 10, startDate, endDate } = options;
 
-    const query = req ? scopeByBranch(req, { shop: shopId }) : { shop: shopId };
+    const query = req ? branchFilter(req, { shop: shopId }) : { shop: shopId };
 
     if (startDate || endDate) {
       query.date = {};

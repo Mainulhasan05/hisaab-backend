@@ -13,14 +13,14 @@ const AuditLog = require('../models/AuditLog.model');
 const Payment = require('../models/Payment.model');
 const Product = require('../models/Product.model');
 const Branch = require('../models/Branch.model');
-const BranchStock = require('../models/BranchStock.model');
+const HeldCart = require('../models/HeldCart.model');
 const mongoose = require('mongoose');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { AppError } = require('../middleware/error.middleware');
 const cacheService = require('./cache.service');
-const { invalidateShopAuthCache } = require('../utils/authCache.util');
+const { invalidateShopAuthCache, invalidateBranchCache } = require('../utils/authCache.util');
 const { KEYS, getTTL } = require('../config/cacheKeys');
 
 class AdminService {
@@ -1426,80 +1426,90 @@ class AdminService {
    * 1. Creates a default "Main Branch"
    * 2. Backfills all existing data with the default branch
    * 3. Assigns all staff to the default branch
-   * 4. Migrates product stock to BranchStock model
+   * 4. Assigns the existing product catalogue to the default branch
    */
   async enableMultiBranch(shopId, adminId, branchName = null) {
     const shop = await Shop.findById(shopId);
     if (!shop) {
-      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
+      throw new AppError('Shop not found', 'Shop not found', 404);
     }
 
     if (shop.multiBranchEnabled) {
-      throw new AppError('মাল্টি-ব্রাঞ্চ আগে থেকেই সক্রিয়', 'Multi-branch already enabled', 400);
+      throw new AppError('Multi-branch already enabled', 'Multi-branch already enabled', 400);
     }
 
-    // 1. Create default branch
-    const defaultBranch = await Branch.create({
-      shop: shopId,
-      name: branchName || 'প্রধান শাখা',
-      code: 'MAIN',
-      address: shop.address,
-      phone: shop.phone,
-      isDefault: true
-    });
+    // 1. Default branch. Reuse an existing one rather than creating a second
+    // MAIN — a shop that was enabled, disabled, then re-enabled still has its
+    // branches, and Branch.create would hit the {shop, code} unique index and
+    // 500 (FEATURE_AUDIT.md M-4).
+    let defaultBranch =
+      (await Branch.findOne({ shop: shopId, isDefault: true })) ||
+      (await Branch.findOne({ shop: shopId }).sort({ createdAt: 1 }));
 
-    // 2. Enable multi-branch on shop
-    shop.multiBranchEnabled = true;
-    await shop.save();
+    if (defaultBranch) {
+      if (!defaultBranch.isDefault || !defaultBranch.isActive) {
+        defaultBranch.isDefault = true;
+        defaultBranch.isActive = true;
+        defaultBranch.deletedAt = null;
+        await defaultBranch.save();
+      }
+    } else {
+      defaultBranch = await Branch.create({
+        shop: shopId,
+        name: branchName || 'Main Branch',
+        code: 'MAIN',
+        address: shop.address,
+        phone: shop.phone,
+        isDefault: true
+      });
+    }
 
-    // 3. Backfill all transactional data with default branch
+    // 2. Backfill BEFORE flipping the flag. The flag used to be set first, so
+    // an interrupted backfill left the shop live with half its rows untagged
+    // and therefore invisible in any branch-selected view (M-6).
+    // HeldCart was missing from this list entirely (M-5).
     const branchScopedModels = [
-      Sale, Purchase, Expense, CashRegister,
-      StockTransaction, Payment, SalesReturn, SMSLog, AuditLog
+      Sale, Purchase, Expense, CashRegister, StockTransaction,
+      Payment, SalesReturn, SMSLog, AuditLog, HeldCart
     ];
 
+    // Batched so a large history never builds one unbounded write, and so a
+    // failure part-way can be resumed simply by re-running (the filter only
+    // ever matches rows that are still untagged).
+    const BATCH = 5000;
+    const backfilled = {};
     for (const Model of branchScopedModels) {
-      await Model.updateMany(
-        { shop: shopId, branch: null },
-        { $set: { branch: defaultBranch._id } }
-      );
+      let total = 0;
+      for (;;) {
+        const ids = await Model.find({ shop: shopId, branch: null }, { _id: 1 })
+          .limit(BATCH).lean();
+        if (ids.length === 0) break;
+        const res = await Model.updateMany(
+          { _id: { $in: ids.map((d) => d._id) } },
+          { $set: { branch: defaultBranch._id } }
+        );
+        total += res.modifiedCount;
+        if (ids.length < BATCH) break;
+      }
+      backfilled[Model.modelName] = total;
     }
 
-    // 4. Assign all non-owner staff to default branch
-    await User.updateMany(
+    // 3. Assign all non-owner staff to the default branch
+    const staffResult = await User.updateMany(
       { shop: shopId, isOwner: false, branch: null },
       { $set: { branch: defaultBranch._id } }
     );
 
-    // 5. Migrate product stock to BranchStock
-    const products = await Product.find({ shop: shopId });
-    const stockOps = [];
-    for (const product of products) {
-      if (product.hasVariants) {
-        for (const variant of product.variants) {
-          stockOps.push({
-            shop: shopId,
-            branch: defaultBranch._id,
-            product: product._id,
-            variantId: variant._id,
-            stock: variant.stock || 0
-          });
-        }
-      } else {
-        stockOps.push({
-          shop: shopId,
-          branch: defaultBranch._id,
-          product: product._id,
-          variantId: null,
-          stock: product.stock || 0
-        });
-      }
-    }
-    if (stockOps.length > 0) {
-      await BranchStock.insertMany(stockOps, { ordered: false }).catch(() => {
-        // Ignore duplicate key errors (idempotent)
-      });
-    }
+    // 4. The existing catalogue becomes the default branch's catalogue.
+    // Stock already lives on these documents, so nothing is recalculated.
+    const productResult = await Product.updateMany(
+      { shop: shopId, branch: null },
+      { $set: { branch: defaultBranch._id } }
+    );
+
+    // 5. Everything is tagged — only now is the shop switched over.
+    shop.multiBranchEnabled = true;
+    await shop.save();
 
     // 6. Log audit
     await AuditLog.log({
@@ -1519,8 +1529,9 @@ class AdminService {
       defaultBranch: defaultBranch.toObject(),
       backedUp: {
         models: branchScopedModels.length,
-        products: products.length,
-        stockRecords: stockOps.length
+        rows: backfilled,
+        staff: staffResult.modifiedCount,
+        products: productResult.modifiedCount
       }
     };
   }
@@ -1589,6 +1600,17 @@ class AdminService {
       createdBy: adminId
     });
 
+    // Optionally seed the new branch's catalogue from an existing branch.
+    // Prices, variants and settings are copied; stock starts at 0 and the owner
+    // fills it in. Batches/serials/sales history are NOT copied — they belong
+    // to the branch that actually holds them.
+    let clonedProducts = 0;
+    if (data.copyProductsFromBranch) {
+      clonedProducts = await this.cloneBranchProducts(
+        shopId, data.copyProductsFromBranch, branch._id
+      );
+    }
+
     // Log audit
     await AuditLog.log({
       shop: shopId,
@@ -1599,7 +1621,76 @@ class AdminService {
       entity: { type: 'branch', id: branch._id, name: branch.name }
     });
 
-    return branch;
+    // Branch list is cached inside auth:user:{id}; refresh it for this shop's users
+    await invalidateBranchCache(shopId);
+
+    return { ...branch.toObject(), clonedProducts };
+  }
+
+  /**
+   * Copy a branch's product catalogue into another branch.
+   *
+   * Copied: name, code, barcode, category, unit, prices, variants (with their
+   * prices), minStock, images, tags, online flags.
+   * Reset:  stock 0, batches [], serials [], totalSold 0, lastSold null.
+   *
+   * `code` is preserved so the two branches' copies stay matchable — that is
+   * what stock transfer keys on — and `clonedFrom` records the lineage.
+   * Batched by _id cursor so a large catalogue never builds one huge write.
+   */
+  async cloneBranchProducts(shopId, sourceBranchId, targetBranchId) {
+    const Product = require('../models/Product.model');
+    const BATCH = 500;
+
+    const sourceBranch = await Branch.findOne({ _id: sourceBranchId, shop: shopId });
+    if (!sourceBranch) {
+      throw new AppError('Source branch not found', 'Source branch not found', 404);
+    }
+
+    // Never overwrite what the target branch already stocks.
+    const existingCodes = new Set(
+      (await Product.find({ shop: shopId, branch: targetBranchId }, { code: 1 }).lean())
+        .map((p) => p.code)
+    );
+
+    let copied = 0;
+    let cursorId = null;
+
+    for (;;) {
+      const filter = { shop: shopId, branch: sourceBranchId, isDeleted: { $ne: true } };
+      if (cursorId) filter._id = { $gt: cursorId };
+
+      const batch = await Product.find(filter).sort({ _id: 1 }).limit(BATCH).lean();
+      if (batch.length === 0) break;
+      cursorId = batch[batch.length - 1]._id;
+
+      const docs = batch
+        .filter((p) => !existingCodes.has(p.code))
+        .map((p) => {
+          const { _id, createdAt, updatedAt, __v, ...rest } = p;
+          return {
+            ...rest,
+            branch: targetBranchId,
+            clonedFrom: p.clonedFrom || p._id,
+            stock: 0,
+            variants: (p.variants || []).map((v) => ({ ...v, stock: 0 })),
+            batches: [],
+            serials: [],
+            totalSold: 0,
+            lastSold: null,
+          };
+        });
+
+      if (docs.length > 0) {
+        await Product.insertMany(docs, { ordered: false });
+        copied += docs.length;
+        docs.forEach((d) => existingCodes.add(d.code));
+      }
+
+      if (batch.length < BATCH) break;
+    }
+
+    return copied;
   }
 
   // Update a shop's branch by admin
@@ -1639,19 +1730,40 @@ class AdminService {
       entity: { type: 'branch', id: branch._id, name: branch.name }
     });
 
+    await invalidateBranchCache(shopId);
+
     return branch;
   }
 
   // Delete/Deactivate a shop's branch by admin
-  async deleteShopBranch(shopId, branchId, adminId) {
+  async deleteShopBranch(shopId, branchId, adminId, options = {}) {
     const shop = await Shop.findById(shopId);
     if (!shop) {
-      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
+      throw new AppError('Shop not found', 'Shop not found', 404);
     }
 
     const branch = await Branch.findOne({ _id: branchId, shop: shopId });
     if (!branch) {
-      throw new AppError('শাখা পাওয়া যায়নি', 'Branch not found', 404);
+      throw new AppError('Branch not found', 'Branch not found', 404);
+    }
+
+    // Deactivating a branch with work in progress strands it: assigned staff
+    // are locked out on their next request, an open till never closes, held
+    // carts become unreachable and in-transit stock is deducted but never
+    // received. `force` is available for the deliberate case.
+    if (!options.force) {
+      const branchService = require('./branch.service');
+      const impact = await branchService.getBranchDeletionImpact(branchId, shopId);
+      if (!impact.canDeactivate) {
+        const err = new AppError(
+          `Cannot deactivate this branch: ${impact.blockers.join('; ')}`,
+          impact.blockers.join('; '),
+          400
+        );
+        err.code = 'BRANCH_HAS_ACTIVITY';
+        err.impact = impact;
+        throw err;
+      }
     }
 
     branch.isActive = false;
@@ -1666,6 +1778,10 @@ class AdminService {
       description: `শাখা "${branch.name}" অ্যাডমিন কর্তৃক নিষ্ক্রিয় করা হয়েছে`,
       entity: { type: 'branch', id: branch._id, name: branch.name }
     });
+
+    // Critical: staff pinned to this branch must stop resolving it immediately,
+    // and owners must stop seeing it in their switcher.
+    await invalidateBranchCache(shopId);
 
     return branch;
   }

@@ -56,7 +56,9 @@ const corsOptions = {
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-active-branch']
+  // x-shop-id lets a platform admin act inside a specific shop from the admin
+  // panel; without it in this list the browser strips the header entirely.
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-active-branch', 'x-shop-id', 'x-idempotency-key']
 };
 app.use(cors(corsOptions));
 

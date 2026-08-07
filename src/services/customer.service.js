@@ -3,6 +3,7 @@ const Sale = require('../models/Sale.model');
 const Payment = require('../models/Payment.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
+const { branchFilter, requireBranch } = require('../utils/branchScope.util');
 const { runInTransaction } = require('../utils/transaction.util');
 
 class CustomerService {
@@ -206,9 +207,13 @@ class CustomerService {
       throw new AppError('পেমেন্টের পরিমাণ বাকির চেয়ে বেশি', 'Payment amount exceeds due balance', 400);
     }
 
-    // Create payment record
+    // Create payment record. `branch` is required: cashRegister._calculateCashFlows
+    // matches due collections by branch, so an untagged payment is invisible to
+    // every branch's till and understates expected closing (FEATURE_AUDIT.md H-6).
+    // The customer's own balance remains shop-wide (product decision #2).
     const [payment] = await Payment.create([{
       shop: shopId,
+      branch: req ? requireBranch(req) : null,
       customer: customerId,
       amount,
       method: method || 'cash',

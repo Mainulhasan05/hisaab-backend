@@ -108,6 +108,7 @@ const smsLogSchema = new mongoose.Schema({
 
 // Indexes - Optimized for scalability
 smsLogSchema.index({ shop: 1, createdAt: -1 }); // Main listing
+smsLogSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Branch-filtered listing
 smsLogSchema.index({ shop: 1, invoiceNumber: 1 }, { sparse: true }); // Duplicate SMS prevention for invoices
 smsLogSchema.index({ transactionId: 1 }, { sparse: true }); // Webhook status updates
 

@@ -6,7 +6,7 @@ const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const { normalizePhone } = require('../utils/phone.util');
-const { getBranchForCreate } = require('../utils/branchScope.util');
+const { branchFilter, requireBranch } = require('../utils/branchScope.util');
 const { invalidateUserAuthCache } = require('../utils/authCache.util');
 
 const userActivityService = require('./userActivity.service');
@@ -137,15 +137,13 @@ class StaffService {
       }
       resolvedBranchId = branch._id;
     } else if (req) {
-      try {
-        resolvedBranchId = getBranchForCreate(req);
-      } catch (err) {
-        // If owner is in "All Branches" context, default to the default branch of the shop
-        const defaultBranch = await Branch.getDefaultBranch(shopId);
-        if (defaultBranch) {
-          resolvedBranchId = defaultBranch._id;
-        }
-      }
+      // No explicit branch in the payload → use the active one. This used to
+      // catch the "no branch selected" error and silently fall back to the
+      // shop's default branch, which is the same silent-misassignment the
+      // write-time fallback in auth.middleware was removed for: the owner would
+      // create a cashier in a branch they weren't looking at. Let it throw so
+      // the UI asks which branch (product decision #3).
+      resolvedBranchId = requireBranch(req);
     }
 
     // Consent: if this phone already belongs to someone in another shop, the

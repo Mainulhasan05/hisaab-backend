@@ -6,13 +6,20 @@ const Expense = require('../models/Expense.model');
 const SalesReturn = require('../models/SalesReturn.model');
 const Purchase = require('../models/Purchase.model');
 const CashRegister = require('../models/CashRegister.model');
-const BranchStock = require('../models/BranchStock.model');
 const Branch = require('../models/Branch.model');
 const User = require('../models/User.model');
 const Role = require('../models/Role.model');
 const mongoose = require('mongoose');
 const cacheService = require('./cache.service');
 const { KEYS, getTTL } = require('../config/cacheKeys');
+
+// Products are per-branch documents, so a report's product scope is just the
+// shop plus the optional branch — no join to a separate stock collection.
+function productScope(shopId, branchId, extra = {}) {
+  const scope = { shop: new mongoose.Types.ObjectId(shopId), isDeleted: { $ne: true }, ...extra };
+  if (branchId) scope.branch = new mongoose.Types.ObjectId(branchId);
+  return scope;
+}
 
 // Bangladesh is UTC+6. All dates from frontend are in Bangladesh local time.
 const BD_OFFSET_MS = 6 * 60 * 60 * 1000;
@@ -84,7 +91,7 @@ class ReportService {
   }
 
   // Get dashboard statistics
-  async getDashboardStats(shopId, branchId = null) {
+  async getDashboardStats(shopId, branchId = null, isMultiBranch = false) {
     // Try cache first (include branchId and shop cache version in the key —
     // sale writes bump the version instead of deleting keys)
     const version = await cacheService.getShopCacheVersion(shopId);
@@ -95,170 +102,166 @@ class ReportService {
     if (cached) return cached;
     const { startOfDay, endOfDay } = getBangladeshDayRange(getBangladeshTodayStr());
 
-    // Get today's sales
-    const todaySalesResult = await Sale.aggregate([
-      {
-        $match: {
-          ...this._baseMatch(shopId, branchId),
-          status: { $ne: 'cancelled' },
-          createdAt: { $gte: startOfDay, $lte: endOfDay },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          totalSales: { $sum: netSaleAmountExpr() },
-          totalPaid: { $sum: '$paid' },
-          totalDue: { $sum: '$due' },
-          totalProfit: { $sum: '$profit' },
-          count: { $sum: 1 },
-        },
-      },
-    ]);
-
-    // Today's profit is already available from the aggregation below via $profit field.
-    // No need for a separate $lookup-based calculateProfit call.
-
-    // Get total due from all customers
-    const customerDueResult = await Customer.aggregate([
-      {
-        $match: {
-          shop: new mongoose.Types.ObjectId(shopId),
-          isActive: true,
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          totalDue: { $sum: '$totalDue' },
-        },
-      },
-    ]);
-
-    // Get low stock count
-    const lowStockCount = await Product.countDocuments({
-      shop: shopId,
-      isActive: true,
-      $expr: { $lt: ['$stock', '$minStock'] },
-    });
-
-    // Get total customers
-    const totalCustomers = await Customer.countDocuments({
-      shop: shopId,
-      isActive: true,
-    });
-
-    // Get total products
-    const totalProducts = await Product.countDocuments({
-      shop: shopId,
-      isActive: true,
-    });
-
-    // Get recent sales
-    const recentSales = await Sale.find({
-      shop: shopId,
-      ...(branchId ? { branch: branchId } : {}),
-      status: { $ne: 'cancelled' },
-    })
-      .populate('customer', 'name phone')
-      .sort({ createdAt: -1 })
-      .limit(5)
-      .lean();
-
-    // Get top selling products (last 30 days)
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-    const topProducts = await Sale.aggregate([
-      {
-        $match: {
-          ...this._baseMatch(shopId, branchId),
-          status: { $ne: 'cancelled' },
-          createdAt: { $gte: thirtyDaysAgo },
-        },
-      },
-      { $unwind: '$items' },
-      {
-        $group: {
-          _id: '$items.product',
-          productName: { $first: '$items.productName' },
-          totalQuantity: { $sum: '$items.quantity' },
-          totalRevenue: { $sum: '$items.total' },
-        },
-      },
-      { $sort: { totalQuantity: -1 } },
-      { $limit: 5 },
-    ]);
-
-    // Get sales chart data (last 7 days)
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
-    const salesChart = await Sale.aggregate([
-      {
-        $match: {
-          ...this._baseMatch(shopId, branchId),
-          status: { $ne: 'cancelled' },
-          createdAt: { $gte: sevenDaysAgo },
-        },
-      },
-      {
-        $group: {
-          _id: {
-            $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
-          },
-          sales: { $sum: netSaleAmountExpr() },
-          orders: { $sum: 1 },
-        },
-      },
-      { $sort: { _id: 1 } },
-    ]);
+    // Branch breakdown is only meaningful for a shop that actually has
+    // branches. It used to run whenever no branch was selected, which is always
+    // true for a single-branch shop — two extra queries on the hottest endpoint
+    // for every such shop, returning an empty array (FEATURE_AUDIT.md M-12).
+    const wantBranchBreakdown = isMultiBranch && !branchId;
 
-    const todaySales = todaySalesResult[0] || { totalSales: 0, totalPaid: 0, totalDue: 0, totalProfit: 0, count: 0 };
-    const totalDue = customerDueResult[0]?.totalDue || 0;
-
-    // Get sales breakdown by branch (for multi-branch dashboard overview)
-    let branchBreakdown = [];
-    if (!branchId) {
-      const salesByBranch = await Sale.aggregate([
+    // These eight queries are independent of each other. They used to run as
+    // eight sequential `await`s, so the endpoint paid one full network round
+    // trip per query — ~500ms of pure latency before any work. Running them
+    // together collapses that to roughly a single round trip.
+    const [
+      todaySalesResult,
+      customerDueResult,
+      lowStockCount,
+      totalCustomers,
+      totalProducts,
+      recentSales,
+      topProducts,
+      salesChart,
+      salesByBranch,
+      activeBranches,
+    ] = await Promise.all([
+      // Today's sales
+      Sale.aggregate([
         {
           $match: {
-            shop: new mongoose.Types.ObjectId(shopId),
+            ...this._baseMatch(shopId, branchId),
             status: { $ne: 'cancelled' },
             createdAt: { $gte: startOfDay, $lte: endOfDay },
           },
         },
         {
           $group: {
-            _id: '$branch',
-            todaySales: { $sum: netSaleAmountExpr() },
-            todayProfit: { $sum: '$profit' },
-            todayOrders: { $sum: 1 },
+            _id: null,
+            totalSales: { $sum: netSaleAmountExpr() },
+            totalPaid: { $sum: '$paid' },
+            totalDue: { $sum: '$due' },
+            totalProfit: { $sum: '$profit' },
+            count: { $sum: 1 },
           },
         },
-      ]);
+      ]),
 
-      const activeBranches = await Branch.find({ shop: shopId, isActive: true }).lean();
+      // Total due across all customers (shop-wide by design — decision #2)
+      Customer.aggregate([
+        { $match: { shop: new mongoose.Types.ObjectId(shopId), isActive: true } },
+        { $group: { _id: null, totalDue: { $sum: '$totalDue' } } },
+      ]),
 
-      branchBreakdown = activeBranches.map(branch => {
-        const stats = salesByBranch.find(s => s._id && s._id.toString() === branch._id.toString()) || {
-          todaySales: 0,
-          todayProfit: 0,
-          todayOrders: 0,
-        };
-        return {
-          branchId: branch._id,
-          name: branch.name,
-          code: branch.code,
-          address: branch.address,
-          phone: branch.phone,
-          isDefault: branch.isDefault,
-          todaySales: stats.todaySales,
-          todayProfit: stats.todayProfit,
-          todayOrders: stats.todayOrders,
-        };
-      });
-    }
+      Product.countDocuments(
+        productScope(shopId, branchId, { isActive: true, $expr: { $lt: ['$stock', '$minStock'] } })
+      ),
+
+      Customer.countDocuments({ shop: shopId, isActive: true }),
+
+      Product.countDocuments(productScope(shopId, branchId, { isActive: true })),
+
+      Sale.find({
+        shop: shopId,
+        ...(branchId ? { branch: branchId } : {}),
+        status: { $ne: 'cancelled' },
+      })
+        .populate('customer', 'name phone')
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .lean(),
+
+      // Top selling products (last 30 days)
+      Sale.aggregate([
+        {
+          $match: {
+            ...this._baseMatch(shopId, branchId),
+            status: { $ne: 'cancelled' },
+            createdAt: { $gte: thirtyDaysAgo },
+          },
+        },
+        { $unwind: '$items' },
+        {
+          $group: {
+            _id: '$items.product',
+            productName: { $first: '$items.productName' },
+            totalQuantity: { $sum: '$items.quantity' },
+            totalRevenue: { $sum: '$items.total' },
+          },
+        },
+        { $sort: { totalQuantity: -1 } },
+        { $limit: 5 },
+      ]),
+
+      // Sales chart (last 7 days)
+      Sale.aggregate([
+        {
+          $match: {
+            ...this._baseMatch(shopId, branchId),
+            status: { $ne: 'cancelled' },
+            createdAt: { $gte: sevenDaysAgo },
+          },
+        },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+            sales: { $sum: netSaleAmountExpr() },
+            orders: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+
+      // Per-branch today's figures — multi-branch shops only
+      wantBranchBreakdown
+        ? Sale.aggregate([
+          {
+            $match: {
+              shop: new mongoose.Types.ObjectId(shopId),
+              status: { $ne: 'cancelled' },
+              createdAt: { $gte: startOfDay, $lte: endOfDay },
+            },
+          },
+          {
+            $group: {
+              _id: '$branch',
+              todaySales: { $sum: netSaleAmountExpr() },
+              todayProfit: { $sum: '$profit' },
+              todayOrders: { $sum: 1 },
+            },
+          },
+        ])
+        : [],
+
+      wantBranchBreakdown
+        ? Branch.find({ shop: shopId, isActive: true }).lean()
+        : [],
+    ]);
+
+    const todaySales = todaySalesResult[0] || { totalSales: 0, totalPaid: 0, totalDue: 0, totalProfit: 0, count: 0 };
+    const totalDue = customerDueResult[0]?.totalDue || 0;
+
+    const branchBreakdown = activeBranches.map((branch) => {
+      const stats = salesByBranch.find((x) => x._id && x._id.toString() === branch._id.toString()) || {
+        todaySales: 0,
+        todayProfit: 0,
+        todayOrders: 0,
+      };
+      return {
+        branchId: branch._id,
+        name: branch.name,
+        code: branch.code,
+        address: branch.address,
+        phone: branch.phone,
+        isDefault: branch.isDefault,
+        todaySales: stats.todaySales,
+        todayProfit: stats.todayProfit,
+        todayOrders: stats.todayOrders,
+      };
+    });
 
     const result = {
       todaySales: todaySales.totalSales,
@@ -388,154 +391,35 @@ class ReportService {
     ]);
 
     // Low stock products
-    let lowStock;
-    if (branchId) {
-      lowStock = await BranchStock.aggregate([
-        {
-          $match: {
-            shop: new mongoose.Types.ObjectId(shopId),
-            branch: new mongoose.Types.ObjectId(branchId),
-          }
-        },
-        {
-          $lookup: {
-            from: 'products',
-            localField: 'product',
-            foreignField: '_id',
-            as: 'productDetails'
-          }
-        },
-        { $unwind: '$productDetails' },
-        {
-          $match: {
-            'productDetails.isActive': true,
-            $expr: { $lt: ['$stock', '$productDetails.minStock'] }
-          }
-        },
-        {
-          $project: {
-            name: '$productDetails.name',
-            code: '$productDetails.code',
-            stock: '$stock',
-            minStock: '$productDetails.minStock',
-            sellingPrice: '$productDetails.sellingPrice'
-          }
-        },
-        { $sort: { stock: 1 } },
-        { $limit: 20 }
-      ]);
-    } else {
-      lowStock = await Product.find({
-        shop: shopId,
-        isActive: true,
-        $expr: { $lt: ['$stock', '$minStock'] },
-      })
-        .select('name code stock minStock sellingPrice')
-        .sort({ stock: 1 })
-        .limit(20)
-        .lean();
-    }
+    const lowStock = await Product.find(
+      productScope(shopId, branchId, { isActive: true, $expr: { $lt: ['$stock', '$minStock'] } })
+    )
+      .select('name code stock minStock sellingPrice')
+      .sort({ stock: 1 })
+      .limit(20)
+      .lean();
 
     // No stock products
-    let noStock;
-    if (branchId) {
-      noStock = await BranchStock.aggregate([
-        {
-          $match: {
-            shop: new mongoose.Types.ObjectId(shopId),
-            branch: new mongoose.Types.ObjectId(branchId),
-            stock: { $lte: 0 }
-          }
-        },
-        {
-          $lookup: {
-            from: 'products',
-            localField: 'product',
-            foreignField: '_id',
-            as: 'productDetails'
-          }
-        },
-        { $unwind: '$productDetails' },
-        {
-          $match: {
-            'productDetails.isActive': true
-          }
-        },
-        {
-          $project: {
-            name: '$productDetails.name',
-            code: '$productDetails.code',
-            stock: '$stock',
-            minStock: '$productDetails.minStock',
-            sellingPrice: '$productDetails.sellingPrice'
-          }
-        },
-        { $limit: 20 }
-      ]);
-    } else {
-      noStock = await Product.find({
-        shop: shopId,
-        isActive: true,
-        stock: { $lte: 0 },
-      })
-        .select('name code stock minStock sellingPrice')
-        .limit(20)
-        .lean();
-    }
+    const noStock = await Product.find(
+      productScope(shopId, branchId, { isActive: true, stock: { $lte: 0 } })
+    )
+      .select('name code stock minStock sellingPrice')
+      .limit(20)
+      .lean();
 
     // Product summary
-    let summary;
-    if (branchId) {
-      const summaryResult = await BranchStock.aggregate([
-        {
-          $match: {
-            shop: new mongoose.Types.ObjectId(shopId),
-            branch: new mongoose.Types.ObjectId(branchId),
-          }
+    const summaryResult = await Product.aggregate([
+      { $match: productScope(shopId, branchId, { isActive: true }) },
+      {
+        $group: {
+          _id: null,
+          totalProducts: { $sum: 1 },
+          totalStock: { $sum: '$stock' },
+          totalValue: { $sum: { $multiply: ['$stock', '$sellingPrice'] } },
         },
-        {
-          $lookup: {
-            from: 'products',
-            localField: 'product',
-            foreignField: '_id',
-            as: 'productDetails'
-          }
-        },
-        { $unwind: '$productDetails' },
-        {
-          $match: {
-            'productDetails.isActive': true
-          }
-        },
-        {
-          $group: {
-            _id: null,
-            totalProducts: { $sum: 1 },
-            totalStock: { $sum: '$stock' },
-            totalValue: { $sum: { $multiply: ['$stock', '$productDetails.sellingPrice'] } }
-          }
-        }
-      ]);
-      summary = summaryResult[0] || { totalProducts: 0, totalStock: 0, totalValue: 0 };
-    } else {
-      const summaryResult = await Product.aggregate([
-        {
-          $match: {
-            shop: new mongoose.Types.ObjectId(shopId),
-            isActive: true,
-          },
-        },
-        {
-          $group: {
-            _id: null,
-            totalProducts: { $sum: 1 },
-            totalStock: { $sum: '$stock' },
-            totalValue: { $sum: { $multiply: ['$stock', '$sellingPrice'] } },
-          },
-        },
-      ]);
-      summary = summaryResult[0] || { totalProducts: 0, totalStock: 0, totalValue: 0 };
-    }
+      },
+    ]);
+    const summary = summaryResult[0] || { totalProducts: 0, totalStock: 0, totalValue: 0 };
 
     return {
       topSelling,
@@ -546,7 +430,10 @@ class ReportService {
   }
 
   // Get customer report
-  async getCustomerReport(shopId, options = {}, branchId = null) {
+  // Customers are shop-wide (product decision #2/#7), so this report is
+  // deliberately NOT branch-scoped. It previously accepted a `branchId` and
+  // silently ignored it, which read as a bug (FEATURE_AUDIT.md H-9).
+  async getCustomerReport(shopId, options = {}) {
     const { startDate, endDate } = options;
 
     // Top customers by purchase
@@ -792,44 +679,7 @@ class ReportService {
       ]),
 
       // 11. Low stock products
-      branchId ? BranchStock.aggregate([
-        {
-          $match: {
-            shop: new mongoose.Types.ObjectId(shopId),
-            branch: new mongoose.Types.ObjectId(branchId),
-          }
-        },
-        {
-          $lookup: {
-            from: 'products',
-            localField: 'product',
-            foreignField: '_id',
-            as: 'productDetails'
-          }
-        },
-        { $unwind: '$productDetails' },
-        {
-          $match: {
-            'productDetails.isActive': true,
-            $expr: { $lte: ['$stock', '$productDetails.minStock'] }
-          }
-        },
-        {
-          $project: {
-            name: '$productDetails.name',
-            code: '$productDetails.code',
-            stock: '$stock',
-            minStock: '$productDetails.minStock',
-            sellingPrice: '$productDetails.sellingPrice'
-          }
-        },
-        { $sort: { stock: 1 } },
-        { $limit: 15 }
-      ]) : Product.find({
-        shop: shopObjId,
-        isActive: true,
-        $expr: { $lte: ['$stock', '$minStock'] },
-      })
+      Product.find(productScope(shopId, branchId, { isActive: true, $expr: { $lte: ['$stock', '$minStock'] } }))
         .select('name code stock minStock sellingPrice')
         .sort({ stock: 1 })
         .limit(15)
@@ -1839,7 +1689,7 @@ class ReportService {
         data = await this.getProductReport(shopId, options, branchId);
         break;
       case 'customers':
-        data = await this.getCustomerReport(shopId, options, branchId);
+        data = await this.getCustomerReport(shopId, options);
         break;
       case 'staff':
         data = await this.getStaffReport(shopId, options, branchId);

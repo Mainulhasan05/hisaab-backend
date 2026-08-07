@@ -8,7 +8,7 @@ const { formatPhone } = require('../utils/phone.util');
 const { SMS_TYPES, SMS_STATUS } = require('../config/constants');
 const logger = require('../utils/logger.util');
 const { countSms, isUnicode } = require('../utils/smsCounter.util');
-const { getBranchForCreate, scopeByBranch } = require('../utils/branchScope.util');
+const { branchFilter, requireBranch } = require('../utils/branchScope.util');
 
 // MimSMS API Configuration
 const MIMSMS = {
@@ -91,7 +91,7 @@ class SMSService {
       // Log SMS
       const smsLog = await SMSLog.create({
         shop: shopId,
-        branch: req ? getBranchForCreate(req) : null,
+        branch: req ? requireBranch(req) : null,
         recipients: [{
           phone: formattedPhone,
           customer: customerId,
@@ -118,7 +118,7 @@ class SMSService {
       // Log failed attempt
       await SMSLog.create({
         shop: shopId,
-        branch: req ? getBranchForCreate(req) : null,
+        branch: req ? requireBranch(req) : null,
         recipients: [{ phone: formattedPhone, customer: customerId, status: SMS_STATUS.FAILED }],
         message,
         type: SMS_TYPES.SINGLE,
@@ -169,7 +169,7 @@ class SMSService {
       // Log SMS
       const smsLog = await SMSLog.create({
         shop: shopId,
-        branch: req ? getBranchForCreate(req) : null,
+        branch: req ? requireBranch(req) : null,
         recipients: formattedRecipients.map(r => ({
           phone: r.phone,
           customer: r.customerId,
@@ -194,7 +194,7 @@ class SMSService {
     } catch (error) {
       await SMSLog.create({
         shop: shopId,
-        branch: req ? getBranchForCreate(req) : null,
+        branch: req ? requireBranch(req) : null,
         recipients: formattedRecipients.map(r => ({
           phone: r.phone,
           customer: r.customerId,
@@ -249,7 +249,7 @@ class SMSService {
       // Log SMS
       const smsLog = await SMSLog.create({
         shop: shopId,
-        branch: req ? getBranchForCreate(req) : null,
+        branch: req ? requireBranch(req) : null,
         recipients: recipients.map(r => ({
           phone: formatPhone(r.phone),
           customer: r.customerId,
@@ -275,7 +275,7 @@ class SMSService {
     } catch (error) {
       await SMSLog.create({
         shop: shopId,
-        branch: req ? getBranchForCreate(req) : null,
+        branch: req ? requireBranch(req) : null,
         recipients: recipients.map(r => ({
           phone: formatPhone(r.phone),
           customer: r.customerId,
@@ -367,17 +367,17 @@ class SMSService {
     const Shop = require('../models/Shop.model');
 
     const shop = await Shop.findById(shopId);
-    const customers = await Customer.find(
-      req ? scopeByBranch(req, {
-        _id: { $in: customerIds },
-        shop: shopId,
-        totalDue: { $gt: 0 },
-      }) : {
-        _id: { $in: customerIds },
-        shop: shopId,
-        totalDue: { $gt: 0 },
-      }
-    );
+
+    // Customers are shop-wide — the Customer model has no `branch` field. This
+    // query was wrapped in branch scoping, which added `branch: <id>` to a
+    // collection that has no such field: it matched zero documents, so due
+    // reminders silently sent nothing for every staff member and for any owner
+    // with a branch selected (FEATURE_AUDIT.md H-7).
+    const customers = await Customer.find({
+      _id: { $in: customerIds },
+      shop: shopId,
+      totalDue: { $gt: 0 },
+    });
 
     if (customers.length === 0) {
       return { success: true, message: 'No customers with due found', sentCount: 0 };
@@ -400,7 +400,7 @@ class SMSService {
   async getSMSHistory(shopId, options = {}, req = null) {
     const { page = 1, limit = 20 } = options;
     const skip = (page - 1) * limit;
-    const filter = req ? scopeByBranch(req, { shop: shopId }) : { shop: shopId };
+    const filter = req ? branchFilter(req, { shop: shopId }) : { shop: shopId };
 
     const [history, total] = await Promise.all([
       SMSLog.find(filter)

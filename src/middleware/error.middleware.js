@@ -112,6 +112,9 @@ const sendErrorProd = (err, res) => {
     // Pass through custom error codes and data for frontend handling
     if (err.code) response.code = err.code;
     if (err.phone) response.phone = err.phone;
+    // WRONG_BRANCH carries the branch a record actually belongs to, so the
+    // client can name it and offer a one-click switch instead of a bare 404.
+    if (err.branch) response.branch = err.branch;
 
     return res.status(err.statusCode).json(response);
   }
@@ -146,6 +149,7 @@ const errorHandler = (err, req, res, next) => {
   error.isOperational = err.isOperational;
   if (err.code) error.code = err.code;
   if (err.phone) error.phone = err.phone;
+  if (err.branch) error.branch = err.branch;
 
   if (err.name === 'CastError') error = handleCastErrorDB(err);
   if (err.code === 11000) error = handleDuplicateFieldsDB(err);

@@ -16,7 +16,7 @@ exports.getPurchases = asyncHandler(async (req, res) => {
 
 // Get single purchase
 exports.getPurchase = asyncHandler(async (req, res) => {
-  const purchase = await purchaseService.getPurchaseById(req.shop._id, req.params.id);
+  const purchase = await purchaseService.getPurchaseById(req.shop._id, req.params.id, req);
   return ApiResponse.success(res, {
     data: purchase,
     message: 'Purchase retrieved',
@@ -36,7 +36,7 @@ exports.createPurchase = asyncHandler(async (req, res) => {
 
 // Cancel purchase
 exports.cancelPurchase = asyncHandler(async (req, res) => {
-  await purchaseService.cancelPurchase(req.shop._id, req.user._id, req.params.id);
+  await purchaseService.cancelPurchase(req.shop._id, req.user._id, req.params.id, req);
   return ApiResponse.success(res, {
     message: 'Purchase cancelled successfully',
     messageBn: 'ক্রয় সফলভাবে বাতিল হয়েছে',
@@ -45,7 +45,7 @@ exports.cancelPurchase = asyncHandler(async (req, res) => {
 
 // Get purchase summary
 exports.getSummary = asyncHandler(async (req, res) => {
-  const summary = await purchaseService.getSummary(req.shop._id, req.query);
+  const summary = await purchaseService.getSummary(req.shop._id, req.query, req);
   return ApiResponse.success(res, {
     data: summary,
     message: 'Purchase summary retrieved',
@@ -59,7 +59,8 @@ exports.recordPayment = asyncHandler(async (req, res) => {
     req.shop._id,
     req.user._id,
     req.params.id,
-    req.body
+    req.body,
+    req
   );
   return ApiResponse.success(res, {
     data: result,
@@ -72,7 +73,8 @@ exports.recordPayment = asyncHandler(async (req, res) => {
 exports.getPurchasePayments = asyncHandler(async (req, res) => {
   const payments = await purchaseService.getPurchasePayments(
     req.shop._id,
-    req.params.id
+    req.params.id,
+    req
   );
   return ApiResponse.success(res, {
     data: payments,

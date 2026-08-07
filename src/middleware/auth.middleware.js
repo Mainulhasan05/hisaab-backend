@@ -11,11 +11,10 @@ const userActivityService = require('../services/userActivity.service');
 const logger = require('../utils/logger.util');
 
 // Auth cache TTL: 5 minutes. Mutations that must take effect immediately
-// (shop status/subscription/settings changes, staff deactivation) explicitly
-// invalidate the affected keys via utils/authCache.util.js.
+// (shop status/subscription/settings changes, staff deactivation, branch
+// create/edit/deactivate) explicitly invalidate the affected keys via
+// utils/authCache.util.js.
 const AUTH_CACHE_TTL = 300;
-// Branch documents change very rarely; branch.service invalidates these keys on change.
-const BRANCH_CACHE_TTL = 600;
 
 /**
  * Extract token from cookies/headers based on route type
@@ -44,42 +43,16 @@ function extractToken(req) {
 }
 
 /**
- * Fetch a branch after validating it belongs to the shop, with caching —
- * previously an uncached Mongo query on every request for multi-branch shops.
- * Only positive results are cached; invalidated by branch.service on change.
- */
-async function getCachedBranchOwnership(branchId, shopId) {
-  const cacheKey = `shop:${shopId}:branch:${branchId}:own`;
-  const cached = await cacheService.get(cacheKey);
-  if (cached) return Branch.hydrate(cached);
-
-  const branch = await Branch.validateBranchOwnership(branchId, shopId);
-  if (branch) {
-    await cacheService.set(cacheKey, branch.toObject(), BRANCH_CACHE_TTL);
-  }
-  return branch;
-}
-
-/**
- * First active branch of a shop (used as the default write target for owners
- * in "All Branches" view), cached. branch.service invalidates this key.
- */
-async function getCachedDefaultBranch(shopId) {
-  const cacheKey = `shop:${shopId}:default_branch`;
-  const cached = await cacheService.get(cacheKey);
-  if (cached) return Branch.hydrate(cached);
-
-  const branch = await Branch.findOne({ shop: shopId, isActive: true }).sort({ createdAt: 1 });
-  if (branch) {
-    await cacheService.set(cacheKey, branch.toObject(), BRANCH_CACHE_TTL);
-  }
-  return branch;
-}
-
-/**
  * Fetch user with shop, using a cache to avoid DB hits on every request.
  * Cache key is based on user ID; explicitly invalidated on relevant mutations,
  * with the TTL as a backstop.
+ *
+ * The shop's branch list rides in the same payload. Branch validation used to
+ * cost up to two extra Redis GETs (plus a Mongo query on a miss) on every
+ * request of every multi-branch shop; carrying the list here makes it an
+ * in-memory lookup and removes those round trips entirely.
+ * Only branches are cached, not per-branch data — the list is tiny and changes
+ * very rarely, and authCache.util invalidates the shop's users on any change.
  */
 async function getCachedUser(userId) {
   const cacheKey = `auth:user:${userId}`;
@@ -91,6 +64,7 @@ async function getCachedUser(userId) {
     // Non-schema property: `role` is an ObjectId path, so the populated doc
     // is carried separately as a plain object (only permissions/isActive are read)
     user.roleDoc = cached.role || null;
+    user.branchList = cached.branches || [];
     return user;
   }
   const user = await User.findById(userId).populate('shop').populate('role');
@@ -98,13 +72,35 @@ async function getCachedUser(userId) {
     const roleDoc = user.role ? user.role.toObject() : null;
     user.depopulate('role'); // keep user.role an ObjectId, matching the cache-hit shape
     user.roleDoc = roleDoc;
+
+    // Only multi-branch shops have branches; single-branch shops skip the query.
+    const branches = user.shop?.multiBranchEnabled
+      ? await Branch.find({ shop: user.shop._id, isActive: true })
+        .select('name code isActive isDefault')
+        .sort({ createdAt: 1 })
+        .lean()
+      : [];
+    user.branchList = branches;
+
     await cacheService.set(cacheKey, {
       user: user.toObject(),
       shop: user.shop ? user.shop.toObject() : null,
       role: roleDoc,
+      branches,
     }, AUTH_CACHE_TTL);
   }
   return user;
+}
+
+/**
+ * Resolve the request's branch from the cached branch list — no I/O.
+ * Returns null when the id is absent, malformed, or not a branch of this shop,
+ * which is what makes a guessed/stale X-Active-Branch header harmless.
+ */
+function findBranch(user, branchId) {
+  if (!branchId || branchId === 'all') return null;
+  const wanted = String(branchId);
+  return (user.branchList || []).find((b) => String(b._id) === wanted) || null;
 }
 
 /**
@@ -214,6 +210,29 @@ const protect = asyncHandler(async (req, res, next) => {
               isOwner: true,
               shop: shop._id,
             };
+
+            // Branch context for admins too. This block used to `return next()`
+            // before branch resolution ran, so req.branchId was always null and
+            // every admin write into a multi-branch shop failed the
+            // branch-required check (FEATURE_AUDIT.md M-7).
+            req.branch = null;
+            req.branchId = null;
+
+            if (shop.multiBranchEnabled) {
+              const requested = req.headers['x-active-branch'] || req.cookies?.activeBranch;
+              if (requested !== 'all') {
+                const branches = await Branch.find({ shop: shop._id, isActive: true })
+                  .select('name code isActive isDefault')
+                  .sort({ createdAt: 1 })
+                  .lean();
+                req.branch =
+                  branches.find((b) => String(b._id) === String(requested)) ||
+                  branches[0] ||
+                  null;
+                if (req.branch) req.branchId = req.branch._id;
+              }
+            }
+
             return next();
           }
         }
@@ -311,39 +330,57 @@ const protect = asyncHandler(async (req, res, next) => {
     req.user.permissions = rbacCtx.permissions;
 
     // ── Branch Context Resolution ──
-    // For single-branch shops: skip entirely (branch = null)
-    // For multi-branch shops:
-    //   Owner: read X-Active-Branch header (switchable)
-    //   Staff: use assigned branch from the user document
+    // Single-branch shops skip this entirely (branch stays null), which is what
+    // keeps every downstream `if (branchId)` a no-op for them.
+    //
+    // Owner: X-Active-Branch header → activeBranch cookie → last-used branch →
+    //        first active branch. The literal 'all' opts into the read-only
+    //        cross-branch view. Resolution is deterministic at every step.
+    // Staff: always their assigned branch. Headers are ignored for them.
+    //
+    // Resolved from the cached branch list — no query, no Redis round trip.
     req.branch = null;
     req.branchId = null;
 
     if (user.shop && user.shop.multiBranchEnabled) {
       if (rbacCtx.isOwner) {
-        const activeBranchId = req.headers['x-active-branch'] || req.cookies?.activeBranch;
-        if (activeBranchId && activeBranchId !== 'all') {
-          const branch = await getCachedBranchOwnership(activeBranchId, user.shop._id);
-          if (branch) {
-            req.branch = branch;
-            req.branchId = branch._id;
-          }
+        const requested = req.headers['x-active-branch'] || req.cookies?.activeBranch;
+
+        // 'all' is an explicit opt-in to the aggregate view, so it must not fall
+        // through to the last-used/first-branch defaults below.
+        if (requested === 'all') {
+          req.branch = null;
+        } else {
+          req.branch =
+            findBranch(user, requested) ||
+            findBranch(user, user.lastActiveBranch) ||
+            user.branchList[0] ||
+            null;
         }
 
-        // If owner is in "All Branches" view (or activeBranchId is not set)
-        // AND it is a write request, automatically default req.branchId to the first active branch.
-        if (!req.branchId && req.method !== 'GET') {
-          const defaultBranch = await getCachedDefaultBranch(user.shop._id);
-          if (defaultBranch) {
-            req.branch = defaultBranch;
-            req.branchId = defaultBranch._id;
+        if (req.branch) {
+          req.branchId = req.branch._id;
+
+          // Remember the owner's branch so the next login lands where they left
+          // off. SET NX caps this to one write per 5 min per (user, branch)
+          // instead of one per request — same guard as the expiry marker above.
+          if (String(user.lastActiveBranch || '') !== String(req.branch._id)) {
+            cacheService.setNX(`user:${user._id}:lastbranch:${req.branch._id}`, 1, 300)
+              .then((acquired) => {
+                if (acquired) {
+                  return User.findByIdAndUpdate(user._id, { lastActiveBranch: req.branch._id });
+                }
+              })
+              .catch(() => {}); // fire-and-forget; never blocks the response
           }
         }
+        // No branch resolved (shop has none yet) → behaves as single-branch.
       } else if (user.branch) {
-        const branch = await getCachedBranchOwnership(user.branch, user.shop._id);
+        const branch = findBranch(user, user.branch);
         if (!branch) {
           return ApiResponse.forbidden(res, {
             message: 'Your assigned branch is inactive or invalid',
-            messageBn: '????? ????????? ???? ?????????? ?? ????',
+            messageBn: 'আপনার নির্ধারিত শাখাটি নিষ্ক্রিয় বা অবৈধ। দোকান মালিকের সাথে যোগাযোগ করুন।',
           });
         }
         req.branch = branch;
@@ -351,7 +388,7 @@ const protect = asyncHandler(async (req, res, next) => {
       } else {
         return ApiResponse.forbidden(res, {
           message: 'No branch is assigned to this staff account',
-          messageBn: '?? ????? ??????????? ???? ???? ????????? ???',
+          messageBn: 'এই অ্যাকাউন্টে কোনো শাখা নির্ধারণ করা হয়নি। দোকান মালিকের সাথে যোগাযোগ করুন।',
         });
       }
     }
@@ -472,36 +509,39 @@ const softProtect = asyncHandler(async (req, res, next) => {
         req.user.isOwner = rbacCtx.isOwner;
         req.user.permissions = rbacCtx.permissions;
 
-        // ── Branch Context Resolution (same as protect) ──
+        // ── Branch Context Resolution ──
+        // Same rules as `protect`, minus the persistence side effect (softProtect
+        // serves optional-auth routes and must stay side-effect free). Previously
+        // these two diverged: protect returned 403 on an invalid staff branch
+        // while softProtect silently downgraded the request to anonymous.
         req.branch = null;
         req.branchId = null;
 
         if (user.shop.multiBranchEnabled) {
           if (rbacCtx.isOwner) {
-            const activeBranchId = req.headers['x-active-branch'] || req.cookies?.activeBranch;
-            if (activeBranchId && activeBranchId !== 'all') {
-              const branch = await getCachedBranchOwnership(activeBranchId, user.shop._id);
-              if (branch) {
-                req.branch = branch;
-                req.branchId = branch._id;
-              }
-              // If branch is invalid, we do NOT clear req.user for owners.
-              // They just fall back to all branches view (branch = null).
+            const requested = req.headers['x-active-branch'] || req.cookies?.activeBranch;
+            if (requested !== 'all') {
+              req.branch =
+                findBranch(user, requested) ||
+                findBranch(user, user.lastActiveBranch) ||
+                user.branchList[0] ||
+                null;
+              if (req.branch) req.branchId = req.branch._id;
             }
-          } else if (user.branch) {
-            const branch = await getCachedBranchOwnership(user.branch, user.shop._id);
+            // An unresolvable branch never invalidates an owner — they fall back
+            // to the aggregate view.
+          } else {
+            const branch = user.branch ? findBranch(user, user.branch) : null;
             if (branch) {
               req.branch = branch;
               req.branchId = branch._id;
             } else {
+              // Staff with no valid branch have no scope to read within, so this
+              // request carries no identity rather than an unscoped one.
               req.user = null;
               req.shop = null;
               req.isAdmin = false;
             }
-          } else {
-            req.user = null;
-            req.shop = null;
-            req.isAdmin = false;
           }
         }
       }

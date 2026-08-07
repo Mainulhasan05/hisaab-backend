@@ -24,12 +24,18 @@ async function invalidateUserAuthCache(userId) {
   await cacheService.delete(`auth:user:${userId}`);
 }
 
-/** Invalidate cached branch-ownership lookups for a branch. */
-async function invalidateBranchCache(shopId, branchId) {
-  await Promise.all([
-    cacheService.delete(`shop:${shopId}:branch:${branchId}:own`),
-    cacheService.delete(`shop:${shopId}:default_branch`),
-  ]);
+/**
+ * Invalidate cached branch data for a shop.
+ *
+ * The branch list now rides inside `auth:user:{id}` (see auth.middleware
+ * getCachedUser), so invalidating branches means invalidating that shop's users.
+ * The previous dedicated keys (`shop:{id}:branch:{bid}:own`,
+ * `shop:{id}:default_branch`) no longer exist.
+ *
+ * Must be called on every branch create / edit / activate / deactivate.
+ */
+async function invalidateBranchCache(shopId) {
+  await invalidateShopAuthCache(shopId);
 }
 
 module.exports = {

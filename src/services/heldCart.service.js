@@ -1,13 +1,13 @@
 const HeldCart = require('../models/HeldCart.model');
 const { AppError } = require('../middleware/error.middleware');
-const { getBranchForCreate } = require('../utils/branchScope.util');
+const { branchFilter, requireBranch } = require('../utils/branchScope.util');
 
 class HeldCartService {
   /**
    * Hold current cart
    */
   async holdCart(shopId, userId, cartData, req) {
-    const branchId = req ? getBranchForCreate(req) : null;
+    const branchId = req ? requireBranch(req) : null;
     const { items, customer, customerName, customerPhone, discount, discountType, deliveryCharge, notes, label } = cartData;
 
     if (!items || items.length === 0) {
@@ -39,6 +39,7 @@ class HeldCartService {
     const query = { shop: shopId, status: 'held' };
     if (options.branchId) query.branch = options.branchId;
 
+
     const carts = await HeldCart.find(query)
       .populate('customer', 'name phone')
       .populate('heldBy', 'name')
@@ -51,8 +52,8 @@ class HeldCartService {
   /**
    * Get a single held cart
    */
-  async getHeldCartById(shopId, cartId) {
-    const cart = await HeldCart.findOne({ _id: cartId, shop: shopId })
+  async getHeldCartById(shopId, cartId, req = null) {
+    const cart = await HeldCart.findOne(branchFilter(req, { _id: cartId, shop: shopId }))
       .populate('customer', 'name phone')
       .populate('heldBy', 'name')
       .populate('items.product', 'name code sellingPrice stock');
@@ -66,8 +67,8 @@ class HeldCartService {
   /**
    * Resume a held cart — returns cart data for POS to load
    */
-  async resumeCart(shopId, cartId) {
-    const cart = await this.getHeldCartById(shopId, cartId);
+  async resumeCart(shopId, cartId, req = null) {
+    const cart = await this.getHeldCartById(shopId, cartId, req);
 
     if (cart.status !== 'held') {
       throw new AppError('Cart is no longer available', 'কার্টটি আর পাওয়া যাচ্ছে না', 400);
@@ -79,9 +80,9 @@ class HeldCartService {
   /**
    * Discard a held cart
    */
-  async discardCart(shopId, cartId) {
+  async discardCart(shopId, cartId, req = null) {
     const cart = await HeldCart.findOneAndUpdate(
-      { _id: cartId, shop: shopId, status: 'held' },
+      branchFilter(req, { _id: cartId, shop: shopId, status: 'held' }),
       { status: 'discarded' },
       { new: true }
     );
@@ -96,19 +97,25 @@ class HeldCartService {
   /**
    * Mark cart as converted to sale
    */
-  async markConverted(shopId, cartId, saleId) {
+  async markConverted(shopId, cartId, saleId, req = null) {
     await HeldCart.updateOne(
-      { _id: cartId, shop: shopId },
+      branchFilter(req, { _id: cartId, shop: shopId }),
       { status: 'converted', convertedSale: saleId }
     );
   }
 
   /**
-   * Auto-expire old carts (called periodically or on request)
+   * Auto-expire old carts for one shop.
+   * `shopId` is required — without it this updateMany ran across every shop on
+   * the platform, so any cashier could expire another tenant's held carts.
    */
-  async expireOldCarts() {
+  async expireOldCarts(shopId) {
+    if (!shopId) {
+      throw new AppError('Shop context required', 'দোকান নির্ধারণ করা যায়নি', 400);
+    }
+
     const result = await HeldCart.updateMany(
-      { status: 'held', expiresAt: { $lt: new Date() } },
+      { shop: shopId, status: 'held', expiresAt: { $lt: new Date() } },
       { status: 'expired' }
     );
     return { expired: result.modifiedCount };

@@ -6,7 +6,7 @@ const { sanitizeReport } = require('../utils/dataSanitizer.util');
 
 // Get dashboard statistics
 exports.getDashboard = asyncHandler(async (req, res) => {
-  const stats = await reportService.getDashboardStats(req.shop._id, req.branchId);
+  const stats = await reportService.getDashboardStats(req.shop._id, req.branchId, req.shop.multiBranchEnabled === true);
   return ApiResponse.success(res, {
     data: sanitizeReport(stats, req),
     message: 'Dashboard stats retrieved successfully',
@@ -36,7 +36,7 @@ exports.getProductReport = asyncHandler(async (req, res) => {
 
 // Get customer report
 exports.getCustomerReport = asyncHandler(async (req, res) => {
-  const report = await reportService.getCustomerReport(req.shop._id, req.query, req.branchId);
+  const report = await reportService.getCustomerReport(req.shop._id, req.query);
   return ApiResponse.success(res, {
     data: sanitizeReport(report, req),
     message: 'Customer report retrieved successfully',

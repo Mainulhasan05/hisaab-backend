@@ -2,7 +2,7 @@ const Expense = require('../models/Expense.model');
 const ExpenseCategory = require('../models/ExpenseCategory.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
-const { getBranchForCreate } = require('../utils/branchScope.util');
+const { branchFilter, requireBranch, branchMatch } = require('../utils/branchScope.util');
 
 class ExpenseService {
   // Get all expenses with filtering, pagination
@@ -87,7 +87,7 @@ class ExpenseService {
 
     const expense = await Expense.create({
       shop: shopId,
-      branch: req ? getBranchForCreate(req) : null,
+      branch: req ? requireBranch(req) : null,
       category: categoryDoc._id,
       categoryName: categoryDoc.name,
       amount,
@@ -104,7 +104,7 @@ class ExpenseService {
     // Audit log
     await AuditLog.create({
       shop: shopId,
-      branch: req ? getBranchForCreate(req) : null,
+      branch: req ? requireBranch(req) : null,
       user: userId,
       action: 'expense_create',
       actionBn: 'নতুন খরচ যোগ',
@@ -124,8 +124,8 @@ class ExpenseService {
   }
 
   // Update expense
-  async updateExpense(shopId, userId, expenseId, updateData) {
-    const expense = await Expense.findOne({ _id: expenseId, shop: shopId });
+  async updateExpense(shopId, userId, expenseId, updateData, req = null) {
+    const expense = await Expense.findOne(branchFilter(req, { _id: expenseId, shop: shopId }));
     if (!expense) {
       throw new AppError('খরচটি পাওয়া যায়নি', 'Expense not found', 404);
     }
@@ -174,8 +174,8 @@ class ExpenseService {
   }
 
   // Delete expense
-  async deleteExpense(shopId, userId, expenseId) {
-    const expense = await Expense.findOne({ _id: expenseId, shop: shopId });
+  async deleteExpense(shopId, userId, expenseId, req = null) {
+    const expense = await Expense.findOne(branchFilter(req, { _id: expenseId, shop: shopId }));
     if (!expense) {
       throw new AppError('খরচটি পাওয়া যায়নি', 'Expense not found', 404);
     }
@@ -202,7 +202,7 @@ class ExpenseService {
   }
 
   // Get expense summary (by category, totals)
-  async getSummary(shopId, options = {}) {
+  async getSummary(shopId, options = {}, req = null) {
     const { startDate, endDate, period = 'month' } = options;
 
     let start, end;
@@ -218,13 +218,19 @@ class ExpenseService {
       end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
     }
 
+    // Summary must match the scope of the list it sits beside — it was
+    // shop-wide while the list was branch-scoped, so the two disagreed on the
+    // same page (FEATURE_AUDIT.md H-10).
+    const branchId = req?.branchId || null;
+
     const [byCategory, totals, todayTotal] = await Promise.all([
-      Expense.getSummaryByCategory(shopId, start, end),
-      Expense.getTotal(shopId, start, end),
+      Expense.getSummaryByCategory(shopId, start, end, branchId),
+      Expense.getTotal(shopId, start, end, branchId),
       Expense.getTotal(
         shopId,
         new Date(new Date().setHours(0, 0, 0, 0)),
-        new Date(new Date().setHours(23, 59, 59, 999))
+        new Date(new Date().setHours(23, 59, 59, 999)),
+        branchId
       ),
     ]);
 

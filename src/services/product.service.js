@@ -2,10 +2,9 @@ const Product = require('../models/Product.model');
 const Category = require('../models/Category.model');
 const StockTransaction = require('../models/StockTransaction.model');
 const AuditLog = require('../models/AuditLog.model');
-const BranchStock = require('../models/BranchStock.model');
 const { AppError } = require('../middleware/error.middleware');
 const mongoose = require('mongoose');
-const { getBranchForCreate } = require('../utils/branchScope.util');
+const { branchFilter, branchMatch, requireBranch } = require('../utils/branchScope.util');
 const logger = require('../utils/logger.util');
 const cacheService = require('./cache.service');
 
@@ -39,7 +38,10 @@ class ProductService {
 
     // Soft-deleted products are hidden from every listing ($ne covers older
     // documents created before the isDeleted field existed)
-    const query = { shop: shopId, isDeleted: { $ne: true } };
+    // Per-branch catalogue: each branch owns its own product documents, so the
+    // ordinary branch filter is all the scoping stock needs — there is no
+    // separate per-branch stock collection to overlay any more.
+    const query = branchFilter(req, { shop: shopId, isDeleted: { $ne: true } });
 
     // Search by name or code. Input is regex-escaped; each field carries a
     // {shop, field} compound index so the $or branches run as shop-bounded
@@ -76,42 +78,10 @@ class ProductService {
     let lowStockOr = null;
     const branchId = req?.branchId;
     if (lowStock === 'true' || lowStock === true) {
-      if (branchId && req?.shop?.multiBranchEnabled) {
-        const lowStockBranchRecords = await BranchStock.aggregate([
-          {
-            $match: {
-              shop: new mongoose.Types.ObjectId(shopId),
-              branch: new mongoose.Types.ObjectId(branchId)
-            }
-          },
-          {
-            $lookup: {
-              from: 'products',
-              localField: 'product',
-              foreignField: '_id',
-              as: 'productDetails'
-            }
-          },
-          { $unwind: '$productDetails' },
-          {
-            $match: {
-              $or: [
-                { variantId: null, $expr: { $lt: ['$stock', '$productDetails.minStock'] } },
-                { variantId: { $ne: null }, stock: { $lt: 5 } }
-              ]
-            }
-          },
-          { $project: { product: 1 } }
-        ]);
-
-        const lowStockProductIds = lowStockBranchRecords.map(r => r.product);
-        query._id = { $in: lowStockProductIds };
-      } else {
-        lowStockOr = [
-          { hasVariants: { $ne: true }, $expr: { $lt: ['$stock', '$minStock'] } },
-          { hasVariants: true, 'variants.stock': { $lt: 5 } },
-        ];
-      }
+      lowStockOr = [
+        { hasVariants: { $ne: true }, $expr: { $lt: ['$stock', '$minStock'] } },
+        { hasVariants: true, 'variants.stock': { $lt: 5 } },
+      ];
     }
 
     // Combine search and lowStock filters — use $and when both are active to avoid $or overwrite
@@ -142,45 +112,9 @@ class ProductService {
     try {
       if (!wantStats || statsCached) {
         // skip aggregation
-      } else if (branchId && req?.shop?.multiBranchEnabled) {
-        const statsResult = await BranchStock.aggregate([
-          {
-            $match: {
-              shop: new mongoose.Types.ObjectId(shopId),
-              branch: new mongoose.Types.ObjectId(branchId),
-            }
-          },
-          {
-            $lookup: {
-              from: 'products',
-              localField: 'product',
-              foreignField: '_id',
-              as: 'productDetails'
-            }
-          },
-          { $unwind: '$productDetails' },
-          {
-            $match: { 'productDetails.isActive': true }
-          },
-          {
-            $group: {
-              _id: null,
-              totalStock: { $sum: '$stock' },
-              totalBuyingValue: { $sum: { $multiply: ['$stock', { $ifNull: ['$productDetails.buyingPrice', 0] }] } },
-              totalSellingValue: { $sum: { $multiply: ['$stock', { $ifNull: ['$productDetails.sellingPrice', 0] }] } }
-            }
-          }
-        ]);
-        if (statsResult.length > 0) {
-          inventoryStats = {
-            totalStock: statsResult[0].totalStock || 0,
-            totalBuyingValue: statsResult[0].totalBuyingValue || 0,
-            totalSellingValue: statsResult[0].totalSellingValue || 0,
-          };
-        }
       } else {
         const statsResult = await Product.aggregate([
-          { $match: { shop: new mongoose.Types.ObjectId(shopId), isActive: true, isDeleted: { $ne: true } } },
+          { $match: branchMatch(req, { shop: new mongoose.Types.ObjectId(shopId), isActive: true, isDeleted: { $ne: true } }) },
           {
             $group: {
               _id: null,
@@ -261,58 +195,6 @@ class ProductService {
       Product.countDocuments(query),
     ]);
 
-    // Integrate BranchStock if in multi-branch mode
-    if (req?.shop?.multiBranchEnabled) {
-      const productIds = products.map(p => p._id);
-      const stockMap = {};
-
-      if (branchId) {
-        // Specific branch selected
-        const branchStocks = await BranchStock.find({
-          shop: shopId,
-          branch: branchId,
-          product: { $in: productIds }
-        }).lean();
-
-        branchStocks.forEach(bs => {
-          const key = bs.variantId ? `${bs.product}_${bs.variantId}` : `${bs.product}`;
-          stockMap[key] = bs.stock;
-        });
-      } else {
-        // "All Branches" view: aggregate stock across all branches
-        const branchStocks = await BranchStock.aggregate([
-          {
-            $match: {
-              shop: new mongoose.Types.ObjectId(shopId),
-              product: { $in: productIds.map(id => new mongoose.Types.ObjectId(id)) }
-            }
-          },
-          {
-            $group: {
-              _id: { product: '$product', variantId: '$variantId' },
-              totalStock: { $sum: '$stock' }
-            }
-          }
-        ]);
-
-        branchStocks.forEach(bs => {
-          const key = bs._id.variantId ? `${bs._id.product}_${bs._id.variantId}` : `${bs._id.product}`;
-          stockMap[key] = bs.totalStock;
-        });
-      }
-
-      products.forEach(p => {
-        if (p.hasVariants && p.variants) {
-          p.variants.forEach(v => {
-            v.stock = stockMap[`${p._id}_${v._id}`] ?? v.stock ?? 0;
-          });
-          p.stock = p.variants.reduce((sum, v) => sum + v.stock, 0);
-        } else {
-          p.stock = stockMap[`${p._id}`] ?? p.stock ?? 0;
-        }
-      });
-    }
-
     return {
       data: products.map(p => this._transformProduct(p)),
       pagination: {
@@ -371,7 +253,9 @@ class ProductService {
 
   // Get single product by ID
   async getProductById(shopId, productId, req = null) {
-    const product = await Product.findOne({ _id: productId, shop: shopId, isDeleted: { $ne: true } })
+    const product = await Product.findOne(
+      branchFilter(req, { _id: productId, shop: shopId, isDeleted: { $ne: true } })
+    )
       .populate('category', 'name')
       .populate('createdBy', 'name phone');
 
@@ -379,60 +263,14 @@ class ProductService {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
     }
 
-    const branchId = req?.branchId;
-    if (req?.shop?.multiBranchEnabled) {
-      const stockMap = {};
-
-      if (branchId) {
-        const branchStocks = await BranchStock.find({
-          shop: shopId,
-          branch: branchId,
-          product: productId
-        }).lean();
-
-        branchStocks.forEach(bs => {
-          const key = bs.variantId ? bs.variantId.toString() : 'base';
-          stockMap[key] = bs.stock;
-        });
-      } else {
-        // "All Branches" view: aggregate stock across all branches
-        const branchStocks = await BranchStock.aggregate([
-          {
-            $match: {
-              shop: new mongoose.Types.ObjectId(shopId),
-              product: new mongoose.Types.ObjectId(productId)
-            }
-          },
-          {
-            $group: {
-              _id: '$variantId',
-              totalStock: { $sum: '$stock' }
-            }
-          }
-        ]);
-
-        branchStocks.forEach(bs => {
-          const key = bs._id ? bs._id.toString() : 'base';
-          stockMap[key] = bs.totalStock;
-        });
-      }
-
-      if (product.hasVariants && product.variants) {
-        product.variants.forEach(v => {
-          v.stock = stockMap[v._id.toString()] ?? v.stock ?? 0;
-        });
-        product.stock = product.variants.reduce((sum, v) => sum + v.stock, 0);
-      } else {
-        product.stock = stockMap['base'] ?? product.stock ?? 0;
-      }
-    }
-
     return this._transformProduct(product);
   }
 
   // Get product by barcode/code
   async getProductByCode(shopId, code, req = null) {
-    const product = await Product.findOne({
+    // Branch-scoped: scanning a barcode in Branch B must not return Branch A's
+    // product — they are separate documents with their own price and stock.
+    const product = await Product.findOne(branchFilter(req, {
       shop: shopId,
       isDeleted: { $ne: true },
       $or: [
@@ -440,58 +278,10 @@ class ProductService {
         { 'variants.sku': code },
         { 'variants.barcode': code },
       ],
-    }).populate('category', 'name');
+    })).populate('category', 'name');
 
     if (!product) {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
-    }
-
-    const branchId = req?.branchId;
-    if (req?.shop?.multiBranchEnabled) {
-      const stockMap = {};
-
-      if (branchId) {
-        const branchStocks = await BranchStock.find({
-          shop: shopId,
-          branch: branchId,
-          product: product._id
-        }).lean();
-
-        branchStocks.forEach(bs => {
-          const key = bs.variantId ? bs.variantId.toString() : 'base';
-          stockMap[key] = bs.stock;
-        });
-      } else {
-        // "All Branches" view: aggregate stock across all branches
-        const branchStocks = await BranchStock.aggregate([
-          {
-            $match: {
-              shop: new mongoose.Types.ObjectId(shopId),
-              product: new mongoose.Types.ObjectId(product._id)
-            }
-          },
-          {
-            $group: {
-              _id: '$variantId',
-              totalStock: { $sum: '$stock' }
-            }
-          }
-        ]);
-
-        branchStocks.forEach(bs => {
-          const key = bs._id ? bs._id.toString() : 'base';
-          stockMap[key] = bs.totalStock;
-        });
-      }
-
-      if (product.hasVariants && product.variants) {
-        product.variants.forEach(v => {
-          v.stock = stockMap[v._id.toString()] ?? v.stock ?? 0;
-        });
-        product.stock = product.variants.reduce((sum, v) => sum + v.stock, 0);
-      } else {
-        product.stock = stockMap['base'] ?? product.stock ?? 0;
-      }
     }
 
     return this._transformProduct(product);
@@ -501,8 +291,9 @@ class ProductService {
   async createProduct(shopId, userId, productData, req = null) {
     const { code, name, category, variants, ...rest } = productData;
 
-    // Check if code already exists
-    const existingProduct = await Product.findOne({ shop: shopId, code });
+    // Code uniqueness is per branch — the same code in another branch is a
+    // different product, which is the whole point of per-branch catalogues.
+    const existingProduct = await Product.findOne(branchFilter(req, { shop: shopId, code }));
     if (existingProduct) {
       throw new AppError('এই কোড দিয়ে ইতিমধ্যে পণ্য আছে', 'Product with this code already exists', 400);
     }
@@ -518,6 +309,7 @@ class ProductService {
     const formattedVariants = this._formatVariants(variants);
     const product = await Product.create({
       shop: shopId,
+      branch: requireBranch(req),
       code,
       name,
       category,
@@ -526,36 +318,6 @@ class ProductService {
       createdBy: userId,
       ...rest,
     });
-
-    // If multi-branch is enabled, initialize BranchStock for the selected branch.
-    if (req?.shop?.multiBranchEnabled) {
-      const targetBranchId = getBranchForCreate(req);
-      const branchStockDocs = [];
-
-      if (product.hasVariants && product.variants) {
-        for (const variant of product.variants) {
-          branchStockDocs.push({
-            shop: shopId,
-            branch: targetBranchId,
-            product: product._id,
-            variantId: variant._id,
-            stock: variant.stock || 0,
-          });
-        }
-      } else {
-        branchStockDocs.push({
-          shop: shopId,
-          branch: targetBranchId,
-          product: product._id,
-          variantId: null,
-          stock: product.stock || 0,
-        });
-      }
-
-      if (branchStockDocs.length > 0) {
-        await BranchStock.insertMany(branchStockDocs);
-      }
-    }
 
     // Create audit log
     await AuditLog.create({
@@ -580,7 +342,9 @@ class ProductService {
 
   // Update product
   async updateProduct(shopId, userId, productId, updateData, req = null) {
-    const product = await Product.findOne({ _id: productId, shop: shopId, isDeleted: { $ne: true } });
+    const product = await Product.findOne(
+      branchFilter(req, { _id: productId, shop: shopId, isDeleted: { $ne: true } })
+    );
     if (!product) {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
     }
@@ -590,8 +354,9 @@ class ProductService {
     // Separate stock from other update data so we can handle it via updateStock
     const { stock, variants: variantsWithStock, ...safeUpdateData } = updateData;
 
-    // Resolve target branch for updates
-    const targetBranchId = req?.shop?.multiBranchEnabled ? getBranchForCreate(req) : null;
+    // The product document already belongs to exactly one branch; this is only
+    // carried into the StockTransaction ledger below.
+    const targetBranchId = product.branch || null;
 
     // Process variant updates and handle variant stock changes
     if (variantsWithStock && Array.isArray(variantsWithStock)) {
@@ -611,33 +376,12 @@ class ProductService {
           // Keep existing variant's ID
           variantId = existingVariant._id;
           variant._id = existingVariant._id;
-          
-          if (req?.shop?.multiBranchEnabled && targetBranchId) {
-            const bs = await BranchStock.findOne({
-              shop: shopId,
-              branch: targetBranchId,
-              product: product._id,
-              variantId: existingVariant._id
-            });
-            currentStock = bs ? bs.stock : 0;
-          } else {
-            currentStock = existingVariant.stock || 0;
-          }
+          currentStock = existingVariant.stock || 0;
         }
 
         // If the stock is different, we must update it
         if (inputStock !== currentStock) {
-          if (req?.shop?.multiBranchEnabled && targetBranchId) {
-            // Update or create BranchStock record
-            await BranchStock.findOneAndUpdate(
-              { shop: shopId, branch: targetBranchId, product: product._id, variantId: variantId },
-              { $set: { stock: inputStock } },
-              { upsert: true }
-            );
-          } else {
-            // In single-branch mode, the stock is stored directly on the variant object
-            variant.stock = inputStock;
-          }
+          variant.stock = inputStock;
 
           // Create stock transaction for this variant stock adjustment
           await StockTransaction.create({
@@ -657,10 +401,7 @@ class ProductService {
           });
         }
 
-        updatedVariants.push({
-          ...variant,
-          stock: req?.shop?.multiBranchEnabled ? currentStock : inputStock // Will be populated from BranchStock anyway, but preserve for single-branch
-        });
+        updatedVariants.push({ ...variant, stock: inputStock });
       }
 
       safeUpdateData.variants = updatedVariants;
@@ -668,7 +409,7 @@ class ProductService {
 
     // Check if code is being changed and if it conflicts
     if (safeUpdateData.code && safeUpdateData.code !== product.code) {
-      const existingProduct = await Product.findOne({ shop: shopId, code: safeUpdateData.code, _id: { $ne: productId } });
+      const existingProduct = await Product.findOne({ shop: shopId, branch: product.branch || null, code: safeUpdateData.code, _id: { $ne: productId } });
       if (existingProduct) {
         throw new AppError('এই কোড দিয়ে ইতিমধ্যে পণ্য আছে', 'Product with this code already exists', 400);
       }
@@ -680,34 +421,6 @@ class ProductService {
       product.hasVariants = safeUpdateData.variants.length > 0;
     }
     await product.save();
-
-    // If multi-branch is enabled, make sure all variants have BranchStock records
-    if (req?.shop?.multiBranchEnabled) {
-      const stockOps = [];
-      if (product.hasVariants && product.variants) {
-        for (const variant of product.variants) {
-          stockOps.push({
-            updateOne: {
-              filter: { shop: shopId, branch: targetBranchId, product: product._id, variantId: variant._id },
-              update: { $setOnInsert: { stock: variant.stock || 0 } },
-              upsert: true,
-            },
-          });
-        }
-      } else {
-        stockOps.push({
-          updateOne: {
-            filter: { shop: shopId, branch: targetBranchId, product: product._id, variantId: null },
-            update: { $setOnInsert: { stock: product.stock || 0 } },
-            upsert: true,
-          },
-        });
-      }
-
-      if (stockOps.length > 0) {
-        await BranchStock.bulkWrite(stockOps);
-      }
-    }
 
     // Create audit log for general product update
     await AuditLog.create({
@@ -739,54 +452,6 @@ class ProductService {
       return this._transformProduct(updatedProduct);
     }
 
-    // Integrate and aggregate BranchStock for the returned product
-    if (req?.shop?.multiBranchEnabled) {
-      const stockMap = {};
-      const branchId = req?.branchId;
-
-      if (branchId) {
-        const branchStocks = await BranchStock.find({
-          shop: shopId,
-          branch: branchId,
-          product: product._id
-        }).lean();
-
-        branchStocks.forEach(bs => {
-          const key = bs.variantId ? bs.variantId.toString() : 'base';
-          stockMap[key] = bs.stock;
-        });
-      } else {
-        const branchStocks = await BranchStock.aggregate([
-          {
-            $match: {
-              shop: new mongoose.Types.ObjectId(shopId),
-              product: new mongoose.Types.ObjectId(product._id)
-            }
-          },
-          {
-            $group: {
-              _id: '$variantId',
-              totalStock: { $sum: '$stock' }
-            }
-          }
-        ]);
-
-        branchStocks.forEach(bs => {
-          const key = bs._id ? bs._id.toString() : 'base';
-          stockMap[key] = bs.totalStock;
-        });
-      }
-
-      if (product.hasVariants && product.variants) {
-        product.variants.forEach(v => {
-          v.stock = stockMap[v._id.toString()] ?? v.stock ?? 0;
-        });
-        product.stock = product.variants.reduce((sum, v) => sum + v.stock, 0);
-      } else {
-        product.stock = stockMap['base'] ?? product.stock ?? 0;
-      }
-    }
-
     return this._transformProduct(product);
   }
 
@@ -795,7 +460,7 @@ class ProductService {
   // blocked and the product disappears from all listings.
   async deleteProduct(shopId, userId, productId, req = null) {
     if (req?.shop?.multiBranchEnabled) {
-      getBranchForCreate(req);
+      requireBranch(req);
     }
 
     const product = await Product.findOne({ _id: productId, shop: shopId, isDeleted: { $ne: true } });
@@ -885,40 +550,21 @@ class ProductService {
   async updateStock(shopId, userId, productId, stockData, req = null) {
     const { quantity, type, variantId, notes } = stockData;
 
-    const product = await Product.findOne({ _id: productId, shop: shopId, isDeleted: { $ne: true } });
+    const product = await Product.findOne(
+      branchFilter(req, { _id: productId, shop: shopId, isDeleted: { $ne: true } })
+    );
     if (!product) {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
     }
 
     let previousStock, newStock;
-    const branchId = req ? getBranchForCreate(req) : null;
+    // Writing to a product implies its branch. requireBranch still runs so an
+    // owner in "All Branches" is told to pick one rather than editing an
+    // arbitrary branch's copy of the item.
+    if (req) requireBranch(req);
+    const branchId = product.branch || null;
 
-    if (branchId && req?.shop?.multiBranchEnabled) {
-      const bsRecord = await BranchStock.getOrCreate(shopId, branchId, productId, variantId || null);
-      previousStock = bsRecord.stock;
-      if (type === 'set') {
-        bsRecord.stock = quantity;
-      } else if (type === 'subtract') {
-        bsRecord.stock = Math.max(0, bsRecord.stock - quantity);
-      } else {
-        bsRecord.stock = bsRecord.stock + quantity;
-      }
-      newStock = bsRecord.stock;
-      await bsRecord.save();
-
-      const totalStock = await BranchStock.getTotalStock(shopId, productId, variantId || null);
-      if (variantId) {
-        const variant = (product.variants && typeof product.variants.id === 'function')
-          ? product.variants.id(variantId)
-          : product.variants?.find(v => (v._id || v.id)?.toString() === variantId?.toString());
-        if (variant) {
-          variant.stock = totalStock;
-        }
-      } else {
-        product.stock = totalStock;
-      }
-      await product.save();
-    } else {
+    {
       if (variantId) {
         // Update variant stock
         const variant = (product.variants && typeof product.variants.id === 'function')
@@ -989,68 +635,17 @@ class ProductService {
       },
     });
 
-    if (branchId && req?.shop?.multiBranchEnabled) {
-      if (product.hasVariants && product.variants) {
-        const allBranchStocks = await BranchStock.find({ shop: shopId, branch: branchId, product: productId }).lean();
-        const stockMap = {};
-        allBranchStocks.forEach(bs => { stockMap[bs.variantId ? bs.variantId.toString() : 'base'] = bs.stock; });
-        product.variants.forEach(v => { v.stock = stockMap[v._id.toString()] ?? 0; });
-        product.stock = product.variants.reduce((sum, v) => sum + v.stock, 0);
-      } else {
-        product.stock = newStock;
-      }
-    }
-
     return this._transformProduct(product);
   }
 
   // Get low stock products
   async getLowStockProducts(shopId, limit = 10, req = null) {
-    const branchId = req?.branchId;
-    if (branchId && req?.shop?.multiBranchEnabled) {
-      const lowStockRecords = await BranchStock.aggregate([
-        {
-          $match: {
-            shop: new mongoose.Types.ObjectId(shopId),
-            branch: new mongoose.Types.ObjectId(branchId)
-          }
-        },
-        {
-          $lookup: {
-            from: 'products',
-            localField: 'product',
-            foreignField: '_id',
-            as: 'productDetails'
-          }
-        },
-        { $unwind: '$productDetails' },
-        {
-          $match: {
-            'productDetails.isActive': true,
-            $expr: { $lt: ['$stock', '$productDetails.minStock'] }
-          }
-        },
-        {
-          $project: {
-            _id: '$productDetails._id',
-            name: '$productDetails.name',
-            code: '$productDetails.code',
-            stock: '$stock',
-            minStock: '$productDetails.minStock',
-            sellingPrice: '$productDetails.sellingPrice'
-          }
-        },
-        { $sort: { stock: 1 } },
-        { $limit: limit }
-      ]);
-      return lowStockRecords;
-    }
-
-    const products = await Product.find({
+    const products = await Product.find(branchFilter(req, {
       shop: shopId,
       isActive: true,
+      isDeleted: { $ne: true },
       $expr: { $lt: ['$stock', '$minStock'] },
-    })
+    }))
       .sort({ stock: 1 })
       .limit(limit)
       .lean();
@@ -1062,8 +657,7 @@ class ProductService {
   async getStockTransactions(shopId, productId, options = {}, req = null) {
     const { page = 1, limit = 20 } = options;
 
-    const { scopeByBranch } = require('../utils/branchScope.util');
-    const query = req ? scopeByBranch(req, { shop: shopId }) : { shop: shopId };
+    const query = req ? branchFilter(req, { shop: shopId }) : { shop: shopId };
     if (productId) {
       query.product = productId;
     }
@@ -1209,7 +803,13 @@ class ProductService {
     });
 
     // Fetch existing product codes & barcodes for this shop to prevent duplicates
-    const existingProducts = await Product.find({ shop: shopId, isDeleted: { $ne: true } }, { code: 1, barcode: 1 });
+    // Import targets one branch; duplicate-code detection is scoped to it,
+    // since the same code in another branch is a different product.
+    const importBranchId = requireBranch(req);
+    const existingProducts = await Product.find(
+      branchFilter(req, { shop: shopId, isDeleted: { $ne: true } }),
+      { code: 1, barcode: 1 }
+    );
     const existingCodes = new Set();
     existingProducts.forEach(p => {
       if (p.code) existingCodes.add(p.code.toUpperCase().trim());
@@ -1278,6 +878,7 @@ class ProductService {
 
         const product = await Product.create({
           shop: shopId,
+          branch: importBranchId,
           code,
           barcode,
           name,
@@ -1293,17 +894,6 @@ class ProductService {
           createdBy: userId,
         });
 
-        if (req?.shop?.multiBranchEnabled) {
-          const targetBranchId = getBranchForCreate(req);
-          if (targetBranchId) {
-            await BranchStock.create({
-              shop: shopId,
-              branch: targetBranchId,
-              product: product._id,
-              stock,
-            });
-          }
-        }
 
         existingCodes.add(code);
         if (barcode) existingCodes.add(barcode);

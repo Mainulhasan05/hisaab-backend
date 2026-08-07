@@ -68,6 +68,7 @@ const auditLogSchema = new mongoose.Schema({
 
 // Indexes - Optimized for scalability
 auditLogSchema.index({ shop: 1, createdAt: -1 }); // Main listing with date sort
+auditLogSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Branch-filtered listing
 auditLogSchema.index({ admin: 1, createdAt: -1 }); // Admin audit trail
 auditLogSchema.index({ customer: 1, createdAt: -1 }); // Customer audit trail
 auditLogSchema.index({ shop: 1, user: 1, createdAt: -1 }); // Per-user activity within a shop
@@ -77,9 +78,16 @@ auditLogSchema.index({ shop: 1, 'entity.type': 1, 'entity.id': 1, createdAt: -1 
 // For compliance, export/archive logs before deletion if needed
 auditLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 90 * 24 * 60 * 60 }); // 90 days
 
-// Static: Create audit log
+// Static: Create audit log.
+//
+// `branch` was missing from this destructure, so every caller that passed one —
+// branch create/update/deactivate, staff changes, due collection, multi-branch
+// enable/disable — had it silently dropped, leaving the audit log unfilterable
+// by branch. It now defaults to the request's active branch, so a call site
+// cannot forget it.
 auditLogSchema.statics.log = async function({
   shop,
+  branch,
   user,
   admin,
   customer,
@@ -96,6 +104,7 @@ auditLogSchema.statics.log = async function({
 
   const logData = {
     shop,
+    branch: branch !== undefined ? branch : (req?.branchId || null),
     user,
     admin,
     customer: customerId,

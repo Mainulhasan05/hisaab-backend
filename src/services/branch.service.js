@@ -1,8 +1,11 @@
 const Branch = require('../models/Branch.model');
 const User = require('../models/User.model');
 const Sale = require('../models/Sale.model');
-const BranchStock = require('../models/BranchStock.model');
+const Product = require('../models/Product.model');
 const AuditLog = require('../models/AuditLog.model');
+const CashRegister = require('../models/CashRegister.model');
+const HeldCart = require('../models/HeldCart.model');
+const StockTransfer = require('../models/StockTransfer.model');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const cacheService = require('./cache.service');
 const { invalidateBranchCache } = require('../utils/authCache.util');
@@ -29,79 +32,28 @@ class BranchService {
   }
 
   /**
-   * Create a new branch
-   */
-  async createBranch(shopId, data, req) {
-    // Validate code uniqueness within shop
-    const existing = await Branch.findOne({
-      shop: shopId,
-      code: data.code?.toUpperCase()
-    });
-
-    if (existing) {
-      const error = new Error('এই কোডের শাখা আগে থেকেই আছে');
-      error.statusCode = 400;
-      throw error;
-    }
-
-    const branch = await Branch.create({
-      shop: shopId,
-      name: data.name,
-      code: data.code,
-      address: data.address,
-      phone: data.phone,
-      isDefault: false,
-      createdBy: req.user._id
-    });
-
-    // Invalidate default branch cache
-    await invalidateBranchCache(shopId, branch._id);
-
-    // Log audit
-    await AuditLog.log({
-      shop: shopId,
-      branch: branch._id,
-      user: req.user._id,
-      action: AUDIT_ACTIONS.BRANCH_CREATE.en,
-      description: `নতুন শাখা "${branch.name}" (${branch.code}) যোগ করা হয়েছে`,
-      entity: { type: 'branch', id: branch._id, name: branch.name },
-      req
-    });
-
-    return branch;
-  }
-
-  /**
    * Update a branch
+   */
+  /**
+   * Update a branch's descriptive details.
+   *
+   * This is the owner-facing edit. `code` (invoice-number prefix) and
+   * `isActive` (existence) are deliberately NOT editable here — those are
+   * platform-admin actions via adminService.updateShopBranch.
    */
   async updateBranch(branchId, shopId, data, req) {
     const branch = await this.getBranch(branchId, shopId);
 
-    // Check code uniqueness if being changed
-    if (data.code && data.code.toUpperCase() !== branch.code) {
-      const existing = await Branch.findOne({
-        shop: shopId,
-        code: data.code.toUpperCase(),
-        _id: { $ne: branchId }
-      });
-      if (existing) {
-        const error = new Error('এই কোডের শাখা আগে থেকেই আছে');
-        error.statusCode = 400;
-        throw error;
-      }
-    }
-
-    const before = { name: branch.name, code: branch.code, address: branch.address, phone: branch.phone };
+    const before = { name: branch.name, address: branch.address, phone: branch.phone };
 
     if (data.name) branch.name = data.name;
-    if (data.code) branch.code = data.code;
     if (data.address !== undefined) branch.address = data.address;
     if (data.phone !== undefined) branch.phone = data.phone;
 
     await branch.save();
 
     // Invalidate default branch cache
-    await invalidateBranchCache(shopId, branch._id);
+    await invalidateBranchCache(shopId);
 
     // Log audit
     await AuditLog.log({
@@ -111,7 +63,7 @@ class BranchService {
       action: AUDIT_ACTIONS.BRANCH_UPDATE.en,
       description: `শাখা "${branch.name}" আপডেট করা হয়েছে`,
       entity: { type: 'branch', id: branch._id, name: branch.name },
-      changes: { before, after: { name: branch.name, code: branch.code, address: branch.address, phone: branch.phone } },
+      changes: { before, after: { name: branch.name, address: branch.address, phone: branch.phone } },
       req
     });
 
@@ -119,51 +71,13 @@ class BranchService {
   }
 
   /**
-   * Deactivate a branch (soft delete)
-   * Cannot deactivate the default branch
+   * The single branch a staff member is assigned to, in the same array shape
+   * the owner's list uses so the frontend needs no special case.
    */
-  async deactivateBranch(branchId, shopId, req) {
-    const branch = await this.getBranch(branchId, shopId);
-
-    if (branch.isDefault) {
-      const error = new Error('প্রধান শাখা নিষ্ক্রিয় করা যাবে না');
-      error.statusCode = 400;
-      throw error;
-    }
-
-    // Check if any active staff are assigned to this branch
-    const staffCount = await User.countDocuments({
-      shop: shopId,
-      branch: branchId,
-      isActive: true,
-      isOwner: false
-    });
-
-    if (staffCount > 0) {
-      const error = new Error(`এই শাখায় ${staffCount} জন কর্মী আছেন। প্রথমে তাদের অন্য শাখায় বদলি করুন।`);
-      error.statusCode = 400;
-      throw error;
-    }
-
-    branch.isActive = false;
-    branch.deletedAt = new Date();
-    await branch.save();
-
-    // Invalidate default branch cache
-    await invalidateBranchCache(shopId, branch._id);
-
-    // Log audit
-    await AuditLog.log({
-      shop: shopId,
-      branch: branch._id,
-      user: req.user._id,
-      action: AUDIT_ACTIONS.BRANCH_DEACTIVATE.en,
-      description: `শাখা "${branch.name}" নিষ্ক্রিয় করা হয়েছে`,
-      entity: { type: 'branch', id: branch._id, name: branch.name },
-      req
-    });
-
-    return branch;
+  async getAssignedBranch(shopId, branchId) {
+    if (!branchId) return [];
+    const branch = await Branch.findOne({ _id: branchId, shop: shopId, isActive: true }).lean();
+    return branch ? [branch] : [];
   }
 
   /**
@@ -189,10 +103,9 @@ class BranchService {
           },
         },
       ]),
-      BranchStock.aggregate([
-        { $match: { shop: shopId, branch: { $in: branchIds }, stock: { $gt: 0 } } },
-        { $group: { _id: { branch: '$branch', product: '$product' } } },
-        { $group: { _id: '$_id.branch', itemCount: { $sum: 1 } } },
+      Product.aggregate([
+        { $match: { shop: shopId, branch: { $in: branchIds }, isDeleted: { $ne: true }, stock: { $gt: 0 } } },
+        { $group: { _id: '$branch', itemCount: { $sum: 1 } } },
       ]),
     ]);
 
@@ -214,14 +127,38 @@ class BranchService {
     });
   }
 
+  /**
+   * What would be affected by deactivating this branch.
+   *
+   * Blocking conditions are work-in-progress that would be stranded: assigned
+   * staff (they would be locked out on their next request), an open cash
+   * register (the day's till would never close), held carts (unreachable), and
+   * in-transit transfers (stock deducted from source, never received).
+   * Sales history and stock are NOT blocking — they stay readable.
+   */
   async getBranchDeletionImpact(branchId, shopId) {
     const branch = await this.getBranch(branchId, shopId);
-    const [staffCount, salesCount, itemCount, stockRecordCount] = await Promise.all([
-      User.countDocuments({ shop: shopId, branch: branchId, isActive: true, isOwner: false }),
-      Sale.countDocuments({ shop: shopId, branch: branchId }),
-      BranchStock.distinct('product', { shop: shopId, branch: branchId, stock: { $gt: 0 } }).then((ids) => ids.length),
-      BranchStock.countDocuments({ shop: shopId, branch: branchId }),
-    ]);
+    const [staffCount, salesCount, itemCount, productCount, openRegisters, heldCarts, inTransit] =
+      await Promise.all([
+        User.countDocuments({ shop: shopId, branch: branchId, isActive: true, isOwner: false }),
+        Sale.countDocuments({ shop: shopId, branch: branchId }),
+        Product.countDocuments({ shop: shopId, branch: branchId, isDeleted: { $ne: true }, stock: { $gt: 0 } }),
+        Product.countDocuments({ shop: shopId, branch: branchId, isDeleted: { $ne: true } }),
+        CashRegister.countDocuments({ shop: shopId, branch: branchId, status: 'open' }),
+        HeldCart.countDocuments({ shop: shopId, branch: branchId, status: 'held' }),
+        StockTransfer.countDocuments({
+          shop: shopId,
+          status: { $in: ['pending', 'in_transit'] },
+          $or: [{ fromBranch: branchId }, { toBranch: branchId }],
+        }),
+      ]);
+
+    const blockers = [];
+    if (branch.isDefault) blockers.push('এটি প্রধান শাখা');
+    if (staffCount > 0) blockers.push(`${staffCount} জন কর্মী এই শাখায় আছেন`);
+    if (openRegisters > 0) blockers.push(`${openRegisters}টি ক্যাশ রেজিস্টার এখনো খোলা`);
+    if (heldCarts > 0) blockers.push(`${heldCarts}টি হোল্ড করা কার্ট আছে`);
+    if (inTransit > 0) blockers.push(`${inTransit}টি স্টক ট্রান্সফার চলমান`);
 
     return {
       branch: {
@@ -233,8 +170,12 @@ class BranchService {
       staffCount,
       salesCount,
       itemCount,
-      stockRecordCount,
-      canDeactivate: !branch.isDefault && staffCount === 0,
+      productCount,
+      openRegisters,
+      heldCarts,
+      inTransit,
+      blockers,
+      canDeactivate: blockers.length === 0,
     };
   }
 }

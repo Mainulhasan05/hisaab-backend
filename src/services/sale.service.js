@@ -8,8 +8,7 @@ const Shop = require('../models/Shop.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const cacheService = require('./cache.service');
-const { getBranchForCreate, getBranchCode } = require('../utils/branchScope.util');
-const BranchStock = require('../models/BranchStock.model');
+const { branchFilter, requireBranch, getBranchCode, wrongBranchError } = require('../utils/branchScope.util');
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
 
@@ -191,7 +190,7 @@ class SaleService {
   }
 
   // Get single sale by ID
-  async getSaleById(shopId, saleId, branchId = null) {
+  async getSaleById(shopId, saleId, branchId = null, req = null) {
     const query = { _id: saleId, shop: shopId };
     if (branchId) query.branch = branchId;
 
@@ -201,6 +200,18 @@ class SaleService {
       .populate('items.product', 'name code unit barcode');
 
     if (!sale) {
+      // A deep link to another branch's sale used to 404 with no explanation.
+      // For the owner, say which branch it belongs to so the UI can offer a
+      // switch. For staff this lookup is skipped entirely — they must not learn
+      // that the record exists at all (FEATURE_AUDIT.md M-19).
+      if (branchId && req?.user?.isOwner) {
+        const elsewhere = await Sale.findOne({ _id: saleId, shop: shopId })
+          .select('branch')
+          .populate('branch', 'name code')
+          .lean();
+        const err = elsewhere?.branch && wrongBranchError(req, elsewhere.branch);
+        if (err) throw err;
+      }
       throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }
 
@@ -266,40 +277,16 @@ class SaleService {
 
     // --- BATCH: Fetch all products in a single query ---
     const productIds = [...new Set(items.map(extractProductId).filter(Boolean))];
-    const products = await Product.find({ _id: { $in: productIds }, shop: shopId }).session(session || null);
+    // Branch-scoped: a product document belongs to exactly one branch and
+    // carries that branch's own stock, so there is nothing to overlay.
+    const branchId = req ? requireBranch(req) : null;
+    const products = await Product.find(
+      branchFilter(req, { _id: { $in: productIds }, shop: shopId })
+    ).session(session || null);
     const productMap = new Map(products.map(p => [p._id.toString(), p]));
-
-    const branchId = req ? getBranchForCreate(req) : null;
-    const isMultiBranchActive = branchId && req?.shop?.multiBranchEnabled;
-
-    if (isMultiBranchActive) {
-      const branchStocks = await BranchStock.find({
-        shop: shopId,
-        branch: branchId,
-        product: { $in: productIds }
-      }).session(session || null).lean();
-
-      const branchStockMap = {};
-      branchStocks.forEach(bs => {
-        const key = bs.variantId ? `${bs.product}_${bs.variantId}` : `${bs.product}`;
-        branchStockMap[key] = bs.stock;
-      });
-
-      products.forEach(p => {
-        if (p.hasVariants && p.variants) {
-          p.variants.forEach(v => {
-            v.stock = branchStockMap[`${p._id}_${v._id}`] ?? 0;
-          });
-          p.stock = p.variants.reduce((sum, v) => sum + v.stock, 0);
-        } else {
-          p.stock = branchStockMap[`${p._id}`] ?? 0;
-        }
-      });
-    }
 
     // Prepare bulk operations
     const bulkStockOps = [];
-    const branchStockOps = [];
     const stockTransactions = [];
     let expectedStockOps = 0;
 
@@ -350,16 +337,7 @@ class SaleService {
         // Track stock change in memory for validation of subsequent items of same product
         variant.stock -= item.quantity;
 
-        if (isMultiBranchActive) {
-          branchStockOps.push({
-            updateOne: {
-              filter: { shop: shopId, branch: branchId, product: product._id, variantId: variant._id, stock: { $gte: item.quantity } },
-              update: { $inc: { stock: -item.quantity } },
-              upsert: false,
-            },
-          });
-          expectedStockOps++;
-        } else {
+        {
           // Queue bulkWrite operation for variant stock with atomic $gte guard
           bulkStockOps.push({
             updateOne: {
@@ -408,16 +386,7 @@ class SaleService {
         // Track stock change in memory for validation of subsequent items of same product
         product.stock -= item.quantity;
 
-        if (isMultiBranchActive) {
-          branchStockOps.push({
-            updateOne: {
-              filter: { shop: shopId, branch: branchId, product: product._id, variantId: null, stock: { $gte: item.quantity } },
-              update: { $inc: { stock: -item.quantity } },
-              upsert: false,
-            },
-          });
-          expectedStockOps++;
-        } else {
+        {
           // Queue bulkWrite operation for product stock with atomic $gte guard
           bulkStockOps.push({
             updateOne: {
@@ -493,69 +462,7 @@ class SaleService {
     }
 
     // --- BATCH: Execute all stock updates in one bulkWrite with race-condition guard ---
-    if (isMultiBranchActive) {
-      if (branchStockOps.length > 0) {
-        const branchResult = await BranchStock.bulkWrite(branchStockOps, sessionOpt);
-        if (branchResult.modifiedCount < expectedStockOps) {
-          throw new AppError(
-            'Insufficient stock — another sale may have just reduced inventory. Please retry.',
-            'পর্যাপ্ত স্টক নেই — অন্য একটি বিক্রয় ইতোমধ্যে স্টক কমিয়ে ফেলেছে। পুনরায় চেষ্টা করুন।',
-            409
-          );
-        }
-      }
-
-      // Now sync the Product total stocks in the database
-      const branchStocks = await BranchStock.aggregate([
-        {
-          $match: {
-            shop: new mongoose.Types.ObjectId(shopId),
-            product: { $in: productIds.map(id => new mongoose.Types.ObjectId(id)) }
-          }
-        },
-        {
-          $group: {
-            _id: { product: '$product', variantId: '$variantId' },
-            totalStock: { $sum: '$stock' }
-          }
-        }
-      ]).option(sessionOpt);
-
-      const totalStockMap = {};
-      branchStocks.forEach(bs => {
-        const key = bs._id.variantId ? `${bs._id.product}_${bs._id.variantId}` : `${bs._id.product}`;
-        totalStockMap[key] = bs.totalStock;
-      });
-
-      const productSyncOps = [];
-      for (const productId of productIds) {
-        const product = productMap.get(productId.toString());
-        if (product) {
-          if (product.hasVariants && product.variants) {
-            for (const variant of product.variants) {
-              const totalStock = totalStockMap[`${productId}_${variant._id}`] || 0;
-              productSyncOps.push({
-                updateOne: {
-                  filter: { _id: productId, 'variants._id': variant._id },
-                  update: { $set: { 'variants.$.stock': totalStock } }
-                }
-              });
-            }
-          } else {
-            const totalStock = totalStockMap[`${productId}`] || 0;
-            productSyncOps.push({
-              updateOne: {
-                filter: { _id: productId },
-                update: { $set: { stock: totalStock } }
-              }
-            });
-          }
-        }
-      }
-      if (productSyncOps.length > 0) {
-        await Product.bulkWrite(productSyncOps, sessionOpt);
-      }
-    } else {
+    {
       if (bulkStockOps.length > 0) {
         const stockResult = await Product.bulkWrite(bulkStockOps, sessionOpt);
         if (stockResult.modifiedCount < expectedStockOps) {
@@ -820,26 +727,12 @@ class SaleService {
     const cancelProducts = await Product.find({ _id: { $in: cancelProductIds } });
     const cancelProductMap = new Map(cancelProducts.map(p => [p._id.toString(), p]));
 
+    // Stock is restored onto the sale's own product documents — those already
+    // belong to the sale's branch, so there is no separate ledger to reconcile.
     const branchId = sale.branch;
-    const isMultiBranchSale = branchId != null;
 
     const restoreOps = [];
-    const restoreBranchOps = [];
     const cancelStockTxns = [];
-    const getStockKey = (productId, variantId = null) => String(productId) + '_' + (variantId || 'base');
-    const branchStockMap = {};
-
-    if (isMultiBranchSale) {
-      const existingBranchStocks = await BranchStock.find({
-        shop: shopId,
-        branch: branchId,
-        product: { $in: cancelProductIds },
-      }).lean();
-
-      existingBranchStocks.forEach((stock) => {
-        branchStockMap[getStockKey(stock.product, stock.variantId || null)] = stock.stock || 0;
-      });
-    }
 
     for (const item of sale.items) {
       const product = cancelProductMap.get(item.product.toString());
@@ -848,20 +741,7 @@ class SaleService {
       let previousStock = 0;
       let newStock = 0;
 
-      if (isMultiBranchSale) {
-        const stockKey = getStockKey(product._id, item.variantId || null);
-        previousStock = branchStockMap[stockKey] || 0;
-        newStock = previousStock + item.quantity;
-        branchStockMap[stockKey] = newStock;
-
-        restoreBranchOps.push({
-          updateOne: {
-            filter: { shop: shopId, branch: branchId, product: product._id, variantId: item.variantId || null },
-            update: { $inc: { stock: item.quantity } },
-            upsert: true,
-          },
-        });
-      } else if (item.variantId) {
+      if (item.variantId) {
         const variant = (product.variants && typeof product.variants.id === 'function')
           ? product.variants.id(item.variantId)
           : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
@@ -911,62 +791,7 @@ class SaleService {
       });
     }
 
-    if (isMultiBranchSale) {
-      if (restoreBranchOps.length > 0) {
-        await BranchStock.bulkWrite(restoreBranchOps);
-      }
-
-      // Sync the Product total stock in the database
-      const branchStocks = await BranchStock.aggregate([
-        {
-          $match: {
-            shop: new mongoose.Types.ObjectId(shopId),
-            product: { $in: cancelProductIds.map(id => new mongoose.Types.ObjectId(id)) }
-          }
-        },
-        {
-          $group: {
-            _id: { product: '$product', variantId: '$variantId' },
-            totalStock: { $sum: '$stock' }
-          }
-        }
-      ]);
-
-      const totalStockMap = {};
-      branchStocks.forEach(bs => {
-        const key = bs._id.variantId ? `${bs._id.product}_${bs._id.variantId}` : `${bs._id.product}`;
-        totalStockMap[key] = bs.totalStock;
-      });
-
-      const productSyncOps = [];
-      for (const productId of cancelProductIds) {
-        const product = cancelProductMap.get(productId.toString());
-        if (product) {
-          if (product.hasVariants && product.variants) {
-            for (const variant of product.variants) {
-              const totalStock = totalStockMap[`${productId}_${variant._id}`] || 0;
-              productSyncOps.push({
-                updateOne: {
-                  filter: { _id: productId, 'variants._id': variant._id },
-                  update: { $set: { 'variants.$.stock': totalStock } }
-                }
-              });
-            }
-          } else {
-            const totalStock = totalStockMap[`${productId}`] || 0;
-            productSyncOps.push({
-              updateOne: {
-                filter: { _id: productId },
-                update: { $set: { stock: totalStock } }
-              }
-            });
-          }
-        }
-      }
-      if (productSyncOps.length > 0) {
-        await Product.bulkWrite(productSyncOps);
-      }
-    } else {
+    {
       if (restoreOps.length > 0) {
         await Product.bulkWrite(restoreOps);
       }
