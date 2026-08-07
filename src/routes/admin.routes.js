@@ -29,6 +29,11 @@ router.post('/shops/:id/disable-multi-branch', adminController.disableMultiBranc
 // Whether the shop's branches share one customer book. Admin-only for the same
 // reason branch create/delete is: it changes what every branch can see.
 router.patch('/shops/:id/customer-scope', adminController.setCustomerScope);
+// Opt-in capabilities (Shop.features). ONE generic pair for every feature —
+// resist adding /enable-<feature> routes, which is how multi-branch ended up
+// with a method per verb. New capabilities need no route change at all.
+router.get('/shops/:id/features', adminController.getShopFeatures);
+router.patch('/shops/:id/features/:key', adminController.setShopFeature);
 router.get('/shops/:id/branches', adminController.getShopBranches);
 router.post('/shops/:id/branches', adminController.addShopBranch);
 router.patch('/shops/:id/branches/:branchId', adminController.updateShopBranch);

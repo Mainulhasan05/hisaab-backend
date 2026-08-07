@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Branch = require('../models/Branch.model');
 const User = require('../models/User.model');
 const Sale = require('../models/Sale.model');
@@ -87,13 +88,20 @@ class BranchService {
     const branches = await Branch.getShopBranches(shopId);
     const branchIds = branches.map((branch) => branch._id);
 
+    // $match does not cast. This is safe today only because req.shop is
+    // Shop.hydrate()'d, so its _id happens to be an ObjectId — the same
+    // accident that did NOT hold for the branch list and silently zeroed the
+    // sales summary. Cast explicitly so the rule "every aggregation casts its
+    // ids" is true here with no exception to remember.
+    const shopOid = new mongoose.Types.ObjectId(shopId);
+
     const [staffCounts, salesStats, itemCounts] = await Promise.all([
       User.aggregate([
-        { $match: { shop: shopId, branch: { $in: branchIds }, isActive: true, isOwner: false } },
+        { $match: { shop: shopOid, branch: { $in: branchIds }, isActive: true, isOwner: false } },
         { $group: { _id: '$branch', staffCount: { $sum: 1 } } },
       ]),
       Sale.aggregate([
-        { $match: { shop: shopId, branch: { $in: branchIds }, status: { $ne: 'cancelled' } } },
+        { $match: { shop: shopOid, branch: { $in: branchIds }, status: { $ne: 'cancelled' } } },
         {
           $group: {
             _id: '$branch',
@@ -104,7 +112,7 @@ class BranchService {
         },
       ]),
       Product.aggregate([
-        { $match: { shop: shopId, branch: { $in: branchIds }, isDeleted: { $ne: true }, stock: { $gt: 0 } } },
+        { $match: { shop: shopOid, branch: { $in: branchIds }, isDeleted: { $ne: true }, stock: { $gt: 0 } } },
         { $group: { _id: '$branch', itemCount: { $sum: 1 } } },
       ]),
     ]);

@@ -11,7 +11,11 @@ const heldCartItemSchema = new mongoose.Schema({
   variantId: { type: mongoose.Schema.Types.ObjectId },
   variantSku: { type: String },
   variantAttributes: { type: mongoose.Schema.Types.Mixed },
-  quantity: { type: Number, required: true, min: 1 },
+  // 0-exclusive, not `min: 1` — a held cart may contain 0.25 kg. Held carts
+  // store the quantity in the PRODUCT'S OWN UNIT, never a pack count, so a
+  // resumed cart cannot be misread if anything about packaging changed while it
+  // was parked. See AGENT_WORKFLOW.md I-6.
+  quantity: { type: Number, required: true, min: 0.001 },
   unitPrice: { type: Number, required: true, min: 0 },
   discount: { type: Number, default: 0 }
 }, { _id: true });

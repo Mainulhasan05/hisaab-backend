@@ -134,6 +134,29 @@ const shopSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  // Opt-in capabilities, switched on per shop by the platform admin only.
+  //
+  // Read this ONLY via `features.util.hasFeature(req, '<key>')`, never directly
+  // — the helper is what guarantees a missing/`undefined` flag reads as OFF
+  // rather than as truthy-object, and it is the one place to look when asking
+  // "what turns this on?".
+  //
+  // `multiBranchEnabled` above is the older, bespoke form of the same idea. It
+  // is deliberately NOT moved in here: it is read in ~20 places across services,
+  // tests, scripts and the frontend, and a rename buys nothing. New capabilities
+  // go here so that list stops growing.
+  //
+  // Every key must default to `false`. A shop that has never been touched by an
+  // admin must behave exactly as it did before the capability existed.
+  features: {
+    // Fractional quantities (kg / litre / yard) + the purchase "x how many"
+    // helper + the extended unit list. See AGENT_WORKFLOW.md I-6 before
+    // touching anything that reads it.
+    packaging: {
+      type: Boolean,
+      default: false
+    }
+  },
   // Whether branches share one customer book or keep separate ones (Phase 7).
   //
   //   'shop'   — one customer, one balance across every branch. A branch sees

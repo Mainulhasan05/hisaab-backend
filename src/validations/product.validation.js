@@ -1,4 +1,25 @@
 const { Joi, commonSchemas } = require('../middleware/validate.middleware');
+const { ALL_UNITS, SAFE_QUANTITY_MAX } = require('../config/units');
+
+/**
+ * Quantity/stock fields used to be `Joi.number().integer()`. They are not any
+ * more, and that is deliberate.
+ *
+ * Joi runs before the service layer, so it can see neither the shop's
+ * `features.packaging` flag nor the product's unit — it cannot tell a
+ * legitimate 0.5 kg from an illegitimate 0.5 piece. Enforcing integers here
+ * would make the feature impossible; enforcing nothing would let fractions into
+ * a shop that has not enabled it.
+ *
+ * So this layer keeps only the STRUCTURAL bounds (finite, non-negative, within
+ * the safe-precision ceiling) and the ENTITLEMENT decision moves to
+ * `utils/quantity.util.parseQuantity`, which has the flag and the unit in hand
+ * and refuses a fraction on any `decimals: 0` unit.
+ *
+ * Do not "restore" `.integer()` here. It will look like a tightening and will
+ * instead break every shop selling by weight.
+ */
+const quantityField = Joi.number().min(0).max(SAFE_QUANTITY_MAX);
 
 const variant = Joi.object({
   _id: commonSchemas.objectId.optional(),
@@ -7,7 +28,7 @@ const variant = Joi.object({
   barcode: Joi.string().trim().max(100).allow('', null),
   buyingPrice: Joi.number().min(0).required(),
   sellingPrice: Joi.number().min(0).required(),
-  stock: Joi.number().integer().min(0).default(0),
+  stock: quantityField.default(0),
   image: Joi.string().uri().allow('', null),
   isActive: Joi.boolean().default(true),
   attributes: Joi.object().unknown(true),
@@ -21,11 +42,13 @@ const baseProduct = {
   subcategory: commonSchemas.objectId.allow(null, ''),
   description: Joi.string().trim().max(2000).allow('', null),
   brand: Joi.string().trim().max(100).allow('', null),
-  unit: Joi.string().valid('piece', 'kg', 'gram', 'liter', 'ml', 'meter', 'inch', 'feet', 'dozen', 'pack', 'box', 'set', 'sack'),
+  // Accepts the full registry; which units this particular shop may CHOOSE is
+  // enforced in `product.service._assertUnitAllowed`, where the flag is known.
+  unit: Joi.string().valid(...ALL_UNITS),
   buyingPrice: Joi.number().min(0).required(),
   sellingPrice: Joi.number().min(0).required(),
-  stock: Joi.number().integer().min(0).default(0),
-  minStock: Joi.number().integer().min(0).default(5),
+  stock: quantityField.default(0),
+  minStock: quantityField.default(5),
   hasVariants: Joi.boolean().default(false),
   variants: Joi.when('hasVariants', {
     is: true,
@@ -42,7 +65,7 @@ const baseProduct = {
   batches: Joi.array().items(Joi.object({
     batchNumber: Joi.string().trim().required(),
     expiryDate: Joi.date().allow('', null),
-    quantity: Joi.number().min(0).required(),
+    quantity: quantityField.required(),
     costPrice: Joi.number().min(0).optional(),
   })).default([]),
   trackSerials: Joi.boolean().default(false),
@@ -66,7 +89,7 @@ const updateProduct = Joi.object({
 }).min(1);
 
 const updateStock = Joi.object({
-  quantity: Joi.number().integer().min(0).required(),
+  quantity: quantityField.required(),
   type: Joi.string().valid('set', 'add', 'subtract').default('add'),
   variantId: commonSchemas.objectId.allow(null, ''),
   notes: Joi.string().trim().max(500).allow('', null),
@@ -79,7 +102,7 @@ const toggleStatus = Joi.object({
 const bulkUpdateStock = Joi.object({
   updates: Joi.array().items(Joi.object({
     productId: commonSchemas.objectId.required(),
-    quantity: Joi.number().integer().min(0).required(),
+    quantity: quantityField.required(),
     type: Joi.string().valid('set', 'add', 'subtract').default('add'),
     variantId: commonSchemas.objectId.allow(null, ''),
     notes: Joi.string().trim().max(500).allow('', null),
@@ -95,9 +118,9 @@ const bulkImportProducts = Joi.object({
     buyingPrice: Joi.number().min(0).default(0),
     costPrice: Joi.number().min(0).optional(),
     sellingPrice: Joi.number().min(0).default(0),
-    stock: Joi.number().integer().min(0).default(0),
+    stock: quantityField.default(0),
     unit: Joi.string().trim().allow('', null).default('piece'),
-    minStock: Joi.number().integer().min(0).default(5),
+    minStock: quantityField.default(5),
     description: Joi.string().trim().max(2000).allow('', null),
     trackBatches: Joi.boolean().default(false),
     batchNumber: Joi.string().trim().allow('', null),

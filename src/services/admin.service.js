@@ -23,6 +23,7 @@ const cacheService = require('./cache.service');
 const { invalidateShopAuthCache, invalidateBranchCache } = require('../utils/authCache.util');
 const { refuseDeletion } = require('../utils/deletionDisabled.util');
 const { KEYS, getTTL } = require('../config/cacheKeys');
+const { FEATURES, FEATURE_KEYS } = require('../utils/features.util');
 
 class AdminService {
   // Admin login
@@ -1645,6 +1646,104 @@ class AdminService {
     await cacheService.bumpShopCacheVersion(shopId, 0);
 
     return shop.toObject();
+  }
+
+  /**
+   * Turn an opt-in capability on or off for one shop. Platform-admin only.
+   *
+   * Deliberately ONE generic endpoint rather than the enable-X / disable-X pair
+   * multi-branch has. Every capability added after this reuses it, so the admin
+   * router stops growing a method per feature and the audit trail has a single
+   * consistent shape to search.
+   *
+   * Unlike `enableMultiBranch`, there is nothing to back-fill. `features.*` are
+   * read-path switches over data that is already in its final shape:
+   *
+   *   - packaging OFF -> stock is an integer count of the product's unit
+   *   - packaging ON  -> stock is the same number, now allowed a fraction
+   *
+   * so flipping it takes effect on the next request and flipping it back loses
+   * nothing. If you ever add a capability that DOES need a back-fill, do not
+   * reuse this method: copy `enableMultiBranch`'s ordering — back-fill first,
+   * flip the flag last (FEATURE_AUDIT.md M-6), or an interruption leaves the
+   * shop half-migrated with the flag already on.
+   *
+   * @param {string} shopId
+   * @param {string} adminId
+   * @param {string} key      a FEATURE_KEYS value
+   * @param {boolean} enabled
+   */
+  async setShopFeature(shopId, adminId, key, enabled) {
+    if (!FEATURE_KEYS.includes(key)) {
+      throw new AppError(
+        `Unknown feature "${key}". Valid: ${FEATURE_KEYS.join(', ')}`,
+        'এই ফিচারটি পাওয়া যায়নি',
+        400
+      );
+    }
+
+    const shop = await Shop.findById(shopId);
+    if (!shop) {
+      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
+    }
+
+    const value = enabled === true;
+    const previous = shop.features?.[key] === true;
+    if (previous === value) {
+      return shop.toObject();
+    }
+
+    if (!shop.features) shop.features = {};
+    shop.features[key] = value;
+    // `features` is a nested object; Mongoose does not always see a mutation on
+    // a sub-path of a non-subdocument object, and a missed change here would
+    // return 200 while saving nothing.
+    shop.markModified('features');
+    await shop.save();
+
+    const meta = FEATURES[key];
+    await AuditLog.log({
+      shop: shopId,
+      admin: adminId,
+      action: value ? 'shop_feature_enabled' : 'shop_feature_disabled',
+      description: value
+        ? `"${shop.name}" দোকানে "${meta.bn}" ফিচার চালু করা হয়েছে`
+        : `"${shop.name}" দোকানে "${meta.bn}" ফিচার বন্ধ করা হয়েছে`,
+      entity: { type: 'shop', id: shop._id, name: shop.name },
+      changes: { before: { [`features.${key}`]: previous }, after: { [`features.${key}`]: value } }
+    });
+
+    // The flag rides in the shop payload of the auth cache, so every session
+    // must be invalidated for it to take effect on the next request.
+    await invalidateShopAuthCache(shopId);
+    // Product listings are cached and their unit/precision handling changes
+    // meaning here — retire the current generation rather than serve stale rows.
+    await cacheService.bumpShopCacheVersion(shopId, 0);
+
+    return shop.toObject();
+  }
+
+  /**
+   * Capability list for the admin UI: every known feature with its label and
+   * this shop's current state. Built from FEATURES, never hand-listed, so a new
+   * capability appears in the admin panel the moment it is registered.
+   */
+  async getShopFeatures(shopId) {
+    const shop = await Shop.findById(shopId).select('name features').lean();
+    if (!shop) {
+      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
+    }
+
+    return {
+      shop: { _id: String(shop._id), name: shop.name },
+      features: FEATURE_KEYS.map((key) => ({
+        key,
+        label: FEATURES[key].bn,
+        labelEn: FEATURES[key].en,
+        description: FEATURES[key].description,
+        enabled: shop.features?.[key] === true,
+      })),
+    };
   }
 
   // Get all branches of a shop for admin

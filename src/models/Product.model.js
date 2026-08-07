@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { ALL_UNITS, DEFAULT_UNIT } = require('../config/units');
 
 const variantSchema = new mongoose.Schema({
   sku: {
@@ -97,10 +98,19 @@ const productSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  // The unit this product's `stock`, `buyingPrice` and `sellingPrice` are
+  // expressed in. Historically a cosmetic label; with `shop.features.packaging`
+  // on it also carries a decimal precision (see config/units.js).
+  //
+  // The enum is the FULL registry for every shop, on purpose: which units a shop
+  // may *choose* is gated in the service layer via `unitsForShop(flag)`, not
+  // here. Gating the enum instead would make an existing product unsaveable the
+  // moment an admin turned the flag back off — the enum has to accept anything
+  // already stored.
   unit: {
     type: String,
-    default: 'piece',
-    enum: ['piece', 'kg', 'gram', 'liter', 'ml', 'meter', 'inch', 'feet', 'dozen', 'pack', 'box', 'set', 'sack']
+    default: DEFAULT_UNIT,
+    enum: ALL_UNITS
   },
   hasVariants: {
     type: Boolean,

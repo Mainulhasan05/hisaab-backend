@@ -373,6 +373,28 @@ exports.setCustomerScope = asyncHandler(async (req, res) => {
   });
 });
 
+// Opt-in capability list for a shop, built from the FEATURES registry
+exports.getShopFeatures = asyncHandler(async (req, res) => {
+  const result = await adminService.getShopFeatures(req.params.id);
+  return ApiResponse.success(res, { data: result });
+});
+
+// Turn one opt-in capability on or off. One generic route for every feature —
+// do not add an enable-X / disable-X pair per capability.
+exports.setShopFeature = asyncHandler(async (req, res) => {
+  const result = await adminService.setShopFeature(
+    req.params.id,
+    req.admin._id,
+    req.params.key,
+    req.body.enabled === true
+  );
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Feature updated successfully',
+    messageBn: req.body.enabled === true ? 'ফিচারটি চালু করা হয়েছে' : 'ফিচারটি বন্ধ করা হয়েছে',
+  });
+});
+
 // Get shop branches
 exports.getShopBranches = asyncHandler(async (req, res) => {
   const branches = await adminService.getShopBranches(req.params.id);

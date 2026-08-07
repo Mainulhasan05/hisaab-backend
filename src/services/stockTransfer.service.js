@@ -5,6 +5,7 @@ const Branch = require('../models/Branch.model');
 const { runInTransaction } = require('../utils/transaction.util');
 const { STOCK_TRANSACTION_TYPES } = require('../config/constants');
 const { isActiveBranch, isAllBranchesView, isMultiBranch } = require('../utils/branchScope.util');
+const { storageUnit, quantize } = require('../utils/quantity.util');
 
 // Helper to create errors with statusCode (no AppError class in this project)
 const createError = (message, statusCode = 400) => {
@@ -78,17 +79,30 @@ const readStock = (product, variantId) => {
   return v?.stock || 0;
 };
 
-/** Apply a delta to a product's stock (variant-aware) and return the new value. */
+/**
+ * Apply a delta to a product's stock (variant-aware) and return the new value.
+ *
+ * Quantized at the product's own precision. A transfer is a deduct on one
+ * document and an add on another, and the two products are separate documents
+ * with separately-drifting stock — without the rounding, moving 1.1 kg back and
+ * forth a few hundred times leaves both branches holding a residue and the
+ * shop-wide total no longer adding up.
+ *
+ * `storageUnit` is flag-independent by design: a transfer created while
+ * packaging was on must still settle correctly if it is switched off before the
+ * receiving branch accepts it.
+ */
 const applyStock = (product, variantId, delta) => {
+  const stkUnit = storageUnit(product);
   if (variantId) {
     const v = typeof product.variants?.id === 'function'
       ? product.variants.id(variantId)
       : product.variants?.find((x) => String(x._id) === String(variantId));
     if (!v) return null;
-    v.stock = Math.max(0, (v.stock || 0) + delta);
+    v.stock = quantize(Math.max(0, quantize((v.stock || 0) + delta, stkUnit)), stkUnit);
     return v.stock;
   }
-  product.stock = Math.max(0, (product.stock || 0) + delta);
+  product.stock = quantize(Math.max(0, quantize((product.stock || 0) + delta, stkUnit)), stkUnit);
   return product.stock;
 };
 

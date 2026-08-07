@@ -24,10 +24,19 @@ const saleItemSchema = new mongoose.Schema({
   variantAttributes: {
     type: mongoose.Schema.Types.Mixed
   },
+  // Lower bound is 0-exclusive rather than 1: a 250-gram sale is `quantity: 0.25`
+  // for a kg product. `min: 1` here would reject it AFTER the stock had already
+  // been deducted by the bulkWrite above, leaving stock down and no sale
+  // recorded.
+  //
+  // This does NOT let a shop without `features.packaging` book a fraction —
+  // `parseQuantity` has already refused it at the service layer, where the flag
+  // and the product's unit are both known. Schema bounds are the floor, not the
+  // policy. See AGENT_WORKFLOW.md I-6.
   quantity: {
     type: Number,
     required: [true, 'পরিমাণ দিন'],
-    min: [1, 'পরিমাণ কমপক্ষে ১ হতে হবে']
+    min: [0.001, 'পরিমাণ ০ এর বেশি হতে হবে']
   },
   unitPrice: {
     type: Number,

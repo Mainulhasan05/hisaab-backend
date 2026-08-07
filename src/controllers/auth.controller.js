@@ -4,6 +4,7 @@ const asyncHandler = require('../utils/asyncHandler.util');
 const User = require('../models/User.model');
 const cacheService = require('../services/cache.service');
 const { invalidateShopAuthCache } = require('../utils/authCache.util');
+const { featureMap } = require('../utils/features.util');
 const {
   setUserTokenCookie,
   setAdminTokenCookie,
@@ -191,6 +192,17 @@ const getMe = asyncHandler(async (req, res) => {
         // says which book it is showing. Always 'shop' for single-branch shops,
         // so nothing about their UI changes.
         customerScope: isMultiBranch ? (req.shop?.customerScope || 'branch') : 'shop',
+        // Opt-in capabilities (Shop.features). Sent as a COMPLETE map — every
+        // known key present as a real boolean, never only the enabled ones —
+        // because the client renders "off" differently from "not loaded yet",
+        // and a sparse object makes those two indistinguishable on first paint.
+        //
+        // The client does not receive the unit catalogue here; it builds that
+        // locally from `lib/units.js` (mirrored from `config/units.js`, kept
+        // honest by `scripts/check-unit-parity.mjs`). Sending ~50 units on the
+        // hottest endpoint to save a file that has to exist anyway is a bad
+        // trade.
+        features: featureMap(req.shop),
       },
       message: 'Profile retrieved',
       messageBn: 'প্রোফাইল পাওয়া গেছে'

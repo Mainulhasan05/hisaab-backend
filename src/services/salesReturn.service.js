@@ -12,6 +12,13 @@ const { branchFilter, requireBranch } = require('../utils/branchScope.util');
 const saleService = require('./sale.service');
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
+const {
+  parseQuantity,
+  quantityUnit,
+  storageUnit,
+  quantize,
+  quantizeMoney,
+} = require('../utils/quantity.util');
 
 const getInvoiceDiscountAmount = (sale) => {
   const discount = Number(sale.discount) || 0;
@@ -94,6 +101,29 @@ class SalesReturnService {
       }
     }
 
+    // Products for the sale items being returned. Fetched once, up front, so
+    // the per-item loop can resolve each unit's precision without an N+1 —
+    // step 8 below re-fetches them for the stock write inside the transaction.
+    // Not branch-filtered: the sale has already been branch-checked above, and
+    // a product moved or deleted since must not block a legitimate refund.
+    const returnProductIds = [...new Set(
+      (items || [])
+        .map((ri) => {
+          const si = (sale.items && typeof sale.items.id === 'function')
+            ? sale.items.id(ri.saleItemId)
+            : sale.items?.find(i => (i._id || i.id)?.toString() === ri.saleItemId?.toString());
+          return si ? String(si.product) : null;
+        })
+        .filter(Boolean)
+    )];
+    const returnProducts = returnProductIds.length
+      ? await Product.find({ shop: shopId, _id: { $in: returnProductIds } })
+        .select('_id unit')
+        .session(session || null)
+        .lean()
+      : [];
+    const returnProductMap = new Map(returnProducts.map(p => [String(p._id), p]));
+
     // 5. Process and validate each return item
     const processedItems = [];
     let totalRefundAmount = 0;
@@ -114,13 +144,21 @@ class SalesReturnService {
       const alreadyReturned = alreadyReturnedMap[returnItem.saleItemId.toString()] || 0;
       const maxReturnable = saleItem.quantity - alreadyReturned;
 
-      if (returnItem.quantity <= 0) {
-        throw new AppError(
-          'ফেরতের পরিমাণ কমপক্ষে ১ হতে হবে',
-          'Return quantity must be at least 1',
-          400
-        );
-      }
+      // A return must be expressible in the same unit the sale was, so this
+      // resolves the unit from the PRODUCT and not from a client-supplied
+      // field. A 0.5 kg return against a 2 kg sale is valid; a 0.5 piece return
+      // is refused by `parseQuantity` because 'piece' is `decimals: 0`.
+      //
+      // `returnProduct` may be null for a product deleted since the sale — the
+      // sale item itself is the source of truth for what may be returned, so a
+      // missing product falls back to the flag-off precision rather than
+      // blocking the refund.
+      const returnProduct = returnProductMap.get(String(saleItem.product));
+      returnItem.quantity = parseQuantity(
+        returnItem.quantity,
+        quantityUnit(req, returnProduct),
+        { label: saleItem.productName }
+      );
 
       if (returnItem.quantity > maxReturnable) {
         throw new AppError(
@@ -136,9 +174,12 @@ class SalesReturnService {
       const invoiceDiscountShare = getInvoiceDiscountShareForItem(sale, saleItem);
       const perUnitInvoiceDiscount = saleItem.quantity > 0 ? invoiceDiscountShare / saleItem.quantity : 0;
       const itemReturnInvoiceDiscount = perUnitInvoiceDiscount * returnItem.quantity;
-      const itemReturnDiscount = itemReturnItemDiscount + itemReturnInvoiceDiscount;
-      const itemReturnTotal = (saleItem.unitPrice * returnItem.quantity) - itemReturnDiscount;
-      const itemProfitLoss = ((saleItem.unitPrice - (saleItem.buyingPrice || 0)) * returnItem.quantity) - itemReturnDiscount;
+      // Rounded to paisa. Every term above is a division by `saleItem.quantity`,
+      // which may now be fractional — 1000/3 is 333.33333333333337, and an
+      // unrounded refund total lands on the invoice and in the cash register.
+      const itemReturnDiscount = quantizeMoney(itemReturnItemDiscount + itemReturnInvoiceDiscount);
+      const itemReturnTotal = quantizeMoney((saleItem.unitPrice * returnItem.quantity) - itemReturnDiscount);
+      const itemProfitLoss = quantizeMoney(((saleItem.unitPrice - (saleItem.buyingPrice || 0)) * returnItem.quantity) - itemReturnDiscount);
 
       processedItems.push({
         saleItemId: saleItem._id,
@@ -157,8 +198,8 @@ class SalesReturnService {
         reason: returnItem.reason || reason || '',
       });
 
-      totalRefundAmount += itemReturnTotal;
-      totalProfitReduction += itemProfitLoss;
+      totalRefundAmount = quantizeMoney(totalRefundAmount + itemReturnTotal);
+      totalProfitReduction = quantizeMoney(totalProfitReduction + itemProfitLoss);
     }
 
     // 6. Generate return number
@@ -190,19 +231,26 @@ class SalesReturnService {
       if (product) {
         let previousStock, newStock;
         {
+          const stkUnit = storageUnit(product);
           if (item.variantId && product.hasVariants) {
             const variant = (product.variants && typeof product.variants.id === 'function')
               ? product.variants.id(item.variantId)
               : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
             if (variant) {
               previousStock = variant.stock;
-              variant.stock += item.quantity;
+              variant.stock = quantize(variant.stock + item.quantity, stkUnit);
               newStock = variant.stock;
             }
-            product.stock = product.variants.reduce((sum, v) => sum + v.stock, 0);
+            // Rolled-up total across variants — also quantized, or summing a
+            // dozen 3-decimal variant stocks reintroduces the drift the
+            // individual writes just eliminated.
+            product.stock = quantize(
+              product.variants.reduce((sum, v) => quantize(sum + v.stock, stkUnit), 0),
+              stkUnit
+            );
           } else {
             previousStock = product.stock;
-            product.stock += item.quantity;
+            product.stock = quantize(product.stock + item.quantity, stkUnit);
             newStock = product.stock;
           }
           await product.save(sessionOpt);

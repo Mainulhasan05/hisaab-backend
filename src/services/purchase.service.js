@@ -8,6 +8,13 @@ const { AppError } = require('../middleware/error.middleware');
 const { branchFilter, requireBranch } = require('../utils/branchScope.util');
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
+const {
+  parseQuantity,
+  quantityUnit,
+  storageUnit,
+  quantize,
+  quantizeMoney,
+} = require('../utils/quantity.util');
 
 class PurchaseService {
   // Get all purchases with filtering and pagination
@@ -141,17 +148,23 @@ class PurchaseService {
         );
       }
 
-      const quantity = parseInt(item.quantity);
+      // `parseInt` used to live here, which is what made purchases integer-only.
+      // `parseQuantity` keeps that behaviour exactly for any shop without the
+      // packaging flag — `quantityUnit` hands it 'piece' (decimals: 0), which
+      // refuses fractions outright rather than truncating them. It also rejects
+      // negatives, non-numbers and values past the safe-precision ceiling, all
+      // of which `parseInt` let through (`parseInt('12abc')` is 12).
+      //
+      // The purchase UI's "5 sacks x 20 kg" helper multiplies on the CLIENT and
+      // posts the product of the two. Nothing about the pack size is stored or
+      // sent — by the time a quantity reaches here it is already expressed in
+      // the product's own unit, which is the whole reason this service needs no
+      // packaging concept at all.
+      const quantity = parseQuantity(item.quantity, quantityUnit(req, product), {
+        label: product.name,
+      });
       const unitPrice = parseFloat(item.unitPrice);
-      const itemTotal = quantity * unitPrice;
-
-      if (quantity <= 0) {
-        throw new AppError(
-          `"${product.name}" এর পরিমাণ কমপক্ষে ১ হতে হবে`,
-          'Quantity must be at least 1',
-          400
-        );
-      }
+      const itemTotal = quantizeMoney(quantity * unitPrice);
 
       preparedItems.push({
         product: product._id,
@@ -164,7 +177,7 @@ class PurchaseService {
         total: itemTotal,
       });
 
-      totalAmount += itemTotal;
+      totalAmount = quantizeMoney(totalAmount + itemTotal);
     }
 
     // Generate invoice number
@@ -205,16 +218,23 @@ class PurchaseService {
           ? getVariantStock(product, item.variantId)
           : product.stock;
 
-        // Update stock
+        // Update stock.
+        //
+        // This path uses `product.save()` rather than the atomic bulkWrite the
+        // sale path uses, so there is no `$round` pipeline to lean on — the
+        // rounding has to happen here, in JS, at the product's own precision.
+        // Without it, receiving 12.5 kg onto 99.9 kg of stock stores
+        // 112.39999999999999.
+        const stkUnit = storageUnit(product);
         if (item.variantId && product.hasVariants) {
           const variant = (product.variants && typeof product.variants.id === 'function')
             ? product.variants.id(item.variantId)
             : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
           if (variant) {
-            variant.stock += item.quantity;
+            variant.stock = quantize(variant.stock + item.quantity, stkUnit);
           }
         } else {
-          product.stock += item.quantity;
+          product.stock = quantize(product.stock + item.quantity, stkUnit);
         }
         await product.save(sessionOpt);
 
@@ -332,15 +352,20 @@ class PurchaseService {
         ? getVariantStock(product, item.variantId)
         : product.stock;
 
+      // Flag-independent, like every other reversal path: what was received
+      // must be removable at the same precision even if packaging was later
+      // switched off for this shop.
+      const stkUnit = storageUnit(product);
+
       if (item.variantId && product.hasVariants) {
         const variant = (product.variants && typeof product.variants.id === 'function')
           ? product.variants.id(item.variantId)
           : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
         if (variant) {
-          variant.stock = Math.max(0, variant.stock - item.quantity);
+          variant.stock = quantize(Math.max(0, variant.stock - item.quantity), stkUnit);
         }
       } else {
-        product.stock = Math.max(0, product.stock - item.quantity);
+        product.stock = quantize(Math.max(0, product.stock - item.quantity), stkUnit);
       }
       await product.save();
 

@@ -6,6 +6,14 @@ const { AppError } = require('../middleware/error.middleware');
 const mongoose = require('mongoose');
 const { branchFilter, branchMatch, requireBranch } = require('../utils/branchScope.util');
 const logger = require('../utils/logger.util');
+const {
+  parseQuantity,
+  quantityUnit,
+  storageUnit,
+  quantize,
+} = require('../utils/quantity.util');
+const { unitsForShop, DEFAULT_UNIT } = require('../config/units');
+const { hasFeature } = require('../utils/features.util');
 const cacheService = require('./cache.service');
 
 // Escape user input before embedding it in a $regex (prevents regex injection/ReDoS)
@@ -288,8 +296,37 @@ class ProductService {
   }
 
   // Create new product
+  /**
+   * Reject a unit this shop is not entitled to choose.
+   *
+   * The Product schema's enum deliberately accepts the FULL registry (an
+   * existing product must stay saveable if an admin turns packaging back off),
+   * so entitlement has to be enforced here, on the write path, where the
+   * request's flag is known.
+   *
+   * Without the flag the answer is the original 13 units — the same list the
+   * dropdown offers — so a hand-crafted POST cannot smuggle in `maund` and
+   * leave the shop with a quantity the rest of their UI cannot interpret.
+   *
+   * @param {Object|null} req
+   * @param {string|undefined} unit  absent/empty is fine; the schema defaults it
+   */
+  _assertUnitAllowed(req, unit) {
+    if (!unit) return;
+    const allowed = unitsForShop(hasFeature(req, 'packaging'));
+    if (!allowed.includes(unit)) {
+      throw new AppError(
+        `Unit "${unit}" is not available for this shop`,
+        'এই এককটি আপনার দোকানের জন্য চালু নেই',
+        400
+      );
+    }
+  }
+
   async createProduct(shopId, userId, productData, req = null) {
     const { code, name, category, variants, ...rest } = productData;
+
+    this._assertUnitAllowed(req, rest.unit);
 
     // Code uniqueness is per branch — the same code in another branch is a
     // different product, which is the whole point of per-branch catalogues.
@@ -350,6 +387,14 @@ class ProductService {
     }
 
     const beforeData = product.toObject();
+
+    this._assertUnitAllowed(req, updateData.unit);
+
+    // Changing the unit does NOT convert the stored stock — 100 (kg) becoming
+    // 100 (gram) is a data-entry correction, not a x1000 conversion, and
+    // guessing wrong silently revalues the whole inventory. The UI warns and
+    // asks for a recount instead. If you are tempted to add a conversion here,
+    // read AGENT_WORKFLOW.md §13 first.
 
     // Separate stock from other update data so we can handle it via updateStock
     const { stock, variants: variantsWithStock, ...safeUpdateData } = updateData;
@@ -564,6 +609,16 @@ class ProductService {
     if (req) requireBranch(req);
     const branchId = product.branch || null;
 
+    // Manual adjustment is the one path where a shopkeeper types a stock figure
+    // directly ("recount: 12.5 kg"), so it is also the one where an unvalidated
+    // fraction would land in the database unrounded. `allowZero` because
+    // `type: 'set'` legitimately zeroes a product out.
+    const qty = parseQuantity(quantity, quantityUnit(req, product), {
+      label: product.name,
+      allowZero: true,
+    });
+    const stkUnit = storageUnit(product);
+
     {
       if (variantId) {
         // Update variant stock
@@ -575,22 +630,22 @@ class ProductService {
         }
         previousStock = variant.stock;
         if (type === 'set') {
-          variant.stock = quantity;
+          variant.stock = qty;
         } else if (type === 'subtract') {
-          variant.stock = variant.stock - quantity;
+          variant.stock = quantize(variant.stock - qty, stkUnit);
         } else {
-          variant.stock = variant.stock + quantity;
+          variant.stock = quantize(variant.stock + qty, stkUnit);
         }
         newStock = variant.stock;
       } else {
         // Update main product stock
         previousStock = product.stock;
         if (type === 'set') {
-          product.stock = quantity;
+          product.stock = qty;
         } else if (type === 'subtract') {
-          product.stock = product.stock - quantity;
+          product.stock = quantize(product.stock - qty, stkUnit);
         } else {
-          product.stock = product.stock + quantity;
+          product.stock = quantize(product.stock + qty, stkUnit);
         }
         newStock = product.stock;
       }
@@ -605,8 +660,8 @@ class ProductService {
       productName: product.name,
       productCode: product.code,
       variantId: variantId || null,
-      type: type === 'set' ? 'adjustment' : (quantity > 0 ? 'purchase' : 'adjustment'),
-      quantity: type === 'set' ? newStock - previousStock : quantity,
+      type: type === 'set' ? 'adjustment' : (qty > 0 ? 'purchase' : 'adjustment'),
+      quantity: type === 'set' ? quantize(newStock - previousStock, stkUnit) : qty,
       previousStock,
       newStock,
       reference: {

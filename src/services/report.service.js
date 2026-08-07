@@ -14,8 +14,35 @@ const mongoose = require('mongoose');
 const cacheService = require('./cache.service');
 const { KEYS, getTTL } = require('../config/cacheKeys');
 const { isBranchCustomerScope } = require('../utils/branchScope.util');
+const { quantizeMoney } = require('../utils/quantity.util');
+const { MAX_DECIMALS } = require('../config/units');
 // Safe direction: customer.service depends on models only, never on reports.
 const customerService = require('./customer.service');
+
+/**
+ * Snap an aggregated quantity to the registry's maximum precision.
+ *
+ * Reports `$sum` quantities ACROSS products, so there is no single unit to
+ * round at — MAX_DECIMALS is the correct ceiling: it is the finest precision
+ * any unit is allowed, so rounding there can never coarsen a real value while
+ * still clearing the float residue that summing fractions leaves behind
+ * (12 x 0.1 sums to 1.1102230246251565e-16 over 1.2).
+ *
+ * Money uses `quantizeMoney` (2 dp); this is for quantities only.
+ */
+const roundReportQty = (value) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  const factor = Math.pow(10, MAX_DECIMALS);
+  return Math.round(num * factor) / factor;
+};
+
+/**
+ * Aggregation stage that applies the same snap server-side, for pipelines whose
+ * `$group` output is sorted and returned without passing through JS. Must come
+ * AFTER the `$group` — `$round` cannot wrap a `$sum` accumulator in place.
+ */
+const roundQtyStage = { $set: { totalQuantity: { $round: ['$totalQuantity', MAX_DECIMALS] } } };
 
 // Products are per-branch documents, so a report's product scope is just the
 // shop plus the optional branch — no join to a separate stock collection.
@@ -220,6 +247,7 @@ class ReportService {
             totalRevenue: { $sum: '$items.total' },
           },
         },
+        roundQtyStage,
         { $sort: { totalQuantity: -1 } },
         { $limit: 5 },
       ]),
@@ -414,6 +442,7 @@ class ReportService {
           salesCount: { $sum: 1 },
         },
       },
+      roundQtyStage,
       { $sort: { totalQuantity: -1 } },
       { $limit: 20 },
     ]);
@@ -752,6 +781,7 @@ class ReportService {
             totalRevenue: { $sum: '$items.total' },
           },
         },
+        roundQtyStage,
         { $sort: { totalQuantity: -1 } },
         { $limit: 10 },
       ]),
@@ -1327,6 +1357,7 @@ class ReportService {
             salesCount: { $sum: 1 },
           },
         },
+        roundQtyStage,
         { $sort: { totalRevenue: -1 } },
       ]),
 
@@ -1347,6 +1378,7 @@ class ReportService {
             totalRevenue: { $sum: '$items.total' },
           },
         },
+        roundQtyStage,
       ]),
     ]);
 
@@ -1377,11 +1409,13 @@ class ReportService {
       return {
         productId: curr._id,
         productName: curr.productName,
-        currentPeriodQty: curr.totalQuantity,
+        currentPeriodQty: roundReportQty(curr.totalQuantity),
         previousPeriodQty: prevQty,
         currentRevenue: curr.totalRevenue,
         previousRevenue: prevRevenue,
         growthPercent: Math.round(growthPercent),
+        // Already rounded to 1 dp — divisions like 100/3 are exactly where a
+        // "৩৩.৩৩৩৩৩৩৩৩৩৩৩" reaches the screen.
         velocity: Math.round((curr.totalQuantity / period) * 10) / 10,
         salesCount: curr.salesCount,
         trend,
@@ -1396,7 +1430,7 @@ class ReportService {
         productId: prev._id,
         productName: prev.productName,
         currentPeriodQty: 0,
-        previousPeriodQty: prev.totalQuantity,
+        previousPeriodQty: roundReportQty(prev.totalQuantity),
         currentRevenue: 0,
         previousRevenue: prev.totalRevenue,
         growthPercent: -100,
@@ -1658,7 +1692,7 @@ class ReportService {
       }
 
       grandTotalRevenue += item.totalRevenue || 0;
-      grandTotalQuantity += item.quantitySold || 0;
+      grandTotalQuantity = roundReportQty(grandTotalQuantity + (item.quantitySold || 0));
       grandTotalProfit += item.totalProfit || 0;
 
       const flatRecord = {
@@ -1669,8 +1703,15 @@ class ReportService {
         date: item.date,
         productId: item.product,
         productName: item.productName,
-        quantitySold: item.quantitySold,
-        unitPrice: Math.round(item.unitPrice || 0),
+        // `quantitySold` is a $sum over possibly-fractional item quantities, so
+        // it needs the same snap every other quantity gets — a raw sum reaches
+        // the CSV export as 12.000000000000002.
+        quantitySold: roundReportQty(item.quantitySold),
+        // Paisa, NOT whole taka. This was `Math.round`, which is correct only
+        // while every unit price is a whole number of taka. Once a shop sells
+        // by the piece or the gram, a ৳0.50 unit price reported as ৳1 (or ৳0)
+        // makes the product report disagree with the invoices it summarises.
+        unitPrice: quantizeMoney(item.unitPrice || 0),
         totalRevenue: Math.round(item.totalRevenue || 0),
         totalProfit: Math.round(item.totalProfit || 0),
         invoiceCount: item.invoiceCount,
@@ -1698,7 +1739,7 @@ class ReportService {
 
       const staffNode = staffMap.get(sIdStr);
       staffNode.totalRevenue += item.totalRevenue || 0;
-      staffNode.totalQuantity += item.quantitySold || 0;
+      staffNode.totalQuantity = roundReportQty(staffNode.totalQuantity + (item.quantitySold || 0));
       staffNode.totalProfit += item.totalProfit || 0;
 
       if (!staffNode.datesMap.has(item.date)) {
@@ -1713,14 +1754,14 @@ class ReportService {
 
       const dateNode = staffNode.datesMap.get(item.date);
       dateNode.totalRevenue += item.totalRevenue || 0;
-      dateNode.totalQuantity += item.quantitySold || 0;
+      dateNode.totalQuantity = roundReportQty(dateNode.totalQuantity + (item.quantitySold || 0));
       dateNode.totalProfit += item.totalProfit || 0;
 
       dateNode.products.push({
         productId: item.product,
         productName: item.productName,
-        quantitySold: item.quantitySold,
-        unitPrice: Math.round(item.unitPrice || 0),
+        quantitySold: roundReportQty(item.quantitySold),
+        unitPrice: quantizeMoney(item.unitPrice || 0),
         totalRevenue: Math.round(item.totalRevenue || 0),
         totalProfit: Math.round(item.totalProfit || 0),
         invoiceCount: item.invoiceCount,
@@ -1746,7 +1787,7 @@ class ReportService {
       summary: {
         totalStaff: staffDetails.length,
         totalRevenue: Math.round(grandTotalRevenue),
-        totalQuantity: grandTotalQuantity,
+        totalQuantity: roundReportQty(grandTotalQuantity),
         totalProfit: Math.round(grandTotalProfit),
       },
       startDate: startDate || null,

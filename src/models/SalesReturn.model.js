@@ -27,10 +27,13 @@ const returnItemSchema = new mongoose.Schema({
   variantAttributes: {
     type: mongoose.Schema.Types.Mixed
   },
+  // 0-exclusive rather than `min: 1` — fractional units (kg / litre / yard).
+  // The flag-and-unit-aware refusal lives in `parseQuantity`; schema bounds are
+  // the floor, not the policy. See AGENT_WORKFLOW.md I-6.
   quantity: {
     type: Number,
     required: [true, 'ফেরতের পরিমাণ দিন'],
-    min: [1, 'পরিমাণ কমপক্ষে ১ হতে হবে']
+    min: [0.001, 'পরিমাণ ০ এর বেশি হতে হবে']
   },
   unitPrice: {
     type: Number,

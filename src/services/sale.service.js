@@ -12,6 +12,15 @@ const cacheService = require('./cache.service');
 const { branchFilter, requireBranch, getBranchCode, wrongBranchError } = require('../utils/branchScope.util');
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
+const {
+  parseQuantity,
+  quantityUnit,
+  storageUnit,
+  quantize,
+  quantizeMoney,
+  buildStockUpdate,
+  buildVariantStockUpdate,
+} = require('../utils/quantity.util');
 
 // Bangladesh is UTC+6
 const BD_OFFSET_MS = 6 * 60 * 60 * 1000;
@@ -318,6 +327,26 @@ class SaleService {
         throw new AppError(`Product has been deleted: ${product.name}`, `পণ্যটি মুছে ফেলা হয়েছে, বিক্রি করা যাবে না: ${product.name}`, 400);
       }
 
+      // Normalise the quantity against the product's own unit BEFORE anything
+      // reads it. Mutating `item` is deliberate: `item.quantity` is read in a
+      // dozen places below (stock guard, batch FEFO, line total, the stored
+      // sale item), and normalising at each of them is how one gets missed.
+      //
+      // Without the packaging flag this is a pure integer round-trip — the
+      // product's unit is one of the legacy 13, all of which are `decimals: 0`
+      // except the weight/length ones, and a shop that never enabled the
+      // feature has only ever been able to store integers in them anyway. So
+      // the value passes through unchanged. See AGENT_WORKFLOW.md I-6.
+      //
+      // `quantize` is idempotent, so an idempotency-key replay that re-enters
+      // this loop with the same payload produces the same numbers.
+      // `qtyUnit` gates what the CLIENT may send (flag-dependent).
+      // `stkUnit` gates how the STORED number is rounded (data-dependent).
+      // They are not interchangeable — see the block comment in quantity.util.js.
+      const qtyUnit = quantityUnit(req, product);
+      const stkUnit = storageUnit(product);
+      item.quantity = parseQuantity(item.quantity, qtyUnit, { label: product.name });
+
       let unitPrice, buyingPrice, variantInfo = {};
 
       if (item.variantId) {
@@ -346,15 +375,28 @@ class SaleService {
         };
 
         const previousStock = variant.stock;
-        // Track stock change in memory for validation of subsequent items of same product
-        variant.stock -= item.quantity;
+        // Track stock change in memory for validation of subsequent items of the
+        // same product. Quantized for the same reason the DB write is: a cart
+        // with the same fractional item on several lines would otherwise drift
+        // in memory and mis-report `newStock` on the stock transaction.
+        variant.stock = quantize(variant.stock - item.quantity, stkUnit);
 
         {
-          // Queue bulkWrite operation for variant stock with atomic $gte guard
+          // Queue bulkWrite operation for variant stock with atomic $gte guard.
+          //
+          // The FILTER is unchanged and must stay that way — the `$gte` inside
+          // `$elemMatch` is what makes two concurrent cashiers safe, and the
+          // `modifiedCount < expectedStockOps` check below is what turns a lost
+          // race into a 409 instead of oversold stock.
+          //
+          // Only the UPDATE varies: integer units keep the positional `$inc`
+          // byte for byte; fractional units get a `$map` pipeline that re-rounds
+          // in the same atomic operation (a pipeline update has no positional
+          // `$`). See utils/quantity.util.js.
           bulkStockOps.push({
             updateOne: {
               filter: { _id: product._id, variants: { $elemMatch: { _id: variant._id, stock: { $gte: item.quantity } } } },
-              update: { $inc: { 'variants.$.stock': -item.quantity } },
+              update: buildVariantStockUpdate(variant._id, -item.quantity, stkUnit),
             },
           });
           expectedStockOps++;
@@ -395,15 +437,18 @@ class SaleService {
         buyingPrice = product.buyingPrice || 0;
 
         const previousStock = product.stock;
-        // Track stock change in memory for validation of subsequent items of same product
-        product.stock -= item.quantity;
+        // Track stock change in memory for validation of subsequent items of the
+        // same product — quantized, see the variant branch above.
+        product.stock = quantize(product.stock - item.quantity, stkUnit);
 
         {
-          // Queue bulkWrite operation for product stock with atomic $gte guard
+          // Queue bulkWrite operation for product stock with atomic $gte guard.
+          // Filter unchanged (see the variant branch above); only the update
+          // shape varies by unit precision.
           bulkStockOps.push({
             updateOne: {
               filter: { _id: product._id, stock: { $gte: item.quantity } },
-              update: { $inc: { stock: -item.quantity } },
+              update: buildStockUpdate(-item.quantity, stkUnit),
             },
           });
           expectedStockOps++;
@@ -454,7 +499,10 @@ class SaleService {
       }
 
       const itemDiscount = item.discount || 0;
-      const itemTotal = (unitPrice * item.quantity) - itemDiscount;
+      // Rounded to paisa: with a fractional quantity `unitPrice x quantity` no
+      // longer lands on a whole taka (70 x 0.333 = 23.310000000000002), and an
+      // unrounded line total propagates into subtotal, profit and the invoice.
+      const itemTotal = quantizeMoney((unitPrice * item.quantity) - itemDiscount);
 
       // Update totalPrice in the last queued stock transaction
       stockTransactions[stockTransactions.length - 1].totalPrice = itemTotal;
@@ -781,29 +829,35 @@ class SaleService {
       let previousStock = 0;
       let newStock = 0;
 
+      // Restore rounds at the PRODUCT's precision, not the request's: this path
+      // takes no `req`, and a shop whose packaging flag was switched off after
+      // the sale must still put back exactly what was taken out. `storageUnit`
+      // is flag-independent for precisely this reason.
+      const stkUnit = storageUnit(product);
+
       if (item.variantId) {
         const variant = (product.variants && typeof product.variants.id === 'function')
           ? product.variants.id(item.variantId)
           : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
         previousStock = variant?.stock || 0;
-        newStock = previousStock + item.quantity;
+        newStock = quantize(previousStock + item.quantity, stkUnit);
         if (variant) variant.stock = newStock;
 
         restoreOps.push({
           updateOne: {
             filter: { _id: product._id, 'variants._id': item.variantId },
-            update: { $inc: { 'variants.$.stock': item.quantity } },
+            update: buildVariantStockUpdate(item.variantId, item.quantity, stkUnit),
           },
         });
       } else {
         previousStock = product.stock || 0;
-        newStock = previousStock + item.quantity;
+        newStock = quantize(previousStock + item.quantity, stkUnit);
         product.stock = newStock;
 
         restoreOps.push({
           updateOne: {
             filter: { _id: product._id },
-            update: { $inc: { stock: item.quantity } },
+            update: buildStockUpdate(item.quantity, stkUnit),
           },
         });
       }
