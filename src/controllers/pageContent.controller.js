@@ -2,6 +2,7 @@ const PageContent = require('../models/PageContent.model');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 const { AppError } = require('../middleware/error.middleware');
+const { refuseDeletion } = require('../utils/deletionDisabled.util');
 
 // Get page by slug (public)
 exports.getPageBySlug = asyncHandler(async (req, res) => {
@@ -113,28 +114,12 @@ exports.createPage = asyncHandler(async (req, res) => {
   });
 });
 
-// Delete page (admin only)
-exports.deletePage = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-
-  const page = await PageContent.findById(id);
-
-  if (!page) {
-    throw new AppError('পেজ পাওয়া যায়নি', 'Page not found', 404);
-  }
-
-  // Prevent deleting core pages
-  const corePages = ['privacy-policy', 'terms-of-service', 'refund-policy', 'about-us'];
-  if (corePages.includes(page.slug)) {
-    throw new AppError('এই পেজ মুছে ফেলা যাবে না', 'Cannot delete core pages', 400);
-  }
-
-  await PageContent.findByIdAndDelete(id);
-
-  return ApiResponse.success(res, {
-    message: 'Page deleted successfully',
-    messageBn: 'পেজ মুছে ফেলা হয়েছে',
-  });
+// Delete page — DISABLED. Route is not mounted; this fails closed if it ever is.
+exports.deletePage = asyncHandler(async () => {
+  refuseDeletion(
+    'a page',
+    'Unpublish it instead: PATCH /api/pages/:id with { isActive: false }.'
+  );
 });
 
 // Seed default pages (admin only)

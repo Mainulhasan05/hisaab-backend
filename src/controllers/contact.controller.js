@@ -2,6 +2,7 @@ const Contact = require('../models/Contact.model');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 const { AppError } = require('../middleware/error.middleware');
+const { refuseDeletion } = require('../utils/deletionDisabled.util');
 
 // Rate limit config
 const RATE_LIMIT_MAX = 2; // Max submissions
@@ -163,18 +164,12 @@ exports.updateContactStatus = asyncHandler(async (req, res) => {
   });
 });
 
-// Delete contact (admin only)
-exports.deleteContact = asyncHandler(async (req, res) => {
-  const contact = await Contact.findByIdAndDelete(req.params.id);
-
-  if (!contact) {
-    throw new AppError('যোগাযোগ পাওয়া যায়নি', 'Contact not found', 404);
-  }
-
-  return ApiResponse.success(res, {
-    message: 'Contact deleted successfully',
-    messageBn: 'যোগাযোগ মুছে ফেলা হয়েছে',
-  });
+// Delete contact — DISABLED. Route is not mounted; this fails closed if it ever is.
+exports.deleteContact = asyncHandler(async () => {
+  refuseDeletion(
+    'a contact message',
+    "Close it instead: PATCH /api/contact/:id with { status: 'closed' }."
+  );
 });
 
 // Get contact stats (admin only)

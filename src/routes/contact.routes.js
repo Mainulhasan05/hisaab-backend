@@ -11,6 +11,6 @@ router.get('/', protect, adminOnly, contactController.getContacts);
 router.get('/stats', protect, adminOnly, contactController.getContactStats);
 router.get('/:id', protect, adminOnly, contactController.getContact);
 router.patch('/:id', protect, adminOnly, contactController.updateContactStatus);
-router.delete('/:id', protect, adminOnly, contactController.deleteContact);
+// No DELETE — retire a message with PATCH { status: 'closed' }.
 
 module.exports = router;

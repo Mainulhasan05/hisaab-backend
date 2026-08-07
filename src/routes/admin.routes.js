@@ -29,8 +29,12 @@ router.post('/shops/:id/disable-multi-branch', adminController.disableMultiBranc
 router.get('/shops/:id/branches', adminController.getShopBranches);
 router.post('/shops/:id/branches', adminController.addShopBranch);
 router.patch('/shops/:id/branches/:branchId', adminController.updateShopBranch);
+// Deactivation, not deletion — flips isActive after an impact check.
 router.delete('/shops/:id/branches/:branchId', adminController.deleteShopBranch);
-router.delete('/shops/:id', adminController.purgeShop);
+
+// DELETE /shops/:id (purgeShop) is deliberately NOT mounted. Hard deletion is
+// disabled panel-wide and returns later behind step-up auth; suspend the shop
+// via PATCH /shops/:id/status instead. See utils/deletionDisabled.util.js.
 
 // Users (all shops) — list + impersonation
 router.get('/users', adminController.getAllUsers);
@@ -82,13 +86,13 @@ router.get('/shop-categories', shopCategoryController.getAllShopCategories);
 router.get('/shop-categories/:id', shopCategoryController.getShopCategoryById);
 router.post('/shop-categories', shopCategoryController.createShopCategory);
 router.put('/shop-categories/:id', shopCategoryController.updateShopCategory);
-router.delete('/shop-categories/:id', shopCategoryController.deleteShopCategory);
+// No DELETE — retire a category with PUT { isActive: false }.
 
 // Gemini AI Keys Management & Usage Tracking (Admin)
 router.get('/gemini-keys', geminiKeyController.getAllKeys);
 router.post('/gemini-keys', geminiKeyController.createKey);
 router.put('/gemini-keys/:id', geminiKeyController.updateKey);
-router.delete('/gemini-keys/:id', geminiKeyController.deleteKey);
+// No DELETE — retire a key with PUT { isActive: false }.
 router.post('/gemini-keys/:id/test', geminiKeyController.testKey);
 router.post('/gemini-keys/:id/reset', geminiKeyController.resetUsage);
 router.post('/gemini-keys/test-prompt', geminiKeyController.testPrompt);

@@ -2,6 +2,7 @@ const GeminiKey = require('../models/GeminiKey.model');
 const geminiService = require('../services/gemini.service');
 const ApiResponse = require('../utils/response.util');
 const { asyncHandler } = require('../middleware/error.middleware');
+const { refuseDeletion } = require('../utils/deletionDisabled.util');
 
 /**
  * Admin: Get all Gemini API keys with usage stats
@@ -133,15 +134,14 @@ exports.updateKey = asyncHandler(async (req, res) => {
 });
 
 /**
- * Admin: Delete Gemini Key
+ * Admin: Delete Gemini Key — DISABLED.
+ * Route is not mounted; this fails closed if it ever is.
  */
-exports.deleteKey = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const keyDoc = await GeminiKey.findByIdAndDelete(id);
-  if (!keyDoc) {
-    return ApiResponse.notFound(res, 'Gemini Key পাওয়া যায়নি');
-  }
-  return ApiResponse.success(res, { message: 'Gemini Key মুছে ফেলা হয়েছে' });
+exports.deleteKey = asyncHandler(async () => {
+  refuseDeletion(
+    'a Gemini key',
+    'Retire it instead: PUT /api/admin/gemini-keys/:id with { isActive: false }.'
+  );
 });
 
 /**

@@ -1,6 +1,7 @@
 const ShopCategory = require('../models/ShopCategory.model');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
+const { refuseDeletion } = require('../utils/deletionDisabled.util');
 
 
 
@@ -135,15 +136,10 @@ exports.updateShopCategory = asyncHandler(async (req, res) => {
 /**
  * Admin: Delete shop category
  */
-exports.deleteShopCategory = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-
-  const category = await ShopCategory.findByIdAndDelete(id);
-  if (!category) {
-    return ApiResponse.notFound(res, 'Shop category not found');
-  }
-
-  return ApiResponse.success(res, {
-    message: 'Shop category deleted successfully'
-  });
+// Disabled. Route is not mounted; this fails closed if it ever is.
+exports.deleteShopCategory = asyncHandler(async () => {
+  refuseDeletion(
+    'a shop category',
+    'Retire it instead: PUT /api/admin/shop-categories/:id with { isActive: false }.'
+  );
 });

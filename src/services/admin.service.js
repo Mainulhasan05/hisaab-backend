@@ -21,6 +21,7 @@ const jwt = require('jsonwebtoken');
 const { AppError } = require('../middleware/error.middleware');
 const cacheService = require('./cache.service');
 const { invalidateShopAuthCache, invalidateBranchCache } = require('../utils/authCache.util');
+const { refuseDeletion } = require('../utils/deletionDisabled.util');
 const { KEYS, getTTL } = require('../config/cacheKeys');
 
 class AdminService {
@@ -1169,52 +1170,25 @@ class AdminService {
     return shop;
   }
 
-  // Completely delete/purge shop and all associated data
-  async purgeShop(adminId, shopId) {
-    const shop = await Shop.findById(shopId);
-    if (!shop) {
-      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
-    }
-
-    const shopObjectId = new mongoose.Types.ObjectId(shopId);
-
-    const models = [
-      { name: 'Product', model: require('../models/Product.model') },
-      { name: 'Sale', model: require('../models/Sale.model') },
-      { name: 'SalesReturn', model: require('../models/SalesReturn.model') },
-      { name: 'Customer', model: require('../models/Customer.model') },
-      { name: 'Supplier', model: require('../models/Supplier.model') },
-      { name: 'Expense', model: require('../models/Expense.model') },
-      { name: 'Purchase', model: require('../models/Purchase.model') },
-      { name: 'CashRegister', model: require('../models/CashRegister.model') },
-      { name: 'Category', model: require('../models/Category.model') },
-      { name: 'Branch', model: require('../models/Branch.model') },
-      { name: 'Role', model: require('../models/Role.model') },
-      { name: 'AuditLog', model: require('../models/AuditLog.model') },
-      { name: 'SMSLog', model: require('../models/SMSLog.model') },
-      { name: 'SMSQuota', model: require('../models/SMSQuota.model') },
-      { name: 'User', model: require('../models/User.model') },
-    ];
-
-    const stats = {};
-    for (const m of models) {
-      const res = await m.model.deleteMany({ shop: shopObjectId });
-      stats[m.name] = res.deletedCount;
-    }
-
-    await Shop.findByIdAndDelete(shopId);
-
-    // Create audit log for admin
-    await AuditLog.create({
-      admin: adminId,
-      action: 'shop_purge',
-      actionBn: 'দোকান ও সম্পূর্ণ তথ্য মুছে ফেলা হয়েছে',
-      description: `Shop ${shop.name} (${shopId}) and all associated data purged completely.`,
-      descriptionBn: `${shop.name} এবং এর সমস্ত ডাটা চিরতরে মুছে ফেলা হয়েছে।`,
-      metadata: { stats },
-    });
-
-    return { shopId, name: shop.name, stats };
+  /**
+   * Shop purge — DISABLED.
+   *
+   * The previous implementation looped `Model.deleteMany({ shop })` over 15
+   * models with `Product` first and `Sale` second. `immutableGuard` rejects
+   * `deleteMany` on Sale/Payment/Purchase/Expense with a 403, so the loop
+   * deleted the shop's entire product catalogue, threw on the second model, and
+   * left the shop, its sales, its users and everything else in place. It could
+   * never complete — it only ever destroyed the catalogue.
+   *
+   * It also never listed 7 collections that reference a shop, which is where
+   * Phase 0's 2,830 orphan rows came from.
+   *
+   * Hard deletion returns as its own piece of work behind step-up
+   * authentication. Until then: suspend the shop (`updateShopStatus`), which
+   * sets `isActive: false` and locks out every user of that shop immediately.
+   */
+  async purgeShop() {
+    refuseDeletion('a shop', 'Suspend it instead: PATCH /api/admin/shops/:id/status.');
   }
 
 

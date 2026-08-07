@@ -11,7 +11,7 @@ router.get('/', protect, adminOnly, pageContentController.getAllPages);
 router.get('/:id', protect, adminOnly, pageContentController.getPageForEdit);
 router.post('/', protect, adminOnly, pageContentController.createPage);
 router.patch('/:id', protect, adminOnly, pageContentController.updatePage);
-router.delete('/:id', protect, adminOnly, pageContentController.deletePage);
+// No DELETE — unpublish a page with PATCH { isActive: false }.
 router.post('/seed', protect, adminOnly, pageContentController.seedDefaultPages);
 
 module.exports = router;

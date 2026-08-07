@@ -2,6 +2,7 @@ const adminService = require('../services/admin.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 const { setAdminTokenCookie, clearAdminTokenCookie, clearUserTokenCookie } = require('../utils/cookie.util');
+const { refuseDeletion } = require('../utils/deletionDisabled.util');
 
 // Admin login
 exports.login = asyncHandler(async (req, res) => {
@@ -400,14 +401,9 @@ exports.deleteShopBranch = asyncHandler(async (req, res) => {
   });
 });
 
-// Purge shop and all associated data completely
-exports.purgeShop = asyncHandler(async (req, res) => {
-  const result = await adminService.purgeShop(req.admin._id, req.params.id);
-  return ApiResponse.success(res, {
-    data: result,
-    message: 'Shop and all associated data purged successfully',
-    messageBn: 'দোকান এবং এর সমস্ত ডাটা চিরতরে মুছে ফেলা হয়েছে',
-  });
+// Shop purge — disabled. Route is not mounted; this fails closed if it ever is.
+exports.purgeShop = asyncHandler(async () => {
+  refuseDeletion('a shop', 'Suspend it instead: PATCH /api/admin/shops/:id/status.');
 });
 
 // Get all products across all shops
