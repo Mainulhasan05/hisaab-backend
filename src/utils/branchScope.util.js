@@ -142,6 +142,42 @@ function isMultiBranch(req) {
 }
 
 /**
+ * Whether this shop's branches share one customer book (Phase 7).
+ *
+ * Returns 'shop' or 'branch'. **Single-branch shops always get 'shop'**,
+ * whatever is stored — that is what keeps their customer pages, dues and
+ * reports byte-identical to before Phase 7 existed.
+ *
+ * Anything other than an explicit 'shop' reads as 'branch'. The default fails
+ * safe toward separation: a shop whose flag is missing keeps its branches'
+ * customers apart rather than silently pooling them, which is the direction
+ * that cannot leak one branch's customer list into another.
+ *
+ * @param {Object} req
+ * @returns {'shop'|'branch'}
+ */
+function customerScope(req) {
+  if (!req?.shop?.multiBranchEnabled) return 'shop';
+  return req.shop.customerScope === 'shop' ? 'shop' : 'branch';
+}
+
+/**
+ * True when customers and dues are scoped to the active branch AND a branch is
+ * actually selected.
+ *
+ * An owner in All-Branches has no branch to scope to, and the sum across every
+ * branch is precisely the shop-wide rollup we never stopped maintaining — so
+ * the aggregate view correctly falls through to the shop-wide read path in both
+ * modes, with no special case anywhere.
+ *
+ * @param {Object} req
+ * @returns {boolean}
+ */
+function isBranchCustomerScope(req) {
+  return customerScope(req) === 'branch' && Boolean(req?.branchId);
+}
+
+/**
  * Branch code for invoice/reference numbering. Null for single-branch shops, so
  * their invoice numbers keep exactly today's shape.
  *
@@ -186,6 +222,8 @@ module.exports = {
   isActiveBranch,
   isAllBranchesView,
   isMultiBranch,
+  customerScope,
+  isBranchCustomerScope,
   getBranchCode,
   wrongBranchError,
   BRANCH_REQUIRED,

@@ -10,6 +10,13 @@ function canViewCost(req) {
   return perms?.products?.view_cost === true;
 }
 
+function canViewPurchaseCost(req) {
+  if (!req || !req.user) return false;
+  if (req.isAdmin || req.user.isOwner) return true;
+  const perms = req.user.permissions;
+  return perms?.purchases?.view_cost === true;
+}
+
 function canViewProfit(req) {
   if (!req || !req.user) return false;
   if (req.isAdmin || req.user.isOwner) return true;
@@ -82,6 +89,26 @@ function sanitizeSales(sales, req) {
   return sanitizeSaleDoc(sales, allowCost, allowProfit);
 }
 
+// Money fields on a purchase document, its line items, its payments and the
+// purchase summary. Scoped to the purchase endpoints only — `total`/`amount`
+// are far too generic to put in the global COST_KEYS strip.
+const PURCHASE_MONEY_KEYS = new Set([
+  'unitPrice', 'total', 'totalAmount', 'paid', 'due',
+  'totalPaid', 'totalDue', 'amount',
+]);
+
+/**
+ * Strip buying prices, invoice totals and dues from purchase payloads unless
+ * the requester holds purchases.view_cost. What survives — supplier, invoice
+ * no, date, status, quantities — still lets a stock handler confirm a delivery
+ * was recorded without learning what the shop paid for it.
+ */
+function sanitizePurchases(data, req) {
+  if (canViewPurchaseCost(req)) return data;
+  if (data === null || data === undefined) return data;
+  return stripKeysDeep(JSON.parse(JSON.stringify(data)), PURCHASE_MONEY_KEYS);
+}
+
 // Keys stripped when the user lacks the corresponding permission
 const PROFIT_KEYS = new Set([
   'profit', 'totalProfit', 'todayProfit', 'profitLoss', 'grossProfit',
@@ -130,10 +157,13 @@ function sanitizeReport(data, req) {
 module.exports = {
   canViewCost,
   canViewProfit,
+  canViewPurchaseCost,
   sanitizeProducts,
   sanitizeSales,
+  sanitizePurchases,
   sanitizeReport,
   stripKeysDeep,
   PROFIT_KEYS,
   COST_KEYS,
+  PURCHASE_MONEY_KEYS,
 };

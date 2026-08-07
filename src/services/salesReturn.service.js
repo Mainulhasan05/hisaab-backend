@@ -2,6 +2,7 @@ const SalesReturn = require('../models/SalesReturn.model');
 const Sale = require('../models/Sale.model');
 const Product = require('../models/Product.model');
 const Customer = require('../models/Customer.model');
+const CustomerBalance = require('../models/CustomerBalance.model');
 const Payment = require('../models/Payment.model');
 const StockTransaction = require('../models/StockTransaction.model');
 const AuditLog = require('../models/AuditLog.model');
@@ -302,6 +303,24 @@ class SalesReturnService {
           customer.totalDue = Math.max(0, customer.totalPurchases - customer.totalPaid);
           await customer.save(sessionOpt);
         }
+
+        // Same two steps, per branch. `recomputeDue` mirrors the Math.max clamp
+        // above rather than $inc-ing totalDue: an over-refunded customer clamps
+        // on one side, and clamping on only one of them is exactly how the two
+        // books silently drift apart. Returns are only allowed at the branch
+        // that made the sale (decision #10), so sale.branch is this branch.
+        await CustomerBalance.applyDelta({
+          shop: shopId,
+          customer: sale.customer,
+          branch: sale.branch,
+          purchases: -totalRefundAmount,
+          paid: -totalRefundAmount,
+        }, session);
+        await CustomerBalance.recomputeDue({
+          shop: shopId,
+          customer: sale.customer,
+          branch: sale.branch,
+        }, session);
       }
     } else if (refundMethod === 'adjustment' && sale.customer) {
       // Reduce customer's totalPurchases → recalc due
@@ -311,6 +330,18 @@ class SalesReturnService {
         customer.totalDue = Math.max(0, customer.totalPurchases - customer.totalPaid);
         await customer.save(sessionOpt);
       }
+
+      await CustomerBalance.applyDelta({
+        shop: shopId,
+        customer: sale.customer,
+        branch: sale.branch,
+        purchases: -totalRefundAmount,
+      }, session);
+      await CustomerBalance.recomputeDue({
+        shop: shopId,
+        customer: sale.customer,
+        branch: sale.branch,
+      }, session);
     }
     // store_credit: no financial changes, just recorded
 

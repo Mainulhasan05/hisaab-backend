@@ -1,6 +1,7 @@
 const Sale = require('../models/Sale.model');
 const Product = require('../models/Product.model');
 const Customer = require('../models/Customer.model');
+const CustomerBalance = require('../models/CustomerBalance.model');
 const Payment = require('../models/Payment.model');
 const User = require('../models/User.model');
 const StockTransaction = require('../models/StockTransaction.model');
@@ -61,19 +62,30 @@ class SaleService {
   }
 
   // Build query from filters (shared by getSales and getSalesSummary)
+  //
+  // Every id predicate is cast up front because this one object feeds BOTH
+  // `Sale.find()` (getSales) and `Sale.aggregate([{ $match }])`
+  // (getSalesSummary). `find` casts strings to ObjectId for you; `$match` does
+  // not — it compares the raw BSON type, so a string id silently matches zero
+  // documents. Uncast, the list showed the invoices and the stat cards above
+  // them read ৳0. Ids that are not valid ObjectIds are left untouched so
+  // Mongoose still raises its own CastError on the find path, exactly as before.
   _buildQuery(shopId, options = {}) {
     const { search, status, customerId, startDate, endDate, paymentMethod, branchId, isOnline, channel, staffId } = options;
 
-    const query = { shop: shopId };
+    const toObjectId = (val) =>
+      (val && mongoose.Types.ObjectId.isValid(val)) ? new mongoose.Types.ObjectId(val) : val;
+
+    const query = { shop: toObjectId(shopId) };
 
     // Branch scoping
     if (branchId) {
-      query.branch = branchId;
+      query.branch = toObjectId(branchId);
     }
 
     // Staff attribution filter ("sales by this staff member")
     if (staffId) {
-      query.createdBy = staffId;
+      query.createdBy = toObjectId(staffId);
     }
 
     if (isOnline !== undefined && isOnline !== '') {
@@ -104,7 +116,7 @@ class SaleService {
     }
 
     if (customerId) {
-      query.customer = customerId;
+      query.customer = toObjectId(customerId);
     }
 
     if (startDate || endDate) {
@@ -563,12 +575,27 @@ class SaleService {
 
     // Update customer statistics if customer exists
     if (customer) {
+      const purchasedAt = new Date();
       customer.totalPurchases += total;
       customer.totalPaid += paid;
       customer.totalDue += due;
       customer.purchaseCount += 1;
-      customer.lastPurchase = new Date();
+      customer.lastPurchase = purchasedAt;
       await customer.save(sessionOpt);
+
+      // Same arithmetic, split per branch (Phase 7). Written whatever
+      // `customerScope` says — only reads consult the flag — and a no-op for
+      // single-branch shops, where branchId is null.
+      await CustomerBalance.applyDelta({
+        shop: shopId,
+        customer: customer._id,
+        branch: branchId,
+        purchases: total,
+        paid,
+        due,
+        count: 1,
+        lastPurchase: purchasedAt,
+      }, session);
     }
 
     // Create payment record if paid amount > 0
@@ -672,6 +699,19 @@ class SaleService {
     if (sale.customer) {
       await Customer.findByIdAndUpdate(sale.customer, {
         $inc: { totalPaid: amount, totalDue: -amount },
+      });
+
+      // Attributed to the SALE's branch, not the collector's. The due being
+      // cleared belongs to whichever branch raised the invoice; crediting it to
+      // the branch that happened to take the cash would leave the issuing
+      // branch permanently overstated and the collecting one negative. The
+      // Payment row above keeps `sale.branch` for the same reason.
+      await CustomerBalance.applyDelta({
+        shop: shopId,
+        customer: sale.customer,
+        branch: sale.branch,
+        paid: amount,
+        due: -amount,
       });
     }
 
@@ -809,6 +849,18 @@ class SaleService {
           totalDue: -sale.due,
           purchaseCount: -1,
         },
+      });
+
+      // Unwound at the branch that raised the sale — which is the only branch
+      // whose figures the sale ever moved.
+      await CustomerBalance.applyDelta({
+        shop: shopId,
+        customer: sale.customer,
+        branch: sale.branch,
+        purchases: -sale.total,
+        paid: -sale.paid,
+        due: -sale.due,
+        count: -1,
       });
     }
 

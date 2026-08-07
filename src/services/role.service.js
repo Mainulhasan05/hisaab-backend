@@ -3,12 +3,14 @@ const User = require('../models/User.model');
 const { AppError } = require('../middleware/error.middleware');
 const {
   ROLE_PRESETS,
+  PRESET_VERSION,
   buildPermissions,
   mergePermissions,
   findUnknownPermissionKeys,
   getPermissionMatrix,
 } = require('../config/permissions');
 const { invalidateUserAuthCache } = require('../utils/authCache.util');
+const { applyPresetUpgrades } = require('../utils/rolePreset.util');
 
 class RoleService {
   /**
@@ -18,35 +20,27 @@ class RoleService {
    */
   async getRoles(shopId) {
     let roles = await Role.find({ shop: shopId, isActive: true }).sort({ isDefault: -1, name: 1 });
-    if (roles.length === 0) {
-      const presets = Object.values(ROLE_PRESETS).map((p) => ({
+
+    // Seed any preset this shop is missing — covers both a shop with zero roles
+    // (seeding failed at registration) and shops that predate a newly added
+    // preset. Roles the owner soft-deleted keep their doc, so the shop+name
+    // unique index makes insertMany skip them and they stay deleted.
+    const existingNames = new Set(await Role.distinct('name', { shop: shopId }));
+    const missing = Object.values(ROLE_PRESETS)
+      .filter((p) => !existingNames.has(p.name))
+      .map((p) => ({
         shop: shopId,
         name: p.name,
         permissions: p.permissions,
         isDefault: true,
+        presetVersion: PRESET_VERSION,
       }));
-      await Role.insertMany(presets, { ordered: false }).catch(() => {});
+    if (missing.length > 0) {
+      await Role.insertMany(missing, { ordered: false }).catch(() => {});
       roles = await Role.find({ shop: shopId, isActive: true }).sort({ isDefault: -1, name: 1 });
     }
 
-    // Self-heal: Ensure Cashier role has SMS view & create permissions enabled
-    const cashierRole = roles.find(r => r.name === ROLE_PRESETS.cashier.name || r.name === 'Cashier');
-    if (cashierRole && (!cashierRole.permissions?.sms?.view || !cashierRole.permissions?.sms?.create)) {
-      await Role.updateOne(
-        { _id: cashierRole._id },
-        {
-          $set: {
-            'permissions.sms.view': true,
-            'permissions.sms.create': true
-          }
-        }
-      );
-      if (cashierRole.permissions) {
-        if (!cashierRole.permissions.sms) cashierRole.permissions.sms = {};
-        cashierRole.permissions.sms.view = true;
-        cashierRole.permissions.sms.create = true;
-      }
-    }
+    await applyPresetUpgrades(roles);
 
     return roles;
   }

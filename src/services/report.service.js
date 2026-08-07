@@ -1,6 +1,7 @@
 const Sale = require('../models/Sale.model');
 const Product = require('../models/Product.model');
 const Customer = require('../models/Customer.model');
+const CustomerBalance = require('../models/CustomerBalance.model');
 const Payment = require('../models/Payment.model');
 const Expense = require('../models/Expense.model');
 const SalesReturn = require('../models/SalesReturn.model');
@@ -12,6 +13,9 @@ const Role = require('../models/Role.model');
 const mongoose = require('mongoose');
 const cacheService = require('./cache.service');
 const { KEYS, getTTL } = require('../config/cacheKeys');
+const { isBranchCustomerScope } = require('../utils/branchScope.util');
+// Safe direction: customer.service depends on models only, never on reports.
+const customerService = require('./customer.service');
 
 // Products are per-branch documents, so a report's product scope is just the
 // shop plus the optional branch — no join to a separate stock collection.
@@ -91,12 +95,19 @@ class ReportService {
   }
 
   // Get dashboard statistics
-  async getDashboardStats(shopId, branchId = null, isMultiBranch = false) {
+  async getDashboardStats(shopId, branchId = null, isMultiBranch = false, req = null) {
+    // Customers and dues are read per-branch or shop-wide depending on the
+    // shop's setting (Phase 7). The two produce different numbers from the same
+    // (shop, branch), so the scope has to be part of the cache key — otherwise
+    // flipping the flag would serve the old figures until the version bumps.
+    const scopedCustomers = isBranchCustomerScope(req);
+
     // Try cache first (include branchId and shop cache version in the key —
     // sale writes bump the version instead of deleting keys)
     const version = await cacheService.getShopCacheVersion(shopId);
+    const scopeTag = scopedCustomers ? ':cs=branch' : '';
     const cacheKey = branchId
-      ? `${KEYS.DASHBOARD_STATS(shopId)}:branch:${branchId}:v${version}`
+      ? `${KEYS.DASHBOARD_STATS(shopId)}:branch:${branchId}${scopeTag}:v${version}`
       : `${KEYS.DASHBOARD_STATS(shopId)}:v${version}`;
     const cached = await cacheService.get(cacheKey);
     if (cached) return cached;
@@ -150,17 +161,34 @@ class ReportService {
         },
       ]),
 
-      // Total due across all customers (shop-wide by design — decision #2)
-      Customer.aggregate([
-        { $match: { shop: new mongoose.Types.ObjectId(shopId), isActive: true } },
-        { $group: { _id: null, totalDue: { $sum: '$totalDue' } } },
-      ]),
+      // Total due across customers. Shop-wide unless this shop keeps separate
+      // books per branch, in which case only what is owed to THIS branch.
+      //
+      // An owner in All-Branches has no branch to scope to, and the sum across
+      // every branch is precisely the shop-wide rollup — so the aggregate view
+      // falls through to the same query in both modes, with no special case.
+      scopedCustomers
+        ? CustomerBalance.aggregate([
+          {
+            $match: {
+              shop: new mongoose.Types.ObjectId(shopId),
+              branch: new mongoose.Types.ObjectId(branchId),
+            },
+          },
+          { $group: { _id: null, totalDue: { $sum: '$totalDue' } } },
+        ])
+        : Customer.aggregate([
+          { $match: { shop: new mongoose.Types.ObjectId(shopId), isActive: true } },
+          { $group: { _id: null, totalDue: { $sum: '$totalDue' } } },
+        ]),
 
       Product.countDocuments(
         productScope(shopId, branchId, { isActive: true, $expr: { $lt: ['$stock', '$minStock'] } })
       ),
 
-      Customer.countDocuments({ shop: shopId, isActive: true }),
+      scopedCustomers
+        ? CustomerBalance.countDocuments({ shop: shopId, branch: branchId })
+        : Customer.countDocuments({ shop: shopId, isActive: true }),
 
       Product.countDocuments(productScope(shopId, branchId, { isActive: true })),
 
@@ -433,29 +461,43 @@ class ReportService {
   // Customers are shop-wide (product decision #2/#7), so this report is
   // deliberately NOT branch-scoped. It previously accepted a `branchId` and
   // silently ignored it, which read as a bug (FEATURE_AUDIT.md H-9).
-  async getCustomerReport(shopId, options = {}) {
+  async getCustomerReport(shopId, options = {}, req = null) {
     const { startDate, endDate } = options;
 
+    // Reverses locked decision #7 ("customer report is shop-wide"): under
+    // separate books a shop-wide report would hand every branch the customer
+    // list and dues the rest of this phase keeps apart.
+    const scopedCustomers = isBranchCustomerScope(req);
+    const branchId = scopedCustomers ? req.branchId : null;
+
     // Top customers by purchase
-    const topCustomers = await Customer.find({
-      shop: shopId,
-      isActive: true,
-    })
-      .select('name phone totalPurchases totalPaid totalDue purchaseCount lastPurchase')
-      .sort({ totalPurchases: -1 })
-      .limit(20)
-      .lean();
+    const topCustomers = scopedCustomers
+      ? await customerService._topBranchBalances(shopId, branchId, { sortField: 'totalPurchases', limit: 20 })
+      : await Customer.find({
+        shop: shopId,
+        isActive: true,
+      })
+        .select('name phone totalPurchases totalPaid totalDue purchaseCount lastPurchase')
+        .sort({ totalPurchases: -1 })
+        .limit(20)
+        .lean();
 
     // Customers with due
-    const customersWithDue = await Customer.find({
-      shop: shopId,
-      isActive: true,
-      totalDue: { $gt: 0 },
-    })
-      .select('name phone totalDue lastPurchase')
-      .sort({ totalDue: -1 })
-      .limit(20)
-      .lean();
+    const customersWithDue = scopedCustomers
+      ? await customerService._topBranchBalances(shopId, branchId, {
+        sortField: 'totalDue',
+        limit: 20,
+        extraMatch: { totalDue: { $gt: 0 } },
+      })
+      : await Customer.find({
+        shop: shopId,
+        isActive: true,
+        totalDue: { $gt: 0 },
+      })
+        .select('name phone totalDue lastPurchase')
+        .sort({ totalDue: -1 })
+        .limit(20)
+        .lean();
 
     // New customers in date range
     const matchStage = {
@@ -468,29 +510,65 @@ class ReportService {
       matchStage.createdAt = dateMatch;
     }
 
-    const newCustomers = await Customer.find(matchStage)
-      .select('name phone createdAt')
-      .sort({ createdAt: -1 })
-      .limit(20)
-      .lean();
+    // "New" means new TO THIS BRANCH under separate books — a customer who has
+    // shopped elsewhere for years is still new here the first time they walk in,
+    // so this keys off when the branch ledger row appeared, not the person.
+    const newCustomers = scopedCustomers
+      ? await CustomerBalance.aggregate([
+        {
+          $match: {
+            shop: new mongoose.Types.ObjectId(shopId),
+            branch: new mongoose.Types.ObjectId(branchId),
+            ...(dateMatch ? { createdAt: dateMatch } : {}),
+          },
+        },
+        { $sort: { createdAt: -1 } },
+        { $limit: 20 },
+        { $lookup: { from: 'customers', localField: 'customer', foreignField: '_id', as: 'customer' } },
+        { $unwind: '$customer' },
+        { $match: { 'customer.isActive': true } },
+        { $project: { _id: '$customer._id', name: '$customer.name', phone: '$customer.phone', createdAt: 1 } },
+      ])
+      : await Customer.find(matchStage)
+        .select('name phone createdAt')
+        .sort({ createdAt: -1 })
+        .limit(20)
+        .lean();
 
     // Customer summary
-    const summaryResult = await Customer.aggregate([
-      {
-        $match: {
-          shop: new mongoose.Types.ObjectId(shopId),
-          isActive: true,
+    const summaryResult = scopedCustomers
+      ? await CustomerBalance.aggregate([
+        {
+          $match: {
+            shop: new mongoose.Types.ObjectId(shopId),
+            branch: new mongoose.Types.ObjectId(branchId),
+          },
         },
-      },
-      {
-        $group: {
-          _id: null,
-          totalCustomers: { $sum: 1 },
-          totalDue: { $sum: '$totalDue' },
-          totalPurchases: { $sum: '$totalPurchases' },
+        {
+          $group: {
+            _id: null,
+            totalCustomers: { $sum: 1 },
+            totalDue: { $sum: '$totalDue' },
+            totalPurchases: { $sum: '$totalPurchases' },
+          },
         },
-      },
-    ]);
+      ])
+      : await Customer.aggregate([
+        {
+          $match: {
+            shop: new mongoose.Types.ObjectId(shopId),
+            isActive: true,
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalCustomers: { $sum: 1 },
+            totalDue: { $sum: '$totalDue' },
+            totalPurchases: { $sum: '$totalPurchases' },
+          },
+        },
+      ]);
 
     const summary = summaryResult[0] || { totalCustomers: 0, totalDue: 0, totalPurchases: 0 };
 

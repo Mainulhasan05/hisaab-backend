@@ -185,6 +185,12 @@ const getMe = asyncHandler(async (req, res) => {
           ? { _id: String(req.branch._id), name: req.branch.name, code: req.branch.code }
           : null,
         branches,
+        // Whether customers and dues are per-branch (Phase 7). The UI needs it
+        // only to label the customer pages: an owner who switches branch and
+        // sees the customer count change reads that as a bug unless the page
+        // says which book it is showing. Always 'shop' for single-branch shops,
+        // so nothing about their UI changes.
+        customerScope: isMultiBranch ? (req.shop?.customerScope || 'branch') : 'shop',
       },
       message: 'Profile retrieved',
       messageBn: 'প্রোফাইল পাওয়া গেছে'

@@ -1403,6 +1403,9 @@ class AdminService {
    * 4. Assigns the existing product catalogue to the default branch
    */
   async enableMultiBranch(shopId, adminId, branchName = null) {
+    const Customer = require('../models/Customer.model');
+    const CustomerBalance = require('../models/CustomerBalance.model');
+
     const shop = await Shop.findById(shopId);
     if (!shop) {
       throw new AppError('Shop not found', 'Shop not found', 404);
@@ -1481,8 +1484,46 @@ class AdminService {
       { $set: { branch: defaultBranch._id } }
     );
 
+    // 4b. Seed the per-branch customer ledger (Phase 7). Every row above now
+    // belongs to the default branch, so this is a clean one-row-per-customer
+    // derivation from the shop-wide rollup — no aggregation over history
+    // needed, and Σ branch dues equals Customer.totalDue by construction.
+    //
+    // Rows are seeded whatever `customerScope` ends up being: writes never
+    // consult the flag, only reads do, which is what lets the platform admin
+    // flip it later with nothing to migrate.
+    const customerBalanceOps = [];
+    for await (const customer of Customer.find({ shop: shopId }).select('_id totalPurchases totalPaid totalDue purchaseCount lastPurchase').lean()) {
+      customerBalanceOps.push({
+        updateOne: {
+          filter: { shop: shopId, customer: customer._id, branch: defaultBranch._id },
+          update: {
+            $set: {
+              totalPurchases: customer.totalPurchases || 0,
+              totalPaid: customer.totalPaid || 0,
+              totalDue: customer.totalDue || 0,
+              purchaseCount: customer.purchaseCount || 0,
+              lastPurchase: customer.lastPurchase || null,
+              updatedAt: new Date(),
+            },
+            $setOnInsert: { createdAt: new Date() },
+          },
+          upsert: true,
+        },
+      });
+    }
+    let customerBalancesSeeded = 0;
+    if (customerBalanceOps.length > 0) {
+      const res = await CustomerBalance.bulkWrite(customerBalanceOps, { ordered: false });
+      customerBalancesSeeded = (res.upsertedCount || 0) + (res.modifiedCount || 0);
+    }
+
     // 5. Everything is tagged — only now is the shop switched over.
     shop.multiBranchEnabled = true;
+    // Default: branches keep SEPARATE customer books. Set explicitly rather
+    // than relying on the schema default, so a shop enabled before this line
+    // shipped never has its meaning changed underneath it by a later deploy.
+    if (!shop.customerScope) shop.customerScope = 'branch';
     await shop.save();
 
     // 6. Log audit
@@ -1505,7 +1546,8 @@ class AdminService {
         models: branchScopedModels.length,
         rows: backfilled,
         staff: staffResult.modifiedCount,
-        products: productResult.modifiedCount
+        products: productResult.modifiedCount,
+        customerBalances: customerBalancesSeeded
       }
     };
   }
@@ -1538,6 +1580,69 @@ class AdminService {
 
     // Invalidate cache
     await invalidateShopAuthCache(shopId);
+
+    return shop.toObject();
+  }
+
+  /**
+   * Set whether a shop's branches share one customer book (Phase 7).
+   *
+   * Platform-admin only, deliberately: it changes what every branch of the shop
+   * can see about every customer, so it sits beside enable/disable multi-branch
+   * rather than in the owner's settings — same rule as branch create/delete.
+   *
+   * Purely a read-path switch. Both books are maintained on every write
+   * regardless of this value, so flipping it takes effect on the next request,
+   * needs no migration, and can be flipped back with nothing lost.
+   */
+  async setCustomerScope(shopId, adminId, scope) {
+    if (!['shop', 'branch'].includes(scope)) {
+      throw new AppError(
+        'Customer scope must be "shop" or "branch"',
+        'কাস্টমার স্কোপ "shop" অথবা "branch" হতে হবে',
+        400
+      );
+    }
+
+    const shop = await Shop.findById(shopId);
+    if (!shop) {
+      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
+    }
+
+    if (!shop.multiBranchEnabled) {
+      throw new AppError(
+        'Enable multi-branch first — a single-branch shop has only one customer book',
+        'আগে মাল্টি-ব্রাঞ্চ চালু করুন — এক শাখার দোকানে কাস্টমার আলাদা করার কিছু নেই',
+        400
+      );
+    }
+
+    const previous = shop.customerScope || 'branch';
+    if (previous === scope) {
+      return shop.toObject();
+    }
+
+    shop.customerScope = scope;
+    await shop.save();
+
+    await AuditLog.log({
+      shop: shopId,
+      admin: adminId,
+      action: 'customer_scope_changed',
+      description: scope === 'branch'
+        ? `"${shop.name}" — কাস্টমার ও বাকি এখন শাখা-ভিত্তিক`
+        : `"${shop.name}" — কাস্টমার ও বাকি এখন সব শাখায় শেয়ার্ড`,
+      entity: { type: 'shop', id: shop._id, name: shop.name },
+      changes: { before: { customerScope: previous }, after: { customerScope: scope } }
+    });
+
+    // The flag rides in the shop payload of the auth cache, so every session
+    // must be invalidated for it to take effect on the next request.
+    await invalidateShopAuthCache(shopId);
+    // The dashboard is cached per (shop, branch, scope) and its numbers change
+    // meaning here, so retire the current generation rather than serve the old
+    // figures until something else happens to bump it.
+    await cacheService.bumpShopCacheVersion(shopId, 0);
 
     return shop.toObject();
   }

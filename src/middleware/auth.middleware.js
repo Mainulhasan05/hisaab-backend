@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 const User = require('../models/User.model');
 const Admin = require('../models/Admin.model');
 const Shop = require('../models/Shop.model');
@@ -44,6 +45,32 @@ function extractToken(req) {
 }
 
 /**
+ * Restore the cached branch list to the shape a fresh Mongo read produces.
+ *
+ * The list is stored in Redis, so it comes back through JSON.parse with `_id`
+ * as a **string**. `req.branchId` is taken straight off these entries, and a
+ * string branch id is invisible to any aggregation `$match` — `$match` does not
+ * cast, so `{ branch: '68a3…' }` never equals an ObjectId and the pipeline
+ * returns nothing. That is what made the sales page list an invoice while every
+ * stat card above it read ৳0: `find()` cast the string and matched, the
+ * summary's `aggregate()` did not.
+ *
+ * `user` and `shop` were already restored via `Model.hydrate()`; branches were
+ * the one payload left as raw JSON. Casting `_id` here fixes every consumer at
+ * once instead of one aggregation at a time. `Branch.hydrate()` is deliberately
+ * not used — these are `.lean()` projections of four fields, and hydrating them
+ * would fill in schema defaults the callers never asked for.
+ */
+function hydrateBranchList(branches) {
+  return (branches || []).map((b) => ({
+    ...b,
+    _id: mongoose.Types.ObjectId.isValid(b._id)
+      ? new mongoose.Types.ObjectId(b._id)
+      : b._id,
+  }));
+}
+
+/**
  * Fetch user with shop, using a cache to avoid DB hits on every request.
  * Cache key is based on user ID; explicitly invalidated on relevant mutations,
  * with the TTL as a backstop.
@@ -65,7 +92,7 @@ async function getCachedUser(userId) {
     // Non-schema property: `role` is an ObjectId path, so the populated doc
     // is carried separately as a plain object (only permissions/isActive are read)
     user.roleDoc = cached.role || null;
-    user.branchList = cached.branches || [];
+    user.branchList = hydrateBranchList(cached.branches);
     return user;
   }
   const user = await User.findById(userId).populate('shop').populate('role');
@@ -572,5 +599,6 @@ module.exports = {
   adminOnly,
   superAdminOnly,
   ownerOnly,
-  restrictTo
+  restrictTo,
+  hydrateBranchList // exported for tests only
 };

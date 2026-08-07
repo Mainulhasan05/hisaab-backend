@@ -28,6 +28,13 @@ const roleSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  // Which ROLE_PRESETS revision this role has been brought up to. Roles created
+  // before presets were versioned default to 0, so the first upgrade pass
+  // catches them. See PRESET_UPGRADES in config/permissions.js.
+  presetVersion: {
+    type: Number,
+    default: 0
+  },
   isActive: {
     type: Boolean,
     default: true

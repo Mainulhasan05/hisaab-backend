@@ -6,13 +6,14 @@ const AuditLog = require('../models/AuditLog.model');
 const SMSService = require('./sms.service');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS, TRIAL_PERIOD_DAYS } = require('../config/constants');
-const { ROLE_PRESETS, buildPermissionsFromConfig, buildPermissions, LEGACY_PERMISSION_MAP } = require('../config/permissions');
+const { ROLE_PRESETS, PRESET_VERSION, buildPermissionsFromConfig, buildPermissions, LEGACY_PERMISSION_MAP } = require('../config/permissions');
 const jwt = require('jsonwebtoken');
 const cacheService = require('./cache.service');
 const { seedCategories } = require('../seeds/categorySeeder');
 const { INITIAL_SHOP_CATEGORIES } = require('../seeds/shopCategorySeeder');
 const ShopCategory = require('../models/ShopCategory.model');
 const { normalizePhone } = require('../utils/phone.util');
+const { applyPresetUpgrades } = require('../utils/rolePreset.util');
 const metaCapi = require('./metaCapi.service');
 
 class AuthService {
@@ -162,6 +163,8 @@ class AuthService {
         permissions: preset.permissions,
         isDefault: true,
         isActive: true,
+        // Seeded from the current presets, so no upgrade pass is owed.
+        presetVersion: PRESET_VERSION,
       });
     }
     await Role.insertMany(roleDocs, { ordered: false }).catch(() => {
@@ -461,6 +464,15 @@ class AuthService {
     // Populate role for employees (to embed permissions in JWT)
     if (!user.isOwner && user.role) {
       await user.populate('role');
+
+      // Bring a preset-derived role up to the current PRESET_VERSION. The
+      // roles page can also do this, but only an owner can open it — without
+      // this a cashier would never receive permissions added by a later
+      // release. No-ops once the role is stamped, so it costs one indexed read
+      // per login thereafter.
+      if (user.role) {
+        await applyPresetUpgrades([user.role]).catch(() => {});
+      }
     }
 
     // Update last login

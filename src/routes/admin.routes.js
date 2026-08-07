@@ -26,6 +26,9 @@ router.patch('/shops/:id/settings', adminController.updateShopSettings);
 router.post('/shops/:id/restrict', adminController.restrictShop);
 router.post('/shops/:id/enable-multi-branch', adminController.enableMultiBranch);
 router.post('/shops/:id/disable-multi-branch', adminController.disableMultiBranch);
+// Whether the shop's branches share one customer book. Admin-only for the same
+// reason branch create/delete is: it changes what every branch can see.
+router.patch('/shops/:id/customer-scope', adminController.setCustomerScope);
 router.get('/shops/:id/branches', adminController.getShopBranches);
 router.post('/shops/:id/branches', adminController.addShopBranch);
 router.patch('/shops/:id/branches/:branchId', adminController.updateShopBranch);

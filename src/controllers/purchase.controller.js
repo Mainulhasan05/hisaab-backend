@@ -1,12 +1,14 @@
 const purchaseService = require('../services/purchase.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
+const { sanitizePurchases } = require('../utils/dataSanitizer.util');
 
 // Get all purchases
 exports.getPurchases = asyncHandler(async (req, res) => {
   const options = { ...req.query };
   if (req.branchId) options.branchId = req.branchId;
   const result = await purchaseService.getPurchases(req.shop._id, options);
+  result.data = sanitizePurchases(result.data, req);
   return ApiResponse.paginated(res, {
     ...result,
     message: 'Purchases retrieved successfully',
@@ -18,7 +20,7 @@ exports.getPurchases = asyncHandler(async (req, res) => {
 exports.getPurchase = asyncHandler(async (req, res) => {
   const purchase = await purchaseService.getPurchaseById(req.shop._id, req.params.id, req);
   return ApiResponse.success(res, {
-    data: purchase,
+    data: sanitizePurchases(purchase, req),
     message: 'Purchase retrieved',
     messageBn: 'ক্রয়ের তথ্য লোড হয়েছে',
   });
@@ -28,7 +30,7 @@ exports.getPurchase = asyncHandler(async (req, res) => {
 exports.createPurchase = asyncHandler(async (req, res) => {
   const purchase = await purchaseService.createPurchase(req.shop._id, req.user._id, req.body, req);
   return ApiResponse.created(res, {
-    data: purchase,
+    data: sanitizePurchases(purchase, req),
     message: 'Purchase recorded successfully',
     messageBn: 'ক্রয় সফলভাবে রেকর্ড হয়েছে',
   });
@@ -47,7 +49,7 @@ exports.cancelPurchase = asyncHandler(async (req, res) => {
 exports.getSummary = asyncHandler(async (req, res) => {
   const summary = await purchaseService.getSummary(req.shop._id, req.query, req);
   return ApiResponse.success(res, {
-    data: summary,
+    data: sanitizePurchases(summary, req),
     message: 'Purchase summary retrieved',
     messageBn: 'ক্রয়ের সারাংশ লোড হয়েছে',
   });
@@ -63,7 +65,7 @@ exports.recordPayment = asyncHandler(async (req, res) => {
     req
   );
   return ApiResponse.success(res, {
-    data: result,
+    data: sanitizePurchases(result, req),
     message: 'Payment recorded successfully',
     messageBn: 'পেমেন্ট সফলভাবে রেকর্ড হয়েছে',
   });
@@ -77,7 +79,7 @@ exports.getPurchasePayments = asyncHandler(async (req, res) => {
     req
   );
   return ApiResponse.success(res, {
-    data: payments,
+    data: sanitizePurchases(payments, req),
     message: 'Purchase payments fetched',
     messageBn: 'ক্রয়ের পেমেন্ট সমূহ পাওয়া গেছে',
   });

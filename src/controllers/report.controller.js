@@ -6,7 +6,7 @@ const { sanitizeReport } = require('../utils/dataSanitizer.util');
 
 // Get dashboard statistics
 exports.getDashboard = asyncHandler(async (req, res) => {
-  const stats = await reportService.getDashboardStats(req.shop._id, req.branchId, req.shop.multiBranchEnabled === true);
+  const stats = await reportService.getDashboardStats(req.shop._id, req.branchId, req.shop.multiBranchEnabled === true, req);
   return ApiResponse.success(res, {
     data: sanitizeReport(stats, req),
     message: 'Dashboard stats retrieved successfully',
@@ -36,7 +36,7 @@ exports.getProductReport = asyncHandler(async (req, res) => {
 
 // Get customer report
 exports.getCustomerReport = asyncHandler(async (req, res) => {
-  const report = await reportService.getCustomerReport(req.shop._id, req.query);
+  const report = await reportService.getCustomerReport(req.shop._id, req.query, req);
   return ApiResponse.success(res, {
     data: sanitizeReport(report, req),
     message: 'Customer report retrieved successfully',
@@ -138,7 +138,7 @@ exports.exportReport = asyncHandler(async (req, res) => {
 
 // Due Aging Analysis
 exports.getDueAging = asyncHandler(async (req, res) => {
-  const result = await customerService.getDueAging(req.shop._id, req.branchId);
+  const result = await customerService.getDueAging(req.shop._id, req);
   return ApiResponse.success(res, {
     data: sanitizeReport(result, req),
     message: 'Due aging report generated',

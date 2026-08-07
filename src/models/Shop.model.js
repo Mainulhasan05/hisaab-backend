@@ -133,6 +133,24 @@ const shopSchema = new mongoose.Schema({
   multiBranchEnabled: {
     type: Boolean,
     default: false
+  },
+  // Whether branches share one customer book or keep separate ones (Phase 7).
+  //
+  //   'shop'   — one customer, one balance across every branch. A branch sees
+  //              the customer's invoices from every other branch too.
+  //   'branch' — each branch keeps its own dues and its own customer list.
+  //
+  // Only ever consulted when `multiBranchEnabled` is true; single-branch shops
+  // behave as 'shop' regardless of what is stored here. Platform-admin only —
+  // the owner has no route that can change it. Read via
+  // `branchScope.util.customerScope(req)`, never directly.
+  //
+  // An enum rather than a boolean so a future third mode (branch group /
+  // region) does not need a migration to express.
+  customerScope: {
+    type: String,
+    enum: ['shop', 'branch'],
+    default: 'branch'
   }
 }, {
   timestamps: true,

@@ -8,7 +8,7 @@ const { formatPhone } = require('../utils/phone.util');
 const { SMS_TYPES, SMS_STATUS } = require('../config/constants');
 const logger = require('../utils/logger.util');
 const { countSms, isUnicode } = require('../utils/smsCounter.util');
-const { branchFilter, requireBranch } = require('../utils/branchScope.util');
+const { branchFilter, requireBranch, isBranchCustomerScope } = require('../utils/branchScope.util');
 
 // MimSMS API Configuration
 const MIMSMS = {
@@ -364,31 +364,56 @@ class SMSService {
    */
   async sendDueReminder(shopId, userId, customerIds, req = null) {
     const Customer = require('../models/Customer.model');
+    const CustomerBalance = require('../models/CustomerBalance.model');
     const Shop = require('../models/Shop.model');
 
     const shop = await Shop.findById(shopId);
 
-    // Customers are shop-wide — the Customer model has no `branch` field. This
-    // query was wrapped in branch scoping, which added `branch: <id>` to a
-    // collection that has no such field: it matched zero documents, so due
-    // reminders silently sent nothing for every staff member and for any owner
-    // with a branch selected (FEATURE_AUDIT.md H-7).
+    // NEVER wrap this in branch scoping. The Customer model has no `branch`
+    // field, so `branch: <id>` matched zero documents and due reminders
+    // silently sent nothing for every staff member and for any owner with a
+    // branch selected (FEATURE_AUDIT.md H-7).
     const customers = await Customer.find({
       _id: { $in: customerIds },
       shop: shopId,
-      totalDue: { $gt: 0 },
     });
 
-    if (customers.length === 0) {
+    // Under separate books the amount in the message must be what the customer
+    // owes THIS branch — texting them the shop-wide figure would both overstate
+    // the debt and disclose another branch's business. The due > 0 filter moves
+    // here for the same reason: a customer who owes another branch but not this
+    // one must not be reminded by this one.
+    const branchScoped = isBranchCustomerScope(req);
+    let dueByCustomer = null;
+    if (branchScoped) {
+      const rows = await CustomerBalance.find({
+        shop: shopId,
+        branch: req.branchId,
+        customer: { $in: customerIds },
+        totalDue: { $gt: 0 },
+      }).lean();
+      dueByCustomer = new Map(rows.map((r) => [String(r.customer), r.totalDue]));
+    }
+
+    const owing = customers
+      .map((customer) => ({
+        customer,
+        due: branchScoped
+          ? (dueByCustomer.get(String(customer._id)) || 0)
+          : (customer.totalDue || 0),
+      }))
+      .filter((entry) => entry.due > 0);
+
+    if (owing.length === 0) {
       return { success: true, message: 'No customers with due found', sentCount: 0 };
     }
 
     // Prepare dynamic messages
-    const recipients = customers.map(customer => ({
+    const recipients = owing.map(({ customer, due }) => ({
       phone: customer.phone,
       customerId: customer._id,
       customerName: customer.name,
-      message: `Dear ${customer.name},\nYour due: Tk${formatSmsAmount(customer.totalDue)}\nPlease pay as soon as possible.\nThank you - ${getGsmSafeShopName(shop.name)}`,
+      message: `Dear ${customer.name},\nYour due: Tk${formatSmsAmount(due)}\nPlease pay as soon as possible.\nThank you - ${getGsmSafeShopName(shop.name)}`,
     }));
 
     return this.sendDynamic(shopId, userId, recipients, req);

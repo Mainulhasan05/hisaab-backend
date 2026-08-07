@@ -361,6 +361,18 @@ exports.disableMultiBranch = asyncHandler(async (req, res) => {
   });
 });
 
+// Share or separate customers/dues across a shop's branches (Phase 7)
+exports.setCustomerScope = asyncHandler(async (req, res) => {
+  const result = await adminService.setCustomerScope(req.params.id, req.admin._id, req.body.scope);
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Customer scope updated successfully',
+    messageBn: result.customerScope === 'branch'
+      ? 'কাস্টমার ও বাকি এখন শাখা-ভিত্তিক'
+      : 'কাস্টমার ও বাকি এখন সব শাখায় শেয়ার্ড',
+  });
+});
+
 // Get shop branches
 exports.getShopBranches = asyncHandler(async (req, res) => {
   const branches = await adminService.getShopBranches(req.params.id);

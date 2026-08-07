@@ -4,7 +4,7 @@ const asyncHandler = require('../utils/asyncHandler.util');
 
 // Get all customers
 exports.getCustomers = asyncHandler(async (req, res) => {
-  const result = await customerService.getCustomers(req.shop._id, req.query);
+  const result = await customerService.getCustomers(req.shop._id, req.query, req);
   return ApiResponse.paginated(res, {
     ...result,
     message: 'Customers retrieved successfully',
@@ -14,7 +14,7 @@ exports.getCustomers = asyncHandler(async (req, res) => {
 
 // Get single customer
 exports.getCustomer = asyncHandler(async (req, res) => {
-  const customer = await customerService.getCustomerById(req.shop._id, req.params.id);
+  const customer = await customerService.getCustomerById(req.shop._id, req.params.id, req);
   return ApiResponse.success(res, {
     data: customer,
     message: 'Customer retrieved successfully',
@@ -24,7 +24,7 @@ exports.getCustomer = asyncHandler(async (req, res) => {
 
 // Get customer by phone
 exports.getCustomerByPhone = asyncHandler(async (req, res) => {
-  const customer = await customerService.getCustomerByPhone(req.shop._id, req.params.phone);
+  const customer = await customerService.getCustomerByPhone(req.shop._id, req.params.phone, req);
   return ApiResponse.success(res, {
     data: customer,
     message: customer ? 'Customer found' : 'Customer not found',
@@ -74,7 +74,7 @@ exports.collectDue = asyncHandler(async (req, res) => {
 
 // Get customer purchase history
 exports.getCustomerHistory = asyncHandler(async (req, res) => {
-  const result = await customerService.getCustomerHistory(req.shop._id, req.params.id, req.query);
+  const result = await customerService.getCustomerHistory(req.shop._id, req.params.id, req.query, req);
   return ApiResponse.success(res, {
     data: result,
     message: 'Customer history retrieved successfully',
@@ -84,7 +84,7 @@ exports.getCustomerHistory = asyncHandler(async (req, res) => {
 
 // Get customers with due
 exports.getCustomersWithDue = asyncHandler(async (req, res) => {
-  const result = await customerService.getCustomersWithDue(req.shop._id, req.query);
+  const result = await customerService.getCustomersWithDue(req.shop._id, req.query, req);
   return ApiResponse.success(res, {
     data: result,
     message: 'Customers with due retrieved successfully',
@@ -95,7 +95,7 @@ exports.getCustomersWithDue = asyncHandler(async (req, res) => {
 // Get top customers
 exports.getTopCustomers = asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
-  const customers = await customerService.getTopCustomers(req.shop._id, limit);
+  const customers = await customerService.getTopCustomers(req.shop._id, limit, req);
   return ApiResponse.success(res, {
     data: customers,
     message: 'Top customers retrieved successfully',
@@ -105,7 +105,7 @@ exports.getTopCustomers = asyncHandler(async (req, res) => {
 
 // Get customer leaderboard
 exports.getCustomerLeaderboard = asyncHandler(async (req, res) => {
-  const result = await customerService.getCustomerLeaderboard(req.shop._id, req.query);
+  const result = await customerService.getCustomerLeaderboard(req.shop._id, req.query, req);
   return ApiResponse.paginated(res, {
     ...result,
     message: 'Customer leaderboard retrieved successfully',

@@ -9,7 +9,10 @@ const MODULES = {
   categories:    { key: 'categories',    label: 'ক্যাটাগরি',          labelEn: 'Categories',      actions: ['view', 'create', 'update', 'delete'] },
   sales:         { key: 'sales',         label: 'বিক্রয়',            labelEn: 'Sales',           actions: ['view', 'create', 'update', 'delete', 'view_profit'] },
   customers:     { key: 'customers',     label: 'কাস্টমার',          labelEn: 'Customers',       actions: ['view', 'create', 'update', 'delete'] },
-  purchases:     { key: 'purchases',     label: 'ক্রয়',              labelEn: 'Purchases',       actions: ['view', 'create', 'update', 'delete'] },
+  // A purchase record IS cost data (unit prices, invoice totals, dues), so
+  // `view` alone only reveals *that* a purchase happened — supplier, date,
+  // invoice no, quantities. The money is behind `view_cost`.
+  purchases:     { key: 'purchases',     label: 'ক্রয়',              labelEn: 'Purchases',       actions: ['view', 'create', 'update', 'delete', 'view_cost'] },
   suppliers:     { key: 'suppliers',     label: 'সরবরাহকারী',        labelEn: 'Suppliers',       actions: ['view', 'create', 'update', 'delete'] },
   expenses:      { key: 'expenses',      label: 'খরচ',               labelEn: 'Expenses',        actions: ['view', 'create', 'update', 'delete'] },
   cash_register: { key: 'cash_register', label: 'ক্যাশ রেজিস্টার',    labelEn: 'Cash Register',   actions: ['view', 'create', 'update'] },
@@ -138,7 +141,7 @@ const ROLE_PRESETS = {
       categories:    ['view', 'create', 'update'],
       sales:         ['view', 'create', 'update', 'view_profit'],
       customers:     ['view', 'create', 'update'],
-      purchases:     ['view', 'create', 'update'],
+      purchases:     ['view', 'create', 'update', 'view_cost'],
       suppliers:     ['view', 'create', 'update'],
       expenses:      ['view', 'create', 'update'],
       cash_register: ['view', 'create', 'update'],
@@ -150,16 +153,26 @@ const ROLE_PRESETS = {
       stock_transfers: ['view', 'create', 'update'],
     }),
   },
+  // Runs the counter: sells, takes payment against dues, handles walk-in
+  // returns, owns the customer desk end to end, and texts customers. Can read
+  // stock but never what the shop paid for it.
+  //
+  // Withheld on purpose: products.view_cost (buying price), sales.delete
+  // (voiding a completed sale), customers.delete (erasing a customer's
+  // history), stock.manual_adjust (rewriting stock counts by hand).
   cashier: {
     name: 'ক্যাশিয়ার',
     nameEn: 'Cashier',
     permissions: buildPermissionsFromConfig({
       products:      ['view'],
       categories:    ['view'],
-      sales:         ['view', 'create'],
-      customers:     ['view', 'create'],
-      purchases:     ['view'],
-      suppliers:     ['view'],
+      // `update` is what lets a cashier record a payment against a due sale
+      // and put through a counter return — both routine till work.
+      sales:         ['view', 'create', 'update'],
+      customers:     ['view', 'create', 'update'],
+      // `purchases` and `suppliers` were deliberately dropped: the purchase
+      // ledger is raw buying-price data, so granting it here handed a cashier
+      // every cost figure despite products.view_cost being off.
       expenses:      ['view'],
       cash_register: ['view', 'create'],
       reports:       ['view'],
@@ -170,6 +183,125 @@ const ROLE_PRESETS = {
       stock_transfers: ['view'],
     }),
   },
+  // Sell and check stock, nothing else. No reports, no purchase ledger, no
+  // expenses — for owners who don't want floor staff seeing any money figure
+  // beyond the selling price they're quoting.
+  salesperson: {
+    name: 'বিক্রয়কর্মী',
+    nameEn: 'Salesperson',
+    permissions: buildPermissionsFromConfig({
+      products:      ['view'],
+      categories:    ['view'],
+      sales:         ['view', 'create'],
+      customers:     ['view', 'create'],
+      cash_register: ['view', 'create'],
+      sms:           ['view', 'create'],
+      stock:         ['view'],
+      stock_transfers: ['view'],
+    }),
+  },
+  // Builds the catalogue and receives stock, so it needs buying prices — but
+  // never sees sale profit or any report.
+  inventory_manager: {
+    name: 'স্টক ম্যানেজার',
+    nameEn: 'Inventory Manager',
+    permissions: buildPermissionsFromConfig({
+      products:      ['view', 'create', 'update', 'view_cost'],
+      categories:    ['view', 'create', 'update'],
+      purchases:     ['view', 'create', 'update', 'view_cost'],
+      suppliers:     ['view', 'create', 'update'],
+      stock:         ['view', 'manual_adjust'],
+      stock_transfers: ['view', 'create', 'update'],
+    }),
+  },
+};
+
+/**
+ * Preset schema version.
+ *
+ * Presets seed a shop's roles at registration, so editing ROLE_PRESETS above
+ * only reaches *new* shops — every existing shop keeps the Role document it was
+ * created with. To roll a change out to shops that already exist, bump this and
+ * add a PRESET_UPGRADES entry.
+ */
+const PRESET_VERSION = 2;
+
+/**
+ * Additive grants applied once per role, in version order.
+ * See Role.presetVersion and roleService.getRoles().
+ *
+ * Grants only — an upgrade never revokes. Because each role is stamped with the
+ * version it reached, an owner who later narrows a default role does not get
+ * the upgrade re-applied on top of their decision.
+ */
+const PRESET_UPGRADES = [
+  {
+    version: 1,
+    // Cashiers need SMS to send due reminders from the till. (Previously an
+    // ad-hoc self-heal in roleService.getRoles.)
+    grants: {
+      cashier: { sms: ['view', 'create'] },
+    },
+  },
+  {
+    version: 2,
+    // Cashiers own the customer desk: edit customer records, collect dues at
+    // both customer and sale level, and put through counter returns.
+    grants: {
+      cashier: {
+        customers: ['update'],
+        sales: ['update'],
+        stock: ['view'],
+      },
+    },
+  },
+];
+
+/**
+ * Map a role name back to the preset it tracks, so an upgrade can be aimed at
+ * "the cashier role" without depending on document order. Matches the Bengali
+ * preset name or its English equivalent, since older shops were seeded with
+ * either.
+ */
+const presetKeyForRoleName = (roleName) => {
+  if (!roleName) return null;
+  const needle = String(roleName).trim().toLowerCase();
+  for (const [key, preset] of Object.entries(ROLE_PRESETS)) {
+    if (
+      needle === preset.name.toLowerCase() ||
+      needle === preset.nameEn.toLowerCase() ||
+      needle === key
+    ) {
+      return key;
+    }
+  }
+  return null;
+};
+
+/**
+ * Build the $set patch bringing one role from `fromVersion` up to
+ * PRESET_VERSION. Returns null when there is nothing to grant.
+ *
+ * @param {string} presetKey - preset this role tracks ('cashier', 'manager', …)
+ * @param {number} fromVersion - the role's current presetVersion
+ */
+const buildPresetUpgradePatch = (presetKey, fromVersion = 0) => {
+  const patch = {};
+  for (const upgrade of PRESET_UPGRADES) {
+    if (upgrade.version <= fromVersion) continue;
+    const grants = upgrade.grants[presetKey];
+    if (!grants) continue;
+    for (const [modKey, actions] of Object.entries(grants)) {
+      const mod = MODULES[modKey];
+      if (!mod) continue;
+      for (const action of actions) {
+        if (mod.actions.includes(action)) {
+          patch[`permissions.${modKey}.${action}`] = true;
+        }
+      }
+    }
+  }
+  return Object.keys(patch).length > 0 ? patch : null;
 };
 
 /**
@@ -219,6 +351,10 @@ module.exports = {
   MODULE_KEYS,
   ACTION_LABELS,
   ROLE_PRESETS,
+  PRESET_VERSION,
+  PRESET_UPGRADES,
+  presetKeyForRoleName,
+  buildPresetUpgradePatch,
   buildPermissions,
   buildPermissionsFromConfig,
   getPermissionMatrix,
