@@ -71,9 +71,20 @@ const {
  * Round a value to a unit's precision.
  *
  * Uses the epsilon-nudged form rather than a bare `Math.round(v * f) / f`:
- * `2.675 * 100` is `267.49999999999997`, which would round DOWN to 2.67. The
- * nudge is scaled to the value so it cannot manufacture precision at large
- * magnitudes.
+ * `1.005 * 100` is `100.49999999999999`, which would round DOWN to 1.00.
+ *
+ * The nudge is proportional to the value, so it corrects representation error
+ * at any magnitude — but the MULTIPLIER matters and is not free to pick:
+ *
+ *   too small (0)     `1.005` and `8.165` round the wrong way
+ *   too large (64+)   at 1e11 the nudge exceeds half a unit in the last place
+ *                     and pushes correct values UP by one
+ *
+ * 8 sits in the middle of the window that passes both ends (2..16 all work).
+ * `src/tests/packagingUnits.test.js` pins both failure modes. If you change
+ * this constant, run that suite — an over-eager nudge silently adds a gram to
+ * every large stock figure, which is exactly the class of bug this file exists
+ * to prevent.
  *
  * @param {number} value
  * @param {string} unit
@@ -88,9 +99,8 @@ function quantize(value, unit = DEFAULT_UNIT) {
 
   const factor = Math.pow(10, dp);
   const scaled = num * factor;
-  // Nudge by one part in 2^40 of the magnitude — far below a real rounding
-  // decision, far above the representation error we are correcting for.
-  const nudge = Math.abs(scaled) * Number.EPSILON * 4096;
+  // See the header: 8 is calibrated, not arbitrary.
+  const nudge = Math.abs(scaled) * Number.EPSILON * 8;
   return Math.round(scaled + (scaled >= 0 ? nudge : -nudge)) / factor;
 }
 
@@ -105,7 +115,7 @@ function quantizeMoney(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return 0;
   const scaled = num * 100;
-  const nudge = Math.abs(scaled) * Number.EPSILON * 4096;
+  const nudge = Math.abs(scaled) * Number.EPSILON * 8;
   return Math.round(scaled + (scaled >= 0 ? nudge : -nudge)) / 100;
 }
 
