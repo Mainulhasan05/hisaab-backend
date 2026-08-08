@@ -12,6 +12,9 @@ router.post('/', idempotency(), rbac('sales', 'update'), salesReturnController.c
 router.get('/summary', rbac('sales', 'view'), salesReturnController.getReturnsSummary);
 router.get('/sale/:saleId', rbac('sales', 'view'), salesReturnController.getReturnsBySale);
 router.get('/sale/:saleId/returnable', rbac('sales', 'view'), salesReturnController.getReturnableItems);
+// Paying out a pending refund moves money, so it needs the same permission a
+// return itself does — not merely 'view'.
+router.patch('/:id/settle', idempotency(), rbac('sales', 'update'), salesReturnController.settleRefund);
 router.get('/:id', rbac('sales', 'view'), salesReturnController.getReturn);
 
 module.exports = router;

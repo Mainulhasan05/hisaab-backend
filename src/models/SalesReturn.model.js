@@ -115,6 +115,49 @@ const salesReturnSchema = new mongoose.Schema({
     enum: ['cash', 'adjustment', 'store_credit'],
     required: [true, 'ফেরতের পদ্ধতি নির্বাচন করুন']
   },
+  /**
+   * Has the shop actually parted with the money yet?
+   *
+   * ───────────────────────────────────────────────────────────────────────────
+   * WHY THIS FIELD EXISTS
+   * ───────────────────────────────────────────────────────────────────────────
+   *
+   * `refundMethod` says HOW the customer gets their money back. It did not say
+   * WHETHER they have. For `cash` and `adjustment` that was fine — both move
+   * money at the moment the return is recorded, and both leave a trail (a
+   * `Payment` row, a customer-ledger delta).
+   *
+   * `store_credit` — the option the till labels "পরে দিবেন" — moved nothing.
+   * The goods came back into stock, the sale's `returnedAmount` went up, and
+   * the fact that the shop now OWED the customer money was recorded precisely
+   * nowhere. There was no balance, no list, no reminder: a shopkeeper who took
+   * a product back on Tuesday and meant to pay on Friday had nothing in the app
+   * to tell them on Friday.
+   *
+   * So a store-credit return is born `pending` and stays there until someone
+   * settles it, at which point the same `Payment` a cash refund would have
+   * created is written. Cash and adjustment returns are `settled` on arrival,
+   * which is why that is the default — every return that already exists is one
+   * of those two and is correctly labelled without a migration.
+   */
+  refundStatus: {
+    type: String,
+    enum: ['settled', 'pending'],
+    default: 'settled'
+  },
+  settledAt: {
+    type: Date
+  },
+  settledBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  // How the money was finally handed over — cash, bkash, etc. Separate from
+  // `paymentMethod` above, which belongs to a same-day cash refund.
+  settlementMethod: {
+    type: String,
+    enum: Object.values(PAYMENT_METHODS)
+  },
   paymentMethod: {
     type: String,
     enum: Object.values(PAYMENT_METHODS)
@@ -155,6 +198,10 @@ salesReturnSchema.index({ shop: 1, returnNo: 1 }, { unique: true });
 salesReturnSchema.index({ shop: 1, sale: 1 });
 salesReturnSchema.index({ shop: 1, customer: 1 });
 salesReturnSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Main listing with branch
+// "Which refunds do I still owe?" — the one query the pending status exists to
+// answer, and the one a shopkeeper opens the returns page to ask. Sparse would
+// not help here: `refundStatus` has a default, so every document carries it.
+salesReturnSchema.index({ shop: 1, branch: 1, refundStatus: 1, createdAt: -1 });
 
 // Virtual: Item count
 salesReturnSchema.virtual('itemCount').get(function() {
@@ -195,12 +242,27 @@ salesReturnSchema.statics.getReturnsSummary = async function(shopId, startDate, 
         _id: null,
         totalReturns: { $sum: '$totalAmount' },
         totalProfitLoss: { $sum: '$profitReduction' },
-        count: { $sum: 1 }
+        count: { $sum: 1 },
+        // Money the shop took goods back for and has not handed over yet. The
+        // whole point of `refundStatus` — without a running total there is
+        // nothing to notice on a screen nobody scrolls.
+        pendingRefundAmount: {
+          $sum: { $cond: [{ $eq: ['$refundStatus', 'pending'] }, '$totalAmount', 0] }
+        },
+        pendingRefundCount: {
+          $sum: { $cond: [{ $eq: ['$refundStatus', 'pending'] }, 1, 0] }
+        }
       }
     }
   ]);
 
-  return summary[0] || { totalReturns: 0, totalProfitLoss: 0, count: 0 };
+  return summary[0] || {
+    totalReturns: 0,
+    totalProfitLoss: 0,
+    count: 0,
+    pendingRefundAmount: 0,
+    pendingRefundCount: 0,
+  };
 };
 
 const SalesReturn = mongoose.model('SalesReturn', salesReturnSchema);

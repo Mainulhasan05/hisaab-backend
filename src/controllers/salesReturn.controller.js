@@ -17,6 +17,22 @@ exports.createReturn = asyncHandler(async (req, res) => {
   });
 });
 
+// Settle a refund that was recorded as "pay later" (store_credit).
+exports.settleRefund = asyncHandler(async (req, res) => {
+  const salesReturn = await salesReturnService.settleRefund(
+    req.shop._id,
+    req.user._id,
+    req.params.id,
+    req.body,
+    req
+  );
+  return ApiResponse.success(res, {
+    data: salesReturn,
+    message: 'Refund settled successfully',
+    messageBn: 'ফেরতের টাকা পরিশোধ হয়েছে',
+  });
+});
+
 // Get all returns (paginated)
 exports.getReturns = asyncHandler(async (req, res) => {
   const options = { ...req.query };

@@ -346,7 +346,41 @@ class ProductService {
     })).populate('category', 'name');
 
     if (!product) {
-      throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
+      // A miss here has two very different causes and they need different
+      // answers.
+      //
+      // Branch scoping is deliberate: a product document belongs to exactly one
+      // branch and carries that branch's own price and stock, so scanning
+      // Nayagola's item while switched to Branch 2 MUST fail. But it failed
+      // with the same "পণ্যটি পাওয়া যায়নি" as a genuinely unknown barcode, and
+      // a cashier reading that blames the scanner — rescans, wipes the label,
+      // retypes the code — and never thinks to look at the branch switcher.
+      //
+      // One extra shop-wide lookup, ONLY on the miss path, turns a dead end
+      // into an instruction. It costs nothing when the scan succeeds.
+      const elsewhere = await Product.findOne({
+        shop: shopId,
+        isDeleted: { $ne: true },
+        $or: [
+          { code: upper },
+          { barcode: raw },
+          { 'variants.sku': raw },
+          { 'variants.barcode': raw },
+        ],
+      }).select('name branch').populate('branch', 'name');
+
+      if (elsewhere) {
+        const where = elsewhere.branch?.name;
+        throw new AppError(
+          `Product "${elsewhere.name}" exists in another branch`,
+          where
+            ? `"${elsewhere.name}" এই ব্রাঞ্চে নেই — আছে ${where} ব্রাঞ্চে। উপরে ব্রাঞ্চ বদলে নিন।`
+            : `"${elsewhere.name}" এই ব্রাঞ্চে নেই, অন্য ব্রাঞ্চে আছে। উপরে ব্রাঞ্চ বদলে নিন।`,
+          404
+        );
+      }
+
+      throw new AppError('Product not found', `"${raw}" দিয়ে কোনো পণ্য পাওয়া যায়নি`, 404);
     }
 
     return this._transformProduct(product);
@@ -380,10 +414,72 @@ class ProductService {
     }
   }
 
+  /**
+   * Refuse a barcode already in use by another product in this branch.
+   *
+   * ───────────────────────────────────────────────────────────────────────────
+   * WHY PER-BRANCH AND NOT GLOBAL
+   * ───────────────────────────────────────────────────────────────────────────
+   *
+   * A barcode identifies a MANUFACTURED ITEM, not a shop's copy of it. Every
+   * shop in the country stocking the same bottle of Coca-Cola prints the same
+   * EAN on the shelf, so global uniqueness would be flatly wrong — the second
+   * shop to add it could never do so. Shop isolation (I-5) already makes a
+   * scan unambiguous across shops, because no query ever leaves the shop.
+   *
+   * WITHIN a branch it is a different story. Two products sharing a barcode
+   * makes `getProductByCode`'s `findOne` return whichever document Mongo hands
+   * back first — so the cashier scans a bottle and rings up a different item,
+   * at the correct-looking price of the wrong product, with no error anywhere.
+   * That is the failure this prevents.
+   *
+   * Branch, not shop, for the same reason `code` is per-branch: two branches
+   * legitimately stock the same item as two separate documents with their own
+   * price and stock.
+   *
+   * ───────────────────────────────────────────────────────────────────────────
+   * WHY THIS IS NOT A UNIQUE INDEX
+   * ───────────────────────────────────────────────────────────────────────────
+   *
+   * A partial unique index on {shop, branch, barcode} is the textbook answer
+   * and would be better. It cannot be added blind: any shop that already has a
+   * duplicate would fail the index build, and on this codebase indexes are
+   * built at startup — so one shop's existing bad data would stop the whole
+   * server from booting. Enforce on the write path now; add the index once a
+   * migration has proven the collection clean.
+   *
+   * @param {string} shopId
+   * @param {string|undefined} barcode  absent/empty is always fine — most
+   *                                    products have no barcode at all
+   * @param {Object|null} req
+   * @param {string|null} excludeId     the product being updated
+   */
+  async _assertBarcodeUnique(shopId, barcode, req = null, excludeId = null) {
+    const value = String(barcode || '').trim();
+    if (!value) return;
+
+    const filter = branchFilter(req, {
+      shop: shopId,
+      isDeleted: { $ne: true },
+      barcode: value,
+    });
+    if (excludeId) filter._id = { $ne: excludeId };
+
+    const clash = await Product.findOne(filter).select('name code');
+    if (clash) {
+      throw new AppError(
+        `Barcode "${value}" is already used by ${clash.code}`,
+        `এই বারকোডটি ইতিমধ্যে "${clash.name}" (${clash.code}) এ ব্যবহার হচ্ছে`,
+        400
+      );
+    }
+  }
+
   async createProduct(shopId, userId, productData, req = null) {
     const { code, name, category, variants, packaging, ...rest } = productData;
 
     this._assertUnitAllowed(req, rest.unit);
+    await this._assertBarcodeUnique(shopId, rest.barcode, req);
     // Validated against the product's OWN unit, so `outerUnitsFor` can refuse a
     // pack that cannot physically hold it. Returns undefined when packaging is
     // off, which is what leaves the subdocument absent rather than half-filled.
@@ -454,6 +550,9 @@ class ProductService {
     const beforeData = product.toObject();
 
     this._assertUnitAllowed(req, updateData.unit);
+    if ('barcode' in updateData) {
+      await this._assertBarcodeUnique(shopId, updateData.barcode, req, productId);
+    }
 
     // The pack has to be re-checked against whichever base unit the product
     // will END UP with, not the one it has now: changing পিস -> কেজি in the same

@@ -235,6 +235,10 @@ class SalesReturnService {
       profitReduction: totalProfitReduction,
       refundMethod,
       paymentMethod: refundMethod === 'cash' ? (paymentMethod || 'cash') : undefined,
+      // `store_credit` is the shop promising to pay later, so it is the only
+      // method that leaves the return open. Cash moves now; adjustment settles
+      // against the customer's due now. See the field's note on the model.
+      refundStatus: refundMethod === 'store_credit' ? 'pending' : 'settled',
       reason,
       notes,
       createdBy: userId,
@@ -474,6 +478,14 @@ class SalesReturnService {
     if (saleId) query.sale = saleId;
     if (customerId) query.customer = customerId;
 
+    // "Which refunds do I still owe?" — the filter the pending status exists to
+    // serve. Anything other than 'pending' is ignored rather than passed
+    // through, so a stray query string cannot slice the list in a way the UI
+    // has no way to display or clear.
+    if (options.refundStatus === 'pending') {
+      query.refundStatus = 'pending';
+    }
+
     if (startDate || endDate) {
       query.createdAt = {};
       if (startDate) query.createdAt.$gte = new Date(startDate);
@@ -598,6 +610,123 @@ class SalesReturnService {
       },
       returnableItems,
     };
+  }
+
+  /**
+   * Pay out a return that was recorded as "পরে দিবেন".
+   *
+   * ───────────────────────────────────────────────────────────────────────────
+   * THIS IS THE SECOND HALF OF A CASH REFUND, RUN LATE
+   * ───────────────────────────────────────────────────────────────────────────
+   *
+   * A `store_credit` return moved the goods and nothing else. Settling it does
+   * exactly what `createReturn` does for `refundMethod: 'cash'` — writes the
+   * refund `Payment`, and walks the customer's totals and per-branch balance
+   * back down — only now, when the money actually leaves the drawer.
+   *
+   * The stock, the sale's `returnedAmount`, the profit reduction and the
+   * customer's `totalPurchases` were all handled when the return was created.
+   * Touching them again here would double-count them. The ONLY thing that
+   * happens now is the money.
+   *
+   * Idempotent by guard: a return already `settled` is refused rather than
+   * paid twice. That guard is the whole reason this is a status flip and not a
+   * free-standing "record a refund" action.
+   *
+   * @param {string} shopId
+   * @param {string} userId
+   * @param {string} returnId
+   * @param {Object} data           `{ settlementMethod }`
+   * @param {Object} req
+   */
+  async settleRefund(shopId, userId, returnId, data = {}, req = null) {
+    return await runInTransaction(async (session) => {
+      const sessionOpt = session ? { session } : {};
+
+      const salesReturn = await SalesReturn.findOne(
+        branchFilter(req, { _id: returnId, shop: shopId })
+      ).session(session || null);
+
+      if (!salesReturn) {
+        throw new AppError('Sales return not found', 'ফেরত পাওয়া যায়নি', 404);
+      }
+      if (salesReturn.refundStatus !== 'pending') {
+        throw new AppError(
+          'This refund has already been settled',
+          'এই ফেরতের টাকা ইতিমধ্যে দেওয়া হয়েছে',
+          400
+        );
+      }
+
+      const method = data.settlementMethod || 'cash';
+      const amount = Number(salesReturn.totalAmount) || 0;
+
+      await Payment.create([{
+        shop: shopId,
+        branch: salesReturn.branch,
+        sale: salesReturn.sale,
+        customer: salesReturn.customer,
+        amount,
+        method,
+        type: 'refund',
+        reference: salesReturn.returnNo,
+        notes: `বকেয়া ফেরত পরিশোধ: ${salesReturn.returnNo}`,
+        receivedBy: userId,
+      }], sessionOpt);
+
+      // Mirrors the cash branch of `createReturn` exactly. `totalPurchases` was
+      // NOT reduced when the store-credit return was created — only a cash or
+      // adjustment refund did that — so both sides move here, and the two books
+      // (Customer and CustomerBalance) are clamped the same way. Clamping only
+      // one of them is precisely how they drift apart.
+      if (salesReturn.customer) {
+        await Customer.findByIdAndUpdate(salesReturn.customer, {
+          $inc: { totalPurchases: -amount, totalPaid: -amount },
+        }, sessionOpt);
+
+        const customer = await Customer.findById(salesReturn.customer).session(session || null);
+        if (customer) {
+          customer.totalDue = Math.max(0, customer.totalPurchases - customer.totalPaid);
+          await customer.save(sessionOpt);
+        }
+
+        await CustomerBalance.applyDelta({
+          shop: shopId,
+          customer: salesReturn.customer,
+          branch: salesReturn.branch,
+          purchases: -amount,
+          paid: -amount,
+        }, session);
+        await CustomerBalance.recomputeDue({
+          shop: shopId,
+          customer: salesReturn.customer,
+          branch: salesReturn.branch,
+        }, session);
+      }
+
+      salesReturn.refundStatus = 'settled';
+      salesReturn.settledAt = new Date();
+      salesReturn.settledBy = userId;
+      salesReturn.settlementMethod = method;
+      await salesReturn.save(sessionOpt);
+
+      await AuditLog.create([{
+        shop: shopId,
+        branch: salesReturn.branch,
+        user: userId,
+        action: AUDIT_ACTIONS.SALE_RETURN || 'sale_return',
+        actionBn: 'বকেয়া ফেরত পরিশোধ',
+        description: `Settled pending refund ${salesReturn.returnNo}. Amount: ${amount}, method: ${method}`,
+        descriptionBn: `${salesReturn.returnNo} এর বকেয়া ৳${amount} ফেরত দেওয়া হয়েছে`,
+        entity: {
+          type: 'sales_return',
+          id: salesReturn._id,
+          name: salesReturn.returnNo,
+        },
+      }], sessionOpt);
+
+      return salesReturn;
+    });
   }
 
   /**
