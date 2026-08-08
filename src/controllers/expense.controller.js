@@ -35,11 +35,20 @@ exports.updateExpense = asyncHandler(async (req, res) => {
 });
 
 // Delete expense
-exports.deleteExpense = asyncHandler(async (req, res) => {
-  await expenseService.deleteExpense(req.shop._id, req.user._id, req.params.id, req);
+// Void an expense. Not delete — expenses are an immutable ledger row; see
+// `voidExpense` in the service and `immutableGuard` on the model.
+exports.voidExpense = asyncHandler(async (req, res) => {
+  const expense = await expenseService.voidExpense(
+    req.shop._id,
+    req.user._id,
+    req.params.id,
+    req.body?.reason,
+    req
+  );
   return ApiResponse.success(res, {
-    message: 'Expense deleted successfully',
-    messageBn: 'খরচ সফলভাবে মুছে ফেলা হয়েছে',
+    data: expense,
+    message: 'Expense voided successfully',
+    messageBn: 'খরচটি বাতিল করা হয়েছে',
   });
 });
 

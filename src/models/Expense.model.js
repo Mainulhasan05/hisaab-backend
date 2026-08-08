@@ -46,9 +46,80 @@ const expenseSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true
+  },
+  // ── Void ───────────────────────────────────────────────────────────────────
+  //
+  // An expense is a ledger row: `immutableGuard` below refuses to delete it, so
+  // a mistyped ৳50,000 has to be retractable some other way or the shopkeeper is
+  // stuck with a wrong profit figure forever. Voiding retracts the AMOUNT while
+  // keeping the ROW — which is the difference between "this never counted" and
+  // "this never happened". The first is true and auditable; the second is a
+  // month-end total that changed with nothing to explain why.
+  isVoided: {
+    type: Boolean,
+    default: false
+  },
+  voidedAt: Date,
+  voidedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  voidReason: {
+    type: String,
+    trim: true,
+    maxlength: [200, 'কারণ ২০০ অক্ষরের বেশি হতে পারবে না']
   }
 }, {
   timestamps: true
+});
+
+/**
+ * Voided expenses are invisible by DEFAULT, everywhere, automatically.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY THIS IS A SCHEMA HOOK AND NOT A FILTER ON EACH QUERY
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Twelve places read or sum expenses: the list and its count, `getTotal` and
+ * `getSummaryByCategory` below, the cash register's cash-expense total, seven
+ * aggregations in report.service (dashboard, profit & loss, daily summary,
+ * date-wise, monthly), and the platform counter in admin.service.
+ *
+ * Adding `isVoided: { $ne: true }` to twelve call sites means the thirteenth —
+ * whoever writes the next report — silently sums voided rows back in. The
+ * failure is a profit figure that is wrong by exactly the amount someone
+ * retracted, on one screen and not the others, with nothing on screen to hint
+ * at it. Nobody reconciles two dashboards against each other; they just trust
+ * the number.
+ *
+ * So the filter lives here, applied to every find and every aggregate, and
+ * being wrong requires opting OUT explicitly rather than remembering to opt in.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * OPTING OUT
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ *   Expense.find(q).setOptions({ includeVoided: true })
+ *   Expense.aggregate(p).option({ includeVoided: true })
+ *
+ * Exactly two callers should: the expense list when the shopkeeper ticks "বাতিল
+ * করা দেখুন", and `voidExpense` itself, which has to load a row it is about to
+ * void and would otherwise be unable to find one twice.
+ *
+ * `$ne: true` rather than `false` — every expense written before this field
+ * existed has no `isVoided` at all, and `{ isVoided: false }` would exclude
+ * every one of them from every total.
+ */
+const NOT_VOIDED = { isVoided: { $ne: true } };
+
+expenseSchema.pre(/^(find|count|distinct)/, function (next) {
+  if (!this.getOptions?.().includeVoided) this.where(NOT_VOIDED);
+  next();
+});
+
+expenseSchema.pre('aggregate', function (next) {
+  if (!this.options?.includeVoided) this.pipeline().unshift({ $match: NOT_VOIDED });
+  next();
 });
 
 // Indexes - Optimized for scalability

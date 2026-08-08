@@ -18,6 +18,10 @@ router.get('/summary', rbac('expenses', 'view'), expenseController.getSummary);
 router.get('/', rbac('expenses', 'view'), expenseController.getExpenses);
 router.post('/', rbac('expenses', 'create'), expenseController.createExpense);
 router.put('/:id', rbac('expenses', 'update'), expenseController.updateExpense);
-router.delete('/:id', rbac('expenses', 'delete'), expenseController.deleteExpense);
+// Void, not delete. `immutableGuard` on the Expense model refuses every hard
+// delete, so the old `DELETE /:id` route could not succeed for any role — it
+// answered 403 to the owner too. Same `expenses.delete` permission: retracting
+// an expense is the same authority, only now it is an operation that works.
+router.post('/:id/void', rbac('expenses', 'delete'), expenseController.voidExpense);
 
 module.exports = router;

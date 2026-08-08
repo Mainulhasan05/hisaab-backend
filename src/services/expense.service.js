@@ -48,15 +48,22 @@ class ExpenseService {
     const sortField = ['date', 'createdAt', 'amount'].includes(sortBy) ? sortBy : 'date';
     const sort = { [sortField]: sortOrder === 'asc' ? 1 : -1 };
 
+    /* Voided rows are hidden by the schema unless asked for. Off by default so
+       the list reads as the shop's real spending; the toggle is for looking
+       something up, not for daily use. */
+    const includeVoided = options.includeVoided === true || options.includeVoided === 'true';
+
     const [expenses, total] = await Promise.all([
       Expense.find(query)
+        .setOptions({ includeVoided })
         .populate('category', 'name icon')
         .populate('createdBy', 'name')
+        .populate('voidedBy', 'name')
         .sort(sort)
         .skip(skip)
         .limit(parseInt(limit))
         .lean(),
-      Expense.countDocuments(query),
+      Expense.countDocuments(query).setOptions({ includeVoided }),
     ]);
 
     return {
@@ -174,31 +181,56 @@ class ExpenseService {
   }
 
   // Delete expense
-  async deleteExpense(shopId, userId, expenseId, req = null) {
-    const expense = await Expense.findOne(branchFilter(req, { _id: expenseId, shop: shopId }));
+  /**
+   * Retract an expense without deleting it.
+   *
+   * This replaces `deleteExpense`, which could never succeed: the route, the
+   * RBAC check and the service body all existed, and then `immutableGuard` on
+   * the model refused the delete for every caller including the owner. The UI
+   * shipped a bin icon and a confirm dialog that always ended in a 403.
+   *
+   * `includeVoided` on the lookup so voiding an already-voided expense reports
+   * "already voided" instead of "not found" — the schema hides voided rows from
+   * every query by default, this one included.
+   */
+  async voidExpense(shopId, userId, expenseId, reason, req = null) {
+    const expense = await Expense.findOne(
+      branchFilter(req, { _id: expenseId, shop: shopId })
+    ).setOptions({ includeVoided: true });
+
     if (!expense) {
       throw new AppError('খরচটি পাওয়া যায়নি', 'Expense not found', 404);
     }
 
-    const deletedInfo = { amount: expense.amount, categoryName: expense.categoryName };
-    await Expense.deleteOne({ _id: expenseId });
+    if (expense.isVoided) {
+      throw new AppError('খরচটি আগেই বাতিল করা হয়েছে', 'Expense is already voided', 400);
+    }
 
-    // Audit log
+    expense.isVoided = true;
+    expense.voidedAt = new Date();
+    expense.voidedBy = userId;
+    expense.voidReason = reason || '';
+    await expense.save();
+
     await AuditLog.create({
       shop: shopId,
       user: userId,
-      action: 'expense_delete',
-      actionBn: 'খরচ মুছে ফেলা',
-      description: `Deleted expense: ৳${deletedInfo.amount} - ${deletedInfo.categoryName}`,
-      descriptionBn: `খরচ মুছে ফেলা হয়েছে: ৳${deletedInfo.amount} - ${deletedInfo.categoryName}`,
+      action: 'expense_void',
+      actionBn: 'খরচ বাতিল',
+      description: `Voided expense: ৳${expense.amount} - ${expense.categoryName}${reason ? `. Reason: ${reason}` : ''}`,
+      descriptionBn: `খরচ বাতিল করা হয়েছে: ৳${expense.amount} - ${expense.categoryName}${reason ? `। কারণ: ${reason}` : ''}`,
       entity: {
         type: 'expense',
-        id: expenseId,
-        name: deletedInfo.categoryName,
+        id: expense._id,
+        name: expense.categoryName,
+      },
+      changes: {
+        before: { isVoided: false, amount: expense.amount },
+        after: { isVoided: true, voidReason: reason || '' },
       },
     });
 
-    return { success: true };
+    return expense;
   }
 
   // Get expense summary (by category, totals)
@@ -276,8 +308,12 @@ class ExpenseService {
       throw new AppError('ক্যাটাগরি পাওয়া যায়নি বা ডিফল্ট ক্যাটাগরি মুছা যায় না', 'Category not found or cannot delete default', 404);
     }
 
-    // Check if any expenses use this category
-    const expenseCount = await Expense.countDocuments({ shop: shopId, category: categoryId });
+    // Voided expenses count here too. They still carry this category id, and a
+    // category that vanishes underneath them makes the "বাতিল করা দেখুন" list
+    // unresolvable later. `categoryName` is denormalised so the row would still
+    // render, but the reference would dangle — cheaper to keep the block honest.
+    const expenseCount = await Expense.countDocuments({ shop: shopId, category: categoryId })
+      .setOptions({ includeVoided: true });
     if (expenseCount > 0) {
       throw new AppError(
         `এই ক্যাটাগরিতে ${expenseCount}টি খরচ আছে, আগে সেগুলো মুছুন বা পরিবর্তন করুন`,
