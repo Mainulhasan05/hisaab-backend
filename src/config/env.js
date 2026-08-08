@@ -20,6 +20,13 @@ function validateEnv(env = process.env) {
   if (env.META_CAPI_ACCESS_TOKEN && !env.META_PIXEL_ID) {
     throw new Error('META_CAPI_ACCESS_TOKEN requires META_PIXEL_ID');
   }
+
+  // Telegram is entirely optional — with no token the bot never starts and the
+  // rest of the app is unaffected. A malformed token is worth catching here
+  // though, because the only other symptom is a 404 from getMe at boot.
+  if (env.TELEGRAM_BOT_TOKEN && !/^\d+:[\w-]{20,}$/.test(env.TELEGRAM_BOT_TOKEN.trim())) {
+    throw new Error('TELEGRAM_BOT_TOKEN is malformed — expected "<digits>:<secret>" from @BotFather');
+  }
 }
 
 module.exports = { validateEnv };

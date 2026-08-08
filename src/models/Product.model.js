@@ -256,7 +256,24 @@ const productSchema = new mongoose.Schema({
     type: String,
     trim: true,
   }],
-  // For variant products
+  // ── For variant products ───────────────────────────────────────────────────
+  //
+  // `variantSchema` is declared at the top of this file and was never attached
+  // here. The comment above marked the spot; the path itself was missing.
+  //
+  // Everything else in the codebase assumed it existed: the two virtuals below
+  // call `this.variants.some(...)` and `.filter(...)`, the instance methods call
+  // `this.variants.id(...)`, `sale.service` deducts variant stock through it,
+  // and two indexes are declared on `variants.sku` / `variants.barcode`.
+  //
+  // Undeclared, Mongoose's strict mode silently DROPPED the key on every write,
+  // and every hydrated document had `variants === undefined`. The list screens
+  // never noticed because they all read through `.lean()`, which skips virtuals
+  // and hands back whatever the raw document holds. The barcode lookup is not
+  // lean — it hydrates and calls `toObject({ virtuals: true })` — so scanning a
+  // variant product ran `undefined.some(...)` and returned a 500 that surfaced
+  // at the till as "Cannot read properties of undefined (reading 'some')".
+  variants: [variantSchema],
   images: [mongoose.Schema.Types.Mixed],
   catalogImages: [{
     url: { type: String, required: true },
@@ -346,22 +363,37 @@ productSchema.index({ shop: 1, isAvailableOnline: 1, isActive: 1 }); // Online p
 productSchema.index({ shop: 1, isDeleted: 1, totalSold: -1 }); // Popular-first listing
 // Note: Text search removed for scalability - use regex or external search (Elasticsearch) for large datasets
 
+/*
+ * Both virtuals guard `variants` rather than trusting `hasVariants`.
+ *
+ * These run inside `toObject({ virtuals: true })`, which means they run on
+ * every hydrated document that gets serialised — including error paths and
+ * response bodies. A throw here is not a wrong number, it is a 500 on whatever
+ * request happened to touch the product, and the caller sees a stack-trace
+ * fragment instead of a product. That is exactly how the missing `variants`
+ * path above showed up: as "Cannot read properties of undefined (reading
+ * 'some')" on a barcode scan at the till.
+ *
+ * `hasVariants` is a flag a human sets; `variants` is the data. When they
+ * disagree, believe the data and degrade quietly.
+ */
+
 // Virtual: Is low stock
 productSchema.virtual('isLowStock').get(function() {
-  if (this.hasVariants) {
+  if (this.hasVariants && Array.isArray(this.variants) && this.variants.length) {
     return this.variants.some(v => v.isActive && v.stock <= this.minStock);
   }
-  return this.stock <= this.minStock;
+  return (this.stock || 0) <= this.minStock;
 });
 
 // Virtual: Total stock (for variant products)
 productSchema.virtual('totalStock').get(function() {
-  if (this.hasVariants) {
+  if (this.hasVariants && Array.isArray(this.variants) && this.variants.length) {
     return this.variants
       .filter(v => v.isActive)
-      .reduce((sum, v) => sum + v.stock, 0);
+      .reduce((sum, v) => sum + (v.stock || 0), 0);
   }
-  return this.stock;
+  return this.stock || 0;
 });
 
 /**

@@ -16,7 +16,10 @@ module.exports = {
   SMSLog: require('./SMSLog.model'),
   SMSQuota: require('./SMSQuota.model'),
   ShopCategory: require('./ShopCategory.model'),
-  GeminiKey: require('./GeminiKey.model')
+  GeminiKey: require('./GeminiKey.model'),
+  TelegramLink: require('./TelegramLink.model'),
+  TelegramLinkToken: require('./TelegramLinkToken.model'),
+  NotificationLog: require('./NotificationLog.model')
 };
 
 

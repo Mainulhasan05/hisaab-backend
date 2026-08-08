@@ -172,7 +172,11 @@ module.exports = {
 
     // Shop Settings
     SHOP_UPDATE: { en: 'shop_update', bn: 'দোকান তথ্য সম্পাদনা' },
-    SETTINGS_UPDATE: { en: 'settings_update', bn: 'সেটিংস আপডেট' }
+    SETTINGS_UPDATE: { en: 'settings_update', bn: 'সেটিংস আপডেট' },
+
+    // Telegram notifications
+    TELEGRAM_LINK: { en: 'telegram_link', bn: 'টেলিগ্রাম সংযুক্ত' },
+    TELEGRAM_UNLINK: { en: 'telegram_unlink', bn: 'টেলিগ্রাম সংযোগ বন্ধ' }
   },
 
   // Sales Return Refund Methods

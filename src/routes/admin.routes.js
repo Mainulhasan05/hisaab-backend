@@ -82,6 +82,12 @@ router.get('/sms/logs', adminController.getSMSLogs);
 router.get('/sms/allocations', adminController.getSMSAllocations);
 router.get('/sms/stats', adminController.getSMSStats);
 
+// Telegram — read-only. Retention is the collection's 90-day TTL index, not a
+// clear button: hard deletion from the admin panel is disabled platform-wide.
+router.get('/telegram/logs', adminController.getTelegramLogs);
+router.get('/telegram/links', adminController.getTelegramLinks);
+router.get('/telegram/stats', adminController.getTelegramStats);
+
 const shopCategoryController = require('../controllers/shopCategory.controller');
 
 const geminiKeyController = require('../controllers/geminiKey.controller');

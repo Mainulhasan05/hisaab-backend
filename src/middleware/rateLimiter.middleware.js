@@ -150,8 +150,33 @@ const smsLimiter = rateLimit({
   }
 });
 
+/**
+ * Telegram Link Token Limiter
+ * 10 deep links per 10 minutes per owner.
+ *
+ * Each call writes a token row, so this is not a courtesy limit. Keyed on the
+ * user rather than the IP: several shops behind one broadband connection is
+ * the normal case here, and an IP key would let one owner's retries lock out
+ * the whole street.
+ */
+const telegramLinkLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 10,
+  store: new HybridStore('rl:tglink:'),
+  keyGenerator: (req) => String(req.user?._id || req.ip),
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    return ApiResponse.tooManyRequests(res, {
+      message: 'Too many link attempts, please try again in a few minutes.',
+      messageBn: 'অনেকবার চেষ্টা করা হয়েছে, কিছুক্ষণ পর আবার চেষ্টা করুন।'
+    });
+  }
+});
+
 module.exports = {
   apiLimiter,
   authLimiter,
-  smsLimiter
+  smsLimiter,
+  telegramLinkLimiter
 };

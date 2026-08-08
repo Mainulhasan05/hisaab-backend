@@ -25,6 +25,25 @@ const { refuseDeletion } = require('../utils/deletionDisabled.util');
 const { KEYS, getTTL } = require('../config/cacheKeys');
 const { FEATURES, FEATURE_KEYS } = require('../utils/features.util');
 
+const escapeRegex = (value) => String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Parses a filter boundary into a Date pinned to the edge of the day it names.
+ *
+ * A bare `YYYY-MM-DD` from an `<input type="date">` parses as UTC midnight, so
+ * an unadjusted `endDate` excludes everything logged on the day the operator
+ * actually asked for. The suffix is applied before parsing rather than via
+ * setHours() so the window does not shift with the server's local zone.
+ */
+const dayBoundary = (value, edge) => {
+  const raw = String(value).trim();
+  const iso = /^\d{4}-\d{2}-\d{2}$/.test(raw)
+    ? `${raw}${edge === 'end' ? 'T23:59:59.999Z' : 'T00:00:00.000Z'}`
+    : raw;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
 class AdminService {
   // Admin login
   async login(phone, password) {
@@ -877,6 +896,113 @@ class AdminService {
     return smsQuota;
   }
 
+  // ── Telegram notifications ────────────────────────────────────────────
+
+  /**
+   * Delivery log for every Telegram message the platform has sent.
+   *
+   * There is deliberately no companion "clear logs" method: the collection
+   * carries a 90-day TTL index and purges itself, and hard deletion from the
+   * admin panel is disabled platform-wide (utils/deletionDisabled.util.js).
+   */
+  async getTelegramLogs(options = {}) {
+    const { page = 1, limit = 50, shopId, status, eventType } = options;
+    const NotificationLog = require('../models/NotificationLog.model');
+
+    const query = { channel: 'telegram' };
+    if (shopId) query.shop = shopId;
+    if (status) query.status = status;
+    if (eventType) query.eventType = eventType;
+
+    const skip = (page - 1) * limit;
+
+    const [logs, total] = await Promise.all([
+      NotificationLog.find(query)
+        .populate('shop', 'name')
+        .populate('user', 'name phone')
+        .sort({ sentAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      NotificationLog.countDocuments(query),
+    ]);
+
+    return {
+      data: logs,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  /** Every shop currently receiving Telegram notifications. */
+  async getTelegramLinks(options = {}) {
+    const { page = 1, limit = 50 } = options;
+    const TelegramLink = require('../models/TelegramLink.model');
+
+    const query = { isActive: true };
+    const skip = (page - 1) * limit;
+
+    const [links, total] = await Promise.all([
+      TelegramLink.find(query)
+        .populate('shop', 'name phone')
+        .populate('user', 'name phone')
+        .sort({ linkedAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      TelegramLink.countDocuments(query),
+    ]);
+
+    return {
+      data: links,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  /**
+   * Headline numbers for the Telegram page.
+   *
+   * "Today" here is the server's last 24 hours rather than a Bangladesh
+   * calendar day — this is an operator health check ("is delivery working right
+   * now?"), not a business figure that has to reconcile with a shop's books.
+   */
+  async getTelegramStats() {
+    const NotificationLog = require('../models/NotificationLog.model');
+    const TelegramLink = require('../models/TelegramLink.model');
+
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    const [byStatus, connectedShops, mutedShops] = await Promise.all([
+      NotificationLog.aggregate([
+        { $match: { channel: 'telegram', sentAt: { $gte: since } } },
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]),
+      TelegramLink.countDocuments({ isActive: true }),
+      TelegramLink.countDocuments({ isActive: true, 'preferences.dailySummary': false }),
+    ]);
+
+    const counts = byStatus.reduce((acc, row) => ({ ...acc, [row._id]: row.count }), {});
+
+    return {
+      last24h: {
+        sent: counts.sent || 0,
+        failed: counts.failed || 0,
+        blocked: counts.blocked || 0,
+      },
+      connectedShops,
+      mutedShops,
+    };
+  }
+
   // Get all SMS logs (admin level - all shops)
   async getSMSLogs(options = {}) {
     const { page = 1, limit = 50, shopId, status, type } = options;
@@ -1241,31 +1367,84 @@ class AdminService {
 
   // Get audit logs (system level)
   async getAuditLogs(options = {}) {
-    const { page = 1, limit = 50, shopId, action, userId, customerId, entityType } = options;
+    const {
+      page = 1,
+      limit = 50,
+      shopId,
+      action,
+      userId,
+      customerId,
+      entityType,
+      search,
+      startDate,
+      endDate,
+    } = options;
 
     const query = {};
+    /* Every clause that needs its own $or is collected here and joined with
+       $and. Assigning `query.$or` twice silently drops the first one, so a
+       category filter and a search filter would have cancelled each other and
+       returned rows matching only the second. */
+    const and = [];
+
     if (shopId) query.shop = shopId;
     // Support prefix-based action filtering (e.g., "customer" matches "customer_create", "customer_update", "due_collection")
     if (action) {
       if (action === 'customer') {
-        query.$or = [
-          { action: { $regex: '^customer', $options: 'i' } },
-          { action: 'due_collection' },
-          { 'entity.type': 'customer' },
-        ];
+        and.push({
+          $or: [
+            { action: { $regex: '^customer', $options: 'i' } },
+            { action: 'due_collection' },
+            { 'entity.type': 'customer' },
+          ],
+        });
       } else if (action === 'auth') {
-        query.$or = [
-          { action: { $regex: '^user_', $options: 'i' } },
-          { action: 'auth_failed' },
-          { action: 'password_change' },
-        ];
+        and.push({
+          $or: [
+            { action: { $regex: '^user_', $options: 'i' } },
+            { action: 'auth_failed' },
+            { action: 'password_change' },
+          ],
+        });
       } else {
-        query.action = { $regex: `^${action}`, $options: 'i' };
+        query.action = { $regex: `^${escapeRegex(action)}`, $options: 'i' };
       }
     }
     if (userId) query.user = userId;
     if (customerId) query.customer = customerId;
     if (entityType) query['entity.type'] = entityType;
+
+    /* Free text over the fields an operator actually types into the box: the
+       action name, the human description, the affected record and the IP. The
+       console previously filtered the loaded page in the browser, so searching
+       an IP across 40k entries only ever looked at the 50 already on screen and
+       reported "no matches" for everything else. */
+    if (search && String(search).trim()) {
+      const rx = { $regex: escapeRegex(search), $options: 'i' };
+      and.push({
+        $or: [
+          { action: rx },
+          { description: rx },
+          { descriptionBn: rx },
+          { 'entity.name': rx },
+          { 'entity.type': rx },
+          { 'metadata.ip': rx },
+        ],
+      });
+    }
+
+    const createdAt = {};
+    if (startDate) {
+      const from = dayBoundary(startDate, 'start');
+      if (from) createdAt.$gte = from;
+    }
+    if (endDate) {
+      const to = dayBoundary(endDate, 'end');
+      if (to) createdAt.$lte = to;
+    }
+    if (Object.keys(createdAt).length) query.createdAt = createdAt;
+
+    if (and.length) query.$and = and;
 
     const skip = (page - 1) * limit;
 

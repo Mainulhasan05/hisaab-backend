@@ -5,6 +5,7 @@
  *   node scripts/recalc-customer-balances.js --shop <id>        # dry-run, one shop
  *   node scripts/recalc-customer-balances.js --shop <id> --apply
  *   node scripts/recalc-customer-balances.js --verify-only      # check the invariant, write nothing
+ *   node scripts/recalc-customer-balances.js --shop <id> --apply --repair-customers
  *
  * THREE JOBS, ONE SCRIPT
  * ----------------------
@@ -21,6 +22,20 @@
  * SalesReturn — never from the rollup it is checking, so it is a genuine second
  * opinion rather than a copy.
  *
+ * --repair-customers
+ * ------------------
+ * Off by default, and deliberately so. A mismatch normally means a write path
+ * updates one book and not the other, and rewriting `Customer` from the branch
+ * rows would hide that bug rather than fix it — which is what the exit code
+ * below exists to prevent.
+ *
+ * The flag is for the other case: a rollup that was never maintained at all
+ * (imported or seeded history, where `Customer.totalPurchases` sits at 0 beside
+ * hundreds of real sales). There the branch rows are the only figures derived
+ * from source documents, so summing them back into `Customer` is a repair, not
+ * a paper-over. Use it only once you have read the mismatches and know which
+ * case you are in.
+ *
  * SAFETY
  * ------
  * Dry-run by default: prints what would change and exits 0/1 on the invariant.
@@ -33,6 +48,7 @@ const mongoose = require('mongoose');
 
 const APPLY = process.argv.includes('--apply');
 const VERIFY_ONLY = process.argv.includes('--verify-only');
+const REPAIR_CUSTOMERS = process.argv.includes('--repair-customers');
 const shopArgIdx = process.argv.indexOf('--shop');
 const SHOP_ARG = shopArgIdx !== -1 ? process.argv[shopArgIdx + 1] : null;
 
@@ -46,8 +62,16 @@ const round = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
  *   totalPaid       = Σ sale.paid        + Σ payments  − Σ cash refunds
  *   totalDue        = max(0, purchases − paid)         ← the same clamp
  *   purchaseCount   = number of non-cancelled sales
+ *
+ * A customer who has never transacted anywhere gets a zero row at the default
+ * branch. Deriving rows from sales alone would leave them with no row at any
+ * branch, and in branch scope a customer with no row is invisible — so a
+ * customer added by hand before the ledger existed would silently disappear
+ * from every branch's list. `enableMultiBranch` already puts every customer on
+ * the default branch for the same reason; this keeps the backfill agreeing
+ * with it.
  */
-async function rebuildShop(db, shop) {
+async function rebuildShop(db, shop, defaultBranchId) {
   const shopId = shop._id;
 
   const sales = await db.collection('sales').aggregate([
@@ -113,6 +137,21 @@ async function rebuildShop(db, shop) {
     row.totalDue = round(Math.max(0, row.totalPurchases - row.totalPaid));
   }
 
+  // Customers with no transaction anywhere — see the note above. Skipped when
+  // the shop somehow has no default branch, since there is no honest home for
+  // them and an arbitrary one would put a customer in a branch that never
+  // served them.
+  if (defaultBranchId) {
+    const seen = new Set([...rows.values()].map((r) => String(r.customer)));
+    const all = await db.collection('customers')
+      .find({ shop: shopId }).project({ _id: 1 }).toArray();
+
+    for (const c of all) {
+      if (seen.has(String(c._id))) continue;
+      slot(c._id, defaultBranchId);
+    }
+  }
+
   return [...rows.values()];
 }
 
@@ -139,11 +178,22 @@ async function main() {
 
   let mismatches = 0;
   let written = 0;
+  let repaired = 0;
 
   for (const shop of shops) {
     console.log(`\n=== ${shop.name} (${shop._id}) — customerScope: ${shop.customerScope || 'unset'}`);
 
-    const rebuilt = await rebuildShop(db, shop);
+    // Same resolution order as enableMultiBranch: the flagged default, else the
+    // oldest branch. It is only used as the home for transaction-less customers.
+    const defaultBranch =
+      (await db.collection('branches').findOne({ shop: shop._id, isDefault: true })) ||
+      (await db.collection('branches').find({ shop: shop._id }).sort({ createdAt: 1 }).limit(1).next());
+
+    if (!defaultBranch) {
+      console.log('  no branch found — customers with no transactions will be left without a row');
+    }
+
+    const rebuilt = await rebuildShop(db, shop, defaultBranch?._id || null);
     const existing = await db.collection('customerbalances')
       .find({ shop: shop._id }).toArray();
     const existingByKey = new Map(existing.map((r) => [`${r.customer}|${r.branch}`, r]));
@@ -151,17 +201,36 @@ async function main() {
     console.log(`  rebuilt ${rebuilt.length} (customer, branch) rows; ${existing.length} currently stored`);
 
     // --- the invariant, per customer ---
+    // Summed across every field, not just totalDue, because --repair-customers
+    // writes the whole rollup back and a partial sum would leave `Customer`
+    // internally inconsistent (a due that its own purchases minus paid cannot
+    // produce).
     const rebuiltByCustomer = new Map();
     for (const row of rebuilt) {
       const k = String(row.customer);
-      rebuiltByCustomer.set(k, round((rebuiltByCustomer.get(k) || 0) + row.totalDue));
+      const acc = rebuiltByCustomer.get(k) ||
+        { totalPurchases: 0, totalPaid: 0, totalDue: 0, purchaseCount: 0, lastPurchase: null };
+      acc.totalPurchases = round(acc.totalPurchases + row.totalPurchases);
+      acc.totalPaid = round(acc.totalPaid + row.totalPaid);
+      acc.totalDue = round(acc.totalDue + row.totalDue);
+      acc.purchaseCount += row.purchaseCount;
+      if (row.lastPurchase && (!acc.lastPurchase || row.lastPurchase > acc.lastPurchase)) {
+        acc.lastPurchase = row.lastPurchase;
+      }
+      rebuiltByCustomer.set(k, acc);
     }
 
     const customers = await db.collection('customers')
-      .find({ shop: shop._id }).project({ totalDue: 1, name: 1, phone: 1 }).toArray();
+      .find({ shop: shop._id })
+      .project({ totalPurchases: 1, totalPaid: 1, totalDue: 1, purchaseCount: 1, name: 1, phone: 1 })
+      .toArray();
+
+    const customerRepairs = [];
 
     for (const customer of customers) {
-      const branchSum = rebuiltByCustomer.get(String(customer._id)) || 0;
+      const rebuiltRollup = rebuiltByCustomer.get(String(customer._id)) ||
+        { totalPurchases: 0, totalPaid: 0, totalDue: 0, purchaseCount: 0, lastPurchase: null };
+      const branchSum = rebuiltRollup.totalDue;
       const shopWide = round(customer.totalDue || 0);
       if (Math.abs(branchSum - shopWide) > 0.01) {
         mismatches++;
@@ -171,6 +240,32 @@ async function main() {
             `branches sum to ৳${branchSum}, Customer.totalDue is ৳${shopWide}`
           );
         }
+      }
+
+      if (!REPAIR_CUSTOMERS) continue;
+
+      const differs =
+        Math.abs(round(customer.totalPurchases || 0) - rebuiltRollup.totalPurchases) > 0.01 ||
+        Math.abs(round(customer.totalPaid || 0) - rebuiltRollup.totalPaid) > 0.01 ||
+        Math.abs(shopWide - branchSum) > 0.01 ||
+        (customer.purchaseCount || 0) !== rebuiltRollup.purchaseCount;
+
+      if (differs) {
+        customerRepairs.push({
+          updateOne: {
+            filter: { _id: customer._id },
+            update: {
+              $set: {
+                totalPurchases: rebuiltRollup.totalPurchases,
+                totalPaid: rebuiltRollup.totalPaid,
+                totalDue: rebuiltRollup.totalDue,
+                purchaseCount: rebuiltRollup.purchaseCount,
+                lastPurchase: rebuiltRollup.lastPurchase,
+                updatedAt: new Date(),
+              },
+            },
+          },
+        });
       }
     }
 
@@ -224,11 +319,22 @@ async function main() {
     }
 
     console.log(`  ${ops.length} row(s) would change`);
+    if (REPAIR_CUSTOMERS) {
+      console.log(`  ${customerRepairs.length} Customer rollup(s) would be rewritten from the branch rows`);
+    }
 
     if (APPLY && ops.length > 0) {
       const res = await db.collection('customerbalances').bulkWrite(ops, { ordered: false });
       written += (res.upsertedCount || 0) + (res.modifiedCount || 0);
       console.log(`  applied: ${res.upsertedCount || 0} inserted, ${res.modifiedCount || 0} updated`);
+    }
+
+    // After this the branch rows and the shop-wide rollup agree by construction,
+    // so the mismatches counted above are the ones that were just repaired.
+    if (APPLY && REPAIR_CUSTOMERS && customerRepairs.length > 0) {
+      const res = await db.collection('customers').bulkWrite(customerRepairs, { ordered: false });
+      repaired += res.modifiedCount || 0;
+      console.log(`  repaired: ${res.modifiedCount || 0} Customer rollup(s)`);
     }
   }
 
@@ -237,12 +343,17 @@ async function main() {
   console.log(`Invariant mismatches: ${mismatches}${mismatches > 20 ? ' (first 20 shown)' : ''}`);
   if (APPLY) console.log(`Rows written: ${written}`);
   else if (!VERIFY_ONLY) console.log('DRY-RUN — nothing written. Re-run with --apply.');
+  if (APPLY && REPAIR_CUSTOMERS) console.log(`Customer rollups repaired: ${repaired}`);
 
   await mongoose.connection.close();
 
   // A mismatch means a write path updates one book and not the other. That is a
   // code bug, not a data blip, so fail loudly rather than quietly rewriting.
-  if (mismatches > 0) {
+  //
+  // Not an error once --repair-customers has actually run: there the mismatch
+  // was the input, and the rollups have just been rewritten from it. Re-run
+  // without the flag to confirm the count is back to zero.
+  if (mismatches > 0 && !(APPLY && REPAIR_CUSTOMERS)) {
     console.error('\nInvariant broken. Fix the write path before applying — do not paper over it here.');
     process.exit(1);
   }

@@ -53,22 +53,11 @@ function productScope(shopId, branchId, extra = {}) {
 }
 
 // Bangladesh is UTC+6. All dates from frontend are in Bangladesh local time.
-const BD_OFFSET_MS = 6 * 60 * 60 * 1000;
-
-// Get current date string in Bangladesh time ("YYYY-MM-DD")
-function getBangladeshTodayStr() {
-  const bdNow = new Date(Date.now() + BD_OFFSET_MS);
-  return bdNow.toISOString().split('T')[0];
-}
-
-// Convert a Bangladesh date string ("YYYY-MM-DD") to UTC start/end timestamps
-function getBangladeshDayRange(dateStr) {
-  const [year, month, day] = dateStr.split('-').map(Number);
-  // Bangladesh midnight = UTC midnight minus 6 hours (BD is UTC+6)
-  const startOfDay = new Date(Date.UTC(year, month - 1, day) - BD_OFFSET_MS);
-  const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000 - 1);
-  return { startOfDay, endOfDay };
-}
+// These used to be defined here; they moved to utils/bdTime.util.js when the
+// Telegram digest job needed the same notion of "today". Two copies of this
+// conversion would eventually disagree, and a digest that reports a different
+// day than the dashboard is worse than no digest.
+const { getBangladeshTodayStr, getBangladeshDayRange } = require('../utils/bdTime.util');
 
 function netSaleAmountExpr() {
   return {
@@ -892,6 +881,85 @@ class ReportService {
 
     // Cache the result
     await cacheService.set(cacheKey, result, getTTL.dailySummary);
+    return result;
+  }
+
+  /**
+   * The three numbers the Telegram daily digest sends, per branch and in total.
+   *
+   * Deliberately NOT built on getDailySummary(): that runs eleven aggregations
+   * to fill a dashboard, and the digest needs three columns. At 10 PM every
+   * shop fires at once, so this is one aggregation per shop — grouped by
+   * branch — instead of eleven per branch per shop.
+   *
+   * The match and the money expressions are the same ones getDailySummary uses,
+   * so the digest total always equals what the owner sees on the dashboard.
+   * Note that `revenue` is net of returns while `profit` is not; that asymmetry
+   * is inherited on purpose, because matching the dashboard matters more than
+   * being internally tidy — an owner comparing the two must not find a gap.
+   */
+  async getDigestTotals(shopId, dateStr, { multiBranch = false } = {}) {
+    const { startOfDay, endOfDay } = getBangladeshDayRange(dateStr);
+
+    const rows = await Sale.aggregate([
+      {
+        $match: {
+          shop: new mongoose.Types.ObjectId(shopId),
+          status: { $ne: 'cancelled' },
+          createdAt: { $gte: startOfDay, $lte: endOfDay },
+        },
+      },
+      {
+        $group: {
+          _id: multiBranch ? '$branch' : null,
+          revenue: { $sum: netSaleAmountExpr() },
+          profit: { $sum: '$profit' },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const total = rows.reduce(
+      (acc, r) => ({
+        count: acc.count + (r.count || 0),
+        revenue: acc.revenue + (r.revenue || 0),
+        profit: acc.profit + (r.profit || 0),
+      }),
+      { count: 0, revenue: 0, profit: 0 }
+    );
+
+    const result = {
+      date: dateStr,
+      total: {
+        count: total.count,
+        revenue: quantizeMoney(total.revenue),
+        profit: quantizeMoney(total.profit),
+      },
+      byBranch: [],
+    };
+
+    if (!multiBranch) return result;
+
+    // Every active branch appears, including those with no sales — "0 invoices
+    // at Uttara" is the line an owner most needs to see, and omitting the row
+    // would read as though the branch simply wasn't counted.
+    const branches = await Branch.find({ shop: shopId, isActive: true })
+      .select('name')
+      .sort({ isDefault: -1, name: 1 })
+      .lean();
+
+    const byId = new Map(rows.map((r) => [String(r._id), r]));
+    result.byBranch = branches.map((b) => {
+      const row = byId.get(String(b._id)) || {};
+      return {
+        branchId: b._id,
+        name: b.name,
+        count: row.count || 0,
+        revenue: quantizeMoney(row.revenue || 0),
+        profit: quantizeMoney(row.profit || 0),
+      };
+    });
+
     return result;
   }
 

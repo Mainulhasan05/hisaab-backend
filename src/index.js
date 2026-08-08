@@ -8,6 +8,8 @@ const { initializeRedis, closeConnection: closeRedis } = require('./config/redis
 const logger = require('./utils/logger.util');
 
 const { startSyncJob, stopSyncJob } = require('./jobs/userActivitySync.job');
+const { startDigestJob, stopDigestJob } = require('./jobs/dailyDigest.job');
+const telegramService = require('./services/telegram.service');
 
 // Register all models early so Mongoose can resolve populate refs
 require('./models/Role.model');
@@ -102,6 +104,13 @@ async function start() {
 
   // Start 5-minute background user activity database sync job
   startSyncJob();
+
+  // Telegram. Started outside the Redis path on purpose — a Redis blip at boot
+  // must not leave the process with no bot until the next restart. initialize()
+  // never throws; with no token it logs and returns, and the digest job then
+  // no-ops on every tick.
+  telegramService.initialize().catch((err) => logger.warn(`Telegram init error: ${err.message}`));
+  startDigestJob();
 }
 
 start().catch((err) => {
@@ -130,6 +139,8 @@ async function shutdown(code = 0) {
 
   try {
     stopSyncJob();
+    stopDigestJob();
+    telegramService.shutdown();
     if (server) {
       await new Promise((resolve) => server.close(resolve));
       logger.info('HTTP server closed');

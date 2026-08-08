@@ -29,6 +29,7 @@ const heldCartRoutes = require('./heldCart.routes');
 const stockTransferRoutes = require('./stockTransfer.routes');
 const imageUploadRoutes = require('./imageUpload.routes');
 const userRoutes = require('./user.routes');
+const telegramRoutes = require('./telegram.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
@@ -59,6 +60,7 @@ router.use('/images', imageRoutes);
 router.use('/branches', branchRoutes);
 router.use('/held-carts', heldCartRoutes);
 router.use('/stock-transfers', stockTransferRoutes);
+router.use('/telegram', telegramRoutes);
 
 // API Info
 router.get('/', (req, res) => {
@@ -90,6 +92,7 @@ router.get('/', (req, res) => {
       branches: '/api/branches',
       heldCarts: '/api/held-carts',
       stockTransfers: '/api/stock-transfers',
+      telegram: '/api/telegram',
     }
   });
 });

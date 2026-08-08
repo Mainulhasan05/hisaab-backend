@@ -144,6 +144,36 @@ exports.getSMSStats = asyncHandler(async (req, res) => {
   });
 });
 
+// Get Telegram delivery logs
+exports.getTelegramLogs = asyncHandler(async (req, res) => {
+  const result = await adminService.getTelegramLogs(req.query);
+  return ApiResponse.paginated(res, {
+    ...result,
+    message: 'Telegram logs retrieved successfully',
+    messageBn: 'টেলিগ্রাম লগ সফলভাবে লোড হয়েছে',
+  });
+});
+
+// Get connected Telegram accounts
+exports.getTelegramLinks = asyncHandler(async (req, res) => {
+  const result = await adminService.getTelegramLinks(req.query);
+  return ApiResponse.paginated(res, {
+    ...result,
+    message: 'Telegram links retrieved successfully',
+    messageBn: 'সংযুক্ত টেলিগ্রাম তালিকা লোড হয়েছে',
+  });
+});
+
+// Get Telegram delivery stats
+exports.getTelegramStats = asyncHandler(async (req, res) => {
+  const stats = await adminService.getTelegramStats();
+  return ApiResponse.success(res, {
+    data: stats,
+    message: 'Telegram stats retrieved successfully',
+    messageBn: 'টেলিগ্রাম পরিসংখ্যান লোড হয়েছে',
+  });
+});
+
 // Get audit logs
 exports.getAuditLogs = asyncHandler(async (req, res) => {
   const result = await adminService.getAuditLogs(req.query);
