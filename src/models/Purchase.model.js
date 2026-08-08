@@ -28,9 +28,48 @@ const purchaseItemSchema = new mongoose.Schema({
     required: [true, 'পরিমাণ দিন'],
     min: [0.001, 'পরিমাণ ০ এর বেশি হতে হবে']
   },
+  // ── The unit snapshot ──────────────────────────────────────────────────────
+  //
+  // Mirrors `Sale.items` exactly; see the long note there. The purchase form
+  // has always multiplied "৫ বস্তা × ২০ কেজি" on the client and posted 100,
+  // throwing the pack away. That made the purchase record unreadable back:
+  // a shopkeeper checking a supplier bill against Hisaab saw "১০০ কেজি" where
+  // the bill said "৫ বস্তা", and had to redo the division in their head.
+  //
+  // Storing it changes no arithmetic — `quantity` is still the base-unit number
+  // stock is incremented by. It only makes the record say what happened.
+  //
+  // Absent on every purchase written before this field existed; fall back.
+  unit: {
+    type: String
+  },
+  purchaseUnit: {
+    type: String,
+    enum: ['base', 'pack'],
+    default: 'base'
+  },
+  packUnit: {
+    type: String
+  },
+  packSize: {
+    type: Number,
+    min: [0.001, 'প্রতি মোড়কে পরিমাণ ০ এর বেশি হতে হবে']
+  },
+  packQuantity: {
+    type: Number,
+    min: [0.001, 'পরিমাণ ০ এর বেশি হতে হবে']
+  },
+  // Per-BASE-unit cost, always — on a pack line it is `packUnitPrice / packSize`.
+  // One meaning for this field is what keeps every existing cost/profit report
+  // working without learning what a pack is.
   unitPrice: {
     type: Number,
     required: [true, 'একক দাম দিন'],
+    min: [0, 'দাম ০ এর কম হতে পারবে না']
+  },
+  // What the supplier charged for one whole pack. Display-only.
+  packUnitPrice: {
+    type: Number,
     min: [0, 'দাম ০ এর কম হতে পারবে না']
   },
   total: {

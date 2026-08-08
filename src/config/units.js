@@ -243,6 +243,51 @@ function conversionFactor(from, to) {
 }
 
 /**
+ * Every unit in the `pack` group — the মোড়ক units with no fixed real-world
+ * size. These are the ones a shopkeeper *buys* in.
+ */
+const PACK_UNITS = Object.freeze(ALL_UNITS.filter(u => UNITS[u].group === 'pack'));
+
+/** True when `unit` is a মোড়ক — প্যাকেট, কার্টন, বস্তা… */
+function isPackUnit(unit) {
+  return unitDef(unit).group === 'pack';
+}
+
+/**
+ * Units that may sit OUTSIDE a given base unit as its pack.
+ *
+ * Two families qualify, and only two:
+ *
+ *   1. every `pack`-group unit — কার্টন, বস্তা, প্যাকেট have no fixed size, so
+ *      any of them can hold any base unit. The size comes from the shopkeeper.
+ *   2. a unit in the base unit's OWN group that is strictly larger — ডজন over
+ *      পিস, মণ over কেজি. Here the size is already known, so it pre-fills.
+ *
+ * Never cross groups: a কার্টন of কেজি is fine (the shopkeeper says how many),
+ * but a লিটার of কেজি is a category error and would silently mis-book stock.
+ *
+ * This is the single definition both the product form and the server-side
+ * validator use. Two copies of this rule is how a pack unit the UI offers ends
+ * up rejected on save.
+ *
+ * @param {string} baseUnit
+ * @returns {string[]}
+ */
+function outerUnitsFor(baseUnit) {
+  const target = UNITS[baseUnit];
+  if (!target) return [];
+
+  return ALL_UNITS.filter((u) => {
+    if (u === baseUnit) return false;
+    const def = UNITS[u];
+    if (def.group === 'pack') return true;
+    if (def.group !== target.group) return false;
+    if (def.value == null || target.value == null) return false;
+    return def.value > target.value;
+  });
+}
+
+/**
  * Units a shop may choose from.
  *
  * WITHOUT the packaging flag this returns the original 13, in the original
@@ -291,6 +336,9 @@ module.exports = {
   ALL_UNITS,
   LEGACY_UNITS,
   COMMON_UNITS,
+  PACK_UNITS,
+  isPackUnit,
+  outerUnitsFor,
   DEFAULT_UNIT,
   MAX_DECIMALS,
   SAFE_QUANTITY_MAX,

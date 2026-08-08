@@ -9,12 +9,14 @@ const { branchFilter, requireBranch } = require('../utils/branchScope.util');
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
 const {
-  parseQuantity,
+  // `parseQuantity` is reached through `resolveLineQuantity` now, so the pack
+  // branch and the loose branch cannot validate a quantity two different ways.
   quantityUnit,
   storageUnit,
   quantize,
   quantizeMoney,
 } = require('../utils/quantity.util');
+const { resolveLineQuantity } = require('../utils/packaging.util');
 
 class PurchaseService {
   // Get all purchases with filtering and pagination
@@ -155,15 +157,39 @@ class PurchaseService {
       // negatives, non-numbers and values past the safe-precision ceiling, all
       // of which `parseInt` let through (`parseInt('12abc')` is 12).
       //
-      // The purchase UI's "5 sacks x 20 kg" helper multiplies on the CLIENT and
-      // posts the product of the two. Nothing about the pack size is stored or
-      // sent — by the time a quantity reaches here it is already expressed in
-      // the product's own unit, which is the whole reason this service needs no
-      // packaging concept at all.
-      const quantity = parseQuantity(item.quantity, quantityUnit(req, product), {
-        label: product.name,
+      // The purchase form may post either shape:
+      //
+      //     { quantity: 100 }                              100 kg, loose
+      //     { purchaseUnit: 'pack', packQuantity: 5 }      5 sacks of the
+      //                                                    product's own pack
+      //
+      // `resolveLineQuantity` collapses both to a base-unit number and hands
+      // back the snapshot to store alongside it. Stock is still incremented by
+      // `quantity` in the base unit exactly as before — the pack is a record of
+      // what was bought, never a second quantity to reconcile.
+      const line = resolveLineQuantity(item, product, req, {
+        qtyUnit: quantityUnit(req, product),
+        // `sellByPack: false` must not block a delivery — see
+        // `packPurchaseAllowed`. Loose rice is never sold by the sack and is
+        // always bought by it.
+        flow: 'purchase',
       });
-      const unitPrice = parseFloat(item.unitPrice);
+      const quantity = line.quantity;
+
+      // Suppliers quote per pack ("৳১৮০০ per bag"), so the form may send the
+      // pack rate. Cost is stored per BASE unit — the division is what keeps
+      // `unitPrice` meaning one thing on every purchase line ever written.
+      // Unrounded on purpose: rounding ৳১০০০/৩ to ৳৩৩৩.৩৩ and multiplying back
+      // books ৳৯৯৯.৯৯ against a bill that says ৳১০০০.
+      let packUnitPrice = null;
+      let unitPrice;
+      if (line.mode === 'pack' && item.packUnitPrice != null && Number(item.packUnitPrice) > 0) {
+        packUnitPrice = quantizeMoney(Number(item.packUnitPrice));
+        unitPrice = packUnitPrice / line.packSize;
+      } else {
+        unitPrice = parseFloat(item.unitPrice);
+        if (line.mode === 'pack') packUnitPrice = quantizeMoney(unitPrice * line.packSize);
+      }
       const itemTotal = quantizeMoney(quantity * unitPrice);
 
       preparedItems.push({
@@ -173,7 +199,13 @@ class PurchaseService {
         variantId: item.variantId || undefined,
         variantLabel: item.variantLabel || undefined,
         quantity,
+        unit: line.unit,
+        purchaseUnit: line.mode,
+        packUnit: line.packUnit || undefined,
+        packSize: line.packSize || undefined,
+        packQuantity: line.packQuantity || undefined,
         unitPrice,
+        packUnitPrice: packUnitPrice || undefined,
         total: itemTotal,
       });
 

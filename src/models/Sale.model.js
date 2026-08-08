@@ -38,9 +38,57 @@ const saleItemSchema = new mongoose.Schema({
     required: [true, 'পরিমাণ দিন'],
     min: [0.001, 'পরিমাণ ০ এর বেশি হতে হবে']
   },
+  // ── The unit snapshot ──────────────────────────────────────────────────────
+  //
+  // `unit` is the product's base unit AS IT WAS when the sale was rung up, and
+  // it is what `quantity` above is expressed in.
+  //
+  // The invoice used to read `item.product.unit` live, through the populate.
+  // That is a rewriting-history bug: a shopkeeper who corrects a product from
+  // পিস to কেজি changes the unit printed on every invoice that product ever
+  // appeared on, including ones already handed to a customer. Denormalised for
+  // the same reason `productName` and `unitPrice` are.
+  //
+  // Absent on every sale written before this field existed. Readers must fall
+  // back — `item.unit || item.product?.unit || 'piece'` — never assume it.
+  unit: {
+    type: String
+  },
+  // How the customer BOUGHT it. 'base' (or absent) = loose, in `unit`.
+  // 'pack' = whole packs, and the three fields below say which pack and how
+  // many. `quantity` is still in the base unit either way, so every stock
+  // guard, report and profit sum downstream is untouched by this.
+  saleUnit: {
+    type: String,
+    enum: ['base', 'pack'],
+    default: 'base'
+  },
+  packUnit: {
+    type: String
+  },
+  // Base units per pack at the time of sale. Snapshotted, not looked up: a
+  // supplier moving from 20-per-carton to 24 must not silently restate an old
+  // invoice's "৫ কার্টন" as 120 pieces when the customer paid for 100.
+  packSize: {
+    type: Number,
+    min: [0.001, 'প্রতি মোড়কে পরিমাণ ০ এর বেশি হতে হবে']
+  },
+  packQuantity: {
+    type: Number,
+    min: [0.001, 'পরিমাণ ০ এর বেশি হতে হবে']
+  },
+  // Per-BASE-unit price, always — including on a pack line, where it is
+  // `packPrice / packSize`. Keeping one meaning for this field is what lets
+  // every existing report, CSV export and profit calculation stay unaware that
+  // packs exist. The pack's own price is `packUnitPrice` below, for display.
   unitPrice: {
     type: Number,
     required: [true, 'একক মূল্য দিন'],
+    min: [0, 'মূল্য ০ এর কম হতে পারবে না']
+  },
+  // Price of one whole pack, on a pack line. Display-only — nothing sums it.
+  packUnitPrice: {
+    type: Number,
     min: [0, 'মূল্য ০ এর কম হতে পারবে না']
   },
   buyingPrice: {

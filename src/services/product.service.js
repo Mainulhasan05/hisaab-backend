@@ -13,6 +13,7 @@ const {
   quantize,
 } = require('../utils/quantity.util');
 const { unitsForShop, DEFAULT_UNIT } = require('../config/units');
+const { normalizePackaging } = require('../utils/packaging.util');
 const { hasFeature } = require('../utils/features.util');
 const cacheService = require('./cache.service');
 
@@ -236,6 +237,11 @@ class ProductService {
         stock: product.stock,
         minStock: product.minStock,
         unit: product.unit,
+        // The POS needs the pack size to render a "কার্টন" button and to
+        // convert before it posts. Sent on this payload rather than fetched
+        // per-line: the cashier taps a product and must see both prices at
+        // once, and a second round-trip at the till is a second failure point.
+        packaging: product.packaging || undefined,
         category: product.category,
         // Already on the document — surfaced so the POS grid can flag best
         // sellers without a second request.
@@ -324,9 +330,17 @@ class ProductService {
   }
 
   async createProduct(shopId, userId, productData, req = null) {
-    const { code, name, category, variants, ...rest } = productData;
+    const { code, name, category, variants, packaging, ...rest } = productData;
 
     this._assertUnitAllowed(req, rest.unit);
+    // Validated against the product's OWN unit, so `outerUnitsFor` can refuse a
+    // pack that cannot physically hold it. Returns undefined when packaging is
+    // off, which is what leaves the subdocument absent rather than half-filled.
+    rest.packaging = normalizePackaging(
+      packaging,
+      rest.unit || DEFAULT_UNIT,
+      hasFeature(req, 'packaging')
+    );
 
     // Code uniqueness is per branch — the same code in another branch is a
     // different product, which is the whole point of per-branch catalogues.
@@ -389,6 +403,19 @@ class ProductService {
     const beforeData = product.toObject();
 
     this._assertUnitAllowed(req, updateData.unit);
+
+    // The pack has to be re-checked against whichever base unit the product
+    // will END UP with, not the one it has now: changing পিস -> কেজি in the same
+    // request as keeping a কার্টন pack is legal, changing it to a ডজন pack over
+    // a কেজি base is not. `updateData.unit` may be absent (a name-only edit),
+    // in which case the stored unit is still the right thing to check against.
+    if ('packaging' in updateData) {
+      updateData.packaging = normalizePackaging(
+        updateData.packaging,
+        updateData.unit || product.unit || DEFAULT_UNIT,
+        hasFeature(req, 'packaging')
+      );
+    }
 
     // Changing the unit does NOT convert the stored stock — 100 (kg) becoming
     // 100 (gram) is a data-entry correction, not a x1000 conversion, and
@@ -462,6 +489,14 @@ class ProductService {
 
     // Update product with safe data
     Object.assign(product, safeUpdateData);
+    // `Object.assign` copies an explicit `undefined` as a key with no value,
+    // which Mongoose treats as "leave it alone" for a single nested path — the
+    // old pack would survive a request that turned packaging off. `$unset` is
+    // the only thing that actually removes it.
+    if ('packaging' in safeUpdateData && safeUpdateData.packaging === undefined) {
+      product.set('packaging', undefined);
+      product.markModified('packaging');
+    }
     if (safeUpdateData.variants) {
       product.hasVariants = safeUpdateData.variants.length > 0;
     }

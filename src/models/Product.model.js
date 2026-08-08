@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const { ALL_UNITS, DEFAULT_UNIT } = require('../config/units');
 
+
 const variantSchema = new mongoose.Schema({
   sku: {
     type: String,
@@ -42,6 +43,98 @@ const variantSchema = new mongoose.Schema({
     default: true
   }
 }, { _id: true });
+
+/**
+ * How this product is PACKED, as opposed to how it is stocked.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ONE INVARIANT, AND EVERYTHING ELSE FOLLOWS FROM IT
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ *     `stock`, `buyingPrice` and `sellingPrice` are ALWAYS in `unit` — the
+ *     base unit. The pack never touches them.
+ *
+ * A shop buys 5 cartons of oil at 20 bottles each and sells bottles one at a
+ * time. `unit` is `piece`, `stock` is 100, and packaging says "a carton is 20
+ * pieces". Sell one carton and stock goes to 80 — the SAME subtraction the
+ * sale path has always done, because the carton was converted to 20 pieces
+ * before it reached the stock guard.
+ *
+ * That is why this is additive rather than a second stock column. A
+ * `stockInPacks` field would need reconciling on every write, would go stale
+ * the moment a supplier changed 12-per-pack to 10-per-pack, and would make
+ * "how many do I actually have" a question with two answers.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY THIS IS STORED AT ALL — the purchase helper used to just multiply
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * The original design (see PackQuantityInput) treated the pack as a pure
+ * calculator: the client multiplied 5 x 20 and posted 100, and nothing about
+ * the pack survived. That was right for purchases and wrong for everything
+ * else, because three real questions have no answer without a stored pack size:
+ *
+ *   - "sell me a whole carton"  — the POS cannot offer a carton button when it
+ *     does not know what a carton is
+ *   - "how many cartons are left" — 100 pieces is not an answer a shopkeeper
+ *     counting shelves can use
+ *   - the invoice line — a customer who bought 5 cartons wants to read
+ *     "৫ কার্টন", not "১০০ পিস"
+ *
+ * So the size is stored once, on the product, and every quantity in the system
+ * stays in the base unit. `sizeAtSale` snapshots on the sale/purchase line, so
+ * changing this later never rewrites history.
+ *
+ * Only ONE level is supported (pack -> base). Carton -> packet -> piece is
+ * deliberately out of scope; see AGENT_WORKFLOW.md 13.9.
+ */
+const packagingSchema = new mongoose.Schema({
+  enabled: {
+    type: Boolean,
+    default: false
+  },
+  // A `pack`-group unit (কার্টন, বস্তা, প্যাকেট) or a larger unit from the base
+  // unit's own group (ডজন over পিস). Validated against `outerUnitsFor(unit)` in
+  // the service layer — the enum here has to accept the whole registry for the
+  // same reason `unit`'s does.
+  packUnit: {
+    type: String,
+    enum: ALL_UNITS
+  },
+  // How many base units are in one pack. Fractional on purpose: half a kg per
+  // packet is a real thing (spice sachets), and 12.5 metres per than is a real
+  // bolt of cloth.
+  unitsPerPack: {
+    type: Number,
+    min: [0.001, 'প্রতি মোড়কে পরিমাণ ০ এর বেশি হতে হবে']
+  },
+  // Cost of one whole pack, if the supplier quotes it that way. Purely a
+  // convenience for purchase entry — `buyingPrice` (per base unit) stays the
+  // number every profit calculation reads.
+  packBuyingPrice: {
+    type: Number,
+    min: [0, 'ক্রয় মূল্য ০ এর কম হতে পারবে না']
+  },
+  // Price of one whole pack. Left empty this is `unitsPerPack x sellingPrice`,
+  // which is the common case; set it to give a wholesale discount on full
+  // cartons without touching the retail price.
+  packSellingPrice: {
+    type: Number,
+    min: [0, 'বিক্রয় মূল্য ০ এর কম হতে পারবে না']
+  },
+  // Which buttons the POS offers. Both default on: a shop that packs a product
+  // normally sells it both ways, and turning one off is the exception (a carton
+  // of loose rice is not sellable as a carton; a strip of tablets often is not
+  // splittable).
+  sellByPack: {
+    type: Boolean,
+    default: true
+  },
+  sellByUnit: {
+    type: Boolean,
+    default: true
+  }
+}, { _id: false });
 
 const productSchema = new mongoose.Schema({
   shop: {
@@ -111,6 +204,12 @@ const productSchema = new mongoose.Schema({
     type: String,
     default: DEFAULT_UNIT,
     enum: ALL_UNITS
+  },
+  // Optional outer pack — see `packagingSchema` above. Absent for every product
+  // that is simply sold as it is stocked, which is most of them.
+  packaging: {
+    type: packagingSchema,
+    default: undefined
   },
   hasVariants: {
     type: Boolean,
@@ -258,6 +357,46 @@ productSchema.virtual('totalStock').get(function() {
       .reduce((sum, v) => sum + v.stock, 0);
   }
   return this.stock;
+});
+
+/**
+ * Base units in one pack, or `null` when this product has no pack.
+ *
+ * Read this rather than `product.packaging.unitsPerPack` — packaging is
+ * `default: undefined`, so the direct read throws on the ~95% of products that
+ * have none, and a cached document from before the field existed has no
+ * `packaging` key at all.
+ */
+productSchema.methods.packSize = function() {
+  const p = this.packaging;
+  if (!p || !p.enabled) return null;
+  const n = Number(p.unitsPerPack);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+/**
+ * Price of one whole pack. Falls back to `unitsPerPack x sellingPrice`, which
+ * is what a shopkeeper means when they leave the pack price empty.
+ */
+productSchema.methods.packPrice = function() {
+  const size = this.packSize();
+  if (size == null) return null;
+  const explicit = Number(this.packaging.packSellingPrice);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  return (this.sellingPrice || 0) * size;
+};
+
+/**
+ * Virtual: stock expressed in packs, for the "কত কার্টন আছে" reading.
+ *
+ * Deliberately NOT rounded to a whole pack — 100 pieces at 30 per carton is
+ * 3.33 cartons, and reporting "3" would hide a third of a carton of stock. The
+ * UI shows it as "৩ কার্টন + ১০ পিস"; this is the raw number behind that.
+ */
+productSchema.virtual('stockInPacks').get(function() {
+  const size = this.packSize();
+  if (size == null) return null;
+  return (this.hasVariants ? this.totalStock : this.stock) / size;
 });
 
 // Virtual: Profit margin

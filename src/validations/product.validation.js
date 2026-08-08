@@ -45,6 +45,20 @@ const baseProduct = {
   // Accepts the full registry; which units this particular shop may CHOOSE is
   // enforced in `product.service._assertUnitAllowed`, where the flag is known.
   unit: Joi.string().valid(...ALL_UNITS),
+  // Shape only. Whether `packUnit` may hold `unit`, whether the shop is
+  // entitled to packaging at all, and the precision of `unitsPerPack` are all
+  // decided in `packaging.util.normalizePackaging`, which — unlike Joi — has
+  // the base unit and the feature flag in hand. Joi cannot do it: the rule is
+  // cross-field AND depends on the request's shop.
+  packaging: Joi.object({
+    enabled: Joi.boolean().default(false),
+    packUnit: Joi.string().valid(...ALL_UNITS).allow('', null),
+    unitsPerPack: Joi.number().positive().allow(null, ''),
+    packBuyingPrice: Joi.number().min(0).allow(null, ''),
+    packSellingPrice: Joi.number().min(0).allow(null, ''),
+    sellByPack: Joi.boolean().default(true),
+    sellByUnit: Joi.boolean().default(true),
+  }).allow(null),
   buyingPrice: Joi.number().min(0).required(),
   sellingPrice: Joi.number().min(0).required(),
   stock: quantityField.default(0),

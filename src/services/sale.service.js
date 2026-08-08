@@ -13,7 +13,9 @@ const { branchFilter, requireBranch, getBranchCode, wrongBranchError } = require
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
 const {
-  parseQuantity,
+  // `parseQuantity` is no longer called directly here — `resolveLineQuantity`
+  // owns it, so the pack branch and the loose branch can never validate a
+  // quantity two different ways.
   quantityUnit,
   storageUnit,
   quantize,
@@ -21,6 +23,7 @@ const {
   buildStockUpdate,
   buildVariantStockUpdate,
 } = require('../utils/quantity.util');
+const { resolveLineQuantity, unitPriceFor } = require('../utils/packaging.util');
 
 // Bangladesh is UTC+6
 const BD_OFFSET_MS = 6 * 60 * 60 * 1000;
@@ -345,7 +348,16 @@ class SaleService {
       // They are not interchangeable — see the block comment in quantity.util.js.
       const qtyUnit = quantityUnit(req, product);
       const stkUnit = storageUnit(product);
-      item.quantity = parseQuantity(item.quantity, qtyUnit, { label: product.name });
+      // A line may arrive as "100 pieces" or as "5 cartons". `resolveLineQuantity`
+      // is the ONE place the second becomes the first — it validates the pack
+      // against the flag and the product, multiplies, and hands back a plain
+      // base-unit quantity plus the snapshot to store on the line.
+      //
+      // `item.quantity` is still overwritten in place, because a dozen reads
+      // below (the stock guard, FEFO, the line total, the stored item) depend
+      // on it and normalising at each of them is how one gets missed.
+      const line = resolveLineQuantity(item, product, req, { qtyUnit });
+      item.quantity = line.quantity;
 
       let unitPrice, buyingPrice, variantInfo = {};
 
@@ -498,6 +510,30 @@ class SaleService {
         }
       }
 
+      // ── Pack pricing ────────────────────────────────────────────────────────
+      //
+      // A whole carton is not always `20 x the piece price`. Shops routinely
+      // give a wholesale rate on full packs, so `packaging.packSellingPrice`
+      // wins when it is set; otherwise the pack is simply the base price times
+      // the pack size, which is what leaving that field empty means.
+      //
+      // `unitPrice` then comes back DOWN to a per-base-unit figure by division,
+      // deliberately unrounded — see `unitPriceFor`. Rounding it to paisa here
+      // and multiplying back would bill ৳৯৯৯.৯৯ for a carton quoted at ৳১০০০.
+      let packUnitPrice = null;
+      if (line.mode === 'pack') {
+        const explicitPack = Number(product.packaging?.packSellingPrice);
+        packUnitPrice = (Number.isFinite(explicitPack) && explicitPack > 0)
+          ? quantizeMoney(explicitPack)
+          : quantizeMoney(unitPrice * line.packSize);
+        unitPrice = unitPriceFor(line, unitPrice, packUnitPrice);
+
+        // The ledger records what the stock actually went out at, so it has to
+        // follow the wholesale rate too — otherwise a carton sold below retail
+        // reports a profit the shop never made.
+        stockTransactions[stockTransactions.length - 1].unitPrice = unitPrice;
+      }
+
       const itemDiscount = item.discount || 0;
       // Rounded to paisa: with a fractional quantity `unitPrice x quantity` no
       // longer lands on a whole taka (70 x 0.333 = 23.310000000000002), and an
@@ -512,7 +548,16 @@ class SaleService {
         productName: product.name,
         ...variantInfo,
         quantity: item.quantity,
+        // The unit snapshot — see the block comment on `saleItemSchema`. Stored
+        // even for a plain base-unit line, because "this invoice was priced in
+        // পিস" is exactly the fact that goes stale when a product is edited.
+        unit: line.unit,
+        saleUnit: line.mode,
+        packUnit: line.packUnit || undefined,
+        packSize: line.packSize || undefined,
+        packQuantity: line.packQuantity || undefined,
         unitPrice,
+        packUnitPrice: packUnitPrice || undefined,
         buyingPrice,
         discount: itemDiscount,
         total: itemTotal,
