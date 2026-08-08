@@ -19,14 +19,41 @@ const { ALL_UNITS, DEFAULT_UNIT } = require('../config/units');
  * VALIDATOR, NOT SETTER, ON PURPOSE. A setter would quietly rewrite `কলম0042`
  * to `0042`, which is a different product identity assigned during whatever
  * unrelated save happened to touch the document. Rejecting says what is wrong
- * and changes nothing. Existing documents are unaffected: Mongoose validates
- * only modified paths on an existing document, so a stock deduction on a legacy
- * product still saves — the rule bites only when the code itself is written.
+ * and changes nothing.
+ *
+ * ONLY WHEN THE FIELD IS ACTUALLY BEING WRITTEN — READ THIS BEFORE SIMPLIFYING
+ * ---------------------------------------------------------------------------
+ * The obvious one-liner
+ *
+ *     validator: (v) => ASCII_CODE.test(v)
+ *
+ * breaks every sale in any shop that already has a Bengali-coded product.
+ * Mongoose does NOT validate only modified paths on an existing document:
+ * `_getPathsToValidate` unions the `modify` paths with the `init` paths, and a
+ * document hydrated by `findOne()` has every field in `init`. So deducting
+ * stock — which touches `stock` and nothing else — revalidates `code`, the
+ * legacy value fails, and `save()` throws in the middle of a sale.
+ *
+ * Hence the `isModified` guard: enforce on create, enforce when the code itself
+ * is written, and leave rows written before this rule existed alone until
+ * `scripts/normalize-product-codes.js` converts them. `this` is the Query
+ * rather than a Document under `runValidators` on an update, which has no
+ * `isModified` — that path falls through to the check, which is correct, since
+ * an update IS a write.
  */
 const ASCII_CODE = /^[A-Z0-9-]+$/i;
 
-const asciiCodeValidator = (label) => ({
-  validator: (v) => v === undefined || v === null || v === '' || ASCII_CODE.test(v),
+const asciiCodeValidator = (label, path) => ({
+  validator: function (v) {
+    if (v === undefined || v === null || v === '') return true;
+    const isUntouchedLegacyValue =
+      this &&
+      typeof this.isModified === 'function' &&
+      !this.isNew &&
+      !this.isModified(path);
+    if (isUntouchedLegacyValue) return true;
+    return ASCII_CODE.test(v);
+  },
   message: `${label} ইংরেজি অক্ষর, সংখ্যা আর ড্যাশ (-) দিয়ে লিখুন — বারকোডে বাংলা ছাপা যায় না`,
 });
 
@@ -38,7 +65,7 @@ const variantSchema = new mongoose.Schema({
     trim: true,
     // No `uppercase` here — variant SKUs are matched against stored values by
     // several call sites, and folding case would change what those match.
-    validate: asciiCodeValidator('ভ্যারিয়েন্টের SKU'),
+    validate: asciiCodeValidator('ভ্যারিয়েন্টের SKU', 'sku'),
   },
   attributes: {
     size: String,
@@ -66,7 +93,7 @@ const variantSchema = new mongoose.Schema({
   barcode: {
     type: String,
     trim: true,
-    validate: asciiCodeValidator('বারকোড'),
+    validate: asciiCodeValidator('বারকোড', 'barcode'),
   },
   image: {
     type: String
@@ -197,12 +224,12 @@ const productSchema = new mongoose.Schema({
     required: [true, 'পণ্যের কোড দিন'],
     trim: true,
     uppercase: true,
-    validate: asciiCodeValidator('পণ্যের কোড'),
+    validate: asciiCodeValidator('পণ্যের কোড', 'code'),
   },
   barcode: {
     type: String,
     trim: true,
-    validate: asciiCodeValidator('বারকোড'),
+    validate: asciiCodeValidator('বারকোড', 'barcode'),
   },
   name: {
     type: String,
