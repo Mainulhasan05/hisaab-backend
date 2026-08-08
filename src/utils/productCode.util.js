@@ -17,8 +17,10 @@
  * 0–127 and nothing else, so the label sheet printed the code as text and drew
  * no bars. Nobody checks a label for bars; they find out at the counter.
  *
- * The long version, and the reason the alphabet is narrower than CODE128
- * allows, is in the frontend copy.
+ * The alphabet is exactly what CODE128 encodes — printable ASCII, 0x20-0x7E.
+ * Not narrower: supplier SKUs contain / . _ and the soft-delete tombstone uses
+ * ~, and an earlier narrowing to [A-Z0-9-] made every product undeletable.
+ * The long version is in the frontend copy.
  */
 
 /** Bengali and Arabic-Indic digits, which a phone keypad set to Bangla emits. */
@@ -50,7 +52,7 @@ const BENGALI_TO_LATIN = [
 ];
 
 const DEFAULT_CODE_PREFIX = 'PRD';
-const CODE_PATTERN = /^[A-Z0-9-]+$/;
+const CODE_PATTERN = /^[ -~]+$/;
 
 const toAsciiDigits = (input) =>
   String(input === undefined || input === null ? '' : input)
@@ -68,7 +70,7 @@ const toAsciiPrefix = (name, length = 3) => {
 };
 
 const sanitizeProductCode = (raw) =>
-  toAsciiDigits(raw).toUpperCase().replace(/[^A-Z0-9-]/g, '');
+  toAsciiDigits(raw).toUpperCase().replace(/[^!-~]/g, '');
 
 const isValidProductCode = (code) =>
   typeof code === 'string' && CODE_PATTERN.test(code);
@@ -82,7 +84,7 @@ const isValidProductCode = (code) =>
  * decides what to do about that — this function never invents a code.
  */
 const romaniseExistingCode = (raw) =>
-  romanise(raw).toUpperCase().replace(/[^A-Z0-9-]/g, '');
+  romanise(raw).toUpperCase().replace(/[^!-~]/g, '');
 
 module.exports = {
   BENGALI_TO_LATIN,

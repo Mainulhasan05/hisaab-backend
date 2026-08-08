@@ -57,7 +57,12 @@ function productScope(shopId, branchId, extra = {}) {
 // Telegram digest job needed the same notion of "today". Two copies of this
 // conversion would eventually disagree, and a digest that reports a different
 // day than the dashboard is worse than no digest.
-const { getBangladeshTodayStr, getBangladeshDayRange } = require('../utils/bdTime.util');
+// `BD_OFFSET_MS` is imported, not redeclared: `getDateWiseSummary` builds its
+// own month boundaries from the raw offset, and a local copy here would be the
+// third in the codebase (sale.service.js still has one). Two constants that
+// must agree and don't is how a report ends up disagreeing with the dashboard
+// about which day a sale landed on.
+const { BD_OFFSET_MS, getBangladeshTodayStr, getBangladeshDayRange } = require('../utils/bdTime.util');
 
 function netSaleAmountExpr() {
   return {

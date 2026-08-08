@@ -21,40 +21,58 @@ const { ALL_UNITS, DEFAULT_UNIT } = require('../config/units');
  * unrelated save happened to touch the document. Rejecting says what is wrong
  * and changes nothing.
  *
- * ONLY WHEN THE FIELD IS ACTUALLY BEING WRITTEN — READ THIS BEFORE SIMPLIFYING
- * ---------------------------------------------------------------------------
- * The obvious one-liner
+ * THE RULE IS "CODE128 CAN ENCODE IT", NOT AN ALPHABET SOMEONE PICKED
+ * -------------------------------------------------------------------
+ * CODE128 encodes printable ASCII, 0x20–0x7E. That is the whole constraint, and
+ * the validator is exactly that test.
  *
- *     validator: (v) => ASCII_CODE.test(v)
+ * An earlier version of this used `[A-Z0-9-]`, reasoning that codes ought to be
+ * tidy. Tidy is not the invariant, and narrowing to it broke two real things at
+ * once: supplier SKUs legitimately contain `/`, `.` and `_`, so editing such a
+ * product was refused; and `deleteProduct` renames the code to
+ * `<code>~DEL~<ts>` to free the unique index, so `~` failed the test and NO
+ * PRODUCT COULD BE DELETED AT ALL — including products whose codes were pure
+ * ASCII and had nothing to do with the Bengali problem this was written for.
+ * Enforce encodability. Anything past that is a form's business, not the
+ * database's.
  *
- * breaks every sale in any shop that already has a Bengali-coded product.
- * Mongoose does NOT validate only modified paths on an existing document:
- * `_getPathsToValidate` unions the `modify` paths with the `init` paths, and a
- * document hydrated by `findOne()` has every field in `init`. So deducting
- * stock — which touches `stock` and nothing else — revalidates `code`, the
- * legacy value fails, and `save()` throws in the middle of a sale.
+ * TWO EXEMPTIONS, BOTH LOAD-BEARING — READ BEFORE SIMPLIFYING
+ * -----------------------------------------------------------
+ * 1. UNMODIFIED VALUES. Mongoose does NOT validate only modified paths on an
+ *    existing document: `_getPathsToValidate` unions the `modify` paths with
+ *    the `init` paths, and a document hydrated by `findOne()` has every field
+ *    in `init`. So deducting stock — which touches `stock` and nothing else —
+ *    revalidates `code`. Without this guard, a legacy Bengali code would make
+ *    `save()` throw in the middle of a sale. Rows written before this rule
+ *    existed stay saveable until `scripts/normalize-product-codes.js` converts
+ *    them.
  *
- * Hence the `isModified` guard: enforce on create, enforce when the code itself
- * is written, and leave rows written before this rule existed alone until
- * `scripts/normalize-product-codes.js` converts them. `this` is the Query
- * rather than a Document under `runValidators` on an update, which has no
- * `isModified` — that path falls through to the check, which is correct, since
- * an update IS a write.
+ * 2. DELETED PRODUCTS. A soft-deleted product's code is a tombstone, not a
+ *    payload — nothing prints a label for it. Deleting a legacy Bengali-coded
+ *    product necessarily writes a Bengali-derived tombstone, and refusing that
+ *    would leave the shopkeeper unable to delete exactly the products this
+ *    change is about.
+ *
+ * Under `runValidators` on an update `this` is the Query, which has no
+ * `isModified`; that falls through to the check, which is right, because an
+ * update IS a write.
  */
-const ASCII_CODE = /^[A-Z0-9-]+$/i;
+const CODE128_ENCODABLE = /^[\x20-\x7E]+$/;
 
 const asciiCodeValidator = (label, path) => ({
   validator: function (v) {
     if (v === undefined || v === null || v === '') return true;
-    const isUntouchedLegacyValue =
-      this &&
-      typeof this.isModified === 'function' &&
-      !this.isNew &&
-      !this.isModified(path);
-    if (isUntouchedLegacyValue) return true;
-    return ASCII_CODE.test(v);
+
+    if (this && typeof this.isModified === 'function') {
+      // Variant SKUs validate on the subdocument; the flag lives on the parent.
+      const owner = typeof this.ownerDocument === 'function' ? this.ownerDocument() : this;
+      if (owner && owner.isDeleted) return true;
+      if (!this.isNew && !this.isModified(path)) return true;
+    }
+
+    return CODE128_ENCODABLE.test(v);
   },
-  message: `${label} ইংরেজি অক্ষর, সংখ্যা আর ড্যাশ (-) দিয়ে লিখুন — বারকোডে বাংলা ছাপা যায় না`,
+  message: `${label} ইংরেজি অক্ষর, সংখ্যা বা চিহ্ন দিয়ে লিখুন — বারকোডে বাংলা ছাপা যায় না`,
 });
 
 
