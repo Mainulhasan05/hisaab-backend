@@ -80,7 +80,10 @@ const telegramLinkSchema = new mongoose.Schema(
 // One link per owner per shop.
 telegramLinkSchema.index({ shop: 1, user: 1 }, { unique: true });
 // Digest sweep: every active link, cheaply.
-telegramLinkSchema.index({ isActive: 1, 'preferences.dailySummary': 1 });
+// digestTime is part of the key because the digest job now pre-filters on it:
+// only links whose send time falls inside the current catch-up window are
+// fetched, instead of every active link on the platform once a minute.
+telegramLinkSchema.index({ isActive: 1, 'preferences.dailySummary': 1, 'preferences.digestTime': 1 });
 // Inbound bot messages arrive with a chat id and nothing else.
 telegramLinkSchema.index({ telegramChatId: 1 });
 

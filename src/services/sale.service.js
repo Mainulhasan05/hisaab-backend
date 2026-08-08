@@ -7,6 +7,7 @@ const User = require('../models/User.model');
 const StockTransaction = require('../models/StockTransaction.model');
 const Shop = require('../models/Shop.model');
 const AuditLog = require('../models/AuditLog.model');
+const InvoiceCounter = require('../models/InvoiceCounter.model');
 const { AppError } = require('../middleware/error.middleware');
 const cacheService = require('./cache.service');
 const logger = require('../utils/logger.util');
@@ -57,21 +58,38 @@ class SaleService {
   }
 
   // Generate invoice number (with optional branch code)
-  async generateInvoiceNumber(shopId, branchCode = null) {
+  //
+  // Backed by an atomic per-(shop, branch, day) counter — see
+  // models/InvoiceCounter.model.js for why, and for how it seeds itself so a
+  // shop switching over mid-day continues its sequence rather than restarting.
+  //
+  // Two behaviour changes, both deliberate and both fixes:
+  //   - the number is handed out atomically, so two concurrent cashiers can no
+  //     longer generate the same one;
+  //   - the sequence is per BRANCH, matching the prefix. It used to be
+  //     shop-wide while the prefix was branch-specific, which coupled the
+  //     branches' numbering to each other.
+  async generateInvoiceNumber(shopId, branchCode = null, branchId = null) {
     const { startOfDay, endOfDay, dateStr } = getBangladeshTodayRange();
     // Date prefix from Bangladesh local date
     const datePrefix = dateStr.replace(/-/g, '');
 
-    const count = await Sale.countDocuments({
+    // Only consulted the first time a given (shop, branch) checks out on a
+    // given day. Scoped by branch to match the counter's key — the pre-existing
+    // sales it is resuming from carry the same branch.
+    const countExisting = () => Sale.countDocuments({
       shop: shopId,
+      ...(branchId ? { branch: branchId } : {}),
       createdAt: { $gte: startOfDay, $lte: endOfDay },
     });
+
+    const seq = await InvoiceCounter.nextSeq(shopId, branchId, dateStr, countExisting);
 
     const prefix = branchCode
       ? `INV-${branchCode}-${datePrefix}`
       : `INV-${datePrefix}`;
 
-    return `${prefix}-${String(count + 1).padStart(4, '0')}`;
+    return `${prefix}-${String(seq).padStart(4, '0')}`;
   }
 
   // Build query from filters (shared by getSales and getSalesSummary)
@@ -685,7 +703,7 @@ class SaleService {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         const branchCode = req ? getBranchCode(req) : null;
-        const invoiceNo = await this.generateInvoiceNumber(shopId, branchCode);
+        const invoiceNo = await this.generateInvoiceNumber(shopId, branchCode, branchId);
         const [newSale] = await Sale.create([{
           shop: shopId,
           branch: branchId,

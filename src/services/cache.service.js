@@ -584,17 +584,35 @@ class CacheService {
     if (isConnected()) {
       try {
         const client = getClient();
-        const allKeys = await client.keys(pattern);
 
-        // Get TTL for each key (limited)
-        for (const key of allKeys.slice(0, limit)) {
-          const ttl = await client.ttl(key);
-          const type = await client.type(key);
-          keys.push({
-            key,
-            type,
-            ttl: ttl === -1 ? 'no expiry' : ttl === -2 ? 'expired' : `${ttl}s`,
-            ttlSeconds: ttl,
+        // SCAN, not KEYS. `KEYS` is O(N) and blocks the Redis event loop for
+        // the whole platform while it runs — `deletePattern` above already
+        // carries that warning and uses scanIterator; these admin helpers
+        // simply predated it.
+        const allKeys = [];
+        for await (const key of client.scanIterator({ MATCH: pattern, COUNT: 1000 })) {
+          allKeys.push(key);
+        }
+
+        // Metadata for the page being shown, pipelined rather than two blocking
+        // round trips per key.
+        const shown = allKeys.slice(0, limit);
+        if (shown.length > 0) {
+          const pipeline = client.multi();
+          for (const key of shown) {
+            pipeline.ttl(key);
+            pipeline.type(key);
+          }
+          const replies = await pipeline.exec();
+          shown.forEach((key, i) => {
+            const ttl = Number(replies[i * 2]);
+            const type = replies[i * 2 + 1];
+            keys.push({
+              key,
+              type,
+              ttl: ttl === -1 ? 'no expiry' : ttl === -2 ? 'expired' : `${ttl}s`,
+              ttlSeconds: ttl,
+            });
           });
         }
 
@@ -730,7 +748,14 @@ class CacheService {
     if (isConnected()) {
       try {
         const client = getClient();
-        const allKeys = await client.keys('*');
+
+        // SCAN rather than KEYS — see the note in listKeys(). This one walks
+        // the ENTIRE keyspace to build the summary, so it is the worse of the
+        // two to have had blocking.
+        const allKeys = [];
+        for await (const key of client.scanIterator({ MATCH: '*', COUNT: 1000 })) {
+          allKeys.push(key);
+        }
         summary.totalKeys = allKeys.length;
 
         // Group by prefix (first part before ':')

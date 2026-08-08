@@ -129,17 +129,31 @@ class PurchaseService {
     const preparedItems = [];
     let totalAmount = 0;
 
-    for (const item of items) {
-      let rawProdId = item.product || item.productId;
-      if (typeof rawProdId === 'object' && rawProdId !== null) {
-        rawProdId = rawProdId._id || rawProdId.id;
-      }
+    // Resolve every referenced product in ONE query. This was a
+    // `Product.findOne(...)` per line, and the stock loop below then re-read
+    // each of the same documents with `findById` — a 20-line delivery paid 40
+    // reads for 20 documents (PERFORMANCE_AUDIT.md H-3).
+    //
+    // The id is normalised the same way as before, because the form may post
+    // `product`, `productId`, or a populated object.
+    const normalizeProductId = (item) => {
+      let raw = item.product || item.productId;
+      if (typeof raw === 'object' && raw !== null) raw = raw._id || raw.id;
+      return raw;
+    };
+    const purchaseProductIds = [...new Set(
+      items.map(normalizeProductId).filter(Boolean).map(String)
+    )];
+    const purchaseProducts = await Product.find({
+      _id: { $in: purchaseProductIds },
+      shop: shopId,
+      isActive: true,
+    }).session(session || null);
+    const purchaseProductMap = new Map(purchaseProducts.map(p => [String(p._id), p]));
 
-      const product = await Product.findOne({
-        _id: rawProdId,
-        shop: shopId,
-        isActive: true,
-      }).session(session || null);
+    for (const item of items) {
+      const rawProdId = normalizeProductId(item);
+      const product = rawProdId ? purchaseProductMap.get(String(rawProdId)) : null;
 
       if (!product) {
         const displayId = typeof rawProdId === 'object' ? JSON.stringify(rawProdId) : rawProdId;
@@ -235,61 +249,80 @@ class PurchaseService {
     // Increase stock for each item. Stock lives on the product document, which
     // belongs to exactly one branch — the separate per-branch stock ledger is
     // gone, so this is a single path for every shop.
+    // ── Batched: one stock write and one ledger insert for the whole delivery ──
+    //
+    // This loop used to issue, PER LINE: a `findById`, a `save()`, a SECOND
+    // `save()` when the product tracks batches, and a `StockTransaction.create`.
+    // Sequentially, inside an open transaction. A 20-line delivery held that
+    // transaction open across ~80 round trips (PERFORMANCE_AUDIT.md H-3,
+    // measured at 1187ms / 85 trips).
+    //
+    // The products are already in memory from the validation pass above, so
+    // there is nothing left to read. The arithmetic below is untouched —
+    // including the JS-side `quantize`, which is load-bearing: without it,
+    // receiving 12.5 kg onto 99.9 kg stores 112.39999999999999. `$set` of the
+    // computed value reproduces exactly what `save()` persisted.
+    const purchaseStockOps = [];
+    const purchaseTxns = [];
+
+    const getVariantStock = (p, vId) => {
+      if (!p.variants) return 0;
+      const v = typeof p.variants.id === 'function' ? p.variants.id(vId) : p.variants.find(x => (x._id || x.id)?.toString() === vId?.toString());
+      return v?.stock || 0;
+    };
+
     for (const item of preparedItems) {
-      const product = await Product.findById(item.product);
-      let previousStock, newStock;
+      const product = purchaseProductMap.get(String(item.product));
+      // Validation above already threw on an unresolvable product; this guard
+      // only covers the impossible case rather than silently skipping stock.
+      if (!product) continue;
 
-      {
-        const getVariantStock = (p, vId) => {
-          if (!p.variants) return 0;
-          const v = typeof p.variants.id === 'function' ? p.variants.id(vId) : p.variants.find(x => (x._id || x.id)?.toString() === vId?.toString());
-          return v?.stock || 0;
-        };
+      const previousStock = item.variantId
+        ? getVariantStock(product, item.variantId)
+        : product.stock;
 
-        previousStock = item.variantId
-          ? getVariantStock(product, item.variantId)
-          : product.stock;
+      const stkUnit = storageUnit(product);
+      let newStock;
 
-        // Update stock.
-        //
-        // This path uses `product.save()` rather than the atomic bulkWrite the
-        // sale path uses, so there is no `$round` pipeline to lean on — the
-        // rounding has to happen here, in JS, at the product's own precision.
-        // Without it, receiving 12.5 kg onto 99.9 kg of stock stores
-        // 112.39999999999999.
-        const stkUnit = storageUnit(product);
-        if (item.variantId && product.hasVariants) {
-          const variant = (product.variants && typeof product.variants.id === 'function')
-            ? product.variants.id(item.variantId)
-            : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
-          if (variant) {
-            variant.stock = quantize(variant.stock + item.quantity, stkUnit);
-          }
-        } else {
-          product.stock = quantize(product.stock + item.quantity, stkUnit);
+      if (item.variantId && product.hasVariants) {
+        const variant = (product.variants && typeof product.variants.id === 'function')
+          ? product.variants.id(item.variantId)
+          : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
+        if (variant) {
+          variant.stock = quantize(variant.stock + item.quantity, stkUnit);
         }
-        await product.save(sessionOpt);
-
-        newStock = item.variantId
-          ? getVariantStock(product, item.variantId)
-          : product.stock;
-      }
-
-      // Batch tracking: push batch entry if product has trackBatches enabled
-      if (product.trackBatches && !item.variantId) {
-        product.batches.push({
-          batchNumber: item.batchNumber || `B-${purchase.invoiceNo}-${Date.now()}`,
-          expiryDate: item.expiryDate || null,
-          quantity: item.quantity,
-          costPrice: item.unitPrice,
-          receivedDate: new Date(),
-          purchaseRef: purchase._id,
+        newStock = getVariantStock(product, item.variantId);
+        purchaseStockOps.push({
+          updateOne: {
+            filter: { _id: product._id },
+            update: { $set: { 'variants.$[v].stock': newStock } },
+            arrayFilters: [{ 'v._id': item.variantId }],
+          },
         });
-        await product.save(sessionOpt);
+      } else {
+        product.stock = quantize(product.stock + item.quantity, stkUnit);
+        newStock = product.stock;
+
+        // Batch tracking rides in the SAME update as the stock change rather
+        // than a second `save()` of the whole document. `$push` also avoids
+        // rewriting the entire batches array, which the second save did.
+        const update = { $set: { stock: newStock } };
+        if (product.trackBatches) {
+          update.$push = {
+            batches: {
+              batchNumber: item.batchNumber || `B-${purchase.invoiceNo}-${Date.now()}`,
+              expiryDate: item.expiryDate || null,
+              quantity: item.quantity,
+              costPrice: item.unitPrice,
+              receivedDate: new Date(),
+              purchaseRef: purchase._id,
+            },
+          };
+        }
+        purchaseStockOps.push({ updateOne: { filter: { _id: product._id }, update } });
       }
 
-      // Create stock transaction
-      await StockTransaction.create([{
+      purchaseTxns.push({
         shop: shopId,
         branch: branchId,
         product: item.product,
@@ -309,7 +342,14 @@ class PurchaseService {
         },
         supplier: supplierName,
         createdBy: userId,
-      }], sessionOpt);
+      });
+    }
+
+    if (purchaseStockOps.length > 0) {
+      await Product.bulkWrite(purchaseStockOps, sessionOpt);
+    }
+    if (purchaseTxns.length > 0) {
+      await StockTransaction.insertMany(purchaseTxns, sessionOpt);
     }
 
     // Update supplier stats
@@ -369,16 +409,27 @@ class PurchaseService {
       throw new AppError('এই ক্রয়টি আগেই বাতিল করা হয়েছে', 'Purchase already cancelled', 400);
     }
 
-    // Reverse stock for each item
-    for (const item of purchase.items) {
-      const product = await Product.findById(item.product);
-      if (!product) continue;
+    // Reverse stock for each item.
+    // Batched the same way as the receive path above: one read for every
+    // referenced product, one bulkWrite, one ledger insert — instead of a
+    // findById + save + create per line.
+    const cancelIds = [...new Set(purchase.items.map(i => String(i.product)))];
+    const cancelProducts = await Product.find({ _id: { $in: cancelIds }, shop: shopId });
+    const cancelProductMap = new Map(cancelProducts.map(p => [String(p._id), p]));
 
-      const getVariantStock = (p, vId) => {
-        if (!p.variants) return 0;
-        const v = typeof p.variants.id === 'function' ? p.variants.id(vId) : p.variants.find(x => (x._id || x.id)?.toString() === vId?.toString());
-        return v?.stock || 0;
-      };
+    const cancelStockOps = [];
+    const cancelTxns = [];
+
+    const getVariantStock = (p, vId) => {
+      if (!p.variants) return 0;
+      const v = typeof p.variants.id === 'function' ? p.variants.id(vId) : p.variants.find(x => (x._id || x.id)?.toString() === vId?.toString());
+      return v?.stock || 0;
+    };
+
+    for (const item of purchase.items) {
+      const product = cancelProductMap.get(String(item.product));
+      // A product deleted since the purchase is skipped, unchanged from before.
+      if (!product) continue;
 
       const previousStock = item.variantId
         ? getVariantStock(product, item.variantId)
@@ -388,6 +439,7 @@ class PurchaseService {
       // must be removable at the same precision even if packaging was later
       // switched off for this shop.
       const stkUnit = storageUnit(product);
+      let newStock;
 
       if (item.variantId && product.hasVariants) {
         const variant = (product.variants && typeof product.variants.id === 'function')
@@ -396,17 +448,27 @@ class PurchaseService {
         if (variant) {
           variant.stock = quantize(Math.max(0, variant.stock - item.quantity), stkUnit);
         }
+        newStock = getVariantStock(product, item.variantId);
+        cancelStockOps.push({
+          updateOne: {
+            filter: { _id: product._id },
+            update: { $set: { 'variants.$[v].stock': newStock } },
+            arrayFilters: [{ 'v._id': item.variantId }],
+          },
+        });
       } else {
         product.stock = quantize(Math.max(0, product.stock - item.quantity), stkUnit);
+        newStock = product.stock;
+        cancelStockOps.push({
+          updateOne: {
+            filter: { _id: product._id },
+            update: { $set: { stock: newStock } },
+          },
+        });
       }
-      await product.save();
-
-      const newStock = item.variantId
-        ? getVariantStock(product, item.variantId)
-        : product.stock;
 
       // Create reversal stock transaction
-      await StockTransaction.create({
+      cancelTxns.push({
         shop: shopId,
         product: item.product,
         productName: item.productName,
@@ -426,6 +488,13 @@ class PurchaseService {
         notes: 'ক্রয় বাতিল — স্টক ফেরত',
         createdBy: userId,
       });
+    }
+
+    if (cancelStockOps.length > 0) {
+      await Product.bulkWrite(cancelStockOps);
+    }
+    if (cancelTxns.length > 0) {
+      await StockTransaction.insertMany(cancelTxns);
     }
 
     // Update supplier stats

@@ -244,60 +244,115 @@ class SalesReturnService {
       createdBy: userId,
     }], sessionOpt);
 
-    // 8. Restore stock for each returned item
-    for (const item of processedItems) {
-      const product = await Product.findById(item.product).session(session || null);
-      if (product) {
-        let previousStock, newStock;
-        {
-          const stkUnit = storageUnit(product);
-          if (item.variantId && product.hasVariants) {
-            const variant = (product.variants && typeof product.variants.id === 'function')
-              ? product.variants.id(item.variantId)
-              : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
-            if (variant) {
-              previousStock = variant.stock;
-              variant.stock = quantize(variant.stock + item.quantity, stkUnit);
-              newStock = variant.stock;
-            }
-            // Rolled-up total across variants — also quantized, or summing a
-            // dozen 3-decimal variant stocks reintroduces the drift the
-            // individual writes just eliminated.
-            product.stock = quantize(
-              product.variants.reduce((sum, v) => quantize(sum + v.stock, stkUnit), 0),
-              stkUnit
-            );
-          } else {
-            previousStock = product.stock;
-            product.stock = quantize(product.stock + item.quantity, stkUnit);
-            newStock = product.stock;
-          }
-          await product.save(sessionOpt);
-        }
+    // 8. Restore stock for each returned item.
+    //
+    // Batched: one read for every returned product, one bulkWrite, one ledger
+    // insert — replacing a findById + save + create per line
+    // (PERFORMANCE_AUDIT.md H-3).
+    //
+    // The arithmetic is deliberately untouched, including the variant ROLLUP:
+    // a variant return rewrites `variants[n].stock` AND recomputes
+    // `product.stock` as the quantized sum across all variants. Both have to
+    // ride in the same update, which is why the variant op below sets two
+    // paths. Dropping the rollup would leave the product-level total stale on
+    // every variant return.
+    //
+    // Two lines returning different variants of the SAME product each push
+    // their own op; each recomputes the rollup from the in-memory document,
+    // which has already absorbed the earlier line. bulkWrite is ordered, so the
+    // last op for that product carries the correct final total.
+    // Distinct from `returnProductMap` above, which is a `.lean()` projection of
+    // just `_id` and `unit` used for precision resolution — it carries no
+    // `stock` or `variants` and so cannot back a stock write. These are the
+    // full documents.
+    const stockProductIds = [...new Set(processedItems.map(i => String(i.product)))];
+    const stockProducts = await Product.find({
+      _id: { $in: stockProductIds }, shop: shopId,
+    }).session(session || null);
+    const stockProductMap = new Map(stockProducts.map(p => [String(p._id), p]));
 
-        // Create stock transaction
-        await StockTransaction.create([{
-          shop: shopId,
-          branch: branchId,
-          product: item.product,
-          productName: item.productName,
-          productCode: item.productCode,
-          variantId: item.variantId || null,
-          variantSku: item.variantSku,
-          variantAttributes: item.variantAttributes,
-          type: 'return',
-          quantity: item.quantity,
-          previousStock: previousStock || 0,
-          newStock: newStock || 0,
-          reference: {
-            type: 'return',
-            id: salesReturn._id,
-            invoiceNo: returnNo,
+    const returnStockOps = [];
+    const returnTxns = [];
+
+    for (const item of processedItems) {
+      const product = stockProductMap.get(String(item.product));
+      if (!product) continue;
+
+      let previousStock, newStock;
+      const stkUnit = storageUnit(product);
+
+      if (item.variantId && product.hasVariants) {
+        const variant = (product.variants && typeof product.variants.id === 'function')
+          ? product.variants.id(item.variantId)
+          : product.variants?.find(v => (v._id || v.id)?.toString() === item.variantId?.toString());
+        if (variant) {
+          previousStock = variant.stock;
+          variant.stock = quantize(variant.stock + item.quantity, stkUnit);
+          newStock = variant.stock;
+        }
+        // Rolled-up total across variants — also quantized, or summing a
+        // dozen 3-decimal variant stocks reintroduces the drift the
+        // individual writes just eliminated.
+        product.stock = quantize(
+          product.variants.reduce((sum, v) => quantize(sum + v.stock, stkUnit), 0),
+          stkUnit
+        );
+
+        if (variant) {
+          returnStockOps.push({
+            updateOne: {
+              filter: { _id: product._id },
+              update: {
+                $set: {
+                  'variants.$[v].stock': variant.stock,
+                  stock: product.stock, // the rollup, not the line quantity
+                },
+              },
+              arrayFilters: [{ 'v._id': item.variantId }],
+            },
+          });
+        }
+      } else {
+        previousStock = product.stock;
+        product.stock = quantize(product.stock + item.quantity, stkUnit);
+        newStock = product.stock;
+        returnStockOps.push({
+          updateOne: {
+            filter: { _id: product._id },
+            update: { $set: { stock: product.stock } },
           },
-          notes: `মাল ফেরত: ${returnNo} (বিক্রয়: ${sale.invoiceNo})`,
-          createdBy: userId,
-        }], sessionOpt);
+        });
       }
+
+      // Create stock transaction
+      returnTxns.push({
+        shop: shopId,
+        branch: branchId,
+        product: item.product,
+        productName: item.productName,
+        productCode: item.productCode,
+        variantId: item.variantId || null,
+        variantSku: item.variantSku,
+        variantAttributes: item.variantAttributes,
+        type: 'return',
+        quantity: item.quantity,
+        previousStock: previousStock || 0,
+        newStock: newStock || 0,
+        reference: {
+          type: 'return',
+          id: salesReturn._id,
+          invoiceNo: returnNo,
+        },
+        notes: `মাল ফেরত: ${returnNo} (বিক্রয়: ${sale.invoiceNo})`,
+        createdBy: userId,
+      });
+    }
+
+    if (returnStockOps.length > 0) {
+      await Product.bulkWrite(returnStockOps, sessionOpt);
+    }
+    if (returnTxns.length > 0) {
+      await StockTransaction.insertMany(returnTxns, sessionOpt);
     }
 
     // 9. Update Sale: returnedAmount, profit, due and status (using updateOne to bypass pre-save hook recalculations)

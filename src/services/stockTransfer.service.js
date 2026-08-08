@@ -70,6 +70,63 @@ const findCounterpart = async (sourceProduct, shopId, branchId, session = null) 
   );
 };
 
+/**
+ * Batched twin of `findCounterpart` — resolves every source product's
+ * destination-branch copy in ONE query instead of up to three per line.
+ *
+ * `findCounterpart` is kept above because it is still the clearest statement of
+ * the matching RULE, and the precedence here is a faithful copy of it:
+ *
+ *   1. same `code` in the destination branch   (the clone keeps the code)
+ *   2. same `clonedFrom` lineage               (code was edited since)
+ *   3. the destination product IS the original the source was cloned from
+ *
+ * Candidates for all three arms are fetched together, then resolved in memory
+ * in that same order. If you change the rule, change both — or delete the
+ * single-item version and route its callers here.
+ */
+const findCounterpartsBatch = async (sourceProducts, shopId, branchId, session = null) => {
+  if (sourceProducts.length === 0) return new Map();
+
+  const codes = [...new Set(sourceProducts.map((p) => p.code).filter(Boolean))];
+  const lineage = [...new Set(
+    sourceProducts.map((p) => String(p.clonedFrom || p._id)).filter(Boolean)
+  )];
+  const originIds = [...new Set(
+    sourceProducts.map((p) => p.clonedFrom).filter(Boolean).map(String)
+  )];
+
+  const or = [];
+  if (codes.length) or.push({ code: { $in: codes } });
+  if (lineage.length) or.push({ clonedFrom: { $in: lineage } });
+  if (originIds.length) or.push({ _id: { $in: originIds } });
+  if (or.length === 0) return new Map();
+
+  const candidates = await Product.find({
+    shop: shopId, branch: branchId, isDeleted: { $ne: true }, $or: or,
+  }).session(session || null);
+
+  const byCode = new Map();
+  const byClonedFrom = new Map();
+  const byId = new Map();
+  for (const c of candidates) {
+    if (c.code && !byCode.has(c.code)) byCode.set(c.code, c);
+    if (c.clonedFrom && !byClonedFrom.has(String(c.clonedFrom))) byClonedFrom.set(String(c.clonedFrom), c);
+    byId.set(String(c._id), c);
+  }
+
+  const resolved = new Map();
+  for (const src of sourceProducts) {
+    const match =
+      (src.code && byCode.get(src.code)) ||
+      byClonedFrom.get(String(src.clonedFrom || src._id)) ||
+      (src.clonedFrom && byId.get(String(src.clonedFrom))) ||
+      null;
+    if (match) resolved.set(String(src._id), match);
+  }
+  return resolved;
+};
+
 /** Read a product's stock for a variant (or the product itself). */
 const readStock = (product, variantId) => {
   if (!variantId) return product.stock || 0;
@@ -107,6 +164,54 @@ const applyStock = (product, variantId, delta) => {
 };
 
 /**
+ * Load every product referenced by `items` in ONE query, keyed by id string.
+ *
+ * Replaces the `await Product.findOne(...)` that used to sit inside each of the
+ * loops below — one round trip per line item, sequential, inside an open
+ * transaction. A 20-line transfer cost 20 reads for information a single `$in`
+ * returns (PERFORMANCE_AUDIT.md H-3).
+ */
+const loadProductsFor = async (items, filter, session = null) => {
+  const ids = [...new Set(items.map((i) => String(i.product)))];
+  const docs = await Product.find({ ...filter, _id: { $in: ids } }).session(session || null);
+  return new Map(docs.map((d) => [String(d._id), d]));
+};
+
+/**
+ * A bulkWrite op that persists the stock value already computed by `applyStock`.
+ *
+ * `$set` — not `$inc` — on purpose. `applyStock` quantizes at the product's own
+ * precision in JS, and the previous code persisted that result with
+ * `product.save()`. Writing the computed value keeps this refactor
+ * behaviour-preserving; switching to `$inc` would change the rounding and the
+ * concurrency semantics at the same time, which is not what a batching change
+ * should do. (The sale path uses `$inc` with a `$gte` guard because it needs
+ * atomic oversell protection; transfers guard by explicit pre-validation.)
+ */
+const stockWriteOp = (product, variantId, newStock) => (
+  variantId
+    ? {
+      updateOne: {
+        filter: { _id: product._id },
+        update: { $set: { 'variants.$[v].stock': newStock } },
+        arrayFilters: [{ 'v._id': variantId }],
+      },
+    }
+    : {
+      updateOne: {
+        filter: { _id: product._id },
+        update: { $set: { stock: newStock } },
+      },
+    }
+);
+
+/** Flush queued stock writes and ledger rows — at most two round trips. */
+const flushStockOps = async (stockOps, txns, sessionOpt) => {
+  if (stockOps.length > 0) await Product.bulkWrite(stockOps, sessionOpt);
+  if (txns.length > 0) await StockTransaction.insertMany(txns, sessionOpt);
+};
+
+/**
  * Create a new stock transfer request
  */
 exports.createTransfer = async (data, userId, req = null) => {
@@ -126,11 +231,15 @@ exports.createTransfer = async (data, userId, req = null) => {
   if (!sourceBranch) throw createError('উৎস শাখা পাওয়া যায়নি', 404);
   if (!destBranch) throw createError('গন্তব্য শাখা পাওয়া যায়নি', 404);
 
-  // Validate stock availability against the source branch's own products
+  // Validate stock availability against the source branch's own products.
+  // One read for the whole catalogue; the checks below are then in-memory and
+  // fail on the same line, with the same message, as the per-item loop did.
+  const productMap = await loadProductsFor(items, {
+    shop, branch: fromBranch, isDeleted: { $ne: true },
+  });
+
   for (const item of items) {
-    const product = await Product.findOne({
-      _id: item.product, shop, branch: fromBranch, isDeleted: { $ne: true },
-    });
+    const product = productMap.get(String(item.product));
     if (!product) {
       throw createError(`${item.productName || 'পণ্য'} উৎস শাখায় পাওয়া যায়নি`, 404);
     }
@@ -160,11 +269,24 @@ exports.approveTransfer = async (transferId, shopId, userId, req = null) => {
     if (transfer.status !== 'pending') throw createError('শুধুমাত্র পেন্ডিং ট্রান্সফার অনুমোদন করা যায়', 400);
 
     // Deduct from the source branch's own product documents.
-    for (const item of transfer.items) {
-      const product = await Product.findOne({
-        _id: item.product, shop: shopId, branch: transfer.fromBranch,
-      }).session(session);
+    //
+    // Two passes on purpose. The loop this replaced validated and wrote line by
+    // line, so a shortage on line 5 left lines 1-4 already deducted and their
+    // ledger rows written. A real transaction rolled that back — but
+    // `runInTransaction` hands back a NULL SESSION on a standalone server, and
+    // on that topology the partial deduction stuck. Validating everything
+    // before writing anything makes the all-or-nothing guarantee hold whether
+    // or not the deployment can actually do transactions.
+    const sessionOpt = session ? { session } : {};
+    const productMap = await loadProductsFor(
+      transfer.items, { shop: shopId, branch: transfer.fromBranch }, session
+    );
 
+    const stockOps = [];
+    const txns = [];
+
+    for (const item of transfer.items) {
+      const product = productMap.get(String(item.product));
       if (!product) {
         throw createError(`${item.productName || 'পণ্য'} উৎস শাখায় পাওয়া যায়নি`, 404);
       }
@@ -174,10 +296,12 @@ exports.approveTransfer = async (transferId, shopId, userId, req = null) => {
         throw createError(`${item.productName || 'পণ্য'} এর স্টক অপর্যাপ্ত`, 400);
       }
 
+      // Mutates the in-memory doc, so two lines against the same product see
+      // each other's deduction — exactly as the sequential loop did.
       const newStock = applyStock(product, item.variantId || null, -item.quantity);
-      await product.save({ session });
+      stockOps.push(stockWriteOp(product, item.variantId || null, newStock));
 
-      await StockTransaction.create([{
+      txns.push({
         shop: shopId,
         branch: transfer.fromBranch,
         product: item.product,
@@ -194,8 +318,10 @@ exports.approveTransfer = async (transferId, shopId, userId, req = null) => {
         referenceModel: 'StockTransfer',
         performedBy: userId,
         note: `ট্রান্সফার #${transfer.transferNo} — শাখা থেকে পাঠানো`,
-      }], { session });
+      });
     }
+
+    await flushStockOps(stockOps, txns, sessionOpt);
 
     transfer.status = 'in_transit';
     transfer.approvedBy = userId;
@@ -219,6 +345,18 @@ exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req 
     assertActingBranch(req, transfer.toBranch, 'destination');
     if (transfer.status !== 'in_transit') throw createError('শুধুমাত্র ট্রানজিটে থাকা ট্রান্সফার গ্রহণ করা যায়', 400);
 
+    // Two batched reads for the whole transfer: the source products, then the
+    // destination branch's counterparts for all of them at once. This loop used
+    // to cost a findById PLUS up to three findOne calls (findCounterpart tries
+    // three matching rules in turn) PLUS a save PLUS a ledger insert — per line.
+    const sourceMap = await loadProductsFor(transfer.items, { shop: shopId }, session);
+    const counterparts = await findCounterpartsBatch(
+      [...sourceMap.values()], shopId, transfer.toBranch, session
+    );
+
+    const stockOps = [];
+    const txns = [];
+
     for (const item of transfer.items) {
       // Find matching received quantity (default to full quantity)
       const receivedQty = receivedItems
@@ -229,12 +367,12 @@ exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req 
 
       // Resolve the destination branch's own copy of this product — a
       // different document with its own price and stock — and credit it.
-      const sourceProduct = await Product.findById(item.product).session(session || null);
+      const sourceProduct = sourceMap.get(String(item.product));
       if (!sourceProduct) {
         throw createError(`${item.productName || 'পণ্য'} পাওয়া যায়নি`, 404);
       }
 
-      const target = await findCounterpart(sourceProduct, shopId, transfer.toBranch, session);
+      const target = counterparts.get(String(sourceProduct._id));
       if (!target) {
         throw createError(
           `"${item.productName || sourceProduct.name}" গন্তব্য শাখায় নেই। আগে ওই শাখায় পণ্যটি যোগ করুন।`,
@@ -250,9 +388,9 @@ exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req 
           400
         );
       }
-      await target.save(sessionOpt);
+      stockOps.push(stockWriteOp(target, item.variantId || null, newStock));
 
-      await StockTransaction.create([{
+      txns.push({
         shop: shopId,
         branch: transfer.toBranch,
         product: target._id,
@@ -269,8 +407,10 @@ exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req 
         referenceModel: 'StockTransfer',
         performedBy: userId,
         note: `ট্রান্সফার #${transfer.transferNo} — শাখায় গৃহীত`,
-      }], sessionOpt);
+      });
     }
+
+    await flushStockOps(stockOps, txns, sessionOpt);
 
     transfer.status = 'received';
     transfer.receivedBy = userId;
@@ -295,34 +435,44 @@ exports.rejectTransfer = async (transferId, shopId, userId, reason, req = null) 
 
     // If in_transit, reverse the source deduction
     if (transfer.status === 'in_transit') {
+      const sessionOpt = session ? { session } : {};
+      const productMap = await loadProductsFor(
+        transfer.items, { shop: shopId, branch: transfer.fromBranch }, session
+      );
+
+      const stockOps = [];
+      const txns = [];
+
       for (const item of transfer.items) {
-        const product = await Product.findOne({
-          _id: item.product, shop: shopId, branch: transfer.fromBranch,
-        }).session(session);
+        const product = productMap.get(String(item.product));
+        // A line whose product has since been removed is skipped rather than
+        // failing the rejection — unchanged from the per-item loop. A rejection
+        // that cannot complete would strand the transfer in_transit forever.
+        if (!product) continue;
 
-        if (product) {
-          const previousStock = readStock(product, item.variantId || null);
-          const newStock = applyStock(product, item.variantId || null, item.quantity);
-          await product.save({ session });
+        const previousStock = readStock(product, item.variantId || null);
+        const newStock = applyStock(product, item.variantId || null, item.quantity);
+        stockOps.push(stockWriteOp(product, item.variantId || null, newStock));
 
-          await StockTransaction.create([{
-            shop: shopId,
-            branch: transfer.fromBranch,
-            product: item.product,
-            productName: item.productName,
-            productCode: item.productCode,
-            variantId: item.variantId,
-            type: STOCK_TRANSACTION_TYPES.TRANSFER_IN,
-            quantity: item.quantity,
-            previousStock,
-            newStock,
-            reference: transfer._id,
-            referenceModel: 'StockTransfer',
-            performedBy: userId,
-            note: `ট্রান্সফার #${transfer.transferNo} বাতিল — স্টক ফেরত`,
-          }], { session });
-        }
+        txns.push({
+          shop: shopId,
+          branch: transfer.fromBranch,
+          product: item.product,
+          productName: item.productName,
+          productCode: item.productCode,
+          variantId: item.variantId,
+          type: STOCK_TRANSACTION_TYPES.TRANSFER_IN,
+          quantity: item.quantity,
+          previousStock,
+          newStock,
+          reference: transfer._id,
+          referenceModel: 'StockTransfer',
+          performedBy: userId,
+          note: `ট্রান্সফার #${transfer.transferNo} বাতিল — স্টক ফেরত`,
+        });
       }
+
+      await flushStockOps(stockOps, txns, sessionOpt);
     }
 
     transfer.status = 'rejected';

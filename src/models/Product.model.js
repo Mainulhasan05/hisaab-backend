@@ -1,12 +1,44 @@
 const mongoose = require('mongoose');
 const { ALL_UNITS, DEFAULT_UNIT } = require('../config/units');
 
+/**
+ * Codes and barcodes are barcode payloads, so they are ASCII or they are
+ * nothing.
+ *
+ * The product form used to build a code from the category name —
+ * `category.name.slice(0, 3)` — and every category in this app is named in
+ * Bengali, so it produced codes like `কলম0042`. CODE128 encodes ASCII 0–127
+ * and nothing else, so the label sheet drew no bars at all: it printed the code
+ * as text and skipped the symbol. Nobody inspects a label for bars. They print
+ * forty, stick them on forty boxes, and discover it at the counter.
+ *
+ * The form is fixed (`hisaab-frontend/lib/productCode.js`), but the form is not
+ * the only way in — imports, the API and future screens all reach this model.
+ * So the rule lives here too.
+ *
+ * VALIDATOR, NOT SETTER, ON PURPOSE. A setter would quietly rewrite `কলম0042`
+ * to `0042`, which is a different product identity assigned during whatever
+ * unrelated save happened to touch the document. Rejecting says what is wrong
+ * and changes nothing. Existing documents are unaffected: Mongoose validates
+ * only modified paths on an existing document, so a stock deduction on a legacy
+ * product still saves — the rule bites only when the code itself is written.
+ */
+const ASCII_CODE = /^[A-Z0-9-]+$/i;
+
+const asciiCodeValidator = (label) => ({
+  validator: (v) => v === undefined || v === null || v === '' || ASCII_CODE.test(v),
+  message: `${label} ইংরেজি অক্ষর, সংখ্যা আর ড্যাশ (-) দিয়ে লিখুন — বারকোডে বাংলা ছাপা যায় না`,
+});
+
 
 const variantSchema = new mongoose.Schema({
   sku: {
     type: String,
     required: true,
-    trim: true
+    trim: true,
+    // No `uppercase` here — variant SKUs are matched against stored values by
+    // several call sites, and folding case would change what those match.
+    validate: asciiCodeValidator('ভ্যারিয়েন্টের SKU'),
   },
   attributes: {
     size: String,

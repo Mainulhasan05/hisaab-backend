@@ -128,10 +128,53 @@ async function runTick() {
     const nowTime = getBangladeshTimeStr();
     const nowMinutes = minutesOfDay(nowTime);
 
+    // ── Narrow by send window BEFORE querying ────────────────────────────────
+    //
+    // This used to fetch every active link with `lastDigestSentFor: { $ne }`
+    // and filter in memory. `$ne` is not selectively indexable, so the index on
+    // {isActive, preferences.dailySummary} narrowed only the first two terms
+    // and the tick read every linked shop on the platform — once a minute,
+    // around the clock, to send a few hundred messages a day
+    // (PERFORMANCE_AUDIT.md M-5).
+    //
+    // Only a link whose digestTime falls inside the catch-up window can be due,
+    // and digestTime is a fixed 'HH:MM' string. Enumerating the minutes in that
+    // window and matching with `$in` is an indexable predicate that cuts the
+    // candidate set to the shops that could actually fire on this tick.
+    //
+    // `isDue` still runs below and remains the authority — this is a
+    // pre-filter, not a reimplementation of the rule.
+    //
+    // Deliberately does NOT wrap backwards over midnight, because `isDue` does
+    // not either: its `elapsed >= 0` test means a 23:30 digest is simply missed
+    // if the process was down until 00:15, rather than going out in the small
+    // hours ("never treats a pre-midnight time as due from the small hours" —
+    // telegramDigest.test.js). Wrapping here would only fetch candidates that
+    // `isDue` then discards.
+    const dueTimes = [];
+    for (let elapsed = 0; elapsed <= CATCHUP_MINUTES; elapsed++) {
+      const scheduled = nowMinutes - elapsed;
+      if (scheduled < 0) break;
+      dueTimes.push(
+        `${String(Math.floor(scheduled / 60)).padStart(2, '0')}:${String(scheduled % 60).padStart(2, '0')}`
+      );
+    }
+
+    // A link with NO digestTime still gets its digest at the default hour —
+    // `isDue` does `minutesOfDay(digestTime || '22:00')` for documents that
+    // predate the field, and dropping them here would silently retire them.
+    // So when 22:00 is inside the window, the query has to reach the missing
+    // ones too. `{ $in: [null] }` matches null AND absent in MongoDB.
+    const timeClauses = [{ 'preferences.digestTime': { $in: dueTimes } }];
+    if (dueTimes.includes('22:00')) {
+      timeClauses.push({ 'preferences.digestTime': { $in: [null, ''] } });
+    }
+
     const candidates = await TelegramLink.find({
       isActive: true,
       'preferences.dailySummary': true,
       lastDigestSentFor: { $ne: dateStr },
+      $or: timeClauses,
     }).lean();
 
     const due = candidates.filter((link) => isDue(link.preferences?.digestTime, nowMinutes));
