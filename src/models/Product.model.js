@@ -65,7 +65,8 @@ const variantSchema = new mongoose.Schema({
   },
   barcode: {
     type: String,
-    trim: true
+    trim: true,
+    validate: asciiCodeValidator('বারকোড'),
   },
   image: {
     type: String
@@ -195,11 +196,13 @@ const productSchema = new mongoose.Schema({
     type: String,
     required: [true, 'পণ্যের কোড দিন'],
     trim: true,
-    uppercase: true
+    uppercase: true,
+    validate: asciiCodeValidator('পণ্যের কোড'),
   },
   barcode: {
     type: String,
-    trim: true
+    trim: true,
+    validate: asciiCodeValidator('বারকোড'),
   },
   name: {
     type: String,
