@@ -97,18 +97,29 @@ class OnlineTrackingService {
    */
   async getShopOnlineUsers(shopId) {
     try {
-      const onlineUserIds = await cacheService.sMembers(`${SHOP_ONLINE_PREFIX}${shopId}`);
+      const setKey = `${SHOP_ONLINE_PREFIX}${shopId}`;
+      const onlineUserIds = await cacheService.sMembers(setKey);
+      if (!onlineUserIds || onlineUserIds.length === 0) return [];
 
-      // Verify each user is still online and get their data
+      // One pipelined MGET instead of one round trip per member. This was a
+      // sequential `await cacheService.get(...)` inside the loop, so the call
+      // cost one Redis RTT per online user and grew with adoption — on an
+      // endpoint the admin dashboard polls.
+      const userDataList = await cacheService.mGet(
+        onlineUserIds.map((id) => `online:user:${id}`)
+      );
+
       const onlineUsers = [];
-      for (const userId of onlineUserIds) {
-        const userData = await cacheService.get(`online:user:${userId}`);
-        if (userData) {
-          onlineUsers.push(userData);
-        } else {
-          // User's TTL expired, remove from shop set
-          await cacheService.sRem(`${SHOP_ONLINE_PREFIX}${shopId}`, userId);
-        }
+      const staleIds = [];
+      onlineUserIds.forEach((userId, i) => {
+        const userData = userDataList[i];
+        if (userData) onlineUsers.push(userData);
+        else staleIds.push(userId); // TTL expired — drop from the shop set
+      });
+
+      // Single SREM with the whole batch; sRem already accepts an array.
+      if (staleIds.length > 0) {
+        await cacheService.sRem(setKey, staleIds);
       }
 
       return onlineUsers;
@@ -138,17 +149,24 @@ class OnlineTrackingService {
   async getTotalOnlineCount() {
     try {
       const allUserIds = await cacheService.sMembers(ONLINE_USERS_KEY);
+      if (!allUserIds || allUserIds.length === 0) return 0;
 
-      // Verify each user is still online
+      // Was one `isUserOnline()` call — and therefore one Redis round trip —
+      // per user, PLATFORM-WIDE, on a polled admin endpoint. At 500 concurrent
+      // users that is 500 serialized round trips per poll. One MGET instead.
+      const presence = await cacheService.mGet(
+        allUserIds.map((id) => `online:user:${id}`)
+      );
+
+      const staleIds = [];
       let count = 0;
-      for (const userId of allUserIds) {
-        const isOnline = await this.isUserOnline(userId);
-        if (isOnline) {
-          count++;
-        } else {
-          // Remove expired user from global set
-          await cacheService.sRem(ONLINE_USERS_KEY, userId);
-        }
+      presence.forEach((data, i) => {
+        if (data) count++;
+        else staleIds.push(allUserIds[i]); // expired — drop from the global set
+      });
+
+      if (staleIds.length > 0) {
+        await cacheService.sRem(ONLINE_USERS_KEY, staleIds);
       }
 
       return count;

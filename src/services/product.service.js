@@ -16,6 +16,8 @@ const { unitsForShop, DEFAULT_UNIT } = require('../config/units');
 const { normalizePackaging } = require('../utils/packaging.util');
 const { hasFeature } = require('../utils/features.util');
 const cacheService = require('./cache.service');
+const { KEYS, getTTL } = require('../config/cacheKeys');
+const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.util');
 
 // Escape user input before embedding it in a $regex (prevents regex injection/ReDoS)
 const escapeRegex = (str) => String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -531,7 +533,8 @@ class ProductService {
         name: name,
       },
       changes: {
-        after: product.toObject(),
+        // Whitelisted, not the whole document — see utils/auditDiff.util.js.
+        after: auditSnapshot(product, AUDIT_FIELDS.product),
       },
     });
 
@@ -665,10 +668,9 @@ class ProductService {
         id: product._id,
         name: product.name,
       },
-      changes: {
-        before: beforeData,
-        after: product.toObject(),
-      },
+      // Field-level diff rather than two full documents: a price edit stored
+      // the whole variants array, batch history and image list twice over.
+      changes: auditDiff(beforeData, product, AUDIT_FIELDS.product),
     });
 
     // If stock was provided and this is a non-variant product, update stock through
@@ -879,7 +881,24 @@ class ProductService {
   }
 
   // Get low stock products
+  //
+  // `$expr` compares two fields of the same document, which no index can serve,
+  // so this is a collection scan of the shop's catalogue — measured at 189ms
+  // against 5k products (PERFORMANCE_BASELINE.md §N-1). Cached for 60s, the
+  // same TTL and for the same reason as report.service._lowStockCount; a
+  // reorder alert tolerates a minute of staleness comfortably.
+  //
+  // Keyed by branch AND limit: both change the result, and a key that ignored
+  // either would serve one caller's rows to another.
   async getLowStockProducts(shopId, limit = 10, req = null) {
+    const branchId = req?.branchId || null;
+    const cacheKey = `${KEYS.LOW_STOCK(shopId)}:list:${branchId || 'all'}:${limit}`;
+
+    // `!= null` not truthiness — an empty array is a valid, cacheable answer,
+    // and it is the answer a well-stocked shop gets every time.
+    const cached = await cacheService.get(cacheKey);
+    if (cached != null) return cached;
+
     const products = await Product.find(branchFilter(req, {
       shop: shopId,
       isActive: true,
@@ -890,6 +909,7 @@ class ProductService {
       .limit(limit)
       .lean();
 
+    await cacheService.set(cacheKey, products, getTTL.lowStock);
     return products;
   }
 

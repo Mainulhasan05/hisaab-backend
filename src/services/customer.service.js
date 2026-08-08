@@ -6,6 +6,7 @@ const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { branchFilter, requireBranch, isBranchCustomerScope } = require('../utils/branchScope.util');
 const { runInTransaction } = require('../utils/transaction.util');
+const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.util');
 const mongoose = require('mongoose');
 
 /** Escape user input before it reaches $regex — raw input is a ReDoS vector. */
@@ -288,7 +289,8 @@ class CustomerService {
         name: name,
       },
       changes: {
-        after: customer.toObject(),
+        // Whitelisted, not the whole document — see utils/auditDiff.util.js.
+        after: auditSnapshot(customer, AUDIT_FIELDS.customer),
       },
       req,
     });
@@ -329,10 +331,8 @@ class CustomerService {
         id: customer._id,
         name: customer.name,
       },
-      changes: {
-        before: beforeData,
-        after: customer.toObject(),
-      },
+      // Field-level diff rather than two full documents.
+      changes: auditDiff(beforeData, customer, AUDIT_FIELDS.customer),
       req,
     });
 

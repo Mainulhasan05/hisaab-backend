@@ -481,8 +481,41 @@ class AdminService {
     const smsQuotas = await SMSQuota.find({ shop: { $in: shopIds } }).lean();
     const quotaMap = new Map(smsQuotas.map(q => [q.shop.toString(), q]));
 
-    // Merge SMS quota data with shops, compute effective status, and fetch real-time stats
-    const shopsWithQuota = await Promise.all(shops.map(async (shop) => {
+    // ── Per-shop stats: two grouped queries, not two queries per shop ────────
+    //
+    // This used to be a `Promise.all(shops.map(async ...))` that ran a
+    // `countDocuments` AND an `aggregate` for EVERY shop on the page — 2N
+    // queries, measured at 45 round trips and 806ms for a page of 20
+    // (PERFORMANCE_BASELINE.md). `Promise.all` made them concurrent, which hid
+    // the latency but not the load: a full page could occupy most of the
+    // 50-connection pool (config/database.js) and starve tenant traffic.
+    //
+    // Grouping by `$shop` over the page's ids gives the same numbers in two
+    // queries regardless of page size.
+    //
+    // The sales aggregate is still unbounded — it sums each shop's whole
+    // lifetime, which is what the column means. That is the remaining cost
+    // here; the fix is to maintain the running total on `Shop.stats` (the
+    // `$inc` in sale.service.js already does this for the sale COUNT) and read
+    // it back instead. Deliberately left for a follow-up: it needs a backfill
+    // and a reconciliation job, and this change is meant to stay behaviour-
+    // preserving.
+    const [productCounts, salesTotals] = await Promise.all([
+      Product.aggregate([
+        { $match: { shop: { $in: shopIds }, isActive: true } },
+        { $group: { _id: '$shop', count: { $sum: 1 } } },
+      ]),
+      Sale.aggregate([
+        { $match: { shop: { $in: shopIds }, status: { $ne: 'cancelled' } } },
+        { $group: { _id: '$shop', totalSales: { $sum: '$total' } } },
+      ]),
+    ]);
+
+    const productCountMap = new Map(productCounts.map(r => [String(r._id), r.count]));
+    const salesTotalMap = new Map(salesTotals.map(r => [String(r._id), r.totalSales]));
+
+    // Merge SMS quota data with shops, compute effective status, attach stats
+    const shopsWithQuota = shops.map((shop) => {
       // Compute effective status: active in DB but past expiresAt = effectively expired
       let effectiveStatus = shop.subscription?.status || 'trial';
       if (
@@ -493,39 +526,22 @@ class AdminService {
         effectiveStatus = 'expired';
       }
 
-      // Query real-time stats
-      const [totalProducts, salesStats] = await Promise.all([
-        Product.countDocuments({ shop: shop._id, isActive: true }),
-        Sale.aggregate([
-          {
-            $match: {
-              shop: shop._id,
-              status: { $ne: 'cancelled' }
-            }
-          },
-          {
-            $group: {
-              _id: null,
-              totalSales: { $sum: '$total' }
-            }
-          }
-        ])
-      ]);
-
-      const totalSales = salesStats[0]?.totalSales || 0;
+      const shopKey = shop._id.toString();
 
       return {
         ...shop,
         effectiveStatus,
-        smsQuota: quotaMap.get(shop._id.toString()) || null,
+        smsQuota: quotaMap.get(shopKey) || null,
         stats: {
-          totalProducts,
-          totalSales,
+          // `|| 0` preserves the previous shape: a shop with no matching rows
+          // produced 0 from countDocuments and 0 from the empty aggregate.
+          totalProducts: productCountMap.get(shopKey) || 0,
+          totalSales: salesTotalMap.get(shopKey) || 0,
           totalCustomers: shop.stats?.totalCustomers || 0,
           totalRevenue: shop.stats?.totalRevenue || 0
         }
       };
-    }));
+    });
 
     // Fetch registration audit logs (IP/device) for all shops in this page
     const registrationLogs = await AuditLog.find({
@@ -1331,14 +1347,15 @@ class AdminService {
       // Get online users for specific shop
       onlineUsers = await onlineTrackingService.getShopOnlineUsers(shopId);
     } else {
-      // Get all online users from cache
+      // Get all online users from cache.
+      // One pipelined MGET, not one round trip per user — same change as in
+      // onlineTracking.service.js, which this loop duplicated.
       const allUserIds = await cacheService.sMembers('online:users');
-
-      for (const userId of allUserIds) {
-        const userData = await cacheService.get(`online:user:${userId}`);
-        if (userData) {
-          onlineUsers.push(userData);
-        }
+      if (allUserIds && allUserIds.length > 0) {
+        const userDataList = await cacheService.mGet(
+          allUserIds.map((id) => `online:user:${id}`)
+        );
+        onlineUsers = userDataList.filter(Boolean);
       }
     }
 

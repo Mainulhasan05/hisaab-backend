@@ -98,6 +98,8 @@ async function main() {
   const expenseService = require('../src/services/expense.service');
   const cashRegisterService = require('../src/services/cashRegister.service');
   const cacheService = require('../src/services/cache.service');
+  const adminService = require('../src/services/admin.service');
+  const purchaseService = require('../src/services/purchase.service');
 
   const reqFor = (branchId, isOwner = true) => ({
     shop: { _id: ctx.shopId, multiBranchEnabled: shop.multiBranchEnabled },
@@ -135,6 +137,38 @@ async function main() {
     ['expenses list', () => expenseService.getExpenses(ctx.shopId, { limit: 20, branchId: ctx.branchA })],
     ['expense summary', () => expenseService.getSummary(ctx.shopId, {}, staffReq)],
     ['cash register today', () => cashRegisterService.getTodayRegister(ctx.shopId, ctx.ownerId, staffReq)],
+
+    // ── PERFORMANCE_AUDIT.md suspects ────────────────────────────────────────
+    // Added for the Phase 0 baseline. The existing cases above cover the read
+    // paths that were optimized previously; these cover the ones that were not.
+
+    // H-1: two queries per shop on the page, and the per-shop aggregate has no
+    // date bound. Needs the neighbour shops from the seed to show anything.
+    ['ADMIN shop list (page of 20)', () => adminService.getAllShops({ page: 1, limit: 20 })],
+
+    // H-2: counts today's sales on every checkout, so it grows through the day.
+    ['H2 invoice number generation', () => saleService.generateInvoiceNumber(ctx.shopId, 'DHA')],
+
+    // M-1: cache keys and TTLs are defined for these three and never used.
+    ['M1 sales report (30d, uncached)', () => reportService.getSalesReport(ctx.shopId, {
+      startDate: new Date(Date.now() - 30 * 8.64e7).toISOString().slice(0, 10),
+      endDate: new Date().toISOString().slice(0, 10),
+    }, ctx.branchA)],
+    ['M1 customer report (uncached)', () => reportService.getCustomerReport(ctx.shopId, {}, ownerReq)],
+
+    // H-3: findById + save() per line item, sequential, inside a transaction.
+    // A write — safe here because this is the throwaway PerfBench database.
+    ['H3 purchase receive (20 lines)', () => purchaseService.createPurchase(
+      ctx.shopId, ctx.ownerId,
+      {
+        supplier: null,
+        items: ctx.purchaseProductIds.map((pid) => ({
+          product: pid, quantity: 5, unitPrice: 40,
+        })),
+        paid: 0, paymentMethod: 'cash',
+      },
+      ownerReq
+    )],
   ];
 
   console.log('  ' + 'endpoint'.padEnd(34) + 'wall'.padStart(9) + 'trips'.padStart(7) + 'server'.padStart(9) + 'est.prod'.padStart(10));

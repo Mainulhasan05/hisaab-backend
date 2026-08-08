@@ -18,6 +18,14 @@ const N_EXPENSES = Math.round(4000 * SCALE);
 const N_PAYMENTS = Math.round(5000 * SCALE);
 const MAX_DB_MB = 250;
 
+// Neighbour shops, so the platform-admin shop list has a full page to render.
+// That endpoint runs two queries PER SHOP ON THE PAGE, so the cost only shows
+// up once the page is actually full — with one shop seeded it looks fine.
+// Each carries its own sales history because the per-shop aggregate is
+// unbounded (it sums the shop's entire lifetime, not a date window).
+const N_ADMIN_SHOPS = Math.round(24 * SCALE);
+const N_ADMIN_SHOP_SALES = Math.round(400 * SCALE);
+
 /** Register every model — src/models/index.js only exports 17 of 29, and the
  *  omitted ones would otherwise be seeded without their indexes. */
 function registerAllModels() {
@@ -145,6 +153,48 @@ async function seedForProfile(mongoose) {
     createdAt: new Date(now - (i % 180) * 8.64e7), updatedAt: new Date(),
   })), 'payments');
 
+  // ── Supplier, for the purchase-receive path ──────────────────────────────
+  const supplierId = oid();
+  await db.collection('suppliers').insertOne({
+    _id: supplierId, shop: shopId, name: 'Bench Supplier', phone: '01900000000',
+    totalPurchases: 0, totalPaid: 0, totalDue: 0, isActive: true,
+    createdAt: new Date(), updatedAt: new Date(),
+  });
+
+  // ── Neighbour shops for the platform-admin list ──────────────────────────
+  //
+  // The admin list is the one endpoint whose cost is driven by how many OTHER
+  // tenants exist, so it cannot be measured against a single-shop database.
+  const adminShops = [];
+  const adminSales = [];
+  for (let s = 0; s < N_ADMIN_SHOPS; s++) {
+    const sid = oid();
+    const sOwner = oid();
+    adminShops.push({
+      _id: sid, name: `Neighbour Shop ${s}`, slug: `neighbour-${s}-${now}`,
+      phone: `0171${String(s).padStart(7, '0')}`, owner: sOwner,
+      multiBranchEnabled: false, isActive: true,
+      subscription: { plan: 'paid', status: 'active', expiresAt: new Date(now + 8.64e7 * 365) },
+      settings: { currency: 'BDT', lowStockThreshold: 5, invoicePrefix: 'INV' },
+      stats: { totalSales: N_ADMIN_SHOP_SALES, totalCustomers: 0, totalRevenue: 0 },
+      createdAt: new Date(now - s * 8.64e7), updatedAt: new Date(),
+    });
+    for (let i = 0; i < N_ADMIN_SHOP_SALES; i++) {
+      const amt = 100 + (i % 900);
+      adminSales.push({
+        _id: oid(), shop: sid, branch: null, invoiceNo: `INV-${s}-${i}`,
+        items: [], subtotal: amt, discount: 0, discountType: 'fixed', tax: 0,
+        deliveryCharge: 0, total: amt, paid: amt, due: 0, profit: amt * 0.2,
+        paymentMethod: 'cash', status: i % 50 === 0 ? 'cancelled' : 'completed',
+        customer: null, customerName: 'Walk-in', isOnline: false, channel: 'pos',
+        createdBy: sOwner,
+        createdAt: new Date(now - (i % 180) * 8.64e7), updatedAt: new Date(),
+      });
+    }
+  }
+  await insert('shops', adminShops, 'neighbour shops');
+  await insert('sales', adminSales, 'neighbour shop sales');
+
   console.log(`\n  storage: ${(await sizeMB()).toFixed(1)}MB`);
   console.log('Building indexes from schema declarations...');
   for (const name of mongoose.modelNames()) {
@@ -153,9 +203,12 @@ async function seedForProfile(mongoose) {
   console.log('  done');
 
   return {
-    shopId, branchA, branchB, ownerId, staffId,
+    shopId, branchA, branchB, ownerId, staffId, supplierId,
     sampleSaleId: sales[0]._id,
     sampleProductId: prodA[5]._id,
+    // A 20-line purchase — enough to make a per-item round-trip loop visible
+    // against a batched one, and a realistic size for a wholesale delivery.
+    purchaseProductIds: prodA.slice(0, 20).map((p) => p._id),
   };
 }
 

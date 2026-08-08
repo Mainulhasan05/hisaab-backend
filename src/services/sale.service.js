@@ -9,6 +9,7 @@ const Shop = require('../models/Shop.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const cacheService = require('./cache.service');
+const logger = require('../utils/logger.util');
 const { branchFilter, requireBranch, getBranchCode, wrongBranchError } = require('../utils/branchScope.util');
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
@@ -767,8 +768,27 @@ class SaleService {
       $inc: { 'stats.totalSales': 1 },
     }, sessionOpt);
 
-    // Create audit log
-    await AuditLog.create({
+    // Create audit log.
+    //
+    // ── Summary, not a second copy of the sale ───────────────────────────────
+    //
+    // `changes.after` used to be `sale.toObject()` — the ENTIRE document,
+    // items array and all. Every checkout therefore wrote its own payload
+    // twice, into the two highest-volume collections in the system, and paid
+    // for it again in index growth and replication bandwidth.
+    //
+    // The fields below are the ones an audit trail is actually read for. The
+    // full line detail is not lost: `entity.id` points at the sale, which is
+    // the authoritative record and outlives this log (AuditLog has a 90-day
+    // TTL — the snapshot was never the durable copy anyway).
+    //
+    // ── Fire-and-forget ──────────────────────────────────────────────────────
+    //
+    // This was `await`ed, so the cashier waited on it. It is deliberately NOT
+    // passed `sessionOpt` and never was, so it is already outside the sale's
+    // transaction — making it non-blocking gives up no atomicity that existed.
+    // Same treatment as the SMS dispatch and cache invalidation just below.
+    AuditLog.create({
       shop: shopId,
       user: userId,
       action: 'sale_create',
@@ -781,9 +801,19 @@ class SaleService {
         name: sale.invoiceNo,
       },
       changes: {
-        after: sale.toObject(),
+        after: {
+          invoiceNo: sale.invoiceNo,
+          total,
+          paid,
+          due,
+          status,
+          paymentMethod,
+          itemCount: processedItems.length,
+          customer: customer?._id || null,
+          customerName: finalCustomerName || null,
+        },
       },
-    });
+    }).catch((err) => logger.error(`Audit log (sale_create) failed: ${err.message}`));
 
     // Send SMS receipt (non-blocking - runs in background)
     // This doesn't wait for SMS to be sent, returns immediately
@@ -914,7 +944,12 @@ class SaleService {
 
     // --- BATCH: Restore stock using bulkWrite ---
     const cancelProductIds = [...new Set(sale.items.map(item => item.product.toString()))];
-    const cancelProducts = await Product.find({ _id: { $in: cancelProductIds } });
+    // `shop` is part of the filter deliberately. Every other product lookup in
+    // this service is tenant-scoped; this one was not, which made it the only
+    // query here that could resolve a document belonging to another shop if an
+    // id ever leaked into a sale's items. It also lets the query use the
+    // shop-prefixed compound indexes instead of falling back to the _id index.
+    const cancelProducts = await Product.find({ _id: { $in: cancelProductIds }, shop: shopId });
     const cancelProductMap = new Map(cancelProducts.map(p => [p._id.toString(), p]));
 
     // Stock is restored onto the sale's own product documents — those already

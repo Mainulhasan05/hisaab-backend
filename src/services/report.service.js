@@ -111,6 +111,51 @@ class ReportService {
   }
 
   // Get dashboard statistics
+  /**
+   * Count of products below their reorder point, cached for 60s.
+   *
+   * ── Why this needs its own cache, on top of the dashboard's ──────────────
+   *
+   * The predicate is `$expr: { $lt: ['$stock', '$minStock'] }` — a comparison
+   * between two fields of the SAME document. MongoDB cannot serve that from an
+   * index, no matter how the shop/branch keys are arranged, so it is a
+   * COLLECTION SCAN of the shop's whole catalogue every time it runs.
+   *
+   * Measured at 189ms for a single query against 5k products, and it is a
+   * major share of the dashboard's server time (PERFORMANCE_BASELINE.md §N-1).
+   *
+   * The dashboard result is already cached, but that cache is version-keyed and
+   * bumped by every write burst, so an active shop misses it often and pays the
+   * scan again. A short independent TTL means the scan runs at most once a
+   * minute per (shop, branch) regardless of how often the dashboard is rebuilt.
+   * 60s staleness is fine for a reorder alert — `getTTL.lowStock` was already
+   * set to exactly that and had no caller.
+   *
+   * The key is scoped by `branchId` because the QUERY is scoped by `branchId`
+   * (via productScope). Do not reduce that to a shop-only key — see the long
+   * note on the inventory-stats key in product.service.js for what happens when
+   * a cache key partitions more coarsely than the data it holds.
+   *
+   * A permanent fix would be a denormalized indexed flag maintained on every
+   * stock write; that is a larger change and is deliberately not attempted here.
+   */
+  async _lowStockCount(shopId, branchId = null) {
+    const cacheKey = `${KEYS.LOW_STOCK(shopId)}:count:${branchId || 'all'}`;
+
+    // `!= null` deliberately, not a truthiness check: zero is both a perfectly
+    // valid count and a cache hit worth honouring. `cached || compute` here
+    // would re-run the scan for every shop that is fully stocked — that is,
+    // for the healthiest shops, forever.
+    const cached = await cacheService.get(cacheKey);
+    if (cached != null) return cached;
+
+    const count = await Product.countDocuments(
+      productScope(shopId, branchId, { isActive: true, $expr: { $lt: ['$stock', '$minStock'] } })
+    );
+    await cacheService.set(cacheKey, count, getTTL.lowStock);
+    return count;
+  }
+
   async getDashboardStats(shopId, branchId = null, isMultiBranch = false, req = null) {
     // Customers and dues are read per-branch or shop-wide depending on the
     // shop's setting (Phase 7). The two produce different numbers from the same
@@ -198,9 +243,7 @@ class ReportService {
           { $group: { _id: null, totalDue: { $sum: '$totalDue' } } },
         ]),
 
-      Product.countDocuments(
-        productScope(shopId, branchId, { isActive: true, $expr: { $lt: ['$stock', '$minStock'] } })
-      ),
+      this._lowStockCount(shopId, branchId),
 
       scopedCustomers
         ? CustomerBalance.countDocuments({ shop: shopId, branch: branchId })
