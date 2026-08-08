@@ -112,7 +112,28 @@ class ProductService {
     // for 60s otherwise — previously this aggregate ran on every request.
     let inventoryStats = { totalStock: 0, totalBuyingValue: 0, totalSellingValue: 0 };
     const wantStats = !search;
-    const statsCacheKey = `shop:${shopId}:invstats:${(branchId && req?.shop?.multiBranchEnabled) ? branchId : 'all'}`;
+    // ── The cache key must be scoped by EXACTLY what the query is scoped by ──
+    //
+    // This used to read
+    //
+    //     `...invstats:${(branchId && req?.shop?.multiBranchEnabled) ? branchId : 'all'}`
+    //
+    // but the aggregation below is scoped by `branchMatch`, which keys off
+    // `req.branchId` ALONE and never consults `multiBranchEnabled`. The two
+    // disagreed whenever `branchId` was set and the flag was not — including the
+    // ordinary case of a shop object rehydrated from Redis before that field
+    // existed, which is the exact hazard `utils/features.util.js` warns about.
+    //
+    // When they disagreed, every branch shared the key `all` while the numbers
+    // underneath were per-branch. So the first branch to be viewed wrote its
+    // totals under `all`, and for the next 60 seconds every other branch was
+    // served them — most visibly as ০টি / ৳০ on a branch whose product list was
+    // right there on screen showing stock.
+    //
+    // Keying off `branchId` directly is not a tightening, it is the correction:
+    // the cache now partitions the same way the data does. If you change
+    // `branchMatch`, change this line in the same commit.
+    const statsCacheKey = `shop:${shopId}:invstats:${branchId || 'all'}`;
     let statsCached = null;
     if (wantStats) {
       statsCached = await cacheService.get(statsCacheKey);
@@ -123,7 +144,19 @@ class ProductService {
         // skip aggregation
       } else {
         const statsResult = await Product.aggregate([
-          { $match: branchMatch(req, { shop: new mongoose.Types.ObjectId(shopId), isActive: true, isDeleted: { $ne: true } }) },
+          // `isActive: true` used to be here, and it is why the totals could
+          // read ০টি / ৳০ on a branch whose product list was on screen showing
+          // stock: the listing only filters on `isActive` when a `status` is
+          // explicitly requested, so a deactivated product was COUNTED by
+          // "মোট পণ্য ধরন" (which comes from `pagination.total`) and its stock
+          // and value were SILENTLY DROPPED from the three cards beside it.
+          //
+          // The cards are answering "how much stock and money is sitting in
+          // this branch". A deactivated product is still on the shelf and its
+          // stock is still money — deactivating hides it from the POS, it does
+          // not make it vanish from the inventory. So the stats now match the
+          // listing exactly: everything in the branch that has not been deleted.
+          { $match: branchMatch(req, { shop: new mongoose.Types.ObjectId(shopId), isDeleted: { $ne: true } }) },
           {
             $group: {
               _id: null,
@@ -282,15 +315,33 @@ class ProductService {
 
   // Get product by barcode/code
   async getProductByCode(shopId, code, req = null) {
+    // ── Normalise what the scanner handed us ─────────────────────────────────
+    //
+    // Barcode scanners behave like keyboards, and most append a carriage return
+    // or newline as the "enter" that submits the field. Phone camera scanners
+    // add stray whitespace of their own. An exact match against the raw string
+    // then fails on a value the shopkeeper can plainly read on screen — which
+    // is precisely the "the code is right there but it says not found" report.
+    const raw = String(code ?? '').trim();
+    // `Product.code` is stored `uppercase: true`, so a lowercase scan or a typed
+    // lookup could never match it. `barcode` and `sku` are stored verbatim and
+    // are matched as-is.
+    const upper = raw.toUpperCase();
+
     // Branch-scoped: scanning a barcode in Branch B must not return Branch A's
     // product — they are separate documents with their own price and stock.
     const product = await Product.findOne(branchFilter(req, {
       shop: shopId,
       isDeleted: { $ne: true },
       $or: [
-        { code: code },
-        { 'variants.sku': code },
-        { 'variants.barcode': code },
+        { code: upper },
+        // The product's OWN barcode was missing from this list, which is the
+        // bug: `barcode` is the field the product form fills in and the field
+        // the label sheet prints, so every scan of a printed label fell through
+        // to a 404 unless the product happened to have a matching variant.
+        { barcode: raw },
+        { 'variants.sku': raw },
+        { 'variants.barcode': raw },
       ],
     })).populate('category', 'name');
 

@@ -311,6 +311,9 @@ class SaleService {
 
     // Prepare bulk operations
     const bulkStockOps = [];
+    // FEFO batch rewrites, executed AFTER the stock guard passes — see the long
+    // note at the deduction site below.
+    const bulkBatchOps = [];
     const stockTransactions = [];
     let expectedStockOps = 0;
 
@@ -488,7 +491,32 @@ class SaleService {
           createdBy: userId,
         });
 
-        // FEFO batch deduction for batch-tracked products
+        // ── FEFO batch deduction ───────────────────────────────────────────
+        //
+        // First-Expiry-First-Out: the batch that goes off soonest leaves the
+        // shelf first, so a shop selling medicine or food is never left holding
+        // the short-dated stock.
+        //
+        // ─────────────────────────────────────────────────────────────────────
+        // THIS USED TO MUTATE THE DOCUMENT AND THROW THE RESULT AWAY
+        // ─────────────────────────────────────────────────────────────────────
+        //
+        // The arithmetic below has always been here, and it has always run on
+        // the in-memory `product` — which is never `.save()`d on this path,
+        // because stock goes out through the atomic `bulkWrite` above and not
+        // through the document. So batch quantities only ever went UP: purchases
+        // pushed new batches, sales silently deducted nothing, and after a few
+        // months `sum(batches.quantity)` bore no relation to `stock`.
+        //
+        // The visible symptom was the expiry-alerts screen warning about stock
+        // that had been sold long ago — which trains a shopkeeper to ignore it,
+        // which is worse than not having the screen.
+        //
+        // So the deduction is now queued as a real update (`bulkBatchOps`) and
+        // written after the stock guard passes. It is a SEPARATE bulkWrite, not
+        // another op in the stock one: `modifiedCount < expectedStockOps` is the
+        // oversell guard, and adding unrelated ops to the batch it counts would
+        // let a lost stock race hide behind a successful batch write.
         if (product.trackBatches && product.batches?.length > 0) {
           let remaining = item.quantity;
           // Sort batches by expiryDate ascending (FEFO), null expiry last
@@ -507,6 +535,23 @@ class SaleService {
           }
           // Remove empty batches
           product.batches = product.batches.filter(b => b.quantity > 0);
+
+          // The whole array is rewritten rather than patched per element: the
+          // deduction may empty several batches at once, and the in-memory copy
+          // is already the exact desired end state. `toObject` strips the
+          // Mongoose subdocument wrappers that bulkWrite cannot serialise.
+          bulkBatchOps.push({
+            updateOne: {
+              filter: { _id: product._id },
+              update: {
+                $set: {
+                  batches: product.batches.map(b =>
+                    (typeof b.toObject === 'function' ? b.toObject() : b)
+                  ),
+                },
+              },
+            },
+          });
         }
       }
 
@@ -578,6 +623,18 @@ class SaleService {
           );
         }
       }
+    }
+
+    // --- Persist the FEFO batch deductions ---
+    //
+    // Deliberately AFTER the stock guard: if that threw a 409 we must not have
+    // consumed batch quantity for a sale that did not happen.
+    //
+    // Deliberately its OWN bulkWrite: `modifiedCount < expectedStockOps` above
+    // is the oversell check, and mixing unrelated ops into the batch it counts
+    // would let a lost stock race hide behind a successful batch write.
+    if (bulkBatchOps.length > 0) {
+      await Product.bulkWrite(bulkBatchOps, sessionOpt);
     }
 
     // --- BATCH: Insert all stock transactions in one call ---

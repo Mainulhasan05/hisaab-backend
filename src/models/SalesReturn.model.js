@@ -119,8 +119,20 @@ const salesReturnSchema = new mongoose.Schema({
     type: String,
     enum: Object.values(PAYMENT_METHODS)
   },
+  // Required. A return moves stock back in and money back out, and six months
+  // later "why" is the only thing that separates a damaged delivery from a
+  // sizing problem from a staff member quietly reversing their own sales. It
+  // was optional, and an optional free-text box on a modal is a box nobody
+  // fills in.
+  //
+  // Not `required: true` on its own: an existing return written before this
+  // rule has no reason, and a hard requirement would make every one of them
+  // unsaveable on any future write. Enforced at the service layer, where new
+  // returns go through and old ones do not. Same pattern as `Product.unit`'s
+  // enum accepting the full registry.
   reason: {
     type: String,
+    trim: true,
     maxlength: [500, 'কারণ ৫০০ অক্ষরের বেশি হতে পারবে না']
   },
   notes: {

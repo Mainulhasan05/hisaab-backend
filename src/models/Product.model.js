@@ -333,6 +333,11 @@ productSchema.index({ shop: 1, name: 1 }); // Search: lets name-regex $or clause
 productSchema.index({ shop: 1, category: 1, isActive: 1 }); // Category listing with active filter
 productSchema.index({ shop: 1, 'variants.sku': 1 }, { sparse: true }); // Variant SKU lookup
 productSchema.index({ shop: 1, 'variants.barcode': 1 }, { sparse: true }); // Variant barcode scan
+// Top-level barcode scan. The variant equivalent above has always existed; this
+// one did not, because `getProductByCode` never actually queried `barcode` —
+// see the note there. Sparse for the same reason: most products carry no
+// barcode at all, and indexing their nulls buys nothing.
+productSchema.index({ shop: 1, barcode: 1 }, { sparse: true });
 productSchema.index({ shop: 1, createdAt: -1 }); // Listing by date
 productSchema.index({ shop: 1, isAvailableOnline: 1, isActive: 1 }); // Online product listing
 // Best-sellers-first ordering for the POS product grid. `isDeleted` is the

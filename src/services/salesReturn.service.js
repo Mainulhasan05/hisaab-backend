@@ -91,6 +91,21 @@ class SalesReturnService {
       );
     }
 
+    // 3b. A reason is mandatory on every NEW return.
+    //
+    // Enforced here rather than in the schema on purpose: returns written before
+    // this rule have no reason, and a schema-level `required` would make each of
+    // them fail validation on any future save. The service only ever sees new
+    // ones, so this is the boundary where the rule can be absolute without
+    // stranding existing data.
+    if (!reason || !String(reason).trim()) {
+      throw new AppError(
+        'A return reason is required',
+        'ফেরতের কারণ লিখুন',
+        400
+      );
+    }
+
     // 4. Build already-returned map from existing returns
     const existingReturns = await SalesReturn.find({ shop: shopId, sale: saleId }).session(session || null);
     const alreadyReturnedMap = {};
