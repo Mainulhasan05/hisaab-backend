@@ -89,7 +89,7 @@ const AUDIT_FIELDS = {
   ],
   customer: [
     'name', 'phone', 'email', 'address', 'creditLimit', 'isActive',
-    'totalDue', 'totalPaid', 'totalPurchases',
+    'totalDue', 'totalPaid', 'totalPurchases', 'openingDue',
   ],
 };
 

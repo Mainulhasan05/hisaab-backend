@@ -19,8 +19,16 @@
  *        Σ CustomerBalance.totalDue  ===  Customer.totalDue      (per customer)
  *
  * The rebuild derives every figure from source documents — Sale, Payment,
- * SalesReturn — never from the rollup it is checking, so it is a genuine second
- * opinion rather than a copy.
+ * SalesReturn, DueAdjustment — never from the rollup it is checking, so it is a
+ * genuine second opinion rather than a copy.
+ *
+ * `DueAdjustment` is the pre-software debt a shop carried in from its paper
+ * খাতা. It has no invoice behind it, so it enters the formula as its own term:
+ *
+ *     totalDue = max(0, totalPurchases + openingDue − totalPaid)
+ *
+ * If this script is ever seen to zero out an opening balance, the cause is a
+ * `dueadjustments` read that was dropped from `rebuildShop` — not bad data.
  *
  * --repair-customers
  * ------------------
@@ -99,6 +107,15 @@ async function rebuildShop(db, shop, defaultBranchId) {
     { $group: { _id: { customer: '$customer', branch: '$branch' }, refunded: { $sum: '$amount' } } },
   ]).toArray();
 
+  // Debt no invoice of ours produced — the paper-খাতা balance carried in at
+  // onboarding, plus later owner corrections. Summed from the rows themselves,
+  // never from `Customer.openingDue`, so this stays a genuine second opinion on
+  // the rollup rather than a copy of it.
+  const openings = await db.collection('dueadjustments').aggregate([
+    { $match: { shop: shopId, customer: { $ne: null } } },
+    { $group: { _id: { customer: '$customer', branch: '$branch' }, opening: { $sum: '$amount' } } },
+  ]).toArray();
+
   const rows = new Map();
   const keyOf = (customer, branch) => `${customer}|${branch}`;
   const slot = (customer, branch) => {
@@ -106,7 +123,7 @@ async function rebuildShop(db, shop, defaultBranchId) {
     if (!rows.has(key)) {
       rows.set(key, {
         shop: shopId, customer, branch,
-        totalPurchases: 0, totalPaid: 0, totalDue: 0, purchaseCount: 0, lastPurchase: null,
+        totalPurchases: 0, totalPaid: 0, totalDue: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null,
       });
     }
     return rows.get(key);
@@ -130,11 +147,18 @@ async function rebuildShop(db, shop, defaultBranchId) {
     row.totalPurchases -= r.refunded || 0;
     row.totalPaid -= r.refunded || 0;
   }
+  for (const o of openings) {
+    if (!o._id.branch) continue;
+    slot(o._id.customer, o._id.branch).openingDue += o.opening || 0;
+  }
 
   for (const row of rows.values()) {
     row.totalPurchases = round(row.totalPurchases);
     row.totalPaid = round(row.totalPaid);
-    row.totalDue = round(Math.max(0, row.totalPurchases - row.totalPaid));
+    row.openingDue = round(row.openingDue);
+    // Same formula as Customer.deriveDue — kept literal here because this
+    // script is the independent check and must not import the code it verifies.
+    row.totalDue = round(Math.max(0, row.totalPurchases + row.openingDue - row.totalPaid));
   }
 
   // Customers with no transaction anywhere — see the note above. Skipped when
@@ -209,10 +233,11 @@ async function main() {
     for (const row of rebuilt) {
       const k = String(row.customer);
       const acc = rebuiltByCustomer.get(k) ||
-        { totalPurchases: 0, totalPaid: 0, totalDue: 0, purchaseCount: 0, lastPurchase: null };
+        { totalPurchases: 0, totalPaid: 0, totalDue: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null };
       acc.totalPurchases = round(acc.totalPurchases + row.totalPurchases);
       acc.totalPaid = round(acc.totalPaid + row.totalPaid);
       acc.totalDue = round(acc.totalDue + row.totalDue);
+      acc.openingDue = round(acc.openingDue + row.openingDue);
       acc.purchaseCount += row.purchaseCount;
       if (row.lastPurchase && (!acc.lastPurchase || row.lastPurchase > acc.lastPurchase)) {
         acc.lastPurchase = row.lastPurchase;
@@ -229,7 +254,7 @@ async function main() {
 
     for (const customer of customers) {
       const rebuiltRollup = rebuiltByCustomer.get(String(customer._id)) ||
-        { totalPurchases: 0, totalPaid: 0, totalDue: 0, purchaseCount: 0, lastPurchase: null };
+        { totalPurchases: 0, totalPaid: 0, totalDue: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null };
       const branchSum = rebuiltRollup.totalDue;
       const shopWide = round(customer.totalDue || 0);
       if (Math.abs(branchSum - shopWide) > 0.01) {
@@ -247,6 +272,7 @@ async function main() {
       const differs =
         Math.abs(round(customer.totalPurchases || 0) - rebuiltRollup.totalPurchases) > 0.01 ||
         Math.abs(round(customer.totalPaid || 0) - rebuiltRollup.totalPaid) > 0.01 ||
+        Math.abs(round(customer.openingDue || 0) - rebuiltRollup.openingDue) > 0.01 ||
         Math.abs(shopWide - branchSum) > 0.01 ||
         (customer.purchaseCount || 0) !== rebuiltRollup.purchaseCount;
 
@@ -259,6 +285,7 @@ async function main() {
                 totalPurchases: rebuiltRollup.totalPurchases,
                 totalPaid: rebuiltRollup.totalPaid,
                 totalDue: rebuiltRollup.totalDue,
+                openingDue: rebuiltRollup.openingDue,
                 purchaseCount: rebuiltRollup.purchaseCount,
                 lastPurchase: rebuiltRollup.lastPurchase,
                 updatedAt: new Date(),
@@ -280,6 +307,7 @@ async function main() {
         Math.abs((current.totalPurchases || 0) - row.totalPurchases) > 0.01 ||
         Math.abs((current.totalPaid || 0) - row.totalPaid) > 0.01 ||
         Math.abs((current.totalDue || 0) - row.totalDue) > 0.01 ||
+        Math.abs((current.openingDue || 0) - row.openingDue) > 0.01 ||
         (current.purchaseCount || 0) !== row.purchaseCount;
 
       if (differs) {
@@ -291,6 +319,7 @@ async function main() {
                 totalPurchases: row.totalPurchases,
                 totalPaid: row.totalPaid,
                 totalDue: row.totalDue,
+                openingDue: row.openingDue,
                 purchaseCount: row.purchaseCount,
                 lastPurchase: row.lastPurchase,
                 updatedAt: new Date(),
@@ -308,11 +337,12 @@ async function main() {
     // how a branch keeps a customer visible without any money attached.
     for (const [key, row] of existingByKey) {
       if (!rebuilt.some((r) => `${r.customer}|${r.branch}` === key)) {
-        if ((row.totalPurchases || 0) === 0 && (row.totalPaid || 0) === 0 && (row.totalDue || 0) === 0) continue;
+        if ((row.totalPurchases || 0) === 0 && (row.totalPaid || 0) === 0 &&
+            (row.totalDue || 0) === 0 && (row.openingDue || 0) === 0) continue;
         ops.push({
           updateOne: {
             filter: { _id: row._id },
-            update: { $set: { totalPurchases: 0, totalPaid: 0, totalDue: 0, purchaseCount: 0, updatedAt: new Date() } },
+            update: { $set: { totalPurchases: 0, totalPaid: 0, totalDue: 0, openingDue: 0, purchaseCount: 0, updatedAt: new Date() } },
           },
         });
       }

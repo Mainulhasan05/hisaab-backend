@@ -18,6 +18,7 @@ const Customer = require('../models/Customer.model');
 const CustomerBalance = require('../models/CustomerBalance.model');
 const Sale = require('../models/Sale.model');
 const Payment = require('../models/Payment.model');
+const DueAdjustment = require('../models/DueAdjustment.model');
 
 const SHOP = new mongoose.Types.ObjectId();
 const CUSTOMER = new mongoose.Types.ObjectId();
@@ -199,14 +200,60 @@ describe('the due list', () => {
 describe('due aging', () => {
   it('filters by branch only under separate books', async () => {
     const agg = jest.spyOn(Sale, 'aggregate').mockResolvedValue([]);
+    const adjAgg = jest.spyOn(DueAdjustment, 'aggregate').mockResolvedValue([]);
 
     await customerService.getDueAging(SHOP, separate());
     expect(agg.mock.calls[0][0][0].$match).toHaveProperty('branch');
+    // Pre-software debt has to obey the same scope rule as invoiced debt, or a
+    // branch-scoped aging report would show another branch's খাতা balance.
+    expect(adjAgg.mock.calls[0][0][0].$match).toHaveProperty('branch');
 
     agg.mockClear();
+    adjAgg.mockClear();
     // It used to branch-filter whenever a branch was active, which was wrong
     // under a shared book: one book must age as one book.
     await customerService.getDueAging(SHOP, shared());
     expect(agg.mock.calls[0][0][0].$match).not.toHaveProperty('branch');
+    expect(adjAgg.mock.calls[0][0][0].$match).not.toHaveProperty('branch');
+  });
+
+  it('folds opening dues into the buckets, including customers with no invoice', async () => {
+    // The whole point of the term: a shop that onboarded ৳5,000 of খাতা debt
+    // must not see ৳0 aged. Before this, aging read Sale.due alone.
+    jest.spyOn(Sale, 'aggregate').mockResolvedValue([]);
+    jest.spyOn(DueAdjustment, 'aggregate').mockResolvedValue([
+      { _id: CUSTOMER, totalDue: 5000, due0to30: 5000, due31to60: 0, due60plus: 0, oldestDue: new Date() },
+    ]);
+    jest.spyOn(Customer, 'find').mockReturnValue({
+      select: () => ({ lean: async () => [{ _id: CUSTOMER, name: 'করিম', phone: '01711223344' }] }),
+    });
+
+    const { customers, summary } = await customerService.getDueAging(SHOP, shared());
+
+    expect(summary.totalDue).toBe(5000);
+    expect(summary.due0to30).toBe(5000);
+    expect(customers[0].customerName).toBe('করিম');
+    expect(customers[0].saleCount).toBe(0);
+  });
+
+  it('adds opening due onto a customer who already has invoiced due', async () => {
+    jest.spyOn(Sale, 'aggregate').mockResolvedValue([
+      {
+        _id: CUSTOMER, customerName: 'করিম', customerPhone: '01711223344',
+        totalDue: 2000, due0to30: 2000, due31to60: 0, due60plus: 0,
+        oldestDue: new Date(), saleCount: 3,
+      },
+    ]);
+    jest.spyOn(DueAdjustment, 'aggregate').mockResolvedValue([
+      { _id: CUSTOMER, totalDue: 5000, due0to30: 0, due31to60: 0, due60plus: 5000, oldestDue: new Date(0) },
+    ]);
+
+    const { customers, summary } = await customerService.getDueAging(SHOP, shared());
+
+    // One row, not two — the same human owes both kinds of money.
+    expect(customers).toHaveLength(1);
+    expect(customers[0].totalDue).toBe(7000);
+    expect(customers[0].due60plus).toBe(5000);
+    expect(summary.customerCount).toBe(1);
   });
 });

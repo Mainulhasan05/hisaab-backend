@@ -72,6 +72,39 @@ exports.collectDue = asyncHandler(async (req, res) => {
   });
 });
 
+// Set a customer's opening (pre-software) due — owner only, see route
+exports.setOpeningDue = asyncHandler(async (req, res) => {
+  const result = await customerService.setOpeningDue(
+    req.shop._id, req.user._id, req.params.id, req.body, req
+  );
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Opening due updated successfully',
+    messageBn: 'পূর্বের বাকি আপডেট হয়েছে',
+  });
+});
+
+// Full account statement — sales, payments, returns and adjustments in one
+// running-balance ledger
+exports.getCustomerLedger = asyncHandler(async (req, res) => {
+  const result = await customerService.getCustomerLedger(req.shop._id, req.params.id, req.query, req);
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Customer ledger retrieved successfully',
+    messageBn: 'কাস্টমার খতিয়ান লোড হয়েছে',
+  });
+});
+
+// Dry-run an import batch so the preview screen can show what will happen
+exports.validateImport = asyncHandler(async (req, res) => {
+  const result = await customerService.validateImportRows(req.shop._id, req.body.customers, req);
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Import validated',
+    messageBn: 'ফাইল যাচাই সম্পন্ন',
+  });
+});
+
 // Get customer purchase history
 exports.getCustomerHistory = asyncHandler(async (req, res) => {
   const result = await customerService.getCustomerHistory(req.shop._id, req.params.id, req.query, req);

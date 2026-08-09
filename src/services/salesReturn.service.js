@@ -422,7 +422,10 @@ class SalesReturnService {
         // Recalculate due
         const customer = await Customer.findById(sale.customer).session(session || null);
         if (customer) {
-          customer.totalDue = Math.max(0, customer.totalPurchases - customer.totalPaid);
+          // `deriveDue`, not the arithmetic inline: it carries the `openingDue`
+          // term, and a return must not wipe debt the customer brought with
+          // them from the shop's paper খাতা. See DueAdjustment.model.js.
+          customer.totalDue = Customer.deriveDue(customer);
           await customer.save(sessionOpt);
         }
 
@@ -449,7 +452,9 @@ class SalesReturnService {
       const customer = await Customer.findById(sale.customer).session(session || null);
       if (customer) {
         customer.totalPurchases -= totalRefundAmount;
-        customer.totalDue = Math.max(0, customer.totalPurchases - customer.totalPaid);
+        // Shared formula — carries the `openingDue` term. See the note at the
+        // cash-refund branch above.
+        customer.totalDue = Customer.deriveDue(customer);
         await customer.save(sessionOpt);
       }
 
@@ -741,7 +746,10 @@ class SalesReturnService {
 
         const customer = await Customer.findById(salesReturn.customer).session(session || null);
         if (customer) {
-          customer.totalDue = Math.max(0, customer.totalPurchases - customer.totalPaid);
+          // `deriveDue`, not the arithmetic inline: it carries the `openingDue`
+          // term, and a return must not wipe debt the customer brought with
+          // them from the shop's paper খাতা. See DueAdjustment.model.js.
+          customer.totalDue = Customer.deriveDue(customer);
           await customer.save(sessionOpt);
         }
 

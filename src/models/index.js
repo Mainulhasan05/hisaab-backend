@@ -7,6 +7,7 @@ module.exports = {
   Role: require('./Role.model'),
   Customer: require('./Customer.model'),
   CustomerBalance: require('./CustomerBalance.model'),
+  DueAdjustment: require('./DueAdjustment.model'),
   Category: require('./Category.model'),
   Product: require('./Product.model'),
   Sale: require('./Sale.model'),

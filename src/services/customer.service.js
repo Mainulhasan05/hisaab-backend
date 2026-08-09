@@ -1,10 +1,13 @@
 const Customer = require('../models/Customer.model');
 const CustomerBalance = require('../models/CustomerBalance.model');
+const DueAdjustment = require('../models/DueAdjustment.model');
 const Sale = require('../models/Sale.model');
+const SalesReturn = require('../models/SalesReturn.model');
 const Payment = require('../models/Payment.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { branchFilter, requireBranch, isBranchCustomerScope } = require('../utils/branchScope.util');
+const { normalizePhone } = require('../utils/phone.util');
 const { runInTransaction } = require('../utils/transaction.util');
 const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.util');
 const mongoose = require('mongoose');
@@ -22,6 +25,35 @@ const CUSTOMER_PROJECTION = {
   isActive: '$customer.isActive',
   createdAt: '$customer.createdAt',
 };
+
+/**
+ * The per-branch money figures, in the shape the shop-wide list already uses.
+ * One constant so a field added to the ledger cannot reach the branch-scoped
+ * list and miss the shop-wide one (or the reverse) — which is how `openingDue`
+ * would otherwise have shown up as ৳0 for every branch-scoped shop.
+ */
+const BALANCE_PROJECTION = {
+  totalPurchases: 1,
+  totalPaid: 1,
+  totalDue: 1,
+  openingDue: 1,
+  purchaseCount: 1,
+  lastPurchase: 1,
+};
+
+/** Money never travels as a string. Rejects NaN/Infinity/negative-zero noise. */
+const toAmount = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : NaN;
+};
+
+/**
+ * Ceiling on one import batch. The commit loop is one `createCustomer` — and so
+ * one transaction — per row, so an unbounded file would hold a request open for
+ * minutes and time out halfway through, leaving a partially imported book with
+ * no clear resume point.
+ */
+const IMPORT_ROW_LIMIT = 1000;
 
 class CustomerService {
   /**
@@ -76,11 +108,7 @@ class CustomerService {
         $project: {
           _id: '$customer._id',
           ...CUSTOMER_PROJECTION,
-          totalPurchases: 1,
-          totalPaid: 1,
-          totalDue: 1,
-          purchaseCount: 1,
-          lastPurchase: 1,
+          ...BALANCE_PROJECTION,
         },
       },
       {
@@ -180,6 +208,7 @@ class CustomerService {
       totalPurchases: row.totalPurchases || 0,
       totalPaid: row.totalPaid || 0,
       totalDue: row.totalDue || 0,
+      openingDue: row.openingDue || 0,
       purchaseCount: row.purchaseCount || 0,
       lastPurchase: row.lastPurchase || null,
     };
@@ -226,17 +255,157 @@ class CustomerService {
       // person instead of creating a duplicate.
       return scoped || {
         ...customer.toObject(),
-        totalPurchases: 0, totalPaid: 0, totalDue: 0, purchaseCount: 0, lastPurchase: null,
+        totalPurchases: 0, totalPaid: 0, totalDue: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null,
       };
     }
 
     return customer;
   }
 
+  /**
+   * Move a customer's pre-software debt by `amount`, in one transaction.
+   *
+   * The single writer for `openingDue`. Everything that can create debt without
+   * an invoice — the create form, the CSV import, the owner's correction —
+   * comes through here, so the four things that must happen together cannot
+   * drift apart:
+   *
+   *   1. a `DueAdjustment` row (the audit trail and the খতিয়ান line)
+   *   2. `Customer.openingDue` and `Customer.totalDue`, both by `amount`
+   *   3. the same pair on `CustomerBalance` for this branch
+   *   4. an `AuditLog` entry
+   *
+   * `totalDue` is `$inc`-ed rather than re-derived for the same reason every
+   * other write path here does: a plain increment is safe under concurrency,
+   * and the re-derivation (`Customer.deriveDue`) is reserved for the return
+   * paths that genuinely need to re-clamp.
+   *
+   * Clamped so the result never goes below zero — this shop does not track
+   * customer advances, so a −৳500 balance would be a figure no screen can
+   * render honestly. A reduction larger than what is owed simply lands at zero,
+   * and the row records what was actually applied.
+   *
+   * @param {number} amount signed delta; positive raises the due
+   * @returns {{customer: Object, adjustment: Object, applied: number}}
+   */
+  async _applyDueAdjustment(shopId, userId, customerId, { amount, kind, note }, req) {
+    return runInTransaction(async (session) => {
+      const sessionOpt = session ? { session } : {};
+      const branchId = req ? requireBranch(req) : null;
+
+      const customer = await Customer.findOne({ _id: customerId, shop: shopId }).session(session || null);
+      if (!customer) {
+        throw new AppError('কাস্টমার পাওয়া যায়নি', 'Customer not found', 404);
+      }
+
+      // A reduction can only take away debt that is actually there. Without
+      // this an owner correcting ৳500 on a customer who owes ৳200 would leave
+      // `openingDue` at −৳300 while `totalDue` clamped at 0 — the two rollups
+      // permanently disagreeing, which the recalc script would then report
+      // forever as unexplained drift.
+      const floor = -Math.min(customer.openingDue || 0, customer.totalDue || 0);
+      const applied = Math.max(amount, floor);
+
+      if (applied === 0) {
+        return { customer, adjustment: null, applied: 0 };
+      }
+
+      customer.openingDue = (customer.openingDue || 0) + applied;
+      customer.totalDue = (customer.totalDue || 0) + applied;
+      await customer.save(sessionOpt);
+
+      const [adjustment] = await DueAdjustment.create([{
+        shop: shopId,
+        customer: customerId,
+        branch: branchId,
+        kind: kind || 'adjustment',
+        amount: applied,
+        balanceAfter: customer.openingDue,
+        note,
+        createdBy: userId,
+      }], sessionOpt);
+
+      // Same arithmetic per branch. A no-op for single-branch shops, where
+      // branchId is null — exactly like every other call site.
+      await CustomerBalance.applyDelta({
+        shop: shopId,
+        customer: customerId,
+        branch: branchId,
+        opening: applied,
+        due: applied,
+      }, session);
+
+      await AuditLog.log({
+        shop: shopId,
+        user: userId,
+        customer: customerId,
+        action: kind === 'opening' ? 'customer_opening_due' : 'customer_due_adjust',
+        description: `${applied > 0 ? 'Added' : 'Reduced'} opening due ৳${Math.abs(applied)} for ${customer.name || customer.phone}`,
+        entity: { type: 'customer', id: customerId, name: customer.name },
+        changes: {
+          before: { openingDue: customer.openingDue - applied, totalDue: customer.totalDue - applied },
+          after: { openingDue: customer.openingDue, totalDue: customer.totalDue },
+        },
+        req,
+      });
+
+      return { customer, adjustment, applied };
+    });
+  }
+
+  /**
+   * Set a customer's opening due to an absolute figure (owner-only).
+   *
+   * Takes the target, not a delta, because that is the question the owner can
+   * actually answer: "খাতায় ওর কত বাকি ছিল?" The delta is arithmetic, and
+   * arithmetic is our job. The `DueAdjustment` row still stores the delta, so
+   * the খতিয়ান reads as a history of corrections rather than a series of
+   * absolute restatements.
+   */
+  async setOpeningDue(shopId, userId, customerId, { openingDue, note }, req) {
+    const target = toAmount(openingDue);
+    if (Number.isNaN(target) || target < 0) {
+      throw new AppError('সঠিক পরিমাণ দিন', 'Enter a valid amount', 400);
+    }
+
+    const customer = await Customer.findOne({ _id: customerId, shop: shopId }).lean();
+    if (!customer) {
+      throw new AppError('কাস্টমার পাওয়া যায়নি', 'Customer not found', 404);
+    }
+
+    const delta = toAmount(target - (customer.openingDue || 0));
+    if (delta === 0) {
+      return { customer, adjustment: null, applied: 0 };
+    }
+
+    return this._applyDueAdjustment(
+      shopId, userId, customerId,
+      { amount: delta, kind: 'adjustment', note },
+      req
+    );
+  }
+
   // Create new customer
   async createCustomer(shopId, userId, customerData, req) {
     const { phone, name, address, notes } = customerData;
     const branchId = req ? requireBranch(req) : null;
+
+    // Pre-software debt, optional. Owner-only — writing this conjures a
+    // receivable out of nothing, so it is the one part of the customer form a
+    // cashier must not reach. Checked here rather than on the route because the
+    // route itself is open to anyone with `customers.create`; only this *field*
+    // is restricted.
+    const openingDue = toAmount(customerData.openingDue ?? 0) || 0;
+    if (openingDue < 0 || Number.isNaN(openingDue)) {
+      throw new AppError('পূর্বের বাকি ঋণাত্মক হতে পারবে না', 'Opening due cannot be negative', 400);
+    }
+    if (openingDue > 0 && req && !req.user?.isOwner && !req.isAdmin) {
+      throw new AppError(
+        'শুধুমাত্র দোকান মালিক পূর্বের বাকি যোগ করতে পারবেন',
+        'Only the shop owner can set an opening due',
+        403
+      );
+    }
 
     // Check if customer with same phone exists.
     //
@@ -255,6 +424,17 @@ class CustomerService {
       // earned them; only their presence in this list is new.
       if (isBranchCustomerScope(req)) {
         await CustomerBalance.applyDelta({ shop: shopId, customer: existingCustomer._id, branch: branchId });
+        // An opening due typed alongside is still meant: the customer is new to
+        // THIS branch, and this branch's paper খাতা may well have carried them.
+        // It lands on this branch's row, not on whatever they owe elsewhere.
+        if (openingDue > 0) {
+          const { customer: withDue } = await this._applyDueAdjustment(
+            shopId, userId, existingCustomer._id,
+            { amount: openingDue, kind: 'opening', note: 'অনবোর্ডিং — পূর্বের বাকি' },
+            req
+          );
+          return withDue;
+        }
         return existingCustomer;
       }
       // Shared book: the customer really is in their list already, so the
@@ -294,6 +474,19 @@ class CustomerService {
       },
       req,
     });
+
+    // The paper-খাতা balance, if one was given. Deliberately AFTER the customer
+    // exists and as its own transaction: a failure here must leave a customer
+    // with no opening due (fixable in one click from their page) rather than
+    // roll back a customer the staff member has already been told about.
+    if (openingDue > 0) {
+      const { customer: withDue } = await this._applyDueAdjustment(
+        shopId, userId, customer._id,
+        { amount: openingDue, kind: 'opening', note: 'অনবোর্ডিং — পূর্বের বাকি' },
+        req
+      );
+      return withDue;
+    }
 
     return customer;
   }
@@ -473,6 +666,162 @@ class CustomerService {
     });
   }
 
+  /**
+   * The খতিয়ান — one chronological account, with a running balance.
+   *
+   * Three streams merged into one column of entries: invoices raise the
+   * balance, payments lower it, and opening/adjustment rows move it without any
+   * invoice behind them. This is the only view in the app that answers "কীভাবে
+   * এই বাকিটা তৈরি হলো" — the sales and payments tabs each show half the story
+   * and neither carries a balance.
+   *
+   * Merged in memory rather than by `$unionWith`, deliberately. The running
+   * balance has to be computed oldest-first over the WHOLE history, so a
+   * database-side paginated union would still need the full set to know what
+   * the first row on page 2 opens at. `limit` caps how many entries come back;
+   * the balance on each is always the true one.
+   */
+  async getCustomerLedger(shopId, customerId, options = {}, req = null) {
+    const { limit = 200 } = options;
+
+    // Reuses the branch visibility rule — a customer with no row at this branch
+    // 404s here exactly as they do on their detail page.
+    const customer = await this.getCustomerById(shopId, customerId, req);
+
+    // In SHARED mode the খতিয়ান is shop-wide, for the same reason the history
+    // tab is: one book means one account. In SEPARATE mode it narrows, so the
+    // running balance ends on the figure that branch's page shows.
+    const scope = { shop: shopId, customer: customerId };
+    if (isBranchCustomerScope(req)) scope.branch = req.branchId;
+
+    const [sales, payments, adjustments, returns] = await Promise.all([
+      Sale.find({ ...scope, status: { $ne: 'cancelled' } })
+        .select('invoiceNo total createdAt')
+        .sort({ createdAt: 1 })
+        .lean(),
+      Payment.find(scope)
+        .select('amount method type sale createdAt notes')
+        .sort({ createdAt: 1 })
+        .lean(),
+      DueAdjustment.find(scope)
+        .select('amount kind note createdAt')
+        .sort({ createdAt: 1 })
+        .lean(),
+      // Settled only. A store-credit return sits at `pending` and has moved no
+      // money yet — crediting it here would show a balance the customer's
+      // account does not actually have.
+      SalesReturn.find({ ...scope, refundStatus: 'settled' })
+        .select('returnNo totalAmount refundMethod createdAt settledAt')
+        .sort({ createdAt: 1 })
+        .lean(),
+    ]);
+
+    const entries = [];
+
+    for (const s of sales) {
+      // The invoice's own total is the debit. Whatever was paid at the till
+      // arrives as its own Payment row, so counting `paid` here too would
+      // credit it twice.
+      entries.push({
+        _id: String(s._id),
+        type: 'sale',
+        date: s.createdAt,
+        label: `ইনভয়েস ${s.invoiceNo}`,
+        ref: s.invoiceNo,
+        saleId: String(s._id),
+        debit: s.total || 0,
+        credit: 0,
+      });
+    }
+
+    // ── Why a return is two lines, not one ───────────────────────────────────
+    //
+    // Goods coming back credit the account; cash going out debits it. On a cash
+    // refund both happen, and they cancel — which is exactly what the write
+    // path does (`totalPurchases -= X` and `totalPaid -= X`, leaving due
+    // unchanged). Booking only the refund payment would leave the ledger ৳X
+    // above the customer's real due on every cash return.
+    //
+    // On an `adjustment` return there is no cash and so no Payment row: the
+    // credit stands alone and the balance drops by X, matching the write path
+    // that decrements purchases only.
+    for (const r of returns) {
+      entries.push({
+        _id: String(r._id),
+        type: 'return',
+        date: r.settledAt || r.createdAt,
+        label: `মাল ফেরত ${r.returnNo}`,
+        ref: r.returnNo,
+        debit: 0,
+        credit: r.totalAmount || 0,
+      });
+    }
+
+    for (const p of payments) {
+      const isRefund = p.type === 'refund';
+      entries.push({
+        _id: String(p._id),
+        type: isRefund ? 'refund' : 'payment',
+        date: p.createdAt,
+        label: isRefund
+          ? 'ফেরত (নগদ প্রদান)'
+          : (p.type === 'due_collection' ? 'বাকি আদায়' : 'পেমেন্ট'),
+        method: p.method,
+        note: p.notes,
+        saleId: p.sale ? String(p.sale) : null,
+        // Cash handed back reverses the credit the customer got for paying.
+        // Pairs with the return's credit line above.
+        debit: isRefund ? (p.amount || 0) : 0,
+        credit: isRefund ? 0 : (p.amount || 0),
+      });
+    }
+
+    for (const a of adjustments) {
+      entries.push({
+        _id: String(a._id),
+        type: a.kind === 'opening' ? 'opening' : 'adjustment',
+        date: a.createdAt,
+        label: a.kind === 'opening' ? 'পূর্বের বাকি (খাতা থেকে)' : 'বাকি সমন্বয়',
+        note: a.note,
+        debit: a.amount > 0 ? a.amount : 0,
+        credit: a.amount < 0 ? -a.amount : 0,
+      });
+    }
+
+    // Oldest first so the balance accumulates. Ties broken by type so an
+    // opening balance entered on the same day as the first invoice reads before
+    // it, which is the order the shopkeeper thinks in.
+    const rank = { opening: 0, adjustment: 1, sale: 2, return: 3, refund: 4, payment: 5 };
+    entries.sort((a, b) => {
+      const d = new Date(a.date) - new Date(b.date);
+      return d !== 0 ? d : (rank[a.type] ?? 9) - (rank[b.type] ?? 9);
+    });
+
+    let balance = 0;
+    for (const e of entries) {
+      balance = Math.round((balance + e.debit - e.credit) * 100) / 100;
+      e.balance = balance;
+    }
+
+    // Newest first for display, but only after the balances are fixed.
+    entries.reverse();
+
+    return {
+      customer,
+      entries: entries.slice(0, parseInt(limit)),
+      totals: {
+        // What the ledger itself says is owed. Should equal `customer.totalDue`;
+        // a gap means a write path updated one book and not the other, so it is
+        // surfaced rather than hidden.
+        closingBalance: Math.max(0, balance),
+        rawBalance: balance,
+        openingDue: customer.openingDue || 0,
+        entryCount: entries.length,
+        truncated: entries.length > parseInt(limit),
+      },
+    };
+  }
+
   // Get customer purchase history
   async getCustomerHistory(shopId, customerId, options = {}, req = null) {
     const { page = 1, limit = 20 } = options;
@@ -546,11 +895,7 @@ class CustomerService {
         $project: {
           _id: '$customer._id',
           ...CUSTOMER_PROJECTION,
-          totalPurchases: 1,
-          totalPaid: 1,
-          totalDue: 1,
-          purchaseCount: 1,
-          lastPurchase: 1,
+          ...BALANCE_PROJECTION,
         },
       },
     ]);
@@ -642,7 +987,7 @@ class CustomerService {
 
     const [customers, total] = await Promise.all([
       Customer.find(query)
-        .select('name phone totalPurchases totalPaid totalDue purchaseCount lastPurchase tags createdAt')
+        .select('name phone totalPurchases totalPaid totalDue openingDue purchaseCount lastPurchase tags createdAt')
         .sort(sort)
         .skip(skip)
         .limit(parseInt(limit))
@@ -667,27 +1012,157 @@ class CustomerService {
     };
   }
 
-  // Bulk import customers
-  async bulkImportCustomers(shopId, userId, customers, req) {
-    const results = [];
+  /**
+   * Check a parsed import batch WITHOUT writing anything.
+   *
+   * Exists so the preview screen can show a shopkeeper exactly what will happen
+   * to two hundred rows before a single one is committed. Every rejection
+   * reason it can return is one `bulkImportCustomers` would hit for the same
+   * row, so "০ ভুল" on the preview means the import will not partially fail —
+   * which matters because there is no undo for a batch of opening dues.
+   *
+   * Duplicate phones WITHIN the file are caught here too. The write path could
+   * not see them (each row is a separate existence check, and the first insert
+   * makes the second a conflict), so without this the user would get a
+   * confusing "already exists" for a customer they are creating right now.
+   */
+  async validateImportRows(shopId, rows, req = null) {
+    if (!Array.isArray(rows)) {
+      throw new AppError('সঠিক ডেটা দিন', 'Invalid import payload', 400);
+    }
+    if (rows.length > IMPORT_ROW_LIMIT) {
+      throw new AppError(
+        `একবারে সর্বোচ্চ ${IMPORT_ROW_LIMIT}টি সারি আপলোড করা যাবে`,
+        `At most ${IMPORT_ROW_LIMIT} rows per import`,
+        400
+      );
+    }
 
-    for (const customerData of customers) {
-      try {
-        // Check if customer exists
-        const existing = await Customer.findOne({ shop: shopId, phone: customerData.phone });
-        if (existing) {
-          results.push({ phone: customerData.phone, success: false, error: 'Already exists' });
-          continue;
+    const canSetOpeningDue = Boolean(req?.user?.isOwner || req?.isAdmin);
+
+    const normalized = rows.map((row) => ({
+      phone: normalizePhone(String(row.phone ?? '').trim()),
+      rawPhone: String(row.phone ?? '').trim(),
+      name: String(row.name ?? '').trim(),
+      address: String(row.address ?? '').trim(),
+      openingDue: row.openingDue === '' || row.openingDue == null ? 0 : toAmount(row.openingDue),
+    }));
+
+    // One query for the whole batch rather than one per row — a 200-row import
+    // was 200 round trips before the user saw anything.
+    const phones = normalized.map((r) => r.phone).filter(Boolean);
+    const existing = await Customer.find({ shop: shopId, phone: { $in: phones } })
+      .select('phone name totalDue')
+      .lean();
+    const existingByPhone = new Map(existing.map((c) => [c.phone, c]));
+
+    const seen = new Map();
+    const checked = normalized.map((row, index) => {
+      const errors = [];
+
+      if (!row.rawPhone) {
+        errors.push('ফোন নম্বর নেই');
+      } else if (!row.phone || !/^01[3-9]\d{8}$/.test(row.phone)) {
+        errors.push('ফোন নম্বর সঠিক নয়');
+      }
+
+      if (row.name.length > 100) errors.push('নাম ১০০ অক্ষরের বেশি');
+      if (row.address.length > 500) errors.push('ঠিকানা ৫০০ অক্ষরের বেশি');
+
+      if (Number.isNaN(row.openingDue)) {
+        errors.push('পূর্বের বাকি সংখ্যা নয়');
+      } else if (row.openingDue < 0) {
+        errors.push('পূর্বের বাকি ঋণাত্মক হতে পারবে না');
+      } else if (row.openingDue > 0 && !canSetOpeningDue) {
+        errors.push('শুধু মালিক পূর্বের বাকি দিতে পারবেন');
+      }
+
+      if (row.phone) {
+        if (seen.has(row.phone)) {
+          errors.push(`ফাইলেই ডুপ্লিকেট (সারি ${seen.get(row.phone) + 1})`);
+        } else {
+          seen.set(row.phone, index);
         }
 
-        const customer = await this.createCustomer(shopId, userId, customerData, req);
-        results.push({ phone: customerData.phone, success: true, customerId: customer._id });
+        const already = existingByPhone.get(row.phone);
+        if (already) {
+          errors.push(`এই নম্বরে কাস্টমার আছে (${already.name || row.phone})`);
+        }
+      }
+
+      return {
+        row: index + 1,
+        phone: row.phone || row.rawPhone,
+        name: row.name,
+        address: row.address,
+        openingDue: Number.isNaN(row.openingDue) ? 0 : row.openingDue,
+        valid: errors.length === 0,
+        errors,
+      };
+    });
+
+    const validRows = checked.filter((r) => r.valid);
+
+    return {
+      rows: checked,
+      summary: {
+        total: checked.length,
+        valid: validRows.length,
+        invalid: checked.length - validRows.length,
+        totalOpeningDue: validRows.reduce((sum, r) => sum + r.openingDue, 0),
+        canSetOpeningDue,
+      },
+    };
+  }
+
+  /**
+   * Commit an import batch.
+   *
+   * Re-validates rather than trusting the preview: the client may have sat on
+   * the confirm button while another device created one of these customers, and
+   * a stale preview must not become a duplicate or a double-counted opening
+   * due. Invalid rows are skipped and reported, never guessed at.
+   */
+  async bulkImportCustomers(shopId, userId, customers, req) {
+    const { rows } = await this.validateImportRows(shopId, customers, req);
+    const results = [];
+
+    for (const row of rows) {
+      if (!row.valid) {
+        results.push({ row: row.row, phone: row.phone, success: false, error: row.errors.join(', ') });
+        continue;
+      }
+
+      try {
+        const customer = await this.createCustomer(shopId, userId, {
+          phone: row.phone,
+          name: row.name,
+          address: row.address,
+          openingDue: row.openingDue,
+        }, req);
+        results.push({
+          row: row.row,
+          phone: row.phone,
+          success: true,
+          customerId: customer._id,
+          openingDue: row.openingDue,
+        });
       } catch (error) {
-        results.push({ phone: customerData.phone, success: false, error: error.message });
+        results.push({ row: row.row, phone: row.phone, success: false, error: error.messageBn || error.message });
       }
     }
 
-    return results;
+    const imported = results.filter((r) => r.success);
+
+    return {
+      results,
+      summary: {
+        total: results.length,
+        imported: imported.length,
+        failed: results.length - imported.length,
+        totalOpeningDue: imported.reduce((sum, r) => sum + (r.openingDue || 0), 0),
+      },
+    };
   }
 
   /**
@@ -737,6 +1212,81 @@ class CustomerService {
       },
       { $sort: { totalDue: -1 } }
     ]);
+
+    // ── Debt with no invoice behind it ───────────────────────────────────────
+    //
+    // Aging reads `Sale.due`, so without this pass the paper-খাতা balance would
+    // be missing from it entirely — and a shop that onboarded ৳২ লাখ of old debt
+    // would see ৳০ aged while every other screen showed the real figure. That
+    // gap is the exact failure this report exists to prevent.
+    //
+    // Aged from when the adjustment was recorded, which for an onboarding
+    // import is the day the shop started using the software. So old debt opens
+    // in the 0–30 bucket and ages from there. It is not the true age of the
+    // debt — the shop never told us that — but it is the honest age of the
+    // claim, and it moves into 60+ on its own.
+    const adjMatch = { shop: new mongoose.Types.ObjectId(shopId) };
+    if (isBranchCustomerScope(req)) {
+      adjMatch.branch = new mongoose.Types.ObjectId(req.branchId);
+    }
+
+    const adjustments = await DueAdjustment.aggregate([
+      { $match: adjMatch },
+      {
+        $group: {
+          _id: '$customer',
+          totalDue: { $sum: '$amount' },
+          due0to30: { $sum: { $cond: [{ $gte: ['$createdAt', days30] }, '$amount', 0] } },
+          due31to60: {
+            $sum: { $cond: [{ $and: [{ $lt: ['$createdAt', days30] }, { $gte: ['$createdAt', days60] }] }, '$amount', 0] }
+          },
+          due60plus: { $sum: { $cond: [{ $lt: ['$createdAt', days60] }, '$amount', 0] } },
+          oldestDue: { $min: '$createdAt' },
+        }
+      },
+      { $match: { totalDue: { $gt: 0 } } },
+    ]);
+
+    if (adjustments.length > 0) {
+      const byCustomer = new Map(result.map((r) => [String(r._id), r]));
+      // Adjustment rows carry no name — they are keyed by customer id, so any
+      // customer with opening debt but no invoice yet needs one looked up.
+      const missing = adjustments
+        .filter((a) => !byCustomer.has(String(a._id)))
+        .map((a) => a._id);
+      const names = missing.length
+        ? await Customer.find({ _id: { $in: missing } }).select('name phone').lean()
+        : [];
+      const nameById = new Map(names.map((c) => [String(c._id), c]));
+
+      for (const a of adjustments) {
+        const key = String(a._id);
+        const row = byCustomer.get(key);
+        if (row) {
+          row.totalDue += a.totalDue;
+          row.due0to30 += a.due0to30;
+          row.due31to60 += a.due31to60;
+          row.due60plus += a.due60plus;
+          if (a.oldestDue && a.oldestDue < row.oldestDue) row.oldestDue = a.oldestDue;
+        } else {
+          const c = nameById.get(key);
+          byCustomer.set(key, {
+            _id: a._id,
+            customerName: c?.name || c?.phone || '',
+            customerPhone: c?.phone || '',
+            totalDue: a.totalDue,
+            due0to30: a.due0to30,
+            due31to60: a.due31to60,
+            due60plus: a.due60plus,
+            oldestDue: a.oldestDue,
+            saleCount: 0,
+          });
+        }
+      }
+
+      result.length = 0;
+      result.push(...[...byCustomer.values()].sort((x, y) => y.totalDue - x.totalDue));
+    }
 
     // Summary totals
     const summary = result.reduce((acc, c) => ({

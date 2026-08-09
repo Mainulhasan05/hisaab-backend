@@ -35,6 +35,17 @@ const customerSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  // Due that no invoice of ours produced — the balance carried over from the
+  // shop's paper খাতা at onboarding, plus any later owner correction. Kept as
+  // its own term rather than folded into `totalPurchases` so that "মোট কেনাকাটা"
+  // stays honest: it means goods actually bought here, and nothing else.
+  //
+  // `totalDue` already includes this. The two are maintained together — see
+  // DueAdjustment.model.js for the formula every recompute path must use.
+  openingDue: {
+    type: Number,
+    default: 0
+  },
   purchaseCount: {
     type: Number,
     default: 0
@@ -88,11 +99,27 @@ customerSchema.virtual('hasDue').get(function() {
   return this.totalDue > 0;
 });
 
+/**
+ * The one formula. Every path that RE-DERIVES due (rather than `$inc`-ing it)
+ * must go through here, so the `openingDue` term can never be dropped on one
+ * side and kept on the other — which is exactly how two books silently drift.
+ *
+ * Mirrored by `CustomerBalance.recomputeDue` for the per-branch rows and by
+ * `scripts/recalc-customer-balances.js`, which checks both against source
+ * documents. See DueAdjustment.model.js for why the term exists at all.
+ */
+customerSchema.statics.deriveDue = function(doc) {
+  return Math.max(
+    0,
+    (doc?.totalPurchases || 0) + (doc?.openingDue || 0) - (doc?.totalPaid || 0)
+  );
+};
+
 // Method: Add purchase
 customerSchema.methods.addPurchase = async function(amount, paid) {
   this.totalPurchases += amount;
   this.totalPaid += paid;
-  this.totalDue = this.totalPurchases - this.totalPaid;
+  this.totalDue = this.constructor.deriveDue(this);
   this.purchaseCount += 1;
   this.lastPurchase = new Date();
   await this.save();
@@ -101,14 +128,14 @@ customerSchema.methods.addPurchase = async function(amount, paid) {
 // Method: Add payment
 customerSchema.methods.addPayment = async function(amount) {
   this.totalPaid += amount;
-  this.totalDue = Math.max(0, this.totalPurchases - this.totalPaid);
+  this.totalDue = this.constructor.deriveDue(this);
   await this.save();
 };
 
 // Method: Refund
 customerSchema.methods.refund = async function(amount) {
   this.totalPurchases -= amount;
-  this.totalDue = Math.max(0, this.totalPurchases - this.totalPaid);
+  this.totalDue = this.constructor.deriveDue(this);
   this.purchaseCount = Math.max(0, this.purchaseCount - 1);
   await this.save();
 };

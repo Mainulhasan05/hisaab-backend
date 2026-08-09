@@ -1,4 +1,7 @@
 const mongoose = require('mongoose');
+// For `deriveDue` only — the shared due formula. Not a cycle: Customer does not
+// know this collection exists.
+const Customer = require('./Customer.model');
 
 /**
  * Per-branch customer ledger (Phase 7).
@@ -55,6 +58,13 @@ const customerBalanceSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  // This branch's share of the pre-software debt. Mirrors `Customer.openingDue`
+  // the same way every other figure here mirrors its shop-wide twin, so the Σ
+  // invariant in rule 3 covers it too. See DueAdjustment.model.js.
+  openingDue: {
+    type: Number,
+    default: 0
+  },
   purchaseCount: {
     type: Number,
     default: 0
@@ -89,12 +99,13 @@ customerBalanceSchema.index({ shop: 1, branch: 1, customer: 1 });
  * @param {number} [delta.purchases]  added to totalPurchases
  * @param {number} [delta.paid]       added to totalPaid
  * @param {number} [delta.due]        added to totalDue
+ * @param {number} [delta.opening]    added to openingDue (caller also passes `due`)
  * @param {number} [delta.count]      added to purchaseCount
  * @param {Date}   [delta.lastPurchase]
  * @param {Object|null} session
  */
 customerBalanceSchema.statics.applyDelta = async function (delta, session = null) {
-  const { shop, customer, branch, purchases = 0, paid = 0, due = 0, count = 0, lastPurchase } = delta;
+  const { shop, customer, branch, purchases = 0, paid = 0, due = 0, opening = 0, count = 0, lastPurchase } = delta;
 
   if (!shop || !customer || !branch) return null;
 
@@ -102,6 +113,7 @@ customerBalanceSchema.statics.applyDelta = async function (delta, session = null
   if (purchases) inc.totalPurchases = purchases;
   if (paid) inc.totalPaid = paid;
   if (due) inc.totalDue = due;
+  if (opening) inc.openingDue = opening;
   if (count) inc.purchaseCount = count;
 
   const update = {};
@@ -120,12 +132,17 @@ customerBalanceSchema.statics.applyDelta = async function (delta, session = null
 };
 
 /**
- * Re-derive `totalDue` from purchases minus payments, clamped at zero.
+ * Re-derive `totalDue` from purchases plus opening debt minus payments,
+ * clamped at zero.
  *
  * Used only where `Customer` does the same clamped recompute rather than a
  * plain `$inc` — the sales-return paths. Mirroring the clamp is what keeps the
  * Σ invariant true; recomputing here while `Customer` clamps (or vice versa)
  * would silently drift the two apart on any over-refunded customer.
+ *
+ * Deliberately delegates to `Customer.deriveDue` rather than repeating the
+ * arithmetic: the `openingDue` term must appear on both sides or neither, and
+ * one shared function is the only way to guarantee that.
  */
 customerBalanceSchema.statics.recomputeDue = async function ({ shop, customer, branch }, session = null) {
   if (!shop || !customer || !branch) return null;
@@ -134,7 +151,7 @@ customerBalanceSchema.statics.recomputeDue = async function ({ shop, customer, b
   const row = await this.findOne({ shop, customer, branch }, null, sessionOpt);
   if (!row) return null;
 
-  row.totalDue = Math.max(0, (row.totalPurchases || 0) - (row.totalPaid || 0));
+  row.totalDue = Customer.deriveDue(row);
   await row.save(sessionOpt);
   return row;
 };
