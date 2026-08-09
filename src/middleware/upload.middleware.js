@@ -40,11 +40,37 @@ const upload = multer({
   fileFilter,
 });
 
+/**
+ * Turn multer's errors into ones a caller can act on.
+ *
+ * A `MulterError` is a client mistake — wrong field name, file too big, too
+ * many files — but it reaches Express as a plain error, so without this it
+ * surfaces as a bare 500 whose only clue is a two-word message. That is exactly
+ * how an avatar upload reported `500 "Unexpected field"`: nothing in the
+ * response said which field was unexpected or which one was wanted.
+ *
+ * `LIMIT_UNEXPECTED_FILE` carries the offending field in `err.field`, so the
+ * message can name both sides of the mismatch.
+ */
 const handleUploadError = (err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
-      return next(new AppError('File size exceeds the limit', 'ফাইল সাইজ সীমার বাইরে', 400));
+      const mb = Math.round(maxSizeBytes / (1024 * 1024));
+      return next(new AppError(
+        `File is larger than the ${mb}MB limit`,
+        `ফাইলের সাইজ ${mb}MB এর বেশি হতে পারবে না`,
+        400
+      ));
     }
+
+    if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+      return next(new AppError(
+        `Unexpected file field '${err.field}'. Send the file under the field name this endpoint expects.`,
+        `'${err.field}' নামে ফাইল পাঠানো যাবে না — সঠিক ফিল্ড নাম ব্যবহার করুন।`,
+        400
+      ));
+    }
+
     return next(new AppError(err.message, err.message, 400));
   }
   next(err);

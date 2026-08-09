@@ -232,14 +232,66 @@ describe('no destructive code remains where the admin can reach it', () => {
 
   const DESTRUCTIVE = /\.(deleteMany|findByIdAndDelete|findOneAndDelete|findByIdAndRemove)\s*\(/;
 
-  it('admin service and controller contain no hard-delete call', () => {
+  /**
+   * The one sanctioned exception: `purgeProducts` clearing a purged product's
+   * stock movements.
+   *
+   * The rule this file enforces is not "no destructive call ever" — the header
+   * says deletion returns "behind step-up authentication". It is "no
+   * destructive call that nobody looked at". So the assertion is now: a
+   * destructive line must carry this marker, and the marker must be rare enough
+   * to read in one sitting.
+   *
+   * Adding the marker to a new line is deliberate, greppable, and shows up in
+   * review as a change to this test's expected count. Removing this allowance
+   * entirely is also fine if the purge feature goes away.
+   *
+   * The purge itself meets the three conditions in
+   * `utils/deletionDisabled.util.js`: step-up password re-entry
+   * (`_assertStepUp`), a server-computed impact preview that is re-run at
+   * submit time (`inspectProductLinks`), and an audit entry with before-state
+   * written before the first destructive call (`product_purge_begin`).
+   */
+  const REVIEWED = /\/\/\s*admin-purge:reviewed\s*$/;
+  const MAX_REVIEWED = 1;
+
+  it('admin service and controller contain no UNREVIEWED hard-delete call', () => {
     for (const [name, src] of [
       ['admin.service.js', fs.readFileSync(path.join(__dirname, '../services/admin.service.js'), 'utf8')],
       ['admin.controller.js', fs.readFileSync(path.join(__dirname, '../controllers/admin.controller.js'), 'utf8')],
     ]) {
-      const hits = src.split('\n').filter((l) => DESTRUCTIVE.test(l) && !l.trim().startsWith('*') && !l.trim().startsWith('//'));
+      const hits = src
+        .split('\n')
+        .filter((l) => DESTRUCTIVE.test(l) && !l.trim().startsWith('*') && !l.trim().startsWith('//'))
+        .filter((l) => !REVIEWED.test(l.trimEnd()));
       expect({ [name]: hits }).toEqual({ [name]: [] });
     }
+  });
+
+  it('keeps the reviewed-exception list to a single line', () => {
+    // If this number ever climbs, the allowance has become a loophole and the
+    // whole approach needs revisiting rather than the number being bumped.
+    const src = fs.readFileSync(path.join(__dirname, '../services/admin.service.js'), 'utf8');
+    const marked = src.split('\n').filter((l) => REVIEWED.test(l.trimEnd()));
+    expect(marked).toHaveLength(MAX_REVIEWED);
+  });
+
+  it('the purge is gated by step-up auth before it reads anything', () => {
+    // The condition `deletionDisabled.util.js` names first. A purge that only
+    // checked the admin cookie would be exactly the thing that rule forbids.
+    const src = fs.readFileSync(path.join(__dirname, '../services/admin.service.js'), 'utf8');
+    const stepUp = src.indexOf('await this._assertStepUp(adminId, password)');
+    const firstDelete = src.indexOf('deleteMany({ product: id })');
+    expect(stepUp).toBeGreaterThan(-1);
+    expect(firstDelete).toBeGreaterThan(stepUp);
+  });
+
+  it('writes the audit entry with before-state ahead of the destructive write', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/admin.service.js'), 'utf8');
+    const intent = src.indexOf("action: 'product_purge_begin'");
+    const firstDelete = src.indexOf('deleteMany({ product: id })');
+    expect(intent).toBeGreaterThan(-1);
+    expect(firstDelete).toBeGreaterThan(intent);
   });
 
   it('no admin-facing controller hard-deletes', () => {

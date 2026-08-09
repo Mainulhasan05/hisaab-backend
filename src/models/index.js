@@ -8,6 +8,8 @@ module.exports = {
   Customer: require('./Customer.model'),
   CustomerBalance: require('./CustomerBalance.model'),
   DueAdjustment: require('./DueAdjustment.model'),
+  Supplier: require('./Supplier.model'),
+  SupplierBalance: require('./SupplierBalance.model'),
   Category: require('./Category.model'),
   Product: require('./Product.model'),
   Sale: require('./Sale.model'),

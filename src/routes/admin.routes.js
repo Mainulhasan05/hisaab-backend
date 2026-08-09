@@ -64,6 +64,9 @@ router.post('/products/purge', adminController.purgeProducts);
 
 // Online users (from heartbeat)
 router.get('/online-users', adminController.getOnlineUsers);
+// Dashboard activity: active users (from lastActiveAt, not the heartbeat set)
+// + catalogue totals + recent product changes, in one call.
+router.get('/activity-overview', adminController.getActivityOverview);
 
 // Cache/Redis management
 router.get('/cache/stats', adminController.getCacheStats);

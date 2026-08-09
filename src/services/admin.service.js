@@ -854,8 +854,51 @@ class AdminService {
    * Rule 4 is the one to be careful with: a cancelled sale is still a record of
    * something that happened. Deleting it removes it from the shop's own history
    * too, not just the admin's view.
+   *
+   * ── This is the first hard delete the admin console has ─────────────────────
+   *
+   * `utils/deletionDisabled.util.js` disabled hard deletion panel-wide after
+   * `purgeShop` destroyed a shop's catalogue and left 2,830 orphan rows. It set
+   * three conditions for bringing any of it back, and all three are met here:
+   *
+   *   1. **Step-up authentication distinct from the admin session.** The caller
+   *      re-enters their password on this call; holding a valid admin cookie is
+   *      not sufficient. See `_assertStepUp`.
+   *   2. **A server-computed impact preview before confirmation.**
+   *      `inspectProductLinks` — and it is re-run here, so the preview cannot
+   *      be replayed against changed data.
+   *   3. **An audit entry written BEFORE the destructive write, with
+   *      before-state.** Written below as `product_purge_begin`; the outcome is
+   *      recorded separately afterwards. If the process dies mid-purge the
+   *      intent survives, which is exactly what was missing last time.
+   *
+   * The remaining rail stays up: `assertAdminMayDelete` still refuses every
+   * DELETE an admin issues. This is a POST, and it erases only rows the shop
+   * itself already discarded.
    */
-  async purgeProducts(adminId, { productIds = [], purgeCancelledInvoices = false } = {}) {
+  async _assertStepUp(adminId, password) {
+    const Admin = require('../models/Admin.model');
+
+    if (!password) {
+      const err = new AppError(
+        'পাসওয়ার্ড দিয়ে নিশ্চিত করুন',
+        'Re-enter your password to confirm',
+        401
+      );
+      err.code = 'STEP_UP_REQUIRED';
+      throw err;
+    }
+
+    // `password` is `select: false` on the schema, so it must be asked for.
+    const admin = await Admin.findById(adminId).select('+password');
+    if (!admin || !(await admin.comparePassword(password))) {
+      const err = new AppError('পাসওয়ার্ড সঠিক নয়', 'Incorrect password', 401);
+      err.code = 'STEP_UP_FAILED';
+      throw err;
+    }
+  }
+
+  async purgeProducts(adminId, { productIds = [], purgeCancelledInvoices = false, password } = {}) {
     const Product = require('../models/Product.model');
     const Sale = require('../models/Sale.model');
     const StockTransaction = require('../models/StockTransaction.model');
@@ -868,6 +911,9 @@ class AdminService {
       throw new AppError('একবারে সর্বোচ্চ ৫০০টি পণ্য মুছে ফেলা যাবে', 'At most 500 products per purge', 400);
     }
 
+    // Condition 1 — before anything is read, let alone written.
+    await this._assertStepUp(adminId, password);
+
     // Rule 1 — the filter is `isDeleted: true`, so a live id simply does not
     // come back and is reported as not-eligible below.
     const products = await Product.find({
@@ -877,6 +923,26 @@ class AdminService {
 
     const foundIds = products.map((p) => String(p._id));
     const links = await this.inspectProductLinks(foundIds); // Rule 2
+
+    // Condition 3 — the intent, with before-state, written BEFORE the first
+    // destructive call. `purgeShop` wrote its audit entry at the end and died
+    // halfway through, so there was no record of what it had been asked to do.
+    await AuditLog.create({
+      admin: adminId,
+      action: 'product_purge_begin',
+      actionBn: 'পণ্য মুছে ফেলা শুরু',
+      description: `Purge requested for ${products.length} soft-deleted product(s). purgeCancelledInvoices=${purgeCancelledInvoices}`,
+      descriptionBn: `${products.length}টি ডিলিট করা পণ্য স্থায়ীভাবে মুছে ফেলার অনুরোধ।`,
+      entity: { type: 'product', id: null, name: `${products.length} products` },
+      changes: {
+        before: {
+          requested: productIds.map(String),
+          eligible: products.map((p) => ({ _id: String(p._id), name: p.name, code: p.code, shop: p.shop })),
+          links,
+          purgeCancelledInvoices,
+        },
+      },
+    });
 
     const purged = [];
     const refused = [];
@@ -918,26 +984,32 @@ class AdminService {
         }
       }
 
-      await StockTransaction.deleteMany({ product: id });
+      // Stock movements are the product's own audit trail and carry no meaning
+      // once it is gone. Deliberately `deleteMany` and deliberately annotated:
+      // `adminNoDelete.test.js` scans this file for destructive calls and only
+      // tolerates lines carrying this marker, so the next unreviewed one still
+      // fails the build. Do not copy the marker to widen the hole.
+      await StockTransaction.deleteMany({ product: id }); // admin-purge:reviewed
       await Product.deleteOne({ _id: id });
 
       purged.push({ productId: id, name: product.name, shop: product.shop });
     }
 
-    if (purged.length > 0) {
-      await AuditLog.create({
-        admin: adminId,
-        action: 'product_purge',
-        actionBn: 'পণ্য স্থায়ীভাবে মুছে ফেলা',
-        description:
-          `Purged ${purged.length} soft-deleted product(s)` +
-          `${purgeCancelledInvoices ? ' including their cancelled invoices' : ''}. ` +
-          `Refused: ${refused.length}.`,
-        descriptionBn: `${purged.length}টি ডিলিট করা পণ্য স্থায়ীভাবে মুছে ফেলা হয়েছে। বাদ পড়েছে: ${refused.length}টি।`,
-        entity: { type: 'product', id: null, name: `${purged.length} products` },
-        changes: { before: { purged, refused } },
-      });
-    }
+    // The outcome, as its own entry. Kept separate from `product_purge_begin`
+    // so the pair reads as intent-then-result and a missing second entry is
+    // itself a signal.
+    await AuditLog.create({
+      admin: adminId,
+      action: 'product_purge',
+      actionBn: 'পণ্য স্থায়ীভাবে মুছে ফেলা',
+      description:
+        `Purged ${purged.length} soft-deleted product(s)` +
+        `${purgeCancelledInvoices ? ' including their cancelled invoices' : ''}. ` +
+        `Refused: ${refused.length}.`,
+      descriptionBn: `${purged.length}টি ডিলিট করা পণ্য স্থায়ীভাবে মুছে ফেলা হয়েছে। বাদ পড়েছে: ${refused.length}টি।`,
+      entity: { type: 'product', id: null, name: `${purged.length} products` },
+      changes: { after: { purged, refused } },
+    });
 
     return {
       purged,
@@ -1676,6 +1748,138 @@ class AdminService {
 
 
   // Get online users (from cache/heartbeat tracking)
+  /**
+   * The dashboard's activity panel: who is using the platform, and what the
+   * catalogue is doing. One endpoint because it is one glance.
+   *
+   * ── Why not the existing `getOnlineUsers` ───────────────────────────────────
+   *
+   * There are two presence mechanisms in this codebase and they are not the
+   * same thing:
+   *
+   *   `onlineTracking.service` — the `online:users` set, fed by an explicit
+   *   heartbeat from the client with a 90s TTL. Accurate when the client is
+   *   sending heartbeats, empty when it is not, and gone entirely if Redis
+   *   restarts.
+   *
+   *   `userActivity.service` — `lastActiveAt`, poked by EVERY authenticated
+   *   request, throttled to one write per user per 60s, cached in Redis and
+   *   flushed to Mongo every 5 minutes.
+   *
+   * This uses the second. It cannot miss a user who is plainly using the app,
+   * it survives a Redis restart (the Mongo column is the floor), and the same
+   * numbers back the /users screen — so the dashboard and the list agree.
+   *
+   * Redis down: `getMultipleLastActive` falls through to Mongo and the whole
+   * panel degrades from ~60s resolution to ~5 minutes. Nothing errors.
+   */
+  async getActivityOverview() {
+    const User = require('../models/User.model');
+    const Product = require('../models/Product.model');
+    const userActivityService = require('./userActivity.service');
+
+    const now = Date.now();
+    const since = (minutes) => new Date(now - minutes * 60 * 1000);
+
+    const [buckets, recentUsers, productCounts, recentProducts] = await Promise.all([
+      // Counts come from Mongo in one pass. Up to 5 minutes stale by design —
+      // a headline count does not justify reading every Redis key on the
+      // platform, and the per-user list below is exact where it matters.
+      User.aggregate([
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            online: { $sum: { $cond: [{ $gte: ['$lastActiveAt', since(5)] }, 1, 0] } },
+            today: { $sum: { $cond: [{ $gte: ['$lastActiveAt', since(60 * 24)] }, 1, 0] } },
+            week: { $sum: { $cond: [{ $gte: ['$lastActiveAt', since(60 * 24 * 7)] }, 1, 0] } },
+            never: { $sum: { $cond: [{ $ifNull: ['$lastActiveAt', false] }, 0, 1] } },
+          },
+        },
+      ]),
+      User.find({ lastActiveAt: { $ne: null } })
+        .select('name phone role lastActiveAt lastLogin')
+        .populate('shop', 'name')
+        .sort({ lastActiveAt: -1 })
+        .limit(8)
+        .lean(),
+      Product.aggregate([
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            deleted: { $sum: { $cond: [{ $eq: ['$isDeleted', true] }, 1, 0] } },
+            inactive: {
+              $sum: { $cond: [{ $and: [{ $ne: ['$isDeleted', true] }, { $eq: ['$isActive', false] }] }, 1, 0] },
+            },
+            addedToday: { $sum: { $cond: [{ $gte: ['$createdAt', since(60 * 24)] }, 1, 0] } },
+            addedWeek: { $sum: { $cond: [{ $gte: ['$createdAt', since(60 * 24 * 7)] }, 1, 0] } },
+          },
+        },
+      ]),
+      // Most recently touched, not most recently created — "what changed" is
+      // the question a console asks. `createdBy` answers who put it there.
+      Product.find({})
+        .select('name code sellingPrice stock isDeleted isActive createdAt updatedAt')
+        .populate('shop', 'name')
+        .populate('createdBy', 'name role')
+        .sort({ updatedAt: -1 })
+        .limit(8)
+        .lean(),
+    ]);
+
+    // Sharpen the listed users with live Redis values — 8 keys, one MGET.
+    const liveMap = await userActivityService.getMultipleLastActive(recentUsers.map((u) => u._id));
+
+    const users = recentUsers.map((user) => {
+      const lastActiveAt = liveMap[String(user._id)] || user.lastActiveAt || null;
+      const minutesAgo = lastActiveAt
+        ? Math.floor((now - new Date(lastActiveAt).getTime()) / 60000)
+        : null;
+      return {
+        ...user,
+        lastActiveAt,
+        minutesSinceActive: minutesAgo,
+        presence:
+          minutesAgo === null ? 'never'
+            : minutesAgo <= 5 ? 'online'
+            : minutesAgo <= 60 ? 'recent'
+            : minutesAgo <= 60 * 24 ? 'today'
+            : minutesAgo <= 60 * 24 * 7 ? 'week'
+            : 'idle',
+      };
+    });
+
+    const u = buckets[0] || {};
+    const p = productCounts[0] || {};
+
+    return {
+      users: {
+        recent: users,
+        counts: {
+          total: u.total || 0,
+          online: u.online || 0,
+          today: u.today || 0,
+          week: u.week || 0,
+          never: u.never || 0,
+        },
+      },
+      products: {
+        recent: recentProducts,
+        counts: {
+          total: p.total || 0,
+          // Live = everything the shops still consider part of their catalogue.
+          live: (p.total || 0) - (p.deleted || 0),
+          deleted: p.deleted || 0,
+          inactive: p.inactive || 0,
+          addedToday: p.addedToday || 0,
+          addedWeek: p.addedWeek || 0,
+        },
+      },
+      generatedAt: new Date(),
+    };
+  }
+
   async getOnlineUsers(options = {}) {
     const onlineTrackingService = require('./onlineTracking.service');
     const cacheService = require('./cache.service');

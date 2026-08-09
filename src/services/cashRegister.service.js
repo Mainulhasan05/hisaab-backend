@@ -24,7 +24,14 @@ class CashRegisterService {
     const shopOid = new mongoose.Types.ObjectId(shopId);
     const branchMatch = branchId ? { branch: new mongoose.Types.ObjectId(branchId) } : {};
 
-    const [cashSales, cashDueCollections, cashExpenses, cashPurchases, cashRefunds] = await Promise.all([
+    const [
+      cashSales,
+      cashDueCollections,
+      cashExpenses,
+      cashPurchases,
+      cashRefunds,
+      cashSupplierPayments,
+    ] = await Promise.all([
       // Cash sales (paid amount from cash sales)
       Sale.aggregate([
         {
@@ -93,13 +100,44 @@ class CashRegisterService {
         },
         { $group: { _id: null, total: { $sum: '$amount' } } },
       ]),
+
+      // ── Supplier payments made after the purchase ────────────────────────
+      //
+      // This was missing entirely, and it is real money leaving the drawer.
+      // `cashPurchases` above only counts `Purchase.paid` — what was settled at
+      // the counter on the day of the purchase. Paying a supplier's outstanding
+      // balance later writes a `Payment{type:'purchase_payment'}` instead, and
+      // nothing here looked at it.
+      //
+      // So: buy ৳50,000 on credit today, hand the supplier ৳20,000 cash
+      // tomorrow, and tomorrow's expected closing was ৳20,000 too high — the
+      // till looked short by exactly the amount that had legitimately been
+      // paid out.
+      //
+      // No double count: `createPurchase` writes no Payment row, so the two
+      // streams are disjoint by construction.
+      Payment.aggregate([
+        {
+          $match: {
+            shop: shopOid,
+            ...branchMatch,
+            method: 'cash',
+            type: 'purchase_payment',
+            createdAt: { $gte: start, $lte: end },
+          },
+        },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]),
     ]);
 
     return {
       sales: cashSales[0]?.total || 0,
       dueCollections: cashDueCollections[0]?.total || 0,
       expenses: cashExpenses[0]?.total || 0,
-      purchases: cashPurchases[0]?.total || 0,
+      // Goods paid for at the counter, plus supplier balances settled later.
+      // Both are cash out against purchases, so they share the one bucket the
+      // register already renders.
+      purchases: (cashPurchases[0]?.total || 0) + (cashSupplierPayments[0]?.total || 0),
       refunds: cashRefunds[0]?.total || 0,
     };
   }

@@ -4,7 +4,7 @@ const asyncHandler = require('../utils/asyncHandler.util');
 
 // Get all suppliers
 exports.getSuppliers = asyncHandler(async (req, res) => {
-  const result = await supplierService.getSuppliers(req.shop._id, req.query);
+  const result = await supplierService.getSuppliers(req.shop._id, req.query, req);
   return ApiResponse.paginated(res, {
     ...result,
     message: 'Suppliers retrieved successfully',
@@ -14,7 +14,7 @@ exports.getSuppliers = asyncHandler(async (req, res) => {
 
 // Get single supplier
 exports.getSupplier = asyncHandler(async (req, res) => {
-  const supplier = await supplierService.getSupplierById(req.shop._id, req.params.id);
+  const supplier = await supplierService.getSupplierById(req.shop._id, req.params.id, req);
   return ApiResponse.success(res, {
     data: supplier,
     message: 'Supplier retrieved',

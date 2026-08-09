@@ -249,6 +249,17 @@ exports.restrictShop = asyncHandler(async (req, res) => {
 });
 
 // Get online users
+// Dashboard activity panel: who is active (request-driven, Redis-overlaid)
+// plus catalogue totals and recent product changes.
+exports.getActivityOverview = asyncHandler(async (req, res) => {
+  const data = await adminService.getActivityOverview();
+  return ApiResponse.success(res, {
+    data,
+    message: 'Activity overview retrieved',
+    messageBn: 'কার্যক্রমের সারসংক্ষেপ লোড হয়েছে',
+  });
+});
+
 exports.getOnlineUsers = asyncHandler(async (req, res) => {
   const result = await adminService.getOnlineUsers(req.query);
   // Flatten response structure - data is the array, count is at top level
@@ -498,6 +509,9 @@ exports.purgeProducts = asyncHandler(async (req, res) => {
   const result = await adminService.purgeProducts(req.admin._id, {
     productIds: req.body.productIds,
     purgeCancelledInvoices: req.body.purgeCancelledInvoices === true,
+    // Step-up: a valid admin session is not enough to erase data. The service
+    // verifies this against the Admin record before reading anything.
+    password: req.body.password,
   });
   return ApiResponse.success(res, {
     data: result,

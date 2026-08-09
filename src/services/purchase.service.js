@@ -2,6 +2,7 @@ const Purchase = require('../models/Purchase.model');
 const Product = require('../models/Product.model');
 const Supplier = require('../models/Supplier.model');
 const Payment = require('../models/Payment.model');
+const SupplierBalance = require('../models/SupplierBalance.model');
 const StockTransaction = require('../models/StockTransaction.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
@@ -358,6 +359,21 @@ class PurchaseService {
       supplierDoc.totalAmount += totalAmount;
       supplierDoc.totalDue += purchase.due;
       await supplierDoc.save(sessionOpt);
+
+      // Same arithmetic, split by the branch the goods were bought for.
+      // Written whatever the shop's setup — a no-op for single-branch shops,
+      // where `branchId` is null. `paid` is `totalAmount - due`, i.e. whatever
+      // was settled at the counter; the rest becomes this branch's payable.
+      await SupplierBalance.applyDelta({
+        shop: shopId,
+        supplier: supplierDoc._id,
+        branch: branchId,
+        amount: totalAmount,
+        paid: totalAmount - purchase.due,
+        due: purchase.due,
+        count: 1,
+        lastPurchase: purchase.date || new Date(),
+      }, session);
     }
 
     // Audit log
@@ -506,6 +522,24 @@ class PurchaseService {
         supplier.totalDue = Math.max(0, supplier.totalDue - purchase.due);
         await supplier.save();
       }
+
+      // Unwound at the branch that raised the purchase — the only branch whose
+      // figures it ever moved. `recomputeDue` rather than `$inc`-ing totalDue,
+      // because the Supplier rollup above clamps at zero and clamping on only
+      // one side is precisely how two books drift apart.
+      await SupplierBalance.applyDelta({
+        shop: shopId,
+        supplier: purchase.supplier,
+        branch: purchase.branch,
+        amount: -purchase.totalAmount,
+        paid: -(purchase.totalAmount - purchase.due),
+        count: -1,
+      });
+      await SupplierBalance.recomputeDue({
+        shop: shopId,
+        supplier: purchase.supplier,
+        branch: purchase.branch,
+      });
     }
 
     purchase.status = 'cancelled';
@@ -590,9 +624,20 @@ class PurchaseService {
     purchase.paid += amount;
     await purchase.save(); // pre-save hook recalculates due and status
 
-    // Create payment record
+    // Create payment record.
+    //
+    // `branch` was missing here, and it is not cosmetic: `_calculateCashFlows`
+    // matches every cash movement by branch, so an untagged supplier payment is
+    // invisible to every branch's till. Cash left the drawer and nothing
+    // recorded it. Same defect the customer due-collection path fixed (H-6).
+    //
+    // Attributed to the PURCHASE's branch, not the caller's. `branchFilter`
+    // above already restricts a branch to paying its own purchases, so the two
+    // are the same in normal use — but an owner in All-Branches has no active
+    // branch, and the debt belongs to whichever branch bought the goods.
     const payment = await Payment.create({
       shop: shopId,
+      branch: purchase.branch || null,
       purchase: purchaseId,
       amount,
       method,
@@ -605,6 +650,15 @@ class PurchaseService {
     if (purchase.supplier) {
       await Supplier.findByIdAndUpdate(purchase.supplier, {
         $inc: { totalDue: -amount },
+      });
+
+      // The same reduction on the branch that owed it.
+      await SupplierBalance.applyDelta({
+        shop: shopId,
+        supplier: purchase.supplier,
+        branch: purchase.branch,
+        paid: amount,
+        due: -amount,
       });
     }
 

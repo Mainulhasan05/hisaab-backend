@@ -1,10 +1,24 @@
 const Supplier = require('../models/Supplier.model');
+const SupplierBalance = require('../models/SupplierBalance.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 
 class SupplierService {
-  // Get all suppliers with search and pagination
-  async getSuppliers(shopId, options = {}) {
+  /**
+   * All suppliers, with the active branch's money.
+   *
+   * The LIST is deliberately shop-wide in every mode — every branch buys from
+   * the same vendors, and a supplier hidden from a branch is a supplier that
+   * branch cannot record a purchase against. What follows the active branch is
+   * the FIGURES: `totalDue` here means "what this branch owes them", because
+   * the branch that bought the goods is the branch that owes for them.
+   *
+   * With no branch selected (single-branch shop, or an owner viewing All
+   * Branches) the shop-wide rollup is returned untouched — and the sum across
+   * every branch IS that rollup, so both views are the same numbers at
+   * different resolutions.
+   */
+  async getSuppliers(shopId, options = {}, req = null) {
     const {
       page = 1,
       limit = 50,
@@ -16,9 +30,10 @@ class SupplierService {
     const query = { shop: shopId, isActive: true };
 
     if (search) {
+      const escaped = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { phone: { $regex: search, $options: 'i' } },
+        { name: { $regex: escaped, $options: 'i' } },
+        { phone: { $regex: escaped, $options: 'i' } },
       ];
     }
 
@@ -35,8 +50,16 @@ class SupplierService {
       Supplier.countDocuments(query),
     ]);
 
+    // Sorting by `totalDue` still sorts on the shop-wide column even when a
+    // branch is active — the page is chosen in Mongo before the overlay can
+    // run. Accepted rather than hidden: sorting a page after the fact would
+    // produce an order that changes as you page through it.
+    const data = req?.branchId
+      ? await SupplierBalance.overlayBranchFigures(suppliers, shopId, req.branchId)
+      : suppliers;
+
     return {
-      data: suppliers,
+      data,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -47,7 +70,7 @@ class SupplierService {
   }
 
   // Get single supplier
-  async getSupplierById(shopId, supplierId) {
+  async getSupplierById(shopId, supplierId, req = null) {
     const supplier = await Supplier.findOne({
       _id: supplierId,
       shop: shopId,
@@ -56,6 +79,15 @@ class SupplierService {
 
     if (!supplier) {
       throw new AppError('সরবরাহকারী পাওয়া যায়নি', 'Supplier not found', 404);
+    }
+
+    // Same overlay as the list, so the detail page and the row it was opened
+    // from cannot show different figures.
+    if (req?.branchId) {
+      const [scoped] = await SupplierBalance.overlayBranchFigures(
+        [supplier.toObject()], shopId, req.branchId
+      );
+      return scoped;
     }
 
     return supplier;
