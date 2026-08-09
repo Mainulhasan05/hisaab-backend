@@ -479,3 +479,29 @@ exports.getAllProducts = asyncHandler(async (req, res) => {
     messageBn: 'পণ্য তালিকা সফলভাবে লোড হয়েছে',
   });
 });
+
+// What a set of products is still referenced by — read-only, writes nothing.
+// The purge screen calls this before offering the button.
+exports.inspectProductLinks = asyncHandler(async (req, res) => {
+  const ids = Array.isArray(req.body.productIds) ? req.body.productIds : [];
+  const links = await adminService.inspectProductLinks(ids);
+  return ApiResponse.success(res, {
+    data: links,
+    message: 'Product links inspected',
+    messageBn: 'পণ্যের সংযোগ যাচাই সম্পন্ন',
+  });
+});
+
+// Permanently erase soft-deleted products that nothing references.
+// The service re-verifies every id; this endpoint grants no exemptions.
+exports.purgeProducts = asyncHandler(async (req, res) => {
+  const result = await adminService.purgeProducts(req.admin._id, {
+    productIds: req.body.productIds,
+    purgeCancelledInvoices: req.body.purgeCancelledInvoices === true,
+  });
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Purge completed',
+    messageBn: 'স্থায়ীভাবে মুছে ফেলা সম্পন্ন',
+  });
+});

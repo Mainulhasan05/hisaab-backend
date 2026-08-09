@@ -657,6 +657,9 @@ class AdminService {
       shopId,
       sortBy = 'createdAt',
       sortOrder = 'desc',
+      // 'deleted' | 'active' | undefined (all). The purge screen needs to list
+      // exactly the soft-deleted rows, which was not reachable before.
+      state,
     } = options;
 
     const query = {};
@@ -665,16 +668,20 @@ class AdminService {
       query.shop = shopId;
     }
 
+    if (state === 'deleted') query.isDeleted = true;
+    else if (state === 'active') query.isDeleted = { $ne: true };
+
     if (search) {
+      const escaped = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { code: { $regex: search, $options: 'i' } },
-        { barcode: { $regex: search, $options: 'i' } },
+        { name: { $regex: escaped, $options: 'i' } },
+        { code: { $regex: escaped, $options: 'i' } },
+        { barcode: { $regex: escaped, $options: 'i' } },
       ];
     }
 
     const skip = (page - 1) * limit;
-    const validSortFields = ['createdAt', 'name', 'sellingPrice', 'stock'];
+    const validSortFields = ['createdAt', 'name', 'sellingPrice', 'stock', 'deletedAt'];
     const sortField = validSortFields.includes(sortBy) ? sortBy : 'createdAt';
     const sort = { [sortField]: sortOrder === 'asc' ? 1 : -1 };
 
@@ -682,6 +689,8 @@ class AdminService {
       Product.find(query)
         .populate('shop', 'name phone')
         .populate('category', 'name')
+        // Who uploaded it. Stored since day one, never surfaced.
+        .populate('createdBy', 'name phone role')
         .sort(sort)
         .skip(skip)
         .limit(parseInt(limit))
@@ -696,6 +705,247 @@ class AdminService {
         limit: parseInt(limit),
         total,
         pages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  /**
+   * What a soft-deleted product is still attached to.
+   *
+   * ── The problem ─────────────────────────────────────────────────────────────
+   *
+   * Shops evaluating the app create throwaway products to try the flow, then
+   * "delete" them. Deletion is a soft delete (`isDeleted`), correctly — a
+   * product named on a real invoice must never vanish, or that invoice becomes
+   * unreadable. But it means the catalogue accumulates test rows forever.
+   *
+   * ── Why this is a report, not a delete ──────────────────────────────────────
+   *
+   * A product is safe to erase only if nothing points at it. This returns the
+   * evidence so the console can show it and a human can decide; `purgeProducts`
+   * below re-runs the same check and refuses anything that fails it, so the
+   * answer cannot go stale between looking and clicking.
+   *
+   * "Active" invoice means any sale that is not cancelled. A cancelled sale is
+   * already void, so a product that appears only on cancelled invoices is
+   * genuinely dead — and the caller may opt to remove those invoices too.
+   *
+   * Purchases, stock transactions and held carts are checked as well. They are
+   * not invoices, but a purchase row naming a product that no longer exists
+   * breaks the supplier ledger the same way.
+   */
+  async inspectProductLinks(productIds = []) {
+    const Sale = require('../models/Sale.model');
+    const Purchase = require('../models/Purchase.model');
+    const StockTransaction = require('../models/StockTransaction.model');
+    const HeldCart = require('../models/HeldCart.model');
+    const mongoose = require('mongoose');
+
+    const ids = productIds
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    if (ids.length === 0) return {};
+
+    // One grouped query per collection rather than one per product: the purge
+    // screen inspects a whole page at a time.
+    const [saleRows, purchaseRows, stockRows, heldRows] = await Promise.all([
+      Sale.aggregate([
+        { $match: { 'items.product': { $in: ids } } },
+        { $unwind: '$items' },
+        { $match: { 'items.product': { $in: ids } } },
+        {
+          $group: {
+            _id: '$items.product',
+            activeCount: { $sum: { $cond: [{ $ne: ['$status', 'cancelled'] }, 1, 0] } },
+            cancelledCount: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] } },
+            // Capped sample for the UI — a product on 4,000 invoices does not
+            // need 4,000 invoice numbers shipped to the browser.
+            samples: {
+              $push: {
+                _id: '$_id',
+                invoiceNo: '$invoiceNo',
+                status: '$status',
+                total: '$total',
+                createdAt: '$createdAt',
+              },
+            },
+          },
+        },
+      ]),
+      Purchase.aggregate([
+        { $match: { 'items.product': { $in: ids } } },
+        { $unwind: '$items' },
+        { $match: { 'items.product': { $in: ids } } },
+        { $group: { _id: '$items.product', count: { $sum: 1 } } },
+      ]),
+      StockTransaction.aggregate([
+        { $match: { product: { $in: ids } } },
+        { $group: { _id: '$product', count: { $sum: 1 } } },
+      ]),
+      HeldCart.aggregate([
+        { $match: { 'items.product': { $in: ids } } },
+        { $unwind: '$items' },
+        { $match: { 'items.product': { $in: ids } } },
+        { $group: { _id: '$items.product', count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const index = (rows) => new Map(rows.map((r) => [String(r._id), r]));
+    const purchaseBy = index(purchaseRows);
+    const stockBy = index(stockRows);
+    const heldBy = index(heldRows);
+    const saleBy = index(saleRows);
+
+    const result = {};
+    for (const id of ids) {
+      const key = String(id);
+      const sale = saleBy.get(key);
+      const purchases = purchaseBy.get(key)?.count || 0;
+      const heldCarts = heldBy.get(key)?.count || 0;
+      const activeSales = sale?.activeCount || 0;
+      const cancelledSales = sale?.cancelledCount || 0;
+
+      // Stock transactions alone do not block: every product ever stocked has
+      // them, they carry no customer-facing meaning, and they are removed with
+      // the product. They are reported so the confirmation can say what goes.
+      const blockers = [];
+      if (activeSales > 0) blockers.push(`${activeSales}টি সক্রিয় ইনভয়েসে আছে`);
+      if (purchases > 0) blockers.push(`${purchases}টি ক্রয় রেকর্ডে আছে`);
+      if (heldCarts > 0) blockers.push(`${heldCarts}টি হোল্ড কার্টে আছে`);
+
+      result[key] = {
+        activeSales,
+        cancelledSales,
+        purchases,
+        heldCarts,
+        stockTransactions: stockBy.get(key)?.count || 0,
+        sampleInvoices: (sale?.samples || [])
+          .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+          .slice(0, 10),
+        safeToPurge: blockers.length === 0,
+        blockers,
+      };
+    }
+
+    return result;
+  }
+
+  /**
+   * Permanently erase soft-deleted products that nothing references.
+   *
+   * ── The rules, and why each one is here ─────────────────────────────────────
+   *
+   * 1. **Soft-deleted only.** A live product is never touched, whatever the
+   *    caller passes. Purging is a cleanup of things the shop already discarded,
+   *    not a deletion tool.
+   * 2. **Re-checked, not trusted.** `inspectProductLinks` runs again inside this
+   *    call. The console showed a verdict some seconds ago; a sale could have
+   *    been rung up since, and that sale must win.
+   * 3. **Refused, not skipped silently.** Every product that fails returns its
+   *    reason, so the operator sees "৩টি বাদ পড়েছে — সক্রিয় ইনভয়েসে আছে" rather
+   *    than a count that quietly does not match.
+   * 4. **`purgeCancelledInvoices` is opt-in.** A product may be free of *active*
+   *    invoices but still appear on cancelled ones. Those are already void, so
+   *    the caller may clear them — but that is a second, explicit decision, and
+   *    it goes through `Sale.deleteOne` per document rather than `deleteMany`
+   *    because `immutableGuard` blocks `deleteMany` on Sale outright.
+   *
+   * Rule 4 is the one to be careful with: a cancelled sale is still a record of
+   * something that happened. Deleting it removes it from the shop's own history
+   * too, not just the admin's view.
+   */
+  async purgeProducts(adminId, { productIds = [], purgeCancelledInvoices = false } = {}) {
+    const Product = require('../models/Product.model');
+    const Sale = require('../models/Sale.model');
+    const StockTransaction = require('../models/StockTransaction.model');
+    const mongoose = require('mongoose');
+
+    if (!Array.isArray(productIds) || productIds.length === 0) {
+      throw new AppError('কোনো পণ্য নির্বাচন করা হয়নি', 'No products selected', 400);
+    }
+    if (productIds.length > 500) {
+      throw new AppError('একবারে সর্বোচ্চ ৫০০টি পণ্য মুছে ফেলা যাবে', 'At most 500 products per purge', 400);
+    }
+
+    // Rule 1 — the filter is `isDeleted: true`, so a live id simply does not
+    // come back and is reported as not-eligible below.
+    const products = await Product.find({
+      _id: { $in: productIds.filter((id) => mongoose.Types.ObjectId.isValid(id)) },
+      isDeleted: true,
+    }).select('name code shop').lean();
+
+    const foundIds = products.map((p) => String(p._id));
+    const links = await this.inspectProductLinks(foundIds); // Rule 2
+
+    const purged = [];
+    const refused = [];
+
+    for (const id of productIds.map(String)) {
+      const product = products.find((p) => String(p._id) === id);
+      if (!product) {
+        refused.push({ productId: id, reason: 'পণ্যটি ডিলিট করা অবস্থায় নেই' });
+        continue;
+      }
+
+      const link = links[id] || { safeToPurge: true, blockers: [], cancelledSales: 0 };
+
+      if (!link.safeToPurge) {
+        refused.push({ productId: id, name: product.name, reason: link.blockers.join(', ') }); // Rule 3
+        continue;
+      }
+
+      // Rule 4 — only reached when there are no ACTIVE invoices.
+      if (link.cancelledSales > 0) {
+        if (!purgeCancelledInvoices) {
+          refused.push({
+            productId: id,
+            name: product.name,
+            reason: `${link.cancelledSales}টি বাতিল ইনভয়েসে আছে — ইনভয়েসসহ মুছতে অনুমতি দিন`,
+          });
+          continue;
+        }
+
+        // `deleteOne` per document: immutableGuard blocks `deleteMany` on Sale,
+        // so a bulk call would throw 403 and abort the whole purge.
+        const cancelled = await Sale.find({
+          'items.product': new mongoose.Types.ObjectId(id),
+          status: 'cancelled',
+        }).select('_id invoiceNo').lean();
+
+        for (const sale of cancelled) {
+          await Sale.deleteOne({ _id: sale._id });
+        }
+      }
+
+      await StockTransaction.deleteMany({ product: id });
+      await Product.deleteOne({ _id: id });
+
+      purged.push({ productId: id, name: product.name, shop: product.shop });
+    }
+
+    if (purged.length > 0) {
+      await AuditLog.create({
+        admin: adminId,
+        action: 'product_purge',
+        actionBn: 'পণ্য স্থায়ীভাবে মুছে ফেলা',
+        description:
+          `Purged ${purged.length} soft-deleted product(s)` +
+          `${purgeCancelledInvoices ? ' including their cancelled invoices' : ''}. ` +
+          `Refused: ${refused.length}.`,
+        descriptionBn: `${purged.length}টি ডিলিট করা পণ্য স্থায়ীভাবে মুছে ফেলা হয়েছে। বাদ পড়েছে: ${refused.length}টি।`,
+        entity: { type: 'product', id: null, name: `${purged.length} products` },
+        changes: { before: { purged, refused } },
+      });
+    }
+
+    return {
+      purged,
+      refused,
+      summary: {
+        requested: productIds.length,
+        purged: purged.length,
+        refused: refused.length,
       },
     };
   }
@@ -1134,36 +1384,122 @@ class AdminService {
     };
   }
 
-  // Get all users (shop owners + staff) across all shops (admin level)
+  /**
+   * All users across all shops, with live presence.
+   *
+   * ── Where "last active" comes from ──────────────────────────────────────────
+   *
+   * `User.lastActiveAt` is a write-behind column: every authenticated request
+   * pokes `userActivityService.recordActivity`, which throttles to one write
+   * per user per 60s into Redis, and a job flushes the dirty set to Mongo every
+   * 5 minutes (jobs/userActivitySync.job.js). So the column is correct but up
+   * to five minutes stale.
+   *
+   * For a screen whose entire job is "who is using the app right now", five
+   * minutes is the difference between useful and misleading. So the page is
+   * sorted and paged in Mongo — the only place that can do it — and then the
+   * Redis values are laid over the returned page, which is at most `limit`
+   * keys in one MGET.
+   *
+   * If Redis is down `getMultipleLastActive` falls back to the same Mongo
+   * column and the screen degrades to five-minute resolution instead of
+   * breaking. That is the whole contract: Redis makes it sharper, never
+   * necessary.
+   *
+   * @param {string} [options.activity] online | today | week | inactive
+   * @param {string} [options.sortBy]   lastActiveAt | lastLogin | createdAt | name
+   */
   async getAllUsers(options = {}) {
     const User = require('../models/User.model');
-    const { page = 1, limit = 30, shopId, search, role } = options;
+    const userActivityService = require('./userActivity.service');
+    const {
+      page = 1,
+      limit = 30,
+      shopId,
+      search,
+      role,
+      activity,
+      sortBy = 'lastActiveAt',
+      sortOrder = 'desc',
+    } = options;
 
     const query = {};
     if (shopId) query.shop = shopId;
     if (role) query.role = role;
     if (search) {
+      const escaped = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { phone: { $regex: search, $options: 'i' } },
+        { name: { $regex: escaped, $options: 'i' } },
+        { phone: { $regex: escaped, $options: 'i' } },
+      ];
+    }
+
+    // Activity buckets filter on the Mongo column, so a user active in the last
+    // 60 seconds but not yet flushed can fall in the bucket below the one they
+    // belong to. The overlay below corrects what is *displayed*; correcting the
+    // filter too would mean loading every user to sort in memory.
+    const now = Date.now();
+    const since = (minutes) => new Date(now - minutes * 60 * 1000);
+    if (activity === 'online') query.lastActiveAt = { $gte: since(5) };
+    else if (activity === 'today') query.lastActiveAt = { $gte: since(60 * 24) };
+    else if (activity === 'week') query.lastActiveAt = { $gte: since(60 * 24 * 7) };
+    else if (activity === 'inactive') {
+      query.$and = [
+        ...(query.$and || []),
+        { $or: [{ lastActiveAt: { $lt: since(60 * 24 * 30) } }, { lastActiveAt: null }] },
       ];
     }
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
+    const validSortFields = ['lastActiveAt', 'lastLogin', 'createdAt', 'name'];
+    const sortField = validSortFields.includes(sortBy) ? sortBy : 'lastActiveAt';
+    const direction = sortOrder === 'asc' ? 1 : -1;
+    // `createdAt` as tiebreaker: without it, the users who have never signed in
+    // (all null) come back in a different order on every page request, so the
+    // same user can appear on both page 1 and page 2.
+    const sort = { [sortField]: direction, createdAt: -1 };
 
     const [users, total] = await Promise.all([
       User.find(query)
         .populate('shop', 'name phone subscription.status subscription.plan isActive')
         .select('-password -otp -permissions')
-        .sort({ createdAt: -1 })
+        .sort(sort)
         .skip(skip)
         .limit(parseInt(limit))
         .lean(),
       User.countDocuments(query),
     ]);
 
+    // Overlay live presence onto this page only.
+    const liveMap = await userActivityService.getMultipleLastActive(users.map((u) => u._id));
+
+    const withPresence = users.map((user) => {
+      const live = liveMap[String(user._id)];
+      const lastActiveAt = live || user.lastActiveAt || null;
+      const minutesAgo = lastActiveAt
+        ? Math.floor((now - new Date(lastActiveAt).getTime()) / 60000)
+        : null;
+
+      return {
+        ...user,
+        lastActiveAt,
+        minutesSinceActive: minutesAgo,
+        // A single field the UI can key a dot colour off, so the threshold
+        // lives in one place instead of being re-guessed per screen.
+        // 5 minutes, matching the 60s heartbeat plus slack for a flaky mobile
+        // connection.
+        presence:
+          minutesAgo === null ? 'never'
+            : minutesAgo <= 5 ? 'online'
+            : minutesAgo <= 60 ? 'recent'
+            : minutesAgo <= 60 * 24 ? 'today'
+            : minutesAgo <= 60 * 24 * 7 ? 'week'
+            : 'idle',
+      };
+    });
+
     return {
-      data: users,
+      data: withPresence,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -1216,6 +1552,10 @@ class AdminService {
     const [customers, total] = await Promise.all([
       Customer.find(query)
         .populate('shop', 'name phone')
+        // Who added this customer. Already stored on every record; it was
+        // simply never joined, so the console could show a customer but not
+        // which staff member entered them.
+        .populate('createdBy', 'name phone role')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(parseInt(limit))

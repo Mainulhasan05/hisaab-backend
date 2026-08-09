@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { AUDIT_ACTIONS } = require('../config/constants');
+const { getAuditMetadata, getActor } = require('../utils/requestStore.util');
 
 const auditLogSchema = new mongoose.Schema({
   shop: {
@@ -77,6 +78,66 @@ auditLogSchema.index({ shop: 1, 'entity.type': 1, 'entity.id': 1, createdAt: -1 
 // TTL Index - Auto-delete logs older than 90 days to prevent unbounded growth
 // For compliance, export/archive logs before deletion if needed
 auditLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 90 * 24 * 60 * 60 }); // 90 days
+
+/**
+ * Fill in origin (and actor) from the request in flight.
+ *
+ * ── Why this is a hook and not a call-site fix ───────────────────────────────
+ *
+ * `AuditLog.log()` accepted a `req` and captured metadata from it. But 33 call
+ * sites — every product, sale, purchase, expense, cash-register, supplier,
+ * coupon and sales-return log — call `AuditLog.create()` directly, which took
+ * that path nowhere near them. The result was an audit trail whose Origin panel
+ * read "IP address —, Browser —, OS —" for most of the actions in the system.
+ *
+ * Adding `req` to 33 signatures fixes the 33 that exist and none of the ones
+ * written next month, and the failure mode is silent: the row saves, it is just
+ * blind. Reading the ambient request here means a call site cannot forget.
+ *
+ * Nothing is overwritten. A caller that passed metadata explicitly — including
+ * `AuditLog.log()`, which still does — keeps exactly what it passed. Outside a
+ * request (jobs, scripts, seeds, tests) `getAuditMetadata()` returns null and
+ * this is a no-op, which is why `isSystemAction` rows stay clean.
+ */
+auditLogSchema.pre('validate', function (next) {
+  if (!this.metadata || !this.metadata.ip) {
+    const metadata = getAuditMetadata();
+    if (metadata) this.metadata = metadata;
+  }
+
+  // The actor is normally passed explicitly and left alone. This only rescues
+  // the rows where it was omitted, which otherwise show "By —" in the admin
+  // trail and cannot be filtered by user at all.
+  if (!this.user && !this.admin && !this.isSystemAction) {
+    const actor = getActor();
+    if (actor?.userId) this.user = actor.userId;
+    else if (actor?.adminId) this.admin = actor.adminId;
+  }
+
+  // Same treatment for branch — a null branch makes a row invisible to every
+  // branch-filtered view of the trail.
+  if (this.branch === undefined || this.branch === null) {
+    const actor = getActor();
+    if (actor?.branchId) this.branch = actor.branchId;
+  }
+
+  next();
+});
+
+/**
+ * `actionBn` is required by the schema, and roughly a third of the call sites
+ * pass it by hand — which is how the same action ends up with two different
+ * Bengali labels depending on which service wrote it. Derive it from the shared
+ * AUDIT_ACTIONS table when it is missing, and fall back to the raw action name
+ * so a new action type can never fail validation and lose the row entirely.
+ */
+auditLogSchema.pre('validate', function (next) {
+  if (!this.actionBn && this.action) {
+    const config = Object.values(AUDIT_ACTIONS).find((a) => a.en === this.action);
+    this.actionBn = config?.bn || this.action;
+  }
+  next();
+});
 
 // Static: Create audit log.
 //

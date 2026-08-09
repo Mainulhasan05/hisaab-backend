@@ -4,6 +4,8 @@
  * Used for audit logging and analytics
  */
 
+const { runWithContext } = require('../utils/requestStore.util');
+
 /**
  * Extract real client IP considering proxies
  */
@@ -178,7 +180,16 @@ const requestContext = (req, res, next) => {
     isMobile: parsedUA.isMobile
   };
 
-  next();
+  // Run the rest of the request inside an AsyncLocalStorage scope holding this
+  // request, so `AuditLog` can read the origin without every service being
+  // handed a `req`. 33 audit call sites used `AuditLog.create()` directly and
+  // wrote no metadata at all; this fixes all of them at once and makes the
+  // next one impossible to get wrong. See utils/requestStore.util.js.
+  //
+  // `req` itself is the store rather than a copy: auth middleware runs AFTER
+  // this one and assigns `req.user`, `req.shop`, `req.branchId`. Storing a
+  // snapshot here would freeze all three as undefined.
+  runWithContext(req, next);
 };
 
 /**

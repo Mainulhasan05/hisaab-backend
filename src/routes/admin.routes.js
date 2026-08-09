@@ -56,6 +56,11 @@ router.get('/sales', adminController.getAllSales);
 
 // Products (all shops)
 router.get('/products', adminController.getAllProducts);
+// Read-only: what these products are still attached to. Safe to call freely.
+router.post('/products/inspect-links', adminController.inspectProductLinks);
+// Destructive and irreversible — soft-deleted products only, and the service
+// re-verifies every id against live invoices before erasing anything.
+router.post('/products/purge', adminController.purgeProducts);
 
 // Online users (from heartbeat)
 router.get('/online-users', adminController.getOnlineUsers);
