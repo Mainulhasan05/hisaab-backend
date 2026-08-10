@@ -697,6 +697,23 @@ class SaleService {
       }
     }
 
+    // The invoice records the name THIS branch knows the customer by.
+    //
+    // `customerName` is a snapshot — it is what gets printed, texted and shown
+    // in every report, and it must not change under the shop later. Taking the
+    // shop-wide name here would hand a Dhaka customer an invoice in the name
+    // Chittagong chose for them, which is the confusion this whole feature
+    // exists to end. Only ever a rename of the same person, so nothing about
+    // the money or the customer link changes.
+    if (customer && branchId) {
+      const localRow = await CustomerBalance.findOne(
+        { shop: shopId, customer: customer._id, branch: branchId },
+        'localName',
+        sessionOpt
+      );
+      if (localRow?.localName) finalCustomerName = localRow.localName;
+    }
+
     // Create sale with retry for invoice number collision
     let sale;
     const maxRetries = 3;

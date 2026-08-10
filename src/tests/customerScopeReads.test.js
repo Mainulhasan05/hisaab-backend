@@ -88,13 +88,21 @@ describe('a single customer', () => {
   const stubFindOne = (doc) =>
     jest.spyOn(Customer, 'findOne').mockReturnValue({ populate: () => Promise.resolve(doc) });
 
+  // The detail page also reports how many branches share this customer, so the
+  // edit form can warn that phone/address changes travel. A count, never the
+  // branch names — which branches serve someone is what separate books hide.
+  const stubBranchCount = (n = 1) =>
+    jest.spyOn(CustomerBalance, 'countDocuments').mockResolvedValue(n);
+
   it('shows this branch\'s figures, not the shop-wide ones', async () => {
     stubFindOne({ _id: CUSTOMER, name: 'করিম', totalDue: 5000, toObject() { return { _id: CUSTOMER, name: 'করিম', totalDue: 5000 }; } });
     jest.spyOn(CustomerBalance, 'findOne').mockReturnValue({ lean: () => Promise.resolve({ totalDue: 1200, totalPaid: 300, totalPurchases: 1500, purchaseCount: 2 }) });
+    stubBranchCount(3);
 
     const customer = await customerService.getCustomerById(SHOP, CUSTOMER, separate());
 
     expect(customer.totalDue).toBe(1200);
+    expect(customer.branchCount).toBe(3);
   });
 
   it('404s for a customer this branch has never served', async () => {
@@ -156,6 +164,8 @@ describe('purchase history', () => {
     jest.spyOn(Payment, 'find').mockImplementation(() => chain([]));
     jest.spyOn(Sale, 'countDocuments').mockResolvedValue(0);
     jest.spyOn(Payment, 'countDocuments').mockResolvedValue(0);
+    // History reuses getCustomerById, which now also counts sharing branches.
+    jest.spyOn(CustomerBalance, 'countDocuments').mockResolvedValue(1);
   };
 
   it('narrows to this branch under separate books', async () => {

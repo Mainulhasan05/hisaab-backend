@@ -71,6 +71,38 @@ const customerBalanceSchema = new mongoose.Schema({
   },
   lastPurchase: {
     type: Date
+  },
+  /**
+   * What THIS branch calls this customer.
+   *
+   * ── Why only the name is per-branch ─────────────────────────────────────
+   *
+   * A shop reported the real failure: Chittagong corrected a customer's name
+   * and number, and Dhaka — who had been tracking the same person as "Sadek"
+   * — could never find them again. One `Customer` document per human is still
+   * right (splitting it would split the money), so what had to stop was one
+   * branch silently rewriting another branch's label.
+   *
+   * The name is a LABEL. Two branches disagreeing about it costs nothing.
+   * The phone is an IDENTITY, and it deliberately stays shared:
+   *
+   *   - `{shop, phone}` is a unique index. A per-branch phone would move that
+   *     guarantee from the database into an application check that races.
+   *   - SMS would go to whichever number the sending branch happened to hold,
+   *     so a corrected number would never reach the other branches — the
+   *     original bug, made permanent and silent instead of visible once.
+   *   - `Sale` snapshots the phone, and the due-aging report groups on it.
+   *
+   * Null means "use the shop-wide name", which is the state every existing row
+   * is in and stays in until a branch deliberately renames. So this is inert
+   * for every shop that does not use it, and `Customer.name` remains the one
+   * canonical answer to "who is this".
+   */
+  localName: {
+    type: String,
+    trim: true,
+    maxlength: [100, 'নাম ১০০ অক্ষরের বেশি হতে পারবে না'],
+    default: null
   }
 }, {
   timestamps: true

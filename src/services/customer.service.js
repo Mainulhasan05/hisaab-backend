@@ -41,6 +41,30 @@ const BALANCE_PROJECTION = {
   lastPurchase: 1,
 };
 
+/**
+ * Resolve the name a branch sees, and say where it came from.
+ *
+ * Every branch-scoped read goes through here so the list, the detail page, the
+ * till lookup and the leaderboard cannot disagree about what a customer is
+ * called. `sharedName` rides along whenever the two differ, so a screen can
+ * show "সব শাখায়: সাদেক মিয়া" instead of quietly presenting a name the rest of
+ * the shop does not use.
+ *
+ * @param {Object} customer plain customer object (carries the canonical name)
+ * @param {Object|null} row this branch's CustomerBalance row
+ */
+const resolveBranchName = (customer, row) => {
+  const local = row?.localName || null;
+  const shared = customer?.name || '';
+  return {
+    name: local || shared,
+    // Only set when the branch has deliberately renamed AND the two differ —
+    // a screen showing "সব শাখায়: X" beside an identical X is just noise.
+    sharedName: local && local !== shared ? shared : null,
+    hasLocalName: Boolean(local),
+  };
+};
+
 /** Money never travels as a string. Rejects NaN/Infinity/negative-zero noise. */
 const toAmount = (value) => {
   const n = Number(value);
@@ -89,6 +113,11 @@ class CustomerService {
       postJoinMatch.$or = [
         { 'customer.name': { $regex: escaped, $options: 'i' } },
         { 'customer.phone': { $regex: escaped, $options: 'i' } },
+        // The branch's own label is searchable too. Without this a branch that
+        // renamed a customer could no longer find them by the name on its own
+        // screen — which is the exact failure this feature exists to prevent,
+        // reintroduced from the other direction.
+        { localName: { $regex: escaped, $options: 'i' } },
       ];
     }
 
@@ -109,10 +138,30 @@ class CustomerService {
           _id: '$customer._id',
           ...CUSTOMER_PROJECTION,
           ...BALANCE_PROJECTION,
+          // `name` is overwritten by the branch's label when it has one. The
+          // spread above already emitted `name: '$customer.name'`, so this key
+          // must come after it — later keys win in a $project literal.
+          name: { $ifNull: ['$localName', '$customer.name'] },
+          // Carried so the row can show "সব শাখায়: X" when the two differ.
+          sharedName: {
+            $cond: [
+              {
+                $and: [
+                  { $ne: [{ $ifNull: ['$localName', null] }, null] },
+                  { $ne: ['$localName', '$customer.name'] },
+                ],
+              },
+              '$customer.name',
+              null,
+            ],
+          },
         },
       },
       {
         $facet: {
+          // Sorting by `name` sorts the resolved name, because the $project
+          // above runs first — so the list orders by what the branch actually
+          // reads, not by a label it never sees.
           data: [{ $sort: { [sortField]: direction } }, { $skip: skip }, { $limit: parseInt(limit) }],
           count: [{ $count: 'total' }],
         },
@@ -205,6 +254,7 @@ class CustomerService {
     const plain = typeof customer.toObject === 'function' ? customer.toObject() : { ...customer };
     return {
       ...plain,
+      ...resolveBranchName(plain, row),
       totalPurchases: row.totalPurchases || 0,
       totalPaid: row.totalPaid || 0,
       totalDue: row.totalDue || 0,
@@ -232,6 +282,16 @@ class CustomerService {
       if (!scoped) {
         throw new AppError('কাস্টমার পাওয়া যায়নি', 'Customer not found', 404);
       }
+
+      // How many branches share this person. The detail page is where editing
+      // starts, so this is where the UI can say "phone and address changes go
+      // to all N branches" BEFORE the change rather than after the confusion.
+      // A count, never the branch names — which branches serve a customer is
+      // exactly what separate books exist to keep private.
+      scoped.branchCount = await CustomerBalance.countDocuments({
+        shop: shopId, customer: customerId,
+      });
+
       return scoped;
     }
 
@@ -253,8 +313,12 @@ class CustomerService {
       // No row here yet — a first-time visit to this branch. Return them with
       // zeroed figures rather than null, so the till binds to the existing
       // person instead of creating a duplicate.
+      // No row here yet — a first-time visit to this branch, so they get the
+      // shop-wide name until this branch decides to call them something else.
       return scoped || {
         ...customer.toObject(),
+        sharedName: null,
+        hasLocalName: false,
         totalPurchases: 0, totalPaid: 0, totalDue: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null,
       };
     }
@@ -424,6 +488,18 @@ class CustomerService {
       // earned them; only their presence in this list is new.
       if (isBranchCustomerScope(req)) {
         await CustomerBalance.applyDelta({ shop: shopId, customer: existingCustomer._id, branch: branchId });
+
+        // The staff member typed a name for this phone. If it differs from the
+        // shop-wide one, that is what THIS branch knows them as — record it as
+        // this branch's label rather than discarding it (the old behaviour) or
+        // overwriting what every other branch sees (the bug this replaces).
+        const typedName = (name || '').trim();
+        if (typedName && typedName !== existingCustomer.name) {
+          await CustomerBalance.updateOne(
+            { shop: shopId, customer: existingCustomer._id, branch: branchId },
+            { $set: { localName: typedName } }
+          );
+        }
         // An opening due typed alongside is still meant: the customer is new to
         // THIS branch, and this branch's paper খাতা may well have carried them.
         // It lands on this branch's row, not on whatever they owe elsewhere.
@@ -433,9 +509,11 @@ class CustomerService {
             { amount: openingDue, kind: 'opening', note: 'অনবোর্ডিং — পূর্বের বাকি' },
             req
           );
-          return withDue;
+          return this._applyBranchFigures(withDue, shopId, branchId);
         }
-        return existingCustomer;
+        // Returned through the overlay so the caller immediately sees the name
+        // it just typed, not the shop-wide one.
+        return this._applyBranchFigures(existingCustomer, shopId, branchId);
       }
       // Shared book: the customer really is in their list already, so the
       // error is both correct and actionable. Unchanged from before Phase 7.
@@ -491,11 +569,52 @@ class CustomerService {
     return customer;
   }
 
-  // Update customer
+  /**
+   * Update a customer.
+   *
+   * ── The bug this rewrites ──────────────────────────────────────────────────
+   *
+   * This method had NO branch awareness at all. In separate-books mode any
+   * branch that could reach a customer id rewrote that customer's name and
+   * phone for every other branch, with no warning. A shop hit it for real:
+   * Chittagong corrected a name and number, and Dhaka — who had been tracking
+   * the same person as "Sadek" — could never find them again.
+   *
+   * ── What changed, and what deliberately did not ────────────────────────────
+   *
+   * In branch scope the NAME is now written to this branch's ledger row
+   * (`CustomerBalance.localName`) instead of to the shared document. Each
+   * branch keeps its own label; nobody's disappears.
+   *
+   * Everything else — phone, address, notes — still writes to the shared
+   * document, on purpose. The phone is the identity: `{shop, phone}` is a
+   * unique index, SMS is sent to it, and `Sale` snapshots it. Making it
+   * per-branch would move a database guarantee into a racy application check
+   * and, worse, would mean a corrected number never reached the branches still
+   * dialling the old one — the original problem made permanent and silent.
+   *
+   * So a phone correction is still shared, which is right: every branch should
+   * get it. What no longer travels is the branch's private label.
+   */
   async updateCustomer(shopId, userId, customerId, updateData, req) {
     const customer = await Customer.findOne({ _id: customerId, shop: shopId });
     if (!customer) {
       throw new AppError('কাস্টমার পাওয়া যায়নি', 'Customer not found', 404);
+    }
+
+    const branchScoped = isBranchCustomerScope(req);
+    const branchId = branchScoped ? req.branchId : null;
+    let balanceRow = null;
+
+    if (branchScoped) {
+      // Visibility rule, matching `getCustomerById`: a branch may only edit a
+      // customer it actually serves. Previously any reachable id was editable.
+      balanceRow = await CustomerBalance.findOne({
+        shop: shopId, customer: customerId, branch: branchId,
+      });
+      if (!balanceRow) {
+        throw new AppError('কাস্টমার পাওয়া যায়নি', 'Customer not found', 404);
+      }
     }
 
     const beforeData = customer.toObject();
@@ -508,8 +627,30 @@ class CustomerService {
       }
     }
 
+    // In branch scope the name is peeled off before the shared document is
+    // touched, so `Object.assign` below can never carry it through.
+    const sharedUpdate = { ...updateData };
+    let localNameChanged = false;
+    const previousLocalName = balanceRow?.localName || null;
+
+    if (branchScoped && Object.prototype.hasOwnProperty.call(sharedUpdate, 'name')) {
+      const nextName = (sharedUpdate.name || '').trim();
+      delete sharedUpdate.name;
+
+      // Clearing the field (or typing the shop-wide name back) drops the
+      // override rather than storing a duplicate — so a branch can always get
+      // back to "just use the shared name" without an extra control.
+      const nextLocal = !nextName || nextName === customer.name ? null : nextName;
+
+      if ((balanceRow.localName || null) !== nextLocal) {
+        balanceRow.localName = nextLocal;
+        await balanceRow.save();
+        localNameChanged = true;
+      }
+    }
+
     // Update customer
-    Object.assign(customer, updateData);
+    Object.assign(customer, sharedUpdate);
     await customer.save();
 
     // Create audit log with request metadata & customer reference
@@ -524,10 +665,26 @@ class CustomerService {
         id: customer._id,
         name: customer.name,
       },
-      // Field-level diff rather than two full documents.
-      changes: auditDiff(beforeData, customer, AUDIT_FIELDS.customer),
+      // Field-level diff rather than two full documents. A branch-local rename
+      // never reaches the shared document, so it would leave no trace at all
+      // without being spliced in here.
+      changes: (() => {
+        const diff = auditDiff(beforeData, customer, AUDIT_FIELDS.customer);
+        if (!localNameChanged) return diff;
+        return {
+          before: { ...(diff?.before || {}), localName: previousLocalName },
+          after: { ...(diff?.after || {}), localName: balanceRow.localName, branch: String(branchId) },
+        };
+      })(),
       req,
     });
+
+    // Return what this branch will now see, not the raw shared document — the
+    // client re-renders from this response, and handing back the shop-wide
+    // name right after a rename would flash the old label back onto the screen.
+    if (branchScoped) {
+      return this._applyBranchFigures(customer, shopId, branchId);
+    }
 
     return customer;
   }
@@ -896,6 +1053,8 @@ class CustomerService {
           _id: '$customer._id',
           ...CUSTOMER_PROJECTION,
           ...BALANCE_PROJECTION,
+          // Same override as the list — see `_getBranchCustomers`.
+          name: { $ifNull: ['$localName', '$customer.name'] },
         },
       },
     ]);
