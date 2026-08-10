@@ -50,6 +50,29 @@ const customerSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  /**
+   * Does this customer buy at the wholesale rate?
+   *
+   * SHOP-WIDE, deliberately — not per branch. A wholesale buyer is one under
+   * every branch's roof, and this sits on the identity document for the same
+   * reason `phone` does (I-4): `Customer` is one document per human, and a
+   * per-branch tier would mean the same person is quoted two prices depending
+   * on which till they walk up to.
+   *
+   * Inert unless `shop.features.wholesale` is on. Never read this field
+   * directly — go through `pricing.util.priceTierFor(req, customer)`, which is
+   * what keeps the flag check and the tier decision in one place.
+   *
+   * OWNER-ONLY to write. It reduces what the shop charges, so a cashier who
+   * could set it could hand a friend wholesale rates forever with one tap.
+   * Enforced in `customer.service`, not on the route — the route is open to
+   * anyone with `customers.update`, only this FIELD is restricted, exactly as
+   * `openingDue` is.
+   */
+  isWholesale: {
+    type: Boolean,
+    default: false
+  },
   lastPurchase: {
     type: Date
   },

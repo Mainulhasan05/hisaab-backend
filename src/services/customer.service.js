@@ -10,6 +10,7 @@ const { branchFilter, requireBranch, isBranchCustomerScope } = require('../utils
 const { normalizePhone } = require('../utils/phone.util');
 const { runInTransaction } = require('../utils/transaction.util');
 const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.util');
+const { resolveWholesaleFlag } = require('../utils/pricing.util');
 const mongoose = require('mongoose');
 
 /** Escape user input before it reaches $regex — raw input is a ReDoS vector. */
@@ -24,6 +25,12 @@ const CUSTOMER_PROJECTION = {
   tags: '$customer.tags',
   isActive: '$customer.isActive',
   createdAt: '$customer.createdAt',
+  // Without this the branch-scoped list — which is an aggregation with an
+  // EXPLICIT projection, unlike the shop-wide list's plain `find()` — would
+  // drop the flag, and the till in every multi-branch shop would quietly ring
+  // wholesale customers up at retail while single-branch shops worked fine.
+  // Exactly how `openingDue` once read ৳০ for every branch-scoped shop.
+  isWholesale: '$customer.isWholesale',
 };
 
 /**
@@ -454,6 +461,11 @@ class CustomerService {
     const { phone, name, address, notes } = customerData;
     const branchId = req ? requireBranch(req) : null;
 
+    // Owner-only and flag-gated — see `resolveWholesaleFlag`. Checked here
+    // rather than on the route for the same reason `openingDue` is: the route
+    // is open to anyone with `customers.create`, only this FIELD is restricted.
+    const isWholesale = resolveWholesaleFlag(customerData.isWholesale, req);
+
     // Pre-software debt, optional. Owner-only — writing this conjures a
     // receivable out of nothing, so it is the one part of the customer form a
     // cashier must not reach. Checked here rather than on the route because the
@@ -526,6 +538,9 @@ class CustomerService {
       name,
       address,
       notes,
+      // Spread rather than assigned, so an untouched field falls to the schema
+      // default instead of being written as an explicit `undefined`.
+      ...(isWholesale === undefined ? {} : { isWholesale }),
       createdBy: userId,
     });
 
@@ -630,6 +645,22 @@ class CustomerService {
     // In branch scope the name is peeled off before the shared document is
     // touched, so `Object.assign` below can never carry it through.
     const sharedUpdate = { ...updateData };
+
+    // Same peel, for the same reason, on a field that is NOT branch-local: the
+    // `Object.assign` at the end of this method copies whatever the body held,
+    // and this one must pass the flag + owner gate first. Deleting the key and
+    // re-adding the resolved value is what makes that unbypassable — leaving it
+    // in place and merely validating it would still let the raw value through.
+    //
+    // Shop-wide on purpose. A পাইকারি buyer is one at every branch (I-4:
+    // identity lives on the Customer document, only the ledger is scoped), and
+    // per-branch tiers would quote the same person two prices depending on
+    // which till they walked up to.
+    delete sharedUpdate.isWholesale;
+    const nextWholesale = resolveWholesaleFlag(updateData.isWholesale, req);
+    if (nextWholesale !== undefined) {
+      sharedUpdate.isWholesale = nextWholesale;
+    }
     let localNameChanged = false;
     const previousLocalName = balanceRow?.localName || null;
 

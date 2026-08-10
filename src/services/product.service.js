@@ -15,6 +15,7 @@ const {
 const { unitsForShop, DEFAULT_UNIT } = require('../config/units');
 const { normalizePackaging } = require('../utils/packaging.util');
 const { hasFeature } = require('../utils/features.util');
+const { normalizeWholesalePrice } = require('../utils/pricing.util');
 const cacheService = require('./cache.service');
 const { KEYS, getTTL } = require('../config/cacheKeys');
 const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.util');
@@ -260,6 +261,11 @@ class ProductService {
       limit: options.limit || 30,
     }, req);
 
+    // Sent ONLY to shops that have the capability. A flag-off shop's POS
+    // payload is byte-identical to what it was before this feature existed —
+    // I-6 — and its till has no wholesale number to accidentally render.
+    const wholesaleEnabled = hasFeature(req, 'wholesale');
+
     return {
       data: result.data.map((product) => ({
         _id: product._id,
@@ -269,6 +275,11 @@ class ProductService {
         hasVariants: product.hasVariants,
         buyingPrice: product.buyingPrice,
         sellingPrice: product.sellingPrice,
+        // The till needs this to SHOW the পাইকারি rate the moment a wholesale
+        // customer is picked. It does not need it to charge — `createSale`
+        // re-derives every price server-side from the customer document, so a
+        // tampered payload changes the screen and nothing else.
+        ...(wholesaleEnabled ? { wholesalePrice: product.wholesalePrice } : {}),
         stock: product.stock,
         minStock: product.minStock,
         unit: product.unit,
@@ -292,6 +303,7 @@ class ProductService {
             color: variant.color,
             buyingPrice: variant.buyingPrice,
             sellingPrice: variant.sellingPrice,
+            ...(wholesaleEnabled ? { wholesalePrice: variant.wholesalePrice } : {}),
             stock: variant.stock,
             isActive: variant.isActive,
           })),
@@ -490,6 +502,13 @@ class ProductService {
       rest.unit || DEFAULT_UNIT,
       hasFeature(req, 'packaging')
     );
+    // Absent for every shop without the capability, and for every product whose
+    // owner left the box empty — which is most of them even in a shop that has
+    // it. See utils/pricing.util.js for why absent means "charge retail".
+    const wholesaleEnabled = hasFeature(req, 'wholesale');
+    rest.wholesalePrice = normalizeWholesalePrice(rest.wholesalePrice, wholesaleEnabled, {
+      label: name,
+    });
 
     // Code uniqueness is per branch — the same code in another branch is a
     // different product, which is the whole point of per-branch catalogues.
@@ -506,7 +525,7 @@ class ProductService {
       }
     }
 
-    const formattedVariants = this._formatVariants(variants);
+    const formattedVariants = this._formatVariants(variants, wholesaleEnabled);
     const product = await Product.create({
       shop: shopId,
       branch: requireBranch(req),
@@ -570,6 +589,22 @@ class ProductService {
       );
     }
 
+    // Guarded by `in`, deliberately. A flag-off shop's product form does not
+    // render the field and therefore does not send the key, so the stored rate
+    // SURVIVES an admin turning the capability off and a shopkeeper editing the
+    // product afterwards. Normalising unconditionally would read the absent key
+    // as `undefined`, clear it, and quietly destroy every wholesale price in
+    // the shop the first time each product was touched — an unrecoverable loss
+    // from a switch that is supposed to be reversible.
+    const wholesaleEnabled = hasFeature(req, 'wholesale');
+    if ('wholesalePrice' in updateData) {
+      updateData.wholesalePrice = normalizeWholesalePrice(
+        updateData.wholesalePrice,
+        wholesaleEnabled,
+        { label: updateData.name || product.name }
+      );
+    }
+
     // Changing the unit does NOT convert the stored stock — 100 (kg) becoming
     // 100 (gram) is a data-entry correction, not a x1000 conversion, and
     // guessing wrong silently revalues the whole inventory. The UI warns and
@@ -585,7 +620,7 @@ class ProductService {
 
     // Process variant updates and handle variant stock changes
     if (variantsWithStock && Array.isArray(variantsWithStock)) {
-      const formattedInputVariants = this._formatVariants(variantsWithStock);
+      const formattedInputVariants = this._formatVariants(variantsWithStock, wholesaleEnabled);
       const updatedVariants = [];
 
       for (const variant of formattedInputVariants) {
@@ -602,6 +637,20 @@ class ProductService {
           variantId = existingVariant._id;
           variant._id = existingVariant._id;
           currentStock = existingVariant.stock || 0;
+
+          // A flag-off shop's variant rows carry no wholesale box, so the form
+          // sends no rate and the rebuilt row above holds `undefined`. Since
+          // this array REPLACES the stored one wholesale, that would erase every
+          // variant's wholesale price the first time the product was edited
+          // after an admin turned the capability off — the toggle is meant to
+          // be reversible, and this is the only path that could make it not be.
+          //
+          // Only carried forward when the shop cannot see the field. With the
+          // flag ON an empty box is a deliberate "remove the wholesale rate",
+          // and honouring that is the whole point of the box.
+          if (!wholesaleEnabled) {
+            variant.wholesalePrice = existingVariant.wholesalePrice;
+          }
         }
 
         // If the stock is different, we must update it
@@ -969,8 +1018,13 @@ class ProductService {
 
   /**
    * Helper to format variant arrays from client flat structure to DB nested attributes structure.
+   *
+   * @param {Array} variants
+   * @param {boolean} wholesaleEnabled  the shop's `features.wholesale` flag.
+   *   Defaults to FALSE so a caller that forgets it cannot accidentally let a
+   *   wholesale rate through — the same fail-closed rule `hasFeature` follows.
    */
-  _formatVariants(variants) {
+  _formatVariants(variants, wholesaleEnabled = false) {
     if (!variants || !Array.isArray(variants)) return [];
 
     return variants.map(v => {
@@ -987,8 +1041,13 @@ class ProductService {
         }
       });
 
-      const customKeys = Object.keys(v).filter(k => 
-        !['id', '_id', 'sku', 'barcode', 'buyingPrice', 'sellingPrice', 'stock', 'image', 'isActive', 'attributes'].includes(k) &&
+      // Anything not a recognised column becomes a custom ATTRIBUTE. So every
+      // real field added to a variant must be listed here as well as in the
+      // return below — miss it and `wholesalePrice: 8` is stored as a made-up
+      // attribute named "wholesalePrice" that renders on the invoice next to
+      // size and colour, while the price column stays empty.
+      const customKeys = Object.keys(v).filter(k =>
+        !['id', '_id', 'sku', 'barcode', 'buyingPrice', 'sellingPrice', 'wholesalePrice', 'stock', 'image', 'isActive', 'attributes'].includes(k) &&
         !knownKeys.includes(k)
       );
 
@@ -1009,6 +1068,13 @@ class ProductService {
         barcode: v.barcode,
         buyingPrice: v.buyingPrice,
         sellingPrice: v.sellingPrice,
+        // `undefined` when cleared or when the shop has no wholesale feature,
+        // which leaves the path absent rather than storing a ৳0 rate that would
+        // bill the next পাইকারি customer nothing. Named per variant so a 403
+        // says WHICH row was wrong on a form with a dozen of them.
+        wholesalePrice: normalizeWholesalePrice(v.wholesalePrice, wholesaleEnabled, {
+          label: v.sku ? `variant ${v.sku}` : 'variant',
+        }),
         stock: v.stock || 0,
         image: v.image,
         isActive: v.isActive !== false,

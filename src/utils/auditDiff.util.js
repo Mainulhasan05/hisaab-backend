@@ -84,12 +84,16 @@ function auditDiff(before, after, fields) {
 const AUDIT_FIELDS = {
   product: [
     'name', 'code', 'barcode', 'category', 'unit', 'buyingPrice', 'sellingPrice',
+    'wholesalePrice',
     'stock', 'minStock', 'isActive', 'isAvailableOnline', 'hasVariants',
     'trackBatches', 'packaging',
   ],
   customer: [
     'name', 'phone', 'email', 'address', 'creditLimit', 'isActive',
     'totalDue', 'totalPaid', 'totalPurchases', 'openingDue',
+    // Owner-only and it changes what the shop charges, so a promotion to
+    // wholesale is exactly the kind of edit the trail exists to record.
+    'isWholesale',
   ],
 };
 

@@ -103,6 +103,12 @@ const variantSchema = new mongoose.Schema({
     required: [true, 'বিক্রয় মূল্য দিন'],
     min: [0, 'বিক্রয় মূল্য ০ এর কম হতে পারবে না']
   },
+  // Wholesale rate for this variant. See the top-level `wholesalePrice` below —
+  // same meaning, same fallback, same feature gate. Absent on ~every variant.
+  wholesalePrice: {
+    type: Number,
+    min: [0, 'পাইকারি মূল্য ০ এর কম হতে পারবে না']
+  },
   stock: {
     type: Number,
     default: 0,
@@ -303,6 +309,37 @@ const productSchema = new mongoose.Schema({
   sellingPrice: {
     type: Number,
     min: [0, 'বিক্রয় মূল্য ০ এর কম হতে পারবে না']
+  },
+  /**
+   * What a WHOLESALE customer pays, per base unit. Optional, and absent for
+   * most products even in a shop that has the feature.
+   *
+   * ── Absent means "charge retail", NOT "free" ────────────────────────────────
+   *
+   * This is the whole reason it is optional rather than required. A shop turns
+   * the feature on with a thousand products already priced; asking for a second
+   * price on every one of them before the first wholesale sale can be rung up
+   * would make the feature unusable on day one. So a product with no wholesale
+   * price sells to a wholesale customer at `sellingPrice`, silently and
+   * correctly, and the shopkeeper fills these in as they go.
+   *
+   * `0` is treated as absent for the same reason `packSellingPrice` is (see
+   * packaging.util): a number input that has been cleared reads as 0, and
+   * charging ৳0 for a carton of rice because someone emptied a box is not a
+   * price, it is a bug. Only a positive figure overrides.
+   *
+   * Never compare against this directly — `pricing.util.sellingPriceFor` is the
+   * one place the fallback lives, and it is what keeps a shop without
+   * `features.wholesale` from ever being billed off this column.
+   *
+   * Deliberately NOT validated against `sellingPrice`. A wholesale rate ABOVE
+   * retail is a data-entry mistake, but it is also occasionally deliberate
+   * (a small pack surcharge), and refusing it at the database means a shop
+   * cannot record what it actually charges. The product form warns instead.
+   */
+  wholesalePrice: {
+    type: Number,
+    min: [0, 'পাইকারি মূল্য ০ এর কম হতে পারবে না']
   },
   stock: {
     type: Number,

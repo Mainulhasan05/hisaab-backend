@@ -26,6 +26,7 @@ const {
   buildVariantStockUpdate,
 } = require('../utils/quantity.util');
 const { resolveLineQuantity, unitPriceFor } = require('../utils/packaging.util');
+const { priceTierFor, sellingPriceFor, hasWholesalePrice } = require('../utils/pricing.util');
 
 // Bangladesh is UTC+6
 const BD_OFFSET_MS = 6 * 60 * 60 * 1000;
@@ -314,6 +315,35 @@ class SaleService {
       return id ? id.toString() : null;
     };
 
+    // ── Resolve the customer BEFORE anything is priced ────────────────────────
+    //
+    // This block used to sit AFTER the item loop and after the stock bulkWrite,
+    // which was fine while every line was priced from `product.sellingPrice`
+    // alone. It is not fine now: `features.wholesale` makes the price a
+    // function of WHO is buying, and a customer resolved 300 lines below the
+    // loop cannot inform a price computed inside it.
+    //
+    // Only the LOOKUP moved. Creating a customer from a typed phone stays where
+    // it was, further down — a brand-new customer is retail by definition, so
+    // it has nothing to tell the pricing, and moving a write above the stock
+    // guard would create a customer for a sale that then fails on stock.
+    //
+    // The lookup is deliberately shop-wide (`shop` + id/phone, no branch
+    // predicate): `Customer` has no `branch` field, and adding one would match
+    // zero rows in silence. Same trap as H-7.
+    let customer = null;
+    if (customerId) {
+      customer = await Customer.findOne({ _id: customerId, shop: shopId }).session(session || null);
+    } else if (customerPhone) {
+      customer = await Customer.findOne({ shop: shopId, phone: customerPhone }).session(session || null);
+    }
+
+    // Which price list this whole invoice is rung up against. Resolved from the
+    // stored customer document, never from anything the client sent — see the
+    // note in utils/pricing.util.js. Reads 'retail' for every shop without the
+    // feature, which is what keeps I-6 true for them.
+    const priceTier = priceTierFor(req, customer);
+
     // Validate items and calculate totals
     let subtotal = 0;
     const processedItems = [];
@@ -382,6 +412,11 @@ class SaleService {
       item.quantity = line.quantity;
 
       let unitPrice, buyingPrice, variantInfo = {};
+      // Did THIS line actually get a wholesale rate? Not the same question as
+      // `priceTier === 'wholesale'` — a wholesale invoice falls back to retail
+      // on any product that has no wholesale price, and the pack branch below
+      // has to know which of the two happened.
+      let lineWholesale = false;
 
       if (item.variantId) {
         const variant = (product.variants && typeof product.variants.id === 'function')
@@ -400,7 +435,11 @@ class SaleService {
           );
         }
 
-        unitPrice = variant.sellingPrice;
+        // Retail unless this invoice is on the wholesale list AND this variant
+        // carries a wholesale rate. A variant without one falls back to its own
+        // retail price — never to the parent product's. See pricing.util.
+        unitPrice = sellingPriceFor(variant, priceTier);
+        lineWholesale = priceTier === 'wholesale' && hasWholesalePrice(variant);
         buyingPrice = variant.buyingPrice || product.buyingPrice || 0;
         variantInfo = {
           variantId: variant._id,
@@ -467,7 +506,8 @@ class SaleService {
           );
         }
 
-        unitPrice = product.sellingPrice;
+        unitPrice = sellingPriceFor(product, priceTier);
+        lineWholesale = priceTier === 'wholesale' && hasWholesalePrice(product);
         buyingPrice = product.buyingPrice || 0;
 
         const previousStock = product.stock;
@@ -584,10 +624,24 @@ class SaleService {
       // `unitPrice` then comes back DOWN to a per-base-unit figure by division,
       // deliberately unrounded — see `unitPriceFor`. Rounding it to paisa here
       // and multiplying back would bill ৳৯৯৯.৯৯ for a carton quoted at ৳১০০০.
+      //
+      // ── When the two features meet ─────────────────────────────────────────
+      //
+      // `packSellingPrice` is itself a wholesale-ish rate — "cheaper if you take
+      // the whole carton". `wholesalePrice` is a different axis — "cheaper
+      // because of who you are". A পাইকারি customer buying a carton is entitled
+      // to the second, and stacking both would compound two discounts the
+      // shopkeeper only meant to give once.
+      //
+      // So a line that actually got a wholesale rate prices its pack as
+      // `wholesale unit price x pack size` and ignores `packSellingPrice`. A
+      // line that fell back to retail — no wholesale price on the product —
+      // keeps the existing pack logic byte for byte, which is also every line
+      // in every shop that does not have `features.wholesale`.
       let packUnitPrice = null;
       if (line.mode === 'pack') {
         const explicitPack = Number(product.packaging?.packSellingPrice);
-        packUnitPrice = (Number.isFinite(explicitPack) && explicitPack > 0)
+        packUnitPrice = (!lineWholesale && Number.isFinite(explicitPack) && explicitPack > 0)
           ? quantizeMoney(explicitPack)
           : quantizeMoney(unitPrice * line.packSize);
         unitPrice = unitPriceFor(line, unitPrice, packUnitPrice);
@@ -672,29 +726,32 @@ class SaleService {
     const due = Math.max(0, total - paid);
     const status = due <= 0 ? 'completed' : (paid > 0 ? 'partial' : 'unpaid');
 
-    // Handle customer
-    let customer = null;
+    // Handle customer.
+    //
+    // The LOOKUP for both branches happened before the item loop — it has to,
+    // because `priceTier` depends on it. What is left here is the half that
+    // must not run before the stock guard: creating a customer from a phone the
+    // shop has never seen. A sale that fails on stock must not leave a customer
+    // record behind for a transaction that never happened.
+    //
+    // A customer created here is new, so `isWholesale` is false and the tier
+    // already computed above ('retail') is still the right one. There is
+    // nothing to recompute, and recomputing would be wrong: the price the
+    // cashier was quoted is the price on the invoice.
     let finalCustomerName = customerName;
     let finalCustomerPhone = customerPhone;
 
-    if (customerId) {
-      customer = await Customer.findOne({ _id: customerId, shop: shopId }).session(session || null);
-      if (customer) {
-        finalCustomerName = customer.name;
-        finalCustomerPhone = customer.phone;
-      }
-    } else if (customerPhone) {
-      // Try to find existing customer or create new one
-      customer = await Customer.findOne({ shop: shopId, phone: customerPhone }).session(session || null);
-      if (!customer && customerName) {
-        const [newCustomer] = await Customer.create([{
-          shop: shopId,
-          phone: customerPhone,
-          name: customerName,
-          createdBy: userId,
-        }], sessionOpt);
-        customer = newCustomer;
-      }
+    if (customer) {
+      finalCustomerName = customer.name;
+      finalCustomerPhone = customer.phone;
+    } else if (!customerId && customerPhone && customerName) {
+      const [newCustomer] = await Customer.create([{
+        shop: shopId,
+        phone: customerPhone,
+        name: customerName,
+        createdBy: userId,
+      }], sessionOpt);
+      customer = newCustomer;
     }
 
     // The invoice records the name THIS branch knows the customer by.
@@ -728,6 +785,9 @@ class SaleService {
           customer: customer?._id,
           customerName: finalCustomerName,
           customerPhone: finalCustomerPhone,
+          // Snapshot, not a lookup: promoting this customer to wholesale next
+          // month must not restate what this invoice was charged at.
+          priceTier,
           items: processedItems,
           subtotal,
           discount,

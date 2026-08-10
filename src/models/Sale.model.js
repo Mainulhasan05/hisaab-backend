@@ -137,6 +137,22 @@ const saleSchema = new mongoose.Schema({
     required: [true, 'পণ্য যোগ করুন'],
     validate: [arr => arr.length > 0, 'অন্তত একটি পণ্য যোগ করুন']
   },
+  // Which price list this invoice was rung up against. A snapshot, like
+  // `customerName` and `item.unit` — a customer promoted to wholesale next
+  // month must not restate the invoices they were charged retail on.
+  //
+  // 'wholesale' does NOT mean every line got a wholesale rate: a product with
+  // no `wholesalePrice` falls back to retail on an otherwise-wholesale invoice.
+  // It means "the wholesale list was applied", which is the question the
+  // invoice, the sales list filter and the reports actually ask.
+  //
+  // Absent on every sale written before this field existed; readers fall back
+  // to 'retail', which is what those sales were.
+  priceTier: {
+    type: String,
+    enum: ['retail', 'wholesale'],
+    default: 'retail'
+  },
   subtotal: {
     type: Number,
     required: true,

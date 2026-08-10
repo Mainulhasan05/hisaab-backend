@@ -28,6 +28,10 @@ const variant = Joi.object({
   barcode: Joi.string().trim().max(100).allow('', null),
   buyingPrice: Joi.number().min(0).required(),
   sellingPrice: Joi.number().min(0).required(),
+  // Optional, and structural bounds only — see the note on the product-level
+  // field below. Not `required()` even alongside a required `sellingPrice`:
+  // most variants never get a wholesale rate.
+  wholesalePrice: Joi.number().min(0).allow(null, ''),
   stock: quantityField.default(0),
   image: Joi.string().uri().allow('', null),
   isActive: Joi.boolean().default(true),
@@ -61,6 +65,12 @@ const baseProduct = {
   }).allow(null),
   buyingPrice: Joi.number().min(0).required(),
   sellingPrice: Joi.number().min(0).required(),
+  // Structural bounds ONLY, exactly like `unit` and `packaging` above. Joi
+  // cannot see the shop's `features.wholesale` flag, so the ENTITLEMENT
+  // decision lives in `pricing.util.normalizeWholesalePrice`, which does. `''`
+  // is accepted because that is what a cleared money box posts, and it is
+  // normalised to "no wholesale rate" rather than to ৳0.
+  wholesalePrice: Joi.number().min(0).allow(null, ''),
   stock: quantityField.default(0),
   minStock: quantityField.default(5),
   hasVariants: Joi.boolean().default(false),

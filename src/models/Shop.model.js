@@ -155,6 +155,14 @@ const shopSchema = new mongoose.Schema({
     packaging: {
       type: Boolean,
       default: false
+    },
+    // Customer-tier pricing: a customer marked `isWholesale` is billed each
+    // product's `wholesalePrice` instead of its `sellingPrice`. Read-path only
+    // — see utils/pricing.util.js. Nothing is back-filled when this flips, and
+    // nothing is lost when it flips back.
+    wholesale: {
+      type: Boolean,
+      default: false
     }
   },
   // Whether branches share one customer book or keep separate ones (Phase 7).

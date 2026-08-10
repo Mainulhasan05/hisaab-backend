@@ -40,6 +40,14 @@ const FEATURES = Object.freeze({
       'list, and the "x how many" helper on purchase entry. Off = the shop sees ' +
       'the original 13 units, integers only.',
   },
+  wholesale: {
+    bn: 'পাইকারি বিক্রি',
+    en: 'Wholesale pricing',
+    description:
+      'A second price per product, charged automatically to customers marked ' +
+      'as wholesale buyers. Products with no wholesale price fall back to the ' +
+      'retail one. Off = one price per product, as before.',
+  },
 });
 
 /** Every valid feature key. */

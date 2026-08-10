@@ -54,9 +54,13 @@ class HeldCartService {
    */
   async getHeldCartById(shopId, cartId, req = null) {
     const cart = await HeldCart.findOne(branchFilter(req, { _id: cartId, shop: shopId }))
-      .populate('customer', 'name phone')
+      // `isWholesale` and `wholesalePrice` ride along so a resumed cart shows
+      // the same prices it was held at. Both are inert for a shop without
+      // `features.wholesale` — the till never reads them, since `hasFeature`
+      // gates the client the same way it gates the server.
+      .populate('customer', 'name phone isWholesale')
       .populate('heldBy', 'name')
-      .populate('items.product', 'name code sellingPrice stock');
+      .populate('items.product', 'name code sellingPrice wholesalePrice stock');
 
     if (!cart) {
       throw new AppError('Held cart not found', 'কার্ট পাওয়া যায়নি', 404);
