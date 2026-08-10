@@ -19,23 +19,15 @@ const { MAX_DECIMALS } = require('../config/units');
 // Safe direction: customer.service depends on models only, never on reports.
 const customerService = require('./customer.service');
 
-/**
- * Snap an aggregated quantity to the registry's maximum precision.
- *
- * Reports `$sum` quantities ACROSS products, so there is no single unit to
- * round at — MAX_DECIMALS is the correct ceiling: it is the finest precision
- * any unit is allowed, so rounding there can never coarsen a real value while
- * still clearing the float residue that summing fractions leaves behind
- * (12 x 0.1 sums to 1.1102230246251565e-16 over 1.2).
- *
- * Money uses `quantizeMoney` (2 dp); this is for quantities only.
- */
-const roundReportQty = (value) => {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return 0;
-  const factor = Math.pow(10, MAX_DECIMALS);
-  return Math.round(num * factor) / factor;
-};
+// Scoping and rounding primitives are shared with staffReport.service.js — see
+// utils/reportScope.util.js for why they no longer live here.
+const {
+  baseMatch: sharedBaseMatch,
+  buildDateMatch: sharedBuildDateMatch,
+  netSaleAmountExpr,
+  roundReportQty,
+} = require('../utils/reportScope.util');
+const staffReportService = require('./staffReport.service');
 
 /**
  * Aggregation stage that applies the same snap server-side, for pipelines whose
@@ -64,15 +56,6 @@ function productScope(shopId, branchId, extra = {}) {
 // about which day a sale landed on.
 const { BD_OFFSET_MS, getBangladeshTodayStr, getBangladeshDayRange } = require('../utils/bdTime.util');
 
-function netSaleAmountExpr() {
-  return {
-    $max: [
-      { $subtract: ['$total', { $ifNull: ['$returnedAmount', 0] }] },
-      0,
-    ],
-  };
-}
-
 class ReportService {
   /**
    * Build the base $match for aggregation with optional branch scoping.
@@ -81,11 +64,7 @@ class ReportService {
    * @returns {Object} Base match object
    */
   _baseMatch(shopId, branchId = null) {
-    const match = { shop: new mongoose.Types.ObjectId(shopId) };
-    if (branchId) {
-      match.branch = new mongoose.Types.ObjectId(branchId);
-    }
-    return match;
+    return sharedBaseMatch(shopId, branchId);
   }
 
   /**
@@ -93,26 +72,7 @@ class ReportService {
    * Ensures end of day (23:59:59.999) is used when endDate is date-only string or midnight timestamp.
    */
   _buildDateMatch(startDate, endDate) {
-    if (!startDate && !endDate) return null;
-    const match = {};
-
-    if (startDate) {
-      match.$gte = new Date(startDate);
-    }
-
-    if (endDate) {
-      const end = new Date(endDate);
-      if (typeof endDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(endDate.trim())) {
-        const { endOfDay } = getBangladeshDayRange(endDate.trim());
-        match.$lte = endOfDay;
-      } else if (end.getUTCHours() === 0 && end.getUTCMinutes() === 0 && end.getUTCSeconds() === 0 && end.getUTCMilliseconds() === 0) {
-        match.$lte = new Date(end.getTime() + (24 * 60 * 60 * 1000 - 1));
-      } else {
-        match.$lte = end;
-      }
-    }
-
-    return match;
+    return sharedBuildDateMatch(startDate, endDate);
   }
 
   // Get dashboard statistics
@@ -1584,331 +1544,20 @@ class ReportService {
   }
 
   /**
-   * Staff-wise sales report: per-staff totals (net sales, paid, due, profit,
-   * count, returns) over an optional date range, sorted by net sales.
-   * Includes the owner's own sales — everyone who created a sale appears.
+   * Staff / salesman-wise reports.
+   *
+   * The implementation lives in staffReport.service.js — it grew filters,
+   * period comparison, a day-by-day series and per-line bill allocation, and
+   * this file was already 1900 lines. These two remain as the public entry
+   * points so every existing caller (controller, exportReport below) is
+   * unchanged.
    */
   async getStaffReport(shopId, options = {}, branchId = null) {
-    const { startDate, endDate, staffId } = options;
-
-    const match = {
-      ...this._baseMatch(shopId, branchId),
-      status: { $ne: 'cancelled' },
-    };
-    const dateMatch = this._buildDateMatch(startDate, endDate);
-    if (dateMatch) {
-      match.createdAt = dateMatch;
-    }
-    if (staffId) {
-      match.createdBy = new mongoose.Types.ObjectId(staffId);
-    }
-
-    const returnMatch = { ...match };
-    delete returnMatch.status; // returns have their own lifecycle
-
-    const [salesByStaff, returnsByStaff] = await Promise.all([
-      Sale.aggregate([
-        { $match: match },
-        {
-          $group: {
-            _id: '$createdBy',
-            totalSales: { $sum: netSaleAmountExpr() },
-            totalPaid: { $sum: '$paid' },
-            totalDue: { $sum: '$due' },
-            totalProfit: { $sum: '$profit' },
-            saleCount: { $sum: 1 },
-            avgSale: { $avg: netSaleAmountExpr() },
-            lastSaleAt: { $max: '$createdAt' },
-          },
-        },
-        { $sort: { totalSales: -1 } },
-      ]),
-      SalesReturn.aggregate([
-        { $match: returnMatch },
-        {
-          $group: {
-            _id: '$createdBy',
-            totalReturned: { $sum: '$totalAmount' },
-            returnCount: { $sum: 1 },
-          },
-        },
-      ]),
-    ]);
-
-    // Resolve staff identities (name, phone, role, active) in one query
-    const User = require('../models/User.model');
-    const userIds = [
-      ...new Set([
-        ...salesByStaff.map((s) => String(s._id)),
-        ...returnsByStaff.map((r) => String(r._id)),
-      ]),
-    ].filter(Boolean);
-
-    const users = await User.find({ _id: { $in: userIds } })
-      .select('name phone isOwner isActive role')
-      .populate('role', 'name')
-      .lean();
-    const userMap = new Map(users.map((u) => [String(u._id), u]));
-    const returnMap = new Map(returnsByStaff.map((r) => [String(r._id), r]));
-
-    const staff = salesByStaff.map((s) => {
-      const user = userMap.get(String(s._id));
-      const returns = returnMap.get(String(s._id));
-      return {
-        staffId: s._id,
-        name: user?.name || 'Unknown',
-        phone: user?.phone || null,
-        roleName: user?.isOwner ? 'Owner' : (user?.role?.name || null),
-        isOwner: user?.isOwner === true,
-        isActive: user?.isActive !== false,
-        totalSales: s.totalSales,
-        totalPaid: s.totalPaid,
-        totalDue: s.totalDue,
-        totalProfit: s.totalProfit,
-        saleCount: s.saleCount,
-        avgSale: Math.round(s.avgSale || 0),
-        lastSaleAt: s.lastSaleAt,
-        totalReturned: returns?.totalReturned || 0,
-        returnCount: returns?.returnCount || 0,
-      };
-    });
-
-    const summary = staff.reduce(
-      (acc, s) => {
-        acc.totalSales += s.totalSales || 0;
-        acc.totalPaid += s.totalPaid || 0;
-        acc.totalDue += s.totalDue || 0;
-        acc.totalProfit += s.totalProfit || 0;
-        acc.saleCount += s.saleCount || 0;
-        acc.totalReturned += s.totalReturned || 0;
-        acc.returnCount += s.returnCount || 0;
-        return acc;
-      },
-      { totalSales: 0, totalPaid: 0, totalDue: 0, totalProfit: 0, saleCount: 0, totalReturned: 0, returnCount: 0 }
-    );
-
-    return { staff, summary, startDate: startDate || null, endDate: endDate || null };
+    return staffReportService.getSummary(shopId, options, branchId);
   }
 
-  /**
-   * Detailed Staff Sales Report (Date-wise & Item-wise):
-   * Provides complete breakdown of which staff member sold what products on which days.
-   */
   async getDetailedStaffReport(shopId, options = {}, branchId = null) {
-    const { startDate, endDate, staffId, search } = options;
-
-    const match = {
-      ...this._baseMatch(shopId, branchId),
-      status: { $ne: 'cancelled' },
-    };
-
-    const dateMatch = this._buildDateMatch(startDate, endDate);
-    if (dateMatch) {
-      match.createdAt = dateMatch;
-    }
-    if (staffId) {
-      match.createdBy = new mongoose.Types.ObjectId(staffId);
-    }
-
-    const aggregationPipeline = [
-      { $match: match },
-      { $unwind: '$items' },
-      {
-        $group: {
-          _id: {
-            createdBy: '$createdBy',
-            date: {
-              $dateToString: {
-                format: '%Y-%m-%d',
-                date: '$createdAt',
-                timezone: '+06:00', // Bangladesh local time
-              },
-            },
-            product: '$items.product',
-            productName: '$items.productName',
-          },
-          quantitySold: { $sum: '$items.quantity' },
-          totalRevenue: { $sum: '$items.total' },
-          unitPrice: { $avg: '$items.unitPrice' },
-          buyingPrice: { $avg: { $ifNull: ['$items.buyingPrice', 0] } },
-          totalCost: {
-            $sum: {
-              $multiply: [{ $ifNull: ['$items.buyingPrice', 0] }, '$items.quantity'],
-            },
-          },
-          totalProfit: {
-            $sum: {
-              $subtract: [
-                '$items.total',
-                { $multiply: [{ $ifNull: ['$items.buyingPrice', 0] }, '$items.quantity'] },
-              ],
-            },
-          },
-          invoices: { $addToSet: '$invoiceNo' },
-          salesCount: { $addToSet: '$_id' },
-        },
-      },
-      {
-        $project: {
-          createdBy: '$_id.createdBy',
-          date: '$_id.date',
-          product: '$_id.product',
-          productName: '$_id.productName',
-          quantitySold: 1,
-          totalRevenue: 1,
-          unitPrice: 1,
-          buyingPrice: 1,
-          totalCost: 1,
-          totalProfit: 1,
-          invoiceCount: { $size: '$invoices' },
-          invoices: 1,
-          salesCount: { $size: '$salesCount' },
-        },
-      },
-      {
-        $sort: { date: -1, totalRevenue: -1 },
-      },
-    ];
-
-    const rawResults = await Sale.aggregate(aggregationPipeline);
-
-    // Collect staff IDs to fetch staff user details
-    const User = require('../models/User.model');
-    const userIds = [...new Set(rawResults.map((r) => String(r.createdBy)))].filter(Boolean);
-
-    const users = await User.find({ _id: { $in: userIds } })
-      .select('name phone isOwner isActive role')
-      .populate('role', 'name')
-      .lean();
-
-    const userMap = new Map(users.map((u) => [String(u._id), u]));
-
-    // Build flat records and hierarchical records
-    const flatItems = [];
-    const staffMap = new Map();
-
-    let grandTotalRevenue = 0;
-    let grandTotalQuantity = 0;
-    let grandTotalProfit = 0;
-
-    for (const item of rawResults) {
-      const staffUser = userMap.get(String(item.createdBy));
-      const staffName = staffUser?.name || 'Unknown Staff';
-      const staffRole = staffUser?.isOwner ? 'Owner' : (staffUser?.role?.name || 'Staff');
-
-      // Filtering search query (if search provided)
-      if (search) {
-        const query = search.toLowerCase();
-        const matchesStaff = staffName.toLowerCase().includes(query);
-        const matchesProduct = (item.productName || '').toLowerCase().includes(query);
-        const matchesDate = (item.date || '').toLowerCase().includes(query);
-        if (!matchesStaff && !matchesProduct && !matchesDate) {
-          continue;
-        }
-      }
-
-      grandTotalRevenue += item.totalRevenue || 0;
-      grandTotalQuantity = roundReportQty(grandTotalQuantity + (item.quantitySold || 0));
-      grandTotalProfit += item.totalProfit || 0;
-
-      const flatRecord = {
-        staffId: item.createdBy,
-        staffName,
-        staffPhone: staffUser?.phone || '',
-        roleName: staffRole,
-        date: item.date,
-        productId: item.product,
-        productName: item.productName,
-        // `quantitySold` is a $sum over possibly-fractional item quantities, so
-        // it needs the same snap every other quantity gets — a raw sum reaches
-        // the CSV export as 12.000000000000002.
-        quantitySold: roundReportQty(item.quantitySold),
-        // Paisa, NOT whole taka. This was `Math.round`, which is correct only
-        // while every unit price is a whole number of taka. Once a shop sells
-        // by the piece or the gram, a ৳0.50 unit price reported as ৳1 (or ৳0)
-        // makes the product report disagree with the invoices it summarises.
-        unitPrice: quantizeMoney(item.unitPrice || 0),
-        totalRevenue: Math.round(item.totalRevenue || 0),
-        totalProfit: Math.round(item.totalProfit || 0),
-        invoiceCount: item.invoiceCount,
-        invoices: item.invoices,
-      };
-
-      flatItems.push(flatRecord);
-
-      // Hierarchical grouping: Staff -> Date -> Products
-      const sIdStr = String(item.createdBy);
-      if (!staffMap.has(sIdStr)) {
-        staffMap.set(sIdStr, {
-          staffId: item.createdBy,
-          staffName,
-          staffPhone: staffUser?.phone || '',
-          roleName: staffRole,
-          isOwner: staffUser?.isOwner === true,
-          isActive: staffUser?.isActive !== false,
-          totalRevenue: 0,
-          totalQuantity: 0,
-          totalProfit: 0,
-          datesMap: new Map(),
-        });
-      }
-
-      const staffNode = staffMap.get(sIdStr);
-      staffNode.totalRevenue += item.totalRevenue || 0;
-      staffNode.totalQuantity = roundReportQty(staffNode.totalQuantity + (item.quantitySold || 0));
-      staffNode.totalProfit += item.totalProfit || 0;
-
-      if (!staffNode.datesMap.has(item.date)) {
-        staffNode.datesMap.set(item.date, {
-          date: item.date,
-          totalRevenue: 0,
-          totalQuantity: 0,
-          totalProfit: 0,
-          products: [],
-        });
-      }
-
-      const dateNode = staffNode.datesMap.get(item.date);
-      dateNode.totalRevenue += item.totalRevenue || 0;
-      dateNode.totalQuantity = roundReportQty(dateNode.totalQuantity + (item.quantitySold || 0));
-      dateNode.totalProfit += item.totalProfit || 0;
-
-      dateNode.products.push({
-        productId: item.product,
-        productName: item.productName,
-        quantitySold: roundReportQty(item.quantitySold),
-        unitPrice: quantizeMoney(item.unitPrice || 0),
-        totalRevenue: Math.round(item.totalRevenue || 0),
-        totalProfit: Math.round(item.totalProfit || 0),
-        invoiceCount: item.invoiceCount,
-        invoices: item.invoices,
-      });
-    }
-
-    // Convert Maps to Arrays
-    const staffDetails = Array.from(staffMap.values()).map((s) => ({
-      ...s,
-      totalRevenue: Math.round(s.totalRevenue),
-      totalProfit: Math.round(s.totalProfit),
-      dates: Array.from(s.datesMap.values()).map((d) => ({
-        ...d,
-        totalRevenue: Math.round(d.totalRevenue),
-        totalProfit: Math.round(d.totalProfit),
-      })),
-    }));
-
-    return {
-      staffDetails,
-      flatItems,
-      summary: {
-        totalStaff: staffDetails.length,
-        totalRevenue: Math.round(grandTotalRevenue),
-        totalQuantity: roundReportQty(grandTotalQuantity),
-        totalProfit: Math.round(grandTotalProfit),
-      },
-      startDate: startDate || null,
-      endDate: endDate || null,
-    };
+    return staffReportService.getDetailed(shopId, options, branchId);
   }
 
   // Export report (placeholder - implement actual export logic)

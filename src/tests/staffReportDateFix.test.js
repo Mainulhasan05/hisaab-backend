@@ -5,6 +5,7 @@
 const reportService = require('../services/report.service');
 const Sale = require('../models/Sale.model');
 const SalesReturn = require('../models/SalesReturn.model');
+const Payment = require('../models/Payment.model');
 const User = require('../models/User.model');
 const mongoose = require('mongoose');
 
@@ -42,6 +43,22 @@ describe('ReportService Date Range & Staff Performance Fixes', () => {
         const matchStage = pipeline.find(stage => stage.$match)?.$match;
         expect(matchStage.createdAt).toBeDefined();
         expect(matchStage.createdAt.$lte).toBeDefined();
+
+        // The summary runs two Sale pipelines: per-staff totals, and the
+        // day-by-day series behind the trend chart and heatmap. The second one
+        // groups by a compound _id, which is how they are told apart here.
+        const groupId = pipeline.find(stage => stage.$group)?.$group?._id;
+        if (groupId && typeof groupId === 'object' && groupId.date) {
+          return Promise.resolve([
+            {
+              _id: { staffId: mockUserId, date: '2026-08-05' },
+              netSales: 1500,
+              profit: 300,
+              saleCount: 2
+            }
+          ]);
+        }
+
         return Promise.resolve([
           {
             _id: mockUserId,
@@ -51,12 +68,14 @@ describe('ReportService Date Range & Staff Performance Fixes', () => {
             totalProfit: 300,
             saleCount: 2,
             avgSale: 750,
-            lastSaleAt: new Date()
+            lastSaleAt: new Date(),
+            activeDays: ['2026-08-05']
           }
         ]);
       });
 
       jest.spyOn(SalesReturn, 'aggregate').mockResolvedValue([]);
+      jest.spyOn(Payment, 'aggregate').mockResolvedValue([]);
       jest.spyOn(User, 'find').mockReturnValue({
         select: jest.fn().mockReturnValue({
           populate: jest.fn().mockReturnValue({
@@ -82,6 +101,14 @@ describe('ReportService Date Range & Staff Performance Fixes', () => {
       expect(res.staff).toHaveLength(1);
       expect(res.staff[0].name).toBe('Cashier Staff');
       expect(res.summary.totalSales).toBe(1500);
+
+      // Share of takings, and the series the chart/heatmap read.
+      expect(res.staff[0].salesShare).toBe(100);
+      expect(res.trend).toEqual([
+        { staffId: mockUserId, date: '2026-08-05', netSales: 1500, profit: 300, saleCount: 2 }
+      ]);
+      // The filter controls need the whole roster, not only those who sold.
+      expect(res.roster).toHaveLength(1);
     });
   });
 });

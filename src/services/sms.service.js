@@ -538,7 +538,10 @@ class SMSService {
 
         // Keep sale receipt SMS ASCII/GSM-7 so it usually costs one segment.
         const shopLabel = getGsmSafeShopName(shop.name);
-        const message = `${shopLabel}\nInv:${invoiceNo}\nTotal:Tk${formatSmsAmount(saleData.total)}\nPaid:Tk${formatSmsAmount(saleData.paid)}\nDue:Tk${formatSmsAmount(saleData.due)}\nThanks for visiting\n- ${shopLabel}`;
+        // The shop name signs off at the bottom only. It used to head the
+        // message as well, so every receipt named the shop twice — wasted
+        // characters in a message that is billed by 160-character segment.
+        const message = `Inv:${invoiceNo}\nTotal:Tk${formatSmsAmount(saleData.total)}\nPaid:Tk${formatSmsAmount(saleData.paid)}\nDue:Tk${formatSmsAmount(saleData.due)}\nThanks for visiting\n- ${shopLabel}`;
 
         // Send SMS with invoice metadata
         const sendResult = await this.sendSingle(shopId, userId, customerPhone, message, saleData.customerId, null, {
@@ -637,7 +640,7 @@ class SMSService {
         id: 'sale_receipt',
         name: 'Sale Receipt',
         nameEn: 'Sale Receipt',
-        template: `${shopName}\nInv:{invoice_no}\nTotal:Tk{total}\nPaid:Tk{paid}\nDue:Tk{due}\nThanks for visiting\n- ${shopName}`,
+        template: `Inv:{invoice_no}\nTotal:Tk{total}\nPaid:Tk{paid}\nDue:Tk{due}\nThanks for visiting\n- ${shopName}`,
         variables: ['shop_name', 'invoice_no', 'total', 'paid', 'due'],
       },
       {
