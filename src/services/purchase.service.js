@@ -18,6 +18,7 @@ const {
   quantizeMoney,
 } = require('../utils/quantity.util');
 const { resolveLineQuantity } = require('../utils/packaging.util');
+const { deductBatches, batchWriteOp, sameOwner } = require('../utils/batch.util');
 
 class PurchaseService {
   // Get all purchases with filtering and pagination
@@ -207,6 +208,23 @@ class PurchaseService {
       }
       const itemTotal = quantizeMoney(quantity * unitPrice);
 
+      // A variant line must name a variant that exists. Without this the id
+      // falls through to the stock write, whose `arrayFilters` match nothing,
+      // and `bulkWrite` reports success for a delivery that increased no stock
+      // at all — goods received, ledger written, shelf count unchanged.
+      if (item.variantId) {
+        const exists = (product.variants && typeof product.variants.id === 'function')
+          ? product.variants.id(item.variantId)
+          : product.variants?.find(v => String(v._id || v.id) === String(item.variantId));
+        if (!exists) {
+          throw new AppError(
+            `Variant not found on ${product.name}`,
+            `"${product.name}" এর এই ভ্যারিয়েন্টটি পাওয়া যায়নি`,
+            404
+          );
+        }
+      }
+
       preparedItems.push({
         product: product._id,
         productName: product.name,
@@ -222,6 +240,13 @@ class PurchaseService {
         unitPrice,
         packUnitPrice: packUnitPrice || undefined,
         total: itemTotal,
+        // The delivery's own batch details. These were read straight off the
+        // raw `item` at the stock-write below and never stored, so the expiry a
+        // shopkeeper typed on a purchase existed only as a side effect on the
+        // product — the purchase record itself could not say which batch it
+        // brought in, and a cancelled purchase had no way to find it again.
+        batchNumber: item.batchNumber ? String(item.batchNumber).trim() : undefined,
+        expiryDate: item.expiryDate ? new Date(item.expiryDate) : undefined,
       });
 
       totalAmount = quantizeMoney(totalAmount + itemTotal);
@@ -285,6 +310,37 @@ class PurchaseService {
       const stkUnit = storageUnit(product);
       let newStock;
 
+      // ── The received batch ──────────────────────────────────────────────
+      //
+      // Built once, ABOVE the variant / non-variant split, and stamped with the
+      // variant it belongs to. It used to sit inside the `else`, which meant a
+      // delivery of a variant product created no batch at all — so a shop could
+      // have expiry tracking on, receive stock every week, and never accumulate
+      // a single dated batch to be warned about. Combined with the same split
+      // in the sale path, per-variant expiry was not partially implemented; it
+      // was absent while appearing to be present.
+      //
+      // Rides in the SAME update as the stock change rather than a second
+      // `save()` of the whole document, and `$push` avoids rewriting the entire
+      // batches array the way that second save did.
+      const batchPush = product.trackBatches
+        ? {
+            batches: {
+              variantId: item.variantId || null,
+              // Generated when the supplier's bill carries no batch code, which
+              // is most of the time in a small shop. The expiry date is the
+              // part that matters and it is kept verbatim; the number exists so
+              // nothing in the ledger is unidentifiable.
+              batchNumber: item.batchNumber || `B-${purchase.invoiceNo}-${Date.now()}`,
+              expiryDate: item.expiryDate || null,
+              quantity: item.quantity,
+              costPrice: item.unitPrice,
+              receivedDate: new Date(),
+              purchaseRef: purchase._id,
+            },
+          }
+        : null;
+
       if (item.variantId && product.hasVariants) {
         const variant = (product.variants && typeof product.variants.id === 'function')
           ? product.variants.id(item.variantId)
@@ -296,7 +352,10 @@ class PurchaseService {
         purchaseStockOps.push({
           updateOne: {
             filter: { _id: product._id },
-            update: { $set: { 'variants.$[v].stock': newStock } },
+            update: {
+              $set: { 'variants.$[v].stock': newStock },
+              ...(batchPush ? { $push: batchPush } : {}),
+            },
             arrayFilters: [{ 'v._id': item.variantId }],
           },
         });
@@ -304,22 +363,10 @@ class PurchaseService {
         product.stock = quantize(product.stock + item.quantity, stkUnit);
         newStock = product.stock;
 
-        // Batch tracking rides in the SAME update as the stock change rather
-        // than a second `save()` of the whole document. `$push` also avoids
-        // rewriting the entire batches array, which the second save did.
-        const update = { $set: { stock: newStock } };
-        if (product.trackBatches) {
-          update.$push = {
-            batches: {
-              batchNumber: item.batchNumber || `B-${purchase.invoiceNo}-${Date.now()}`,
-              expiryDate: item.expiryDate || null,
-              quantity: item.quantity,
-              costPrice: item.unitPrice,
-              receivedDate: new Date(),
-              purchaseRef: purchase._id,
-            },
-          };
-        }
+        const update = {
+          $set: { stock: newStock },
+          ...(batchPush ? { $push: batchPush } : {}),
+        };
         purchaseStockOps.push({ updateOne: { filter: { _id: product._id }, update } });
       }
 
@@ -481,6 +528,36 @@ class PurchaseService {
             update: { $set: { stock: newStock } },
           },
         });
+      }
+
+      // ── Reverse the batch this line brought in ──────────────────────────
+      //
+      // Cancelling a delivery removes the goods; the batch that came with them
+      // has to go too, or the expiry screen keeps warning about stock that was
+      // sent back to the supplier. Preferred by `purchaseRef` — the exact rows
+      // this purchase created — so a cancellation cannot eat a batch that
+      // arrived on a different delivery and happens to expire sooner.
+      //
+      // Anything already sold out of that batch is simply not there to remove;
+      // FEFO drained it and `stock` reflects that. Whatever is left over falls
+      // back to a plain FEFO deduction, which is the honest approximation: the
+      // shop cannot return goods it no longer holds.
+      if (product.trackBatches && Array.isArray(product.batches) && product.batches.length) {
+        const owner = item.variantId || null;
+        let toRemove = item.quantity;
+
+        for (const b of product.batches) {
+          if (toRemove <= 0) break;
+          if (!sameOwner(b.variantId, owner)) continue;
+          if (String(b.purchaseRef || '') !== String(purchase._id)) continue;
+          const take = Math.min(toRemove, b.quantity);
+          b.quantity -= take;
+          toRemove -= take;
+        }
+        product.batches = product.batches.filter(b => b.quantity > 0);
+        if (toRemove > 0) deductBatches(product, owner, toRemove);
+
+        cancelStockOps.push(batchWriteOp(product));
       }
 
       // Create reversal stock transaction

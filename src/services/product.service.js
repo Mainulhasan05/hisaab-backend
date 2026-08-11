@@ -20,6 +20,7 @@ const { normalizeWholesalePrice } = require('../utils/pricing.util');
 const cacheService = require('./cache.service');
 const { KEYS, getTTL } = require('../config/cacheKeys');
 const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.util');
+const { capBatchesToStock } = require('../utils/batch.util');
 
 // Escape user input before embedding it in a $regex (prevents regex injection/ReDoS)
 const escapeRegex = (str) => String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -523,6 +524,88 @@ class ProductService {
     return brand._id;
   }
 
+  /**
+   * The `batches` array a newly created product starts life with.
+   *
+   * ───────────────────────────────────────────────────────────────────────────
+   * WHY A VARIANT PRODUCT CANNOT USE THE TOP-LEVEL `batches` ARRAY
+   * ───────────────────────────────────────────────────────────────────────────
+   *
+   * Because the client has no variant ids to point at. `_formatVariants` mints
+   * them (`new mongoose.Types.ObjectId()`), so a request body composed before
+   * that call can only identify a variant by its POSITION. Hence
+   * `variants[i].openingBatch`, zipped against `formattedVariants[i]` here —
+   * both arrays are produced by a 1:1 `map` over the same input, so the indexes
+   * cannot drift.
+   *
+   * ───────────────────────────────────────────────────────────────────────────
+   * WHAT THIS REPLACES
+   * ───────────────────────────────────────────────────────────────────────────
+   *
+   * The create form used to post ONE product-level batch whatever the product
+   * was, with `quantity: parseStock(formData.stock)`. On a variant product the
+   * stock box is not even rendered — variant stock lives on the rows — so that
+   * read an empty string and stored a batch of quantity 0. The expiry-alerts
+   * screen filters on `quantity > 0`, so the row never appeared: the shopkeeper
+   * set an expiry date, saw it save, and was never warned about it. A feature
+   * that silently does nothing is worse than one that is visibly absent.
+   *
+   * Quantity is the variant's own stock and cost is its own buying price, by
+   * definition — see the note in the validation schema for why a client is not
+   * allowed to send a third number that could disagree with them.
+   *
+   * @param {Array} formattedVariants  output of `_formatVariants` (has _id)
+   * @param {Array} rawVariants        the request's variant rows (has openingBatch)
+   * @param {Array} productBatches     top-level `batches`, non-variant products only
+   * @param {string} code              product code, for generated batch numbers
+   */
+  _buildOpeningBatches(formattedVariants, rawVariants, productBatches, code) {
+    const stamp = (batch, variantId, quantity, costPrice, index) => {
+      const qty = Number(quantity) || 0;
+      const expiryDate = batch?.expiryDate ? new Date(batch.expiryDate) : null;
+      const batchNumber = String(batch?.batchNumber || '').trim();
+
+      // Nothing to track. Not an error: the batch card is a single toggle for
+      // the whole product, so a shop that tracks expiry on its milk still has
+      // rows it has not dated yet.
+      if (!batchNumber && !expiryDate) return null;
+      // No stock means nothing on the shelf to go off. A zero-quantity batch is
+      // exactly the phantom row this function exists to stop producing.
+      if (qty <= 0) return null;
+
+      return {
+        variantId: variantId || null,
+        // An expiry date with no batch number is the common case in a small
+        // shop — the date is printed on the packet, the batch code often is not
+        // legible or is simply not worth typing. Generating one keeps the field
+        // required at the model (so nothing is ever unidentifiable in the
+        // ledger) without making the shopkeeper invent a code.
+        batchNumber: batchNumber || `B-${code || 'PRD'}-${index + 1}`,
+        expiryDate,
+        quantity: qty,
+        costPrice: Number(costPrice) || 0,
+      };
+    };
+
+    if (formattedVariants.length > 0) {
+      return formattedVariants
+        .map((fv, i) => stamp(
+          rawVariants?.[i]?.openingBatch,
+          fv._id,
+          fv.stock,
+          fv.buyingPrice,
+          i
+        ))
+        .filter(Boolean);
+    }
+
+    // Non-variant: the product-level array, with `variantId` forced to null.
+    // A client cannot smuggle a variant id onto a product that has no variants.
+    return (Array.isArray(productBatches) ? productBatches : [])
+      .map((b, i) => stamp(b, null, b?.quantity, b?.costPrice, i))
+      .filter(Boolean);
+  }
+
   async createProduct(shopId, userId, productData, req = null) {
     const { code, name, category, variants, packaging, ...rest } = productData;
 
@@ -566,6 +649,14 @@ class ProductService {
     }
 
     const formattedVariants = this._formatVariants(variants, wholesaleEnabled);
+    // Assigned rather than left to `...rest` so the top-level `batches` a client
+    // sent can never reach the document unmapped — on a variant product it
+    // would be a batch belonging to no variant, which FEFO could not find and
+    // the alerts screen could not name.
+    rest.batches = rest.trackBatches
+      ? this._buildOpeningBatches(formattedVariants, variants, rest.batches, code)
+      : [];
+
     const product = await Product.create({
       shop: shopId,
       branch: requireBranch(req),
@@ -938,6 +1029,27 @@ class ProductService {
         }
         newStock = product.stock;
       }
+
+      // ── Keep batches from out-running stock ──────────────────────────────
+      //
+      // A recount is the one place a shopkeeper overrides the system's count
+      // with their own, and this path did not touch `batches` at all. So
+      // recounting 30 down to 8 left 30 batched — and the expiry screen went on
+      // warning about 22 packets that were not on the shelf. Warnings about
+      // goods that are not there are how a shopkeeper learns to ignore the
+      // screen entirely.
+      //
+      // Only ever trims, never grows: a recount UP means stock arrived without
+      // a delivery being recorded, and there is no honest expiry date to invent
+      // for it. That surplus shows on the batch panel as `untracked`, which is
+      // the truth — the shopkeeper can date it themselves.
+      //
+      // Soonest-expiry-first, because if packets are missing at a recount the
+      // expired ones are far and away the likeliest to have been thrown out.
+      if (capBatchesToStock(product, variantId || null, newStock)) {
+        product.markModified('batches');
+      }
+
       await product.save();
     }
 
@@ -980,6 +1092,444 @@ class ProductService {
     });
 
     return this._transformProduct(product);
+  }
+
+  // ══ Batch / expiry management ═══════════════════════════════════════════════
+  //
+  // Batches are edited HERE and not through the product form. `updateProduct`
+  // takes a whole-document body from a form that has never displayed a batch,
+  // so letting it write `batches` means every save is an unconditional
+  // overwrite — which is precisely how the array used to be destroyed on an
+  // unrelated price edit (see `updateProduct`'s `batches: Joi.forbidden()`).
+  //
+  // ── THE INVARIANT THESE METHODS EXIST TO KEEP ────────────────────────────────
+  //
+  //     For each sellable thing (a variant, or the product when it has none):
+  //     sum(batch quantities) <= that thing's stock.
+  //
+  // Batches DESCRIBE stock; they do not create it. Stock arrives through a
+  // purchase or a manual adjustment, and a batch says "of the 30 packets I
+  // have, these 12 expire in June". So adding a batch never moves `stock`, and
+  // a batch that would claim more than is on the shelf is refused rather than
+  // silently accepted — an over-claimed batch makes FEFO deduct stock that was
+  // never there and the alerts screen warn about goods the shop does not hold.
+  //
+  // The sum may legitimately be LESS than stock: a shop that turns expiry
+  // tracking on mid-life has stock it has not dated yet, and the shopkeeper
+  // fills those in as the old boxes sell through. That gap is reported as
+  // `untracked` rather than treated as an error.
+
+  /**
+   * Stock of one sellable thing. `variantId` null = the product itself.
+   * Throws if the variant does not exist, so a mistyped id cannot silently
+   * validate a batch against the wrong pool.
+   */
+  _stockForOwner(product, variantId) {
+    if (!variantId) return product.stock || 0;
+
+    const variant = (product.variants && typeof product.variants.id === 'function')
+      ? product.variants.id(variantId)
+      : product.variants?.find(v => String(v._id || v.id) === String(variantId));
+
+    if (!variant) {
+      throw new AppError('Variant not found', 'ভেরিয়েন্ট পাওয়া যায়নি', 404);
+    }
+    return variant.stock || 0;
+  }
+
+  /**
+   * How much of one owner's stock is already claimed by batches.
+   * `excludeBatchId` drops the row being edited, so raising a batch from 10 to
+   * 12 is checked against the other batches rather than against itself.
+   */
+  _batchedQtyFor(product, variantId, excludeBatchId = null) {
+    return (product.batches || [])
+      .filter(b => Product.sameBatchOwner(b.variantId, variantId))
+      .filter(b => !excludeBatchId || String(b._id) !== String(excludeBatchId))
+      .reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
+  }
+
+  /**
+   * Refuse a batch that claims more stock than the owner actually holds.
+   * The Bengali message names the shortfall, because "৩০টির মধ্যে ২৫টি ইতিমধ্যে
+   * ব্যাচে আছে, তাই সর্বোচ্চ ৫টি দিতে পারবেন" is actionable and "invalid
+   * quantity" is not.
+   */
+  _assertBatchFits(product, variantId, quantity, excludeBatchId = null) {
+    const stock = this._stockForOwner(product, variantId);
+    const claimed = this._batchedQtyFor(product, variantId, excludeBatchId);
+    const room = stock - claimed;
+
+    if (quantity > room) {
+      throw new AppError(
+        `Batch quantity ${quantity} exceeds untracked stock ${room} (stock ${stock}, already batched ${claimed})`,
+        `স্টকে আছে ${stock}টি, তার মধ্যে ${claimed}টি ইতিমধ্যে ব্যাচে আছে — এই ব্যাচে সর্বোচ্চ ${room}টি দিতে পারবেন`,
+        400
+      );
+    }
+  }
+
+  /** The product, scoped to shop + branch, or a 404. */
+  async _loadProductForBatches(shopId, productId, req) {
+    const product = await Product.findOne(
+      branchFilter(req, { _id: productId, shop: shopId, isDeleted: { $ne: true } })
+    );
+    if (!product) {
+      throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
+    }
+    return product;
+  }
+
+  async _logBatchAudit(shopId, userId, product, action, actionBn, description, changes) {
+    await AuditLog.create({
+      shop: shopId,
+      user: userId,
+      action,
+      actionBn,
+      description,
+      descriptionBn: description,
+      entity: { type: 'product', id: product._id, name: product.name },
+      changes,
+    });
+  }
+
+  /**
+   * Every batch on a product, grouped by the thing it belongs to, with the
+   * untracked remainder spelled out per owner.
+   *
+   * Returns owners with NO batches too. A variant the shopkeeper has not dated
+   * yet is the row they most need to see — omitting it would make the panel
+   * look complete while half the shelf is unaccounted for.
+   */
+  async getProductBatches(shopId, productId, req = null) {
+    const product = await this._loadProductForBatches(shopId, productId, req);
+
+    const owners = product.hasVariants && product.variants?.length
+      ? product.variants.map(v => ({
+          variantId: String(v._id),
+          label: v.sku,
+          attributes: v.attributes,
+          isActive: v.isActive,
+          stock: v.stock || 0,
+        }))
+      : [{ variantId: null, label: product.name, attributes: null, isActive: true, stock: product.stock || 0 }];
+
+    return {
+      productId: String(product._id),
+      name: product.name,
+      code: product.code,
+      unit: product.unit,
+      trackBatches: Boolean(product.trackBatches),
+      hasVariants: Boolean(product.hasVariants),
+      owners: owners.map(o => {
+        const batches = product.batchesFor(o.variantId).map(b => ({
+          _id: String(b._id),
+          batchNumber: b.batchNumber,
+          expiryDate: b.expiryDate,
+          quantity: b.quantity,
+          costPrice: b.costPrice,
+          receivedDate: b.receivedDate,
+        }));
+        const tracked = batches.reduce((s, b) => s + (b.quantity || 0), 0);
+        return { ...o, batches, tracked, untracked: Math.max(0, o.stock - tracked) };
+      }),
+    };
+  }
+
+  /**
+   * Add a batch to a product, or to one of its variants.
+   *
+   * Turning `trackBatches` on is implicit: a shopkeeper who has just typed an
+   * expiry date has answered the question the toggle asks, and making them go
+   * back to the product form to flip a switch before the date will save is a
+   * step that exists only because of how the data is stored.
+   */
+  async addProductBatch(shopId, userId, productId, batchData, req = null) {
+    if (req) requireBranch(req);
+    const product = await this._loadProductForBatches(shopId, productId, req);
+
+    const variantId = batchData.variantId || null;
+    if (variantId && !product.hasVariants) {
+      throw new AppError(
+        'Product has no variants',
+        'এই পণ্যের কোনো ভ্যারিয়েন্ট নেই',
+        400
+      );
+    }
+    // Validates the variant exists (throws 404) as well as the arithmetic.
+    const quantity = parseQuantity(batchData.quantity, quantityUnit(req, product), {
+      label: product.name,
+    });
+    this._assertBatchFits(product, variantId, quantity);
+
+    product.batches.push({
+      variantId,
+      batchNumber: String(batchData.batchNumber).trim(),
+      expiryDate: batchData.expiryDate ? new Date(batchData.expiryDate) : null,
+      quantity,
+      costPrice: batchData.costPrice === '' || batchData.costPrice == null
+        ? undefined
+        : Number(batchData.costPrice),
+    });
+    if (!product.trackBatches) product.trackBatches = true;
+    await product.save();
+
+    await this._logBatchAudit(
+      shopId, userId, product, 'product_update', 'ব্যাচ যোগ',
+      `Added batch ${batchData.batchNumber} to ${product.name}`,
+      { after: { batchNumber: batchData.batchNumber, expiryDate: batchData.expiryDate, quantity, variantId } }
+    );
+
+    return this.getProductBatches(shopId, productId, req);
+  }
+
+  /**
+   * Correct a batch. The whole reason this endpoint exists: an expiry date
+   * typed wrong at creation was previously uncorrectable, because the product
+   * form does not render batches and nothing else could write them.
+   *
+   * `variantId` is deliberately NOT editable. Moving a batch between variants
+   * moves stock claims between two pools and would need both to be re-checked;
+   * delete and re-add says the same thing without a half-applied middle state.
+   */
+  async updateProductBatch(shopId, userId, productId, batchId, updates, req = null) {
+    if (req) requireBranch(req);
+    const product = await this._loadProductForBatches(shopId, productId, req);
+
+    const batch = product.batches?.id(batchId);
+    if (!batch) {
+      throw new AppError('Batch not found', 'ব্যাচটি পাওয়া যায়নি', 404);
+    }
+
+    const before = {
+      batchNumber: batch.batchNumber,
+      expiryDate: batch.expiryDate,
+      quantity: batch.quantity,
+    };
+
+    if (updates.quantity !== undefined) {
+      const quantity = parseQuantity(updates.quantity, quantityUnit(req, product), {
+        label: product.name,
+        allowZero: true,
+      });
+      this._assertBatchFits(product, batch.variantId || null, quantity, batchId);
+      batch.quantity = quantity;
+    }
+    if (updates.batchNumber !== undefined) batch.batchNumber = String(updates.batchNumber).trim();
+    if ('expiryDate' in updates) {
+      batch.expiryDate = updates.expiryDate ? new Date(updates.expiryDate) : null;
+    }
+    if ('costPrice' in updates) {
+      batch.costPrice = updates.costPrice === '' || updates.costPrice == null
+        ? undefined
+        : Number(updates.costPrice);
+    }
+
+    await product.save();
+
+    await this._logBatchAudit(
+      shopId, userId, product, 'product_update', 'ব্যাচ সংশোধন',
+      `Updated batch ${batch.batchNumber} on ${product.name}`,
+      { before, after: { batchNumber: batch.batchNumber, expiryDate: batch.expiryDate, quantity: batch.quantity } }
+    );
+
+    return this.getProductBatches(shopId, productId, req);
+  }
+
+  /**
+   * Remove a batch. Stock is NOT reduced — the goods are still on the shelf,
+   * they are simply no longer dated. Deducting here would let a shopkeeper
+   * destroy inventory by tidying up a mistyped batch row.
+   */
+  async deleteProductBatch(shopId, userId, productId, batchId, req = null) {
+    if (req) requireBranch(req);
+    const product = await this._loadProductForBatches(shopId, productId, req);
+
+    const batch = product.batches?.id(batchId);
+    if (!batch) {
+      throw new AppError('Batch not found', 'ব্যাচটি পাওয়া যায়নি', 404);
+    }
+
+    const removed = {
+      batchNumber: batch.batchNumber,
+      expiryDate: batch.expiryDate,
+      quantity: batch.quantity,
+    };
+    batch.deleteOne();
+    await product.save();
+
+    await this._logBatchAudit(
+      shopId, userId, product, 'product_update', 'ব্যাচ মুছে ফেলা',
+      `Removed batch ${removed.batchNumber} from ${product.name}`,
+      { before: removed, after: null }
+    );
+
+    return this.getProductBatches(shopId, productId, req);
+  }
+
+  /**
+   * Batches expiring within `days`, soonest first — ONE ROW PER BATCH.
+   *
+   * ───────────────────────────────────────────────────────────────────────────
+   * WHY THIS IS A SERVER QUERY NOW
+   * ───────────────────────────────────────────────────────────────────────────
+   *
+   * The expiry-alerts screen used to call `GET /products?limit=200` and do the
+   * whole job in the browser: filter to `trackBatches`, walk every batch, work
+   * out the days remaining, sort. Three things were wrong with that, in
+   * increasing order of severity:
+   *
+   *   - it shipped 200 full product documents (variants, images, batch history)
+   *     to render at most a handful of rows;
+   *   - `trackBatches=true` was passed as a query parameter that `getProducts`
+   *     has never read, so it did nothing;
+   *   - and the 200 were the 200 most RECENTLY CREATED products. A shop with
+   *     201 products could not see the expiry of the oldest one. Silently: the
+   *     screen said "সব ঠিক আছে!" with expired stock on the shelf.
+   *
+   * A screen a shopkeeper is meant to trust cannot be wrong in the quiet
+   * direction. So the filtering happens where the data is, against the
+   * {shop, trackBatches, batches.expiryDate} index, and pagination is real.
+   *
+   * ── One row per BATCH, not per product ──────────────────────────────────────
+   *
+   * Two variants of the same milk powder expire on different dates and are two
+   * separate things to act on — you pull the ৫০০ গ্রাম packets off the shelf and
+   * leave the ১ কেজি ones. Grouping them under one product row would force the
+   * screen to re-flatten what the database just grouped, which is the shape
+   * that made the old client-side version awkward.
+   */
+  async getExpiringBatches(shopId, options = {}, req = null) {
+    const days = Number.isFinite(Number(options.days)) ? Number(options.days) : 30;
+    const page = Math.max(1, parseInt(options.page) || 1);
+    const limit = Math.min(200, Math.max(1, parseInt(options.limit) || 50));
+    const includeExpired = options.includeExpired !== false && options.includeExpired !== 'false';
+
+    const now = new Date();
+    const threshold = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+
+    // I-3: `$match` does not cast. `shop` must be a real ObjectId here or this
+    // matches nothing at all — silently, which on this screen reads as "no
+    // product is expiring".
+    const match = branchMatch(req, {
+      shop: new mongoose.Types.ObjectId(shopId),
+      isDeleted: { $ne: true },
+      trackBatches: true,
+    });
+
+    const batchMatch = {
+      'batches.quantity': { $gt: 0 },
+      // An undated batch is not "expiring" — it is unrecorded, and listing it
+      // here would bury the dated rows this screen exists for.
+      'batches.expiryDate': includeExpired
+        ? { $ne: null, $lte: threshold }
+        : { $ne: null, $gte: now, $lte: threshold },
+    };
+
+    // The variant a batch belongs to, resolved inside the pipeline so the
+    // screen can say "৫০০ গ্রাম" rather than an ObjectId. `$filter` over the
+    // product's own variants — no lookup, they are in the same document.
+    const variantExpr = {
+      $first: {
+        $filter: {
+          input: { $ifNull: ['$variants', []] },
+          as: 'v',
+          cond: { $eq: ['$$v._id', '$batches.variantId'] },
+        },
+      },
+    };
+
+    const [result] = await Product.aggregate([
+      { $match: match },
+      { $unwind: '$batches' },
+      { $match: batchMatch },
+      {
+        $facet: {
+          rows: [
+            { $sort: { 'batches.expiryDate': 1, _id: 1 } },
+            { $skip: (page - 1) * limit },
+            { $limit: limit },
+            {
+              $project: {
+                _id: 0,
+                productId: '$_id',
+                name: 1,
+                code: 1,
+                unit: 1,
+                hasVariants: 1,
+                batchId: '$batches._id',
+                batchNumber: '$batches.batchNumber',
+                expiryDate: '$batches.expiryDate',
+                quantity: '$batches.quantity',
+                costPrice: '$batches.costPrice',
+                variantId: '$batches.variantId',
+                variantSku: { $ifNull: [{ $let: { vars: { v: variantExpr }, in: '$$v.sku' } }, null] },
+                variantAttributes: { $ifNull: [{ $let: { vars: { v: variantExpr }, in: '$$v.attributes' } }, null] },
+              },
+            },
+          ],
+          summary: [
+            {
+              $group: {
+                _id: null,
+                total: { $sum: 1 },
+                expired: { $sum: { $cond: [{ $lt: ['$batches.expiryDate', now] }, 1, 0] } },
+                critical: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $gte: ['$batches.expiryDate', now] },
+                          { $lte: ['$batches.expiryDate', new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)] },
+                        ],
+                      },
+                      1,
+                      0,
+                    ],
+                  },
+                },
+                totalQuantity: { $sum: '$batches.quantity' },
+              },
+            },
+          ],
+        },
+      },
+    ]);
+
+    const summary = result?.summary?.[0] || { total: 0, expired: 0, critical: 0, totalQuantity: 0 };
+    const rows = (result?.rows || []).map(r => {
+      const expiry = new Date(r.expiryDate);
+      // Computed here rather than in the browser so every consumer — the
+      // screen, the daily digest, a future SMS alert — agrees on what "৩ দিন
+      // বাকি" means. `Math.ceil` so anything still in the future reads as at
+      // least 1 day rather than rounding down to "0 days" while it is saleable.
+      const daysLeft = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
+      return {
+        ...r,
+        productId: String(r.productId),
+        batchId: String(r.batchId),
+        variantId: r.variantId ? String(r.variantId) : null,
+        daysLeft,
+        isExpired: expiry < now,
+        urgency: expiry < now ? 'expired' : daysLeft <= 7 ? 'critical' : 'warning',
+      };
+    });
+
+    return {
+      data: rows,
+      summary: {
+        total: summary.total || 0,
+        expired: summary.expired || 0,
+        critical: summary.critical || 0,
+        totalQuantity: summary.totalQuantity || 0,
+      },
+      pagination: {
+        page,
+        limit,
+        total: summary.total || 0,
+        pages: Math.ceil((summary.total || 0) / limit),
+      },
+    };
   }
 
   // Get low stock products
@@ -1100,7 +1650,11 @@ class ProductService {
       // attribute named "wholesalePrice" that renders on the invoice next to
       // size and colour, while the price column stays empty.
       const customKeys = Object.keys(v).filter(k =>
-        !['id', '_id', 'sku', 'barcode', 'buyingPrice', 'sellingPrice', 'wholesalePrice', 'stock', 'image', 'isActive', 'attributes'].includes(k) &&
+        // `openingBatch` is consumed by `_buildOpeningBatches` and stored on the
+        // product's `batches` array, NOT on the variant. Without it in this
+        // list it would be swept into `attributes.custom` and rendered on the
+        // invoice as an attribute called "openingBatch" beside size and colour.
+        !['id', '_id', 'sku', 'barcode', 'buyingPrice', 'sellingPrice', 'wholesalePrice', 'stock', 'image', 'isActive', 'attributes', 'openingBatch'].includes(k) &&
         !knownKeys.includes(k)
       );
 

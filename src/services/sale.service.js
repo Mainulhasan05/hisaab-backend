@@ -27,6 +27,7 @@ const {
 } = require('../utils/quantity.util');
 const { resolveLineQuantity, unitPriceFor } = require('../utils/packaging.util');
 const { priceTierFor, sellingPriceFor, hasWholesalePrice } = require('../utils/pricing.util');
+const { deductBatches, batchWriteOp } = require('../utils/batch.util');
 
 // Bangladesh is UTC+6
 const BD_OFFSET_MS = 6 * 60 * 60 * 1000;
@@ -550,68 +551,48 @@ class SaleService {
           createdBy: userId,
         });
 
-        // ── FEFO batch deduction ───────────────────────────────────────────
-        //
-        // First-Expiry-First-Out: the batch that goes off soonest leaves the
-        // shelf first, so a shop selling medicine or food is never left holding
-        // the short-dated stock.
-        //
-        // ─────────────────────────────────────────────────────────────────────
-        // THIS USED TO MUTATE THE DOCUMENT AND THROW THE RESULT AWAY
-        // ─────────────────────────────────────────────────────────────────────
-        //
-        // The arithmetic below has always been here, and it has always run on
-        // the in-memory `product` — which is never `.save()`d on this path,
-        // because stock goes out through the atomic `bulkWrite` above and not
-        // through the document. So batch quantities only ever went UP: purchases
-        // pushed new batches, sales silently deducted nothing, and after a few
-        // months `sum(batches.quantity)` bore no relation to `stock`.
-        //
-        // The visible symptom was the expiry-alerts screen warning about stock
-        // that had been sold long ago — which trains a shopkeeper to ignore it,
-        // which is worse than not having the screen.
-        //
-        // So the deduction is now queued as a real update (`bulkBatchOps`) and
-        // written after the stock guard passes. It is a SEPARATE bulkWrite, not
-        // another op in the stock one: `modifiedCount < expectedStockOps` is the
-        // oversell guard, and adding unrelated ops to the batch it counts would
-        // let a lost stock race hide behind a successful batch write.
-        if (product.trackBatches && product.batches?.length > 0) {
-          let remaining = item.quantity;
-          // Sort batches by expiryDate ascending (FEFO), null expiry last
-          const sorted = product.batches
-            .filter(b => b.quantity > 0)
-            .sort((a, b) => {
-              if (!a.expiryDate) return 1;
-              if (!b.expiryDate) return -1;
-              return new Date(a.expiryDate) - new Date(b.expiryDate);
-            });
-          for (const batch of sorted) {
-            if (remaining <= 0) break;
-            const deduct = Math.min(remaining, batch.quantity);
-            batch.quantity -= deduct;
-            remaining -= deduct;
-          }
-          // Remove empty batches
-          product.batches = product.batches.filter(b => b.quantity > 0);
+      }
 
-          // The whole array is rewritten rather than patched per element: the
-          // deduction may empty several batches at once, and the in-memory copy
-          // is already the exact desired end state. `toObject` strips the
-          // Mongoose subdocument wrappers that bulkWrite cannot serialise.
-          bulkBatchOps.push({
-            updateOne: {
-              filter: { _id: product._id },
-              update: {
-                $set: {
-                  batches: product.batches.map(b =>
-                    (typeof b.toObject === 'function' ? b.toObject() : b)
-                  ),
-                },
-              },
-            },
-          });
-        }
+      // ── FEFO batch deduction ─────────────────────────────────────────────
+      //
+      // First-Expiry-First-Out: the batch that goes off soonest leaves the
+      // shelf first, so a shop selling medicine or food is never left holding
+      // the short-dated stock.
+      //
+      // ───────────────────────────────────────────────────────────────────────
+      // WHY THIS SITS OUTSIDE THE VARIANT / NON-VARIANT SPLIT
+      // ───────────────────────────────────────────────────────────────────────
+      //
+      // It used to live inside the `else`, i.e. non-variant products only.
+      // `trackBatches` appeared exactly once in this whole file and it was in
+      // there. So a shop could turn expiry tracking on for a product with
+      // variants, watch it save, and have it do NOTHING: no deduction on sale,
+      // and — because the purchase path had the same split — no batch to deduct
+      // from in the first place. The toggle was live and inert at once, which is
+      // the worst way for a feature to be missing.
+      //
+      // `item.variantId || null` is the owner. A batch belongs to one variant,
+      // or to the product itself; selling ৫০০ গ্রাম packets must not consume the
+      // ১ কেজি batch even though both live in the same array.
+      //
+      // ───────────────────────────────────────────────────────────────────────
+      // THIS USED TO MUTATE THE DOCUMENT AND THROW THE RESULT AWAY
+      // ───────────────────────────────────────────────────────────────────────
+      //
+      // The arithmetic ran on the in-memory `product` — which is never
+      // `.save()`d on this path, because stock goes out through the atomic
+      // `bulkWrite` above and not through the document. So batch quantities only
+      // ever went UP: purchases pushed new batches, sales silently deducted
+      // nothing, and after a few months `sum(batches.quantity)` bore no relation
+      // to `stock`.
+      //
+      // So the deduction is queued as a real update (`bulkBatchOps`) and written
+      // after the stock guard passes. It is a SEPARATE bulkWrite, not another op
+      // in the stock one: `modifiedCount < expectedStockOps` is the oversell
+      // guard, and adding unrelated ops to the batch it counts would let a lost
+      // stock race hide behind a successful batch write.
+      if (deductBatches(product, item.variantId || null, item.quantity)) {
+        bulkBatchOps.push(batchWriteOp(product));
       }
 
       // ── Pack pricing ────────────────────────────────────────────────────────

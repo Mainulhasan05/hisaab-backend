@@ -6,6 +6,7 @@ const { runInTransaction } = require('../utils/transaction.util');
 const { STOCK_TRANSACTION_TYPES } = require('../config/constants');
 const { isActiveBranch, isAllBranchesView, isMultiBranch } = require('../utils/branchScope.util');
 const { storageUnit, quantize } = require('../utils/quantity.util');
+const { takeBatches, addBatches, batchWriteOp } = require('../utils/batch.util');
 
 // Helper to create errors with statusCode (no AppError class in this project)
 const createError = (message, statusCode = 400) => {
@@ -301,6 +302,21 @@ exports.approveTransfer = async (transferId, shopId, userId, req = null) => {
       const newStock = applyStock(product, item.variantId || null, -item.quantity);
       stockOps.push(stockWriteOp(product, item.variantId || null, newStock));
 
+      // ── The dated goods leaving this branch ─────────────────────────────
+      //
+      // FEFO picks them, and WHICH ones is recorded on the transfer line so the
+      // receiving branch can recreate them with their real expiry dates. Before
+      // this, `batches` was not mentioned anywhere in this file: dispatch
+      // removed stock but not batches (so the source over-reported what it had
+      // left), and receipt added plain undated stock (so the expiry vanished at
+      // the branch boundary). Short-dated goods could be moved between branches
+      // until nobody was warned about them at all.
+      const { changed, taken } = takeBatches(product, item.variantId || null, item.quantity);
+      if (changed) {
+        item.batches = taken;
+        stockOps.push(batchWriteOp(product));
+      }
+
       txns.push({
         shop: shopId,
         branch: transfer.fromBranch,
@@ -390,6 +406,35 @@ exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req 
       }
       stockOps.push(stockWriteOp(target, item.variantId || null, newStock));
 
+      // ── Replay the dispatched batches at the destination ────────────────
+      //
+      // The destination is a DIFFERENT product document with its own batch
+      // array, so the dates have to be carried across explicitly — see
+      // `item.batches` on the transfer model.
+      //
+      // A partial receipt takes them soonest-first (the order dispatch stored
+      // them in), so if 20 of 30 arrive it is the short-dated 20 that are
+      // credited. Crediting the long-dated ones instead would leave the branch
+      // holding goods it is not warned about.
+      //
+      // Only when the DESTINATION product tracks batches. Two branches can
+      // legitimately configure the same item differently, and `addBatches`
+      // fails closed on that rather than forcing tracking on a branch that has
+      // not asked for it.
+      if (Array.isArray(item.batches) && item.batches.length) {
+        let left = receivedQty;
+        const arriving = [];
+        for (const b of item.batches) {
+          if (left <= 0) break;
+          const take = Math.min(left, Number(b.quantity) || 0);
+          if (take > 0) arriving.push({ ...(b.toObject ? b.toObject() : b), quantity: take });
+          left -= take;
+        }
+        if (addBatches(target, item.variantId || null, arriving)) {
+          stockOps.push(batchWriteOp(target));
+        }
+      }
+
       txns.push({
         shop: shopId,
         branch: transfer.toBranch,
@@ -453,6 +498,18 @@ exports.rejectTransfer = async (transferId, shopId, userId, reason, req = null) 
         const previousStock = readStock(product, item.variantId || null);
         const newStock = applyStock(product, item.variantId || null, item.quantity);
         stockOps.push(stockWriteOp(product, item.variantId || null, newStock));
+
+        // The goods never left, so put their batches back exactly as dispatched
+        // rather than as undated stock. `addBatches` merges by batch number and
+        // date, so a rejected transfer restores the source to the state it was
+        // in before approval instead of leaving a duplicate row beside the
+        // original.
+        if (Array.isArray(item.batches) && item.batches.length) {
+          const restored = item.batches.map(b => (b.toObject ? b.toObject() : b));
+          if (addBatches(product, item.variantId || null, restored)) {
+            stockOps.push(batchWriteOp(product));
+          }
+        }
 
         txns.push({
           shop: shopId,

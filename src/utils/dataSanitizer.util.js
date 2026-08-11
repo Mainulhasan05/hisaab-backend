@@ -40,8 +40,32 @@ function sanitizeProductDoc(doc, allowCost) {
         return vObj;
       });
     }
+    // `batches[].costPrice` is what the shop PAID for that delivery — the same
+    // confidential figure as `buyingPrice`, reached by a different path. It has
+    // always been serialised with the product and was never stripped, so a
+    // cashier without `products.view_cost` could read the cost of every batch
+    // straight out of the product list response. Sanitising the batch
+    // endpoints alone would not close that; the leak is here.
+    if (Array.isArray(obj.batches)) {
+      obj.batches = obj.batches.map((b) => {
+        const bObj = typeof b.toObject === 'function' ? b.toObject() : { ...b };
+        delete bObj.costPrice;
+        return bObj;
+      });
+    }
   }
   return obj;
+}
+
+/**
+ * Batch payloads (`getProductBatches`, `getExpiringBatches`) are not product
+ * documents — they are purpose-built shapes with batches nested under owners —
+ * so `sanitizeProducts` cannot reach into them. Same rule, same permission.
+ */
+function sanitizeBatches(data, req) {
+  if (canViewCost(req)) return data;
+  if (data === null || data === undefined) return data;
+  return stripKeysDeep(JSON.parse(JSON.stringify(data)), new Set(['costPrice', 'buyingPrice']));
 }
 
 function sanitizeProducts(products, req) {
@@ -159,6 +183,7 @@ module.exports = {
   canViewProfit,
   canViewPurchaseCost,
   sanitizeProducts,
+  sanitizeBatches,
   sanitizeSales,
   sanitizePurchases,
   sanitizeReport,

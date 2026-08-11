@@ -366,12 +366,57 @@ const productSchema = new mongoose.Schema({
     default: 5,
     min: [0, 'নূন্যতম স্টক ০ এর কম হতে পারবে না']
   },
-  // Batch / Expiry tracking (opt-in per product)
+  /**
+   * Batch / expiry tracking. Opt-in per PRODUCT, never per variant — a shop
+   * that tracks the expiry of ডানো গুঁড়ো দুধ tracks it for the ৫০০ গ্রাম packet
+   * and the ২ কেজি packet alike. There is no case for half a product being
+   * date-controlled, and a per-variant flag would only create one more way for
+   * the two halves to disagree.
+   */
   trackBatches: {
     type: Boolean,
     default: false,
   },
+  /**
+   * ── WHY `variantId` LIVES ON THE BATCH AND NOT THE OTHER WAY ROUND ──────────
+   *
+   * Every real batch belongs to one sellable thing. For a plain product that is
+   * the product; for a variant product it is ONE variant — the ৫০০ গ্রাম packets
+   * that came in January expire in June, and the ১ কেজি packets that came in
+   * March expire in December. Those are two different dates against two
+   * different stock pools, and before this field there was nowhere to put the
+   * second one.
+   *
+   * The obvious alternative is a `batches[]` INSIDE `variantSchema`. It was
+   * rejected for three concrete reasons, all of which have already bitten this
+   * file:
+   *
+   *   1. MIGRATION. `variantId: null` reads as "the whole product", which is
+   *      exactly what every batch written before today already meant. Nothing
+   *      to backfill, and a single-branch non-variant shop is byte-identical
+   *      (I-1/I-6).
+   *
+   *   2. THE VARIANTS ARRAY IS REBUILT WHOLESALE ON EVERY EDIT.
+   *      `product.service._formatVariants` reconstructs each row from the
+   *      client payload, and the frontend `VariantBuilder` regenerates rows
+   *      from attribute combinations. Anything living inside a variant survives
+   *      only if BOTH remember to carry it forward — see the `wholesalePrice`
+   *      rescue in `updateProduct`, which exists because that exact thing was
+   *      forgotten once. Batch history is not something to stake on a rebuild
+   *      remembering it.
+   *
+   *   3. ONE FEFO, ONE INDEX. The sale path, the expiry report and the purchase
+   *      push all read one array and one `batches.expiryDate` index rather than
+   *      a product-level path and a nested-in-variant path that must be kept in
+   *      step forever.
+   *
+   * Read this through `batchesFor(variantId)` below rather than filtering by
+   * hand — `null`, `undefined` and an ObjectId all have to compare equal to
+   * "the product level", and `String(null) === String(undefined)` is false.
+   */
   batches: [{
+    // null / absent = the product itself (no variants, or a legacy row).
+    variantId: { type: mongoose.Schema.Types.ObjectId, default: null },
     batchNumber: { type: String, required: true, trim: true },
     expiryDate: { type: Date },
     quantity: { type: Number, required: true, min: 0 },
@@ -493,6 +538,16 @@ productSchema.index({ shop: 1, isAvailableOnline: 1, isActive: 1 }); // Online p
 // leading filter on every listing query, so including it here keeps the sort
 // index-backed rather than falling back to an in-memory sort.
 productSchema.index({ shop: 1, isDeleted: 1, totalSold: -1 }); // Popular-first listing
+// Expiry sweep. `getExpiringBatches` matches on {shop, branch, isDeleted,
+// trackBatches} and then unwinds, so the leading keys carry the whole match and
+// the trailing `batches.expiryDate` keeps the "soonest first" ordering
+// index-backed. Sparse: batch tracking is off for the overwhelming majority of
+// products, and indexing their absent arrays buys nothing.
+//
+// This screen used to have no index at all because it had no query — the client
+// pulled 200 products and filtered them in the browser, which is why product
+// 201's expiry was invisible.
+productSchema.index({ shop: 1, trackBatches: 1, 'batches.expiryDate': 1 }, { sparse: true });
 // Note: Text search removed for scalability - use regex or external search (Elasticsearch) for large datasets
 
 /*
@@ -654,6 +709,47 @@ productSchema.methods.recordSale = async function(quantity, variantId = null) {
   this.totalSold += quantity;
   this.lastSold = new Date();
   await this.save();
+};
+
+/**
+ * Do two batch owners refer to the same sellable thing?
+ *
+ * `null`, `undefined` and `''` all mean "the product itself", and an ObjectId
+ * has to compare equal to its own string form because one side comes from the
+ * document and the other from a request body. `String(null) === String(undefined)`
+ * is FALSE ('null' vs 'undefined'), so the naive stringify comparison silently
+ * treats a legacy batch as belonging to no variant anyone can name — which
+ * would hide it from FEFO and leak it into every variant's expiry list at once.
+ *
+ * Exported as a static so the sale, purchase, return and transfer paths all
+ * decide this the same way.
+ */
+productSchema.statics.sameBatchOwner = function(a, b) {
+  const norm = (v) => (v === null || v === undefined || v === '' ? null : String(v));
+  return norm(a) === norm(b);
+};
+
+/**
+ * This product's batches for one variant, or for the product itself when
+ * `variantId` is null. Sorted FEFO — soonest expiry first, undated last, which
+ * is the order every consumer wants and none of them should re-derive.
+ *
+ * An undated batch sorts LAST rather than first on purpose: "no expiry recorded"
+ * is not "expires never", it is "nobody typed it in", and draining those before
+ * a batch with a real date three weeks out would leave the short-dated stock on
+ * the shelf — the exact outcome FEFO exists to prevent.
+ */
+productSchema.methods.batchesFor = function(variantId = null) {
+  if (!Array.isArray(this.batches)) return [];
+  const Model = this.constructor;
+  return this.batches
+    .filter((b) => Model.sameBatchOwner(b.variantId, variantId))
+    .sort((a, b) => {
+      if (!a.expiryDate && !b.expiryDate) return 0;
+      if (!a.expiryDate) return 1;
+      if (!b.expiryDate) return -1;
+      return new Date(a.expiryDate) - new Date(b.expiryDate);
+    });
 };
 
 // Method: Get variant by ID

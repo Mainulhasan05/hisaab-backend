@@ -36,6 +36,26 @@ const transferItemSchema = new mongoose.Schema({
     default: 0,
     min: 0,
   },
+  /**
+   * WHICH batches went out with this line — the goods' expiry dates in transit.
+   *
+   * A transfer moves stock between two SEPARATE product documents (per-branch
+   * catalogues), so nothing about the source's batches reaches the destination
+   * on its own. Without this the dispatch deducted the source's short-dated
+   * batch, the receipt credited plain stock, and the expiry date simply
+   * evaporated at the branch boundary: a carton with three weeks left arrived
+   * at the other shop as undated stock nobody would ever be warned about.
+   *
+   * Recorded at dispatch (FEFO decides which batches leave), replayed at
+   * receipt. A partial receipt takes them in the same soonest-first order, so
+   * the short-dated goods are the ones credited first.
+   */
+  batches: [{
+    batchNumber: { type: String },
+    expiryDate: { type: Date },
+    quantity: { type: Number, min: 0 },
+    costPrice: { type: Number, min: 0 },
+  }],
 }, { _id: true });
 
 const stockTransferSchema = new mongoose.Schema({

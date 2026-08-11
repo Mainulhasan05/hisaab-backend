@@ -1,7 +1,7 @@
 const productService = require('../services/product.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
-const { sanitizeProducts, sanitizeReport } = require('../utils/dataSanitizer.util');
+const { sanitizeProducts, sanitizeReport, sanitizeBatches } = require('../utils/dataSanitizer.util');
 
 // Get all products
 exports.getProducts = asyncHandler(async (req, res) => {
@@ -85,6 +85,67 @@ exports.updateStock = asyncHandler(async (req, res) => {
     data: product,
     message: 'Stock updated successfully',
     messageBn: 'স্টক সফলভাবে আপডেট করা হয়েছে',
+  });
+});
+
+// ── Batch / expiry ──────────────────────────────────────────────────────────
+//
+// All four go through `sanitizeBatches`, which strips `costPrice` from anyone
+// without `products.view_cost` — a batch's cost price is the same confidential
+// figure as a product's `buyingPrice`, just reached by a different route.
+
+// List a product's batches, grouped by variant
+exports.getProductBatches = asyncHandler(async (req, res) => {
+  const result = await productService.getProductBatches(req.shop._id, req.params.id, req);
+  return ApiResponse.success(res, {
+    data: sanitizeBatches(result, req),
+    message: 'Batches retrieved successfully',
+    messageBn: 'ব্যাচ তালিকা লোড হয়েছে',
+  });
+});
+
+// Add a batch to a product or one of its variants
+exports.addProductBatch = asyncHandler(async (req, res) => {
+  const result = await productService.addProductBatch(req.shop._id, req.user._id, req.params.id, req.body, req);
+  return ApiResponse.success(res, {
+    data: sanitizeBatches(result, req),
+    message: 'Batch added successfully',
+    messageBn: 'ব্যাচ যোগ করা হয়েছে',
+    statusCode: 201,
+  });
+});
+
+// Correct a batch (expiry date, quantity, number)
+exports.updateProductBatch = asyncHandler(async (req, res) => {
+  const result = await productService.updateProductBatch(
+    req.shop._id, req.user._id, req.params.id, req.params.batchId, req.body, req
+  );
+  return ApiResponse.success(res, {
+    data: sanitizeBatches(result, req),
+    message: 'Batch updated successfully',
+    messageBn: 'ব্যাচ আপডেট হয়েছে',
+  });
+});
+
+// Remove a batch (does NOT change stock)
+exports.deleteProductBatch = asyncHandler(async (req, res) => {
+  const result = await productService.deleteProductBatch(
+    req.shop._id, req.user._id, req.params.id, req.params.batchId, req
+  );
+  return ApiResponse.success(res, {
+    data: sanitizeBatches(result, req),
+    message: 'Batch deleted successfully',
+    messageBn: 'ব্যাচ মুছে ফেলা হয়েছে',
+  });
+});
+
+// Batches expiring within N days — one row per batch, soonest first
+exports.getExpiringBatches = asyncHandler(async (req, res) => {
+  const result = await productService.getExpiringBatches(req.shop._id, req.query, req);
+  return ApiResponse.paginated(res, {
+    ...sanitizeBatches(result, req),
+    message: 'Expiring batches retrieved successfully',
+    messageBn: 'মেয়াদ শেষ হতে যাওয়া পণ্য লোড হয়েছে',
   });
 });
 

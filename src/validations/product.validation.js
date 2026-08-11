@@ -36,7 +36,43 @@ const variant = Joi.object({
   image: Joi.string().uri().allow('', null),
   isActive: Joi.boolean().default(true),
   attributes: Joi.object().unknown(true),
+  /**
+   * The opening batch for THIS variant, on create only.
+   *
+   * It rides on the variant row rather than in the product-level `batches`
+   * array because the client cannot name the variant it belongs to: variant
+   * `_id`s are minted server-side in `_formatVariants`, so a payload written
+   * before that call has no id to point at. Position is the only handle both
+   * sides share, and a nested object makes that correspondence structural
+   * rather than a parallel array someone can get out of step.
+   *
+   * Quantity and cost are NOT accepted here — they are the variant's own
+   * `stock` and `buyingPrice` by definition. Letting a client send a third
+   * number would immediately allow "৩০ pieces in stock, opening batch of ৫০",
+   * and there is no honest way to resolve that disagreement afterwards.
+   *
+   * NOTE for `_formatVariants`: this key is consumed by `createProduct` and
+   * must be in that function's exclusion list, or it lands in
+   * `attributes.custom` and renders on the invoice next to size and colour.
+   */
+  openingBatch: Joi.object({
+    batchNumber: Joi.string().trim().max(100).allow('', null),
+    expiryDate: Joi.date().allow('', null),
+  }).allow(null),
 }).unknown(true);
+
+/**
+ * One batch, as the batch endpoints accept it. `variantId` is which sellable
+ * thing it belongs to — absent/null means the product itself, which is what
+ * every batch written before per-variant expiry existed already meant.
+ */
+const batchBody = {
+  batchNumber: Joi.string().trim().min(1).max(100).required(),
+  expiryDate: Joi.date().allow('', null),
+  quantity: quantityField.required(),
+  costPrice: Joi.number().min(0).allow(null, ''),
+  variantId: commonSchemas.objectId.allow(null, ''),
+};
 
 const baseProduct = {
   code: Joi.string().trim().uppercase().max(100),
@@ -75,45 +111,106 @@ const baseProduct = {
   // is accepted because that is what a cleared money box posts, and it is
   // normalised to "no wholesale rate" rather than to ৳0.
   wholesalePrice: Joi.number().min(0).allow(null, ''),
-  stock: quantityField.default(0),
-  minStock: quantityField.default(5),
-  hasVariants: Joi.boolean().default(false),
+  stock: quantityField,
+  minStock: quantityField,
+  hasVariants: Joi.boolean(),
   variants: Joi.when('hasVariants', {
     is: true,
     then: Joi.array().items(variant).min(1).required(),
     otherwise: Joi.array().items(variant).max(0).optional(),
   }),
-  images: Joi.array().items(Joi.string().uri()).default([]),
-  tags: Joi.array().items(Joi.string().trim().max(50)).default([]),
-  isAvailableOnline: Joi.boolean().default(true),
+  images: Joi.array().items(Joi.string().uri()),
+  tags: Joi.array().items(Joi.string().trim().max(50)),
+  isAvailableOnline: Joi.boolean(),
   onlinePrice: Joi.number().min(0).allow(null, ''),
   onlineDescription: Joi.string().trim().max(2000).allow('', null),
-  isFeaturedOnline: Joi.boolean().default(false),
-  trackBatches: Joi.boolean().default(false),
-  batches: Joi.array().items(Joi.object({
-    batchNumber: Joi.string().trim().required(),
-    expiryDate: Joi.date().allow('', null),
-    quantity: quantityField.required(),
-    costPrice: Joi.number().min(0).optional(),
-  })).default([]),
-  trackSerials: Joi.boolean().default(false),
-  serials: Joi.array().items(Joi.string().trim()).default([]),
+  isFeaturedOnline: Joi.boolean(),
+  trackBatches: Joi.boolean(),
+  // Create only — `updateProduct` forbids this key outright. A variant
+  // product's opening batches arrive on `variants[].openingBatch` instead,
+  // because the client has no variant id to reference yet.
+  batches: Joi.array().items(Joi.object(batchBody)),
+  trackSerials: Joi.boolean(),
+  serials: Joi.array().items(Joi.string().trim()),
+};
+
+/**
+ * ── A DEFAULT ON AN UPDATE SCHEMA IS A DELETE INSTRUCTION ───────────────────
+ *
+ * `validate.middleware` runs `schema.validate(req.body)` and then assigns the
+ * RESULT back over `req.body`. Joi fills in every `.default()` for a key the
+ * client did not send. So while these defaults lived on `baseProduct` — which
+ * BOTH schemas spread — a `PUT /products/:id` that said nothing about batches
+ * became a request that said `batches: []`, and `updateProduct`'s
+ * `Object.assign(product, …)` duly persisted the empty array.
+ *
+ * What that cost, measured against the real edit form (which sends name,
+ * category, prices, stock, minStock and nothing else): correcting a price wiped
+ * every batch and expiry date on the product, flipped `trackBatches` back to
+ * false, emptied `images`, `tags` and `serials`, and reset the two online flags.
+ * No error, no warning — the expiry-alerts screen simply went quiet for a
+ * product the shopkeeper had just edited, which is the worst possible failure
+ * for a screen whose whole job is to be trusted.
+ *
+ * `wholesalePrice` and `brand` already had bespoke `in`-guards in the service
+ * for exactly this hazard (see `product.service.updateProduct`). These fields
+ * did not, because their defaults lived here rather than there.
+ *
+ * So the defaults are declared ONCE, here, and applied ONLY to the create
+ * schema. `baseProduct` above is now defaults-free, which means the failure
+ * mode is inverted: forgetting to add a new field to this map makes CREATE
+ * miss a default (visible immediately, harmless), where before forgetting to
+ * strip one made UPDATE destroy data (silent, permanent).
+ *
+ * On an update, ABSENT MEANS "LEAVE IT ALONE". Do not reintroduce `.default()`
+ * into `baseProduct`.
+ */
+const CREATE_DEFAULTS = {
+  stock: 0,
+  minStock: 5,
+  hasVariants: false,
+  images: [],
+  tags: [],
+  isAvailableOnline: true,
+  isFeaturedOnline: false,
+  trackBatches: false,
+  batches: [],
+  trackSerials: false,
+  serials: [],
+};
+
+const withCreateDefaults = (schema) => {
+  const out = { ...schema };
+  for (const [key, value] of Object.entries(CREATE_DEFAULTS)) {
+    if (!out[key]) {
+      throw new Error(`CREATE_DEFAULTS names "${key}", which is not a field of baseProduct`);
+    }
+    out[key] = out[key].default(value);
+  }
+  return out;
 };
 
 
-const createProduct = Joi.object(baseProduct).custom((value, helpers) => {
+const createProduct = Joi.object(withCreateDefaults(baseProduct)).custom((value, helpers) => {
   if (!value.hasVariants && value.stock === undefined) {
     return helpers.error('any.custom', { message: 'Stock is required for non-variant products' });
   }
   return value;
 });
 
+// Spreads `baseProduct` as-is — which is now defaults-free. See CREATE_DEFAULTS
+// above for why that matters and what it cost when it was not.
 const updateProduct = Joi.object({
   ...baseProduct,
   name: baseProduct.name.optional(),
   category: commonSchemas.objectId.optional(),
   buyingPrice: Joi.number().min(0),
   sellingPrice: Joi.number().min(0),
+  // Batches are NOT editable through the product form. They carry stock
+  // quantities that must stay reconciled with `stock`, and a whole-array
+  // overwrite from a form that never displayed them is how they got destroyed
+  // above. `PUT /products/:id/batches/...` is the sanctioned path.
+  batches: Joi.forbidden(),
 }).min(1);
 
 const updateStock = Joi.object({
@@ -121,6 +218,35 @@ const updateStock = Joi.object({
   type: Joi.string().valid('set', 'add', 'subtract').default('add'),
   variantId: commonSchemas.objectId.allow(null, ''),
   notes: Joi.string().trim().max(500).allow('', null),
+});
+
+// ── Batch endpoints ─────────────────────────────────────────────────────────
+//
+// Separate from the product form on purpose. A batch carries a QUANTITY, and
+// the sum of a variant's batch quantities must not exceed that variant's stock
+// — a rule the service enforces and a whole-array PUT from a product form
+// cannot. See `updateProduct`'s `batches: Joi.forbidden()`.
+const addBatch = Joi.object(batchBody);
+
+// Everything optional: correcting a typo'd expiry date must not require
+// re-sending the quantity. `.min(1)` refuses an empty body rather than
+// performing a silent no-op the caller reads as success.
+const updateBatch = Joi.object({
+  batchNumber: Joi.string().trim().min(1).max(100),
+  expiryDate: Joi.date().allow('', null),
+  quantity: quantityField,
+  costPrice: Joi.number().min(0).allow(null, ''),
+}).min(1);
+
+const expiringBatches = Joi.object({
+  // The alerts screen offers ৭ / ৩০ / ৬০ / ৯০; the bound is generous rather
+  // than an enum so a report can ask for a year without a schema change.
+  days: Joi.number().integer().min(0).max(3650).default(30),
+  page: Joi.number().integer().min(1).default(1),
+  limit: Joi.number().integer().min(1).max(200).default(50),
+  // 'all' includes batches that have already expired, which is the default the
+  // screen wants: expired stock on the shelf is the most urgent row of all.
+  includeExpired: Joi.boolean().default(true),
 });
 
 const toggleStatus = Joi.object({
@@ -163,4 +289,7 @@ module.exports = {
   toggleStatus,
   bulkUpdateStock,
   bulkImportProducts,
+  addBatch,
+  updateBatch,
+  expiringBatches,
 };

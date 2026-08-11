@@ -19,6 +19,7 @@ const {
   quantize,
   quantizeMoney,
 } = require('../utils/quantity.util');
+const { restoreBatches, batchWriteOp } = require('../utils/batch.util');
 
 const getInvoiceDiscountAmount = (sale) => {
   const discount = Number(sale.discount) || 0;
@@ -322,6 +323,26 @@ class SalesReturnService {
             update: { $set: { stock: product.stock } },
           },
         });
+      }
+
+      // ── Put the goods back into a batch ──────────────────────────────────
+      //
+      // A return adds stock, and until now it added stock ONLY — `batches` was
+      // not mentioned anywhere in this file. So every return widened the gap
+      // between `stock` and `sum(batches.quantity)`, and a shop with a busy
+      // returns counter drifted fastest. The expiry screen then under-reports:
+      // it warns about less stock than is actually on the shelf, which is the
+      // quiet direction and therefore the dangerous one.
+      //
+      // Restored to the LONGEST-dated batch, because FEFO sold the shortest
+      // first — crediting a return to an about-to-expire batch would invent an
+      // expiry warning for goods that are not short-dated. See batch.util.
+      //
+      // A product whose batches were all sold through has nothing to restore
+      // into; the stock still returns and shows up as `untracked` on the batch
+      // panel rather than being silently invented with a made-up date.
+      if (restoreBatches(product, item.variantId || null, item.quantity)) {
+        returnStockOps.push(batchWriteOp(product));
       }
 
       // Create stock transaction

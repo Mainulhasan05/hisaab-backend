@@ -20,6 +20,25 @@ const purchaseItemSchema = new mongoose.Schema({
   variantLabel: {
     type: String
   },
+  // ── What this line brought in, expiry-wise ─────────────────────────────────
+  //
+  // `purchase.service` has always read `item.batchNumber` and `item.expiryDate`
+  // off the incoming request to build the product's batch — but the fields were
+  // never declared here, so Mongoose's strict mode dropped them and the
+  // PURCHASE itself kept no record of what it delivered. The consequences were
+  // small until they were not: a supplier bill could not be reconciled against
+  // the dates entered, and cancelling a purchase had no way to identify which
+  // batch to reverse.
+  //
+  // Snapshots, like `unit` and `packSize` above: editing the product's batch
+  // later must not rewrite what this delivery said.
+  batchNumber: {
+    type: String,
+    trim: true
+  },
+  expiryDate: {
+    type: Date
+  },
   // 0-exclusive rather than `min: 1` — fractional units (kg / litre / yard).
   // The flag-and-unit-aware refusal lives in `parseQuantity`; schema bounds are
   // the floor, not the policy. See AGENT_WORKFLOW.md I-6.
