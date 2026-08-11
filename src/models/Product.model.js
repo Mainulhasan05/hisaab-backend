@@ -273,9 +273,24 @@ const productSchema = new mongoose.Schema({
     type: String,
     maxlength: [2000, 'বিবরণ ২০০০ অক্ষরের বেশি হতে পারবে না']
   },
+  /**
+   * The shop's own brand, when `features.brands` is on.
+   *
+   * A reference, not the free-text string this used to be. The field had
+   * existed as a `String` since the beginning and was never once written — no
+   * form collected it, and a census of production found 0 of 51 products
+   * carrying a value — so there is no data to migrate and nothing that reads a
+   * name here.
+   *
+   * A ref is what the requirement actually asks for: the shop MANAGES a brand
+   * list and PICKS from it, which means renaming "Squre" to "Square" has to fix
+   * every product at once rather than leaving the typo scattered across the
+   * catalogue.
+   */
   brand: {
-    type: String,
-    trim: true
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Brand',
+    default: null
   },
   // The unit this product's `stock`, `buyingPrice` and `sellingPrice` are
   // expressed in. Historically a cosmetic label; with `shop.features.packaging`

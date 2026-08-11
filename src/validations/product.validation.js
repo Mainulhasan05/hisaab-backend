@@ -45,7 +45,11 @@ const baseProduct = {
   category: commonSchemas.objectId.required(),
   subcategory: commonSchemas.objectId.allow(null, ''),
   description: Joi.string().trim().max(2000).allow('', null),
-  brand: Joi.string().trim().max(100).allow('', null),
+  // A Brand id, not a name. Empty string and null both mean "no brand" — the
+  // product form sends '' for an untouched picker. Ownership and the
+  // `features.brands` gate are enforced in `product.service._resolveBrand`,
+  // where the shop and the flag are known.
+  brand: commonSchemas.objectId.allow('', null),
   // Accepts the full registry; which units this particular shop may CHOOSE is
   // enforced in `product.service._assertUnitAllowed`, where the flag is known.
   unit: Joi.string().valid(...ALL_UNITS),

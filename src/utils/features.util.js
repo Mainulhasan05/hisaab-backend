@@ -26,6 +26,8 @@
  * change silently alters what a shop's screens look like.
  */
 
+const { AppError } = require('../middleware/error.middleware');
+
 /**
  * The capability registry. Keys here MUST match `Shop.features` keys exactly —
  * `assertKnownFeature` is what stops a typo'd flag from reading as permanently
@@ -47,6 +49,14 @@ const FEATURES = Object.freeze({
       'A second price per product, charged automatically to customers marked ' +
       'as wholesale buyers. Products with no wholesale price fall back to the ' +
       'retail one. Off = one price per product, as before.',
+  },
+  brands: {
+    bn: 'ব্র্যান্ড ব্যবস্থাপনা',
+    en: 'Brand management',
+    description:
+      'A brand list the shop maintains itself, and a brand picker on the ' +
+      'product form. Managing brands rides on the categories permission. ' +
+      'Off = no brand field anywhere and no brand is stored, as before.',
   },
 });
 
@@ -113,6 +123,37 @@ function featureMap(shop) {
   return map;
 }
 
+/**
+ * Route guard: refuse the whole endpoint when the capability is off.
+ *
+ * For features that add ROUTES rather than fields. `packaging` and `wholesale`
+ * only widen existing payloads, so they are checked inside the services that
+ * read them; a capability with its own resource needs the door shut too, or the
+ * API keeps serving a feature the shop cannot see and has not been given.
+ *
+ * 404, not 403: to a shop without the capability the resource does not exist,
+ * and a 403 would advertise that it does. Mount it AFTER `protect`, which is
+ * what puts `req.shop` there to read.
+ *
+ * @param {string} key a FEATURES key
+ */
+function requireFeature(key) {
+  assertKnownFeature(key);
+  return (req, res, next) => {
+    if (!hasFeature(req, key)) {
+      const error = new AppError(
+        'Not found',
+        'এই সুবিধাটি আপনার দোকানে চালু নেই',
+        404
+      );
+      error.code = 'FEATURE_DISABLED';
+      error.feature = key;
+      return next(error);
+    }
+    return next();
+  };
+}
+
 module.exports = {
   FEATURES,
   FEATURE_KEYS,
@@ -120,4 +161,5 @@ module.exports = {
   shopHasFeature,
   featureMap,
   assertKnownFeature,
+  requireFeature,
 };

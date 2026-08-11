@@ -163,6 +163,13 @@ const shopSchema = new mongoose.Schema({
     wholesale: {
       type: Boolean,
       default: false
+    },
+    // A managed brand list, and a brand picker on the product form. Off = the
+    // product form has no brand field at all and `Product.brand` is never set,
+    // which is exactly how every shop behaved before this existed.
+    brands: {
+      type: Boolean,
+      default: false
     }
   },
   // Whether branches share one customer book or keep separate ones (Phase 7).

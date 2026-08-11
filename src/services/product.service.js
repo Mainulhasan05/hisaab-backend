@@ -1,5 +1,6 @@
 const Product = require('../models/Product.model');
 const Category = require('../models/Category.model');
+const Brand = require('../models/Brand.model');
 const StockTransaction = require('../models/StockTransaction.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
@@ -233,6 +234,12 @@ class ProductService {
     const [products, total] = await Promise.all([
       Product.find(query)
         .populate('category', 'name')
+        // Populated unconditionally rather than behind `hasFeature`. The field
+        // is null for every product in a shop without the capability, so this
+        // resolves nothing and costs nothing there — and gating it would mean
+        // the list renders a bare id for the shops that DO have it whenever the
+        // flag is read from a stale cached shop.
+        .populate('brand', 'name')
         .sort(sort)
         .skip(skip)
         .limit(limitNum)
@@ -318,6 +325,7 @@ class ProductService {
       branchFilter(req, { _id: productId, shop: shopId, isDeleted: { $ne: true } })
     )
       .populate('category', 'name')
+      .populate('brand', 'name')
       .populate('createdBy', 'name phone');
 
     if (!product) {
@@ -489,6 +497,32 @@ class ProductService {
     }
   }
 
+  /**
+   * The brand to store, or null.
+   *
+   * Fails closed on the capability: a shop without `features.brands` stores no
+   * brand at all, whatever a client sends. The ownership check is the other half
+   * — without it a caller could point one shop's product at another shop's
+   * brand id, and the picker would then render a name from a shop they cannot
+   * see. Inactive brands are refused too, so a deleted brand cannot be
+   * resurrected onto a product through a stale form.
+   *
+   * @returns {mongoose.Types.ObjectId|null}
+   */
+  async _resolveBrand(shopId, brandId, req) {
+    if (!hasFeature(req, 'brands')) return null;
+    if (brandId === undefined || brandId === null || brandId === '') return null;
+
+    const brand = await Brand.findOne({ _id: brandId, shop: shopId, isActive: true })
+      .select('_id')
+      .lean();
+
+    if (!brand) {
+      throw new AppError('Brand not found', 'ব্র্যান্ড পাওয়া যায়নি', 404);
+    }
+    return brand._id;
+  }
+
   async createProduct(shopId, userId, productData, req = null) {
     const { code, name, category, variants, packaging, ...rest } = productData;
 
@@ -509,6 +543,12 @@ class ProductService {
     rest.wholesalePrice = normalizeWholesalePrice(rest.wholesalePrice, wholesaleEnabled, {
       label: name,
     });
+
+    // Null for a shop without the capability, so a flag-off shop's products are
+    // stored exactly as they were before brands existed. Nothing to preserve on
+    // a create, which is why this assigns rather than deleting the key the way
+    // the update path below has to.
+    rest.brand = await this._resolveBrand(shopId, rest.brand, req);
 
     // Code uniqueness is per branch — the same code in another branch is a
     // different product, which is the whole point of per-branch catalogues.
@@ -603,6 +643,19 @@ class ProductService {
         wholesaleEnabled,
         { label: updateData.name || product.name }
       );
+    }
+
+    // Guarded by `in` for the same reason as `wholesalePrice` above, and the key
+    // is DROPPED rather than nulled when the capability is off. An admin who
+    // turns brands off must be able to turn them back on and find the products
+    // still pointing at their brands; clearing the field on the next unrelated
+    // edit would make that switch one-way.
+    if ('brand' in updateData) {
+      if (!hasFeature(req, 'brands')) {
+        delete updateData.brand;
+      } else {
+        updateData.brand = await this._resolveBrand(shopId, updateData.brand, req);
+      }
     }
 
     // Changing the unit does NOT convert the stored stock — 100 (kg) becoming
