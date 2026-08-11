@@ -796,20 +796,30 @@ class SalesReturnService {
    * Get returns summary for stats
    */
   async getReturnsSummary(shopId, options = {}) {
-    const { startDate, endDate } = options;
+    const { startDate, endDate, branchId = null } = options;
 
-    let start, end;
-    if (startDate && endDate) {
-      start = new Date(startDate);
-      end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-    } else {
-      const now = new Date();
-      start = new Date(now.getFullYear(), now.getMonth(), 1);
-      end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
-    }
+    /* The window is built exactly the way `getReturns` builds its own, and for
+       the same reason the branch scope is shared: these totals are printed on
+       top of that list and have to count the same rows.
 
-    return SalesReturn.getReturnsSummary(shopId, start, end);
+       In particular an ABSENT bound means unbounded, not "this month". This
+       defaulted to the current calendar month while the list defaulted to all
+       time, so the shop's "সব সময়" filter — the one the page opens on — put a
+       month's totals above every return ever recorded. A shopkeeper reading
+       "৫টি ফেরত" over a table of thirty had no way to tell which number was
+       lying.
+
+       No `setHours` on the end bound either. The list applies the timestamp it
+       is given; adding a day's grace here made the summary's window wider than
+       the list's, which is the same class of disagreement in miniature. The
+       client sends a full ISO instant for both bounds. */
+    const start = startDate ? new Date(startDate) : null;
+    const end = endDate ? new Date(endDate) : null;
+
+    // Branch-scoped for the same reason `getReturns` above is: the cards sit
+    // directly on top of that list and have to count the same rows. An owner in
+    // "All Branches" passes null here and correctly gets the shop-wide rollup.
+    return SalesReturn.getReturnsSummary(shopId, start, end, branchId);
   }
 }
 

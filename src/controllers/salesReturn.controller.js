@@ -35,8 +35,11 @@ exports.settleRefund = asyncHandler(async (req, res) => {
 
 // Get all returns (paginated)
 exports.getReturns = asyncHandler(async (req, res) => {
-  const options = { ...req.query };
-  if (req.branchId) options.branchId = req.branchId;
+  // Branch is assigned unconditionally, overwriting anything the query string
+  // carried: spreading `req.query` first meant a client-supplied `branchId`
+  // survived whenever the resolved scope was null, letting a caller slice the
+  // list by a branch the scope never granted.
+  const options = { ...req.query, branchId: req.branchId || null };
   const result = await salesReturnService.getReturns(req.shop._id, options);
   return ApiResponse.paginated(res, {
     ...result,
@@ -89,9 +92,17 @@ exports.getReturnableItems = asyncHandler(async (req, res) => {
 
 // Get returns summary
 exports.getReturnsSummary = asyncHandler(async (req, res) => {
+  // Only the date window is taken from the query string. `branchId` comes from
+  // the resolved scope and is NOT spread in from `req.query`, so a caller
+  // cannot ask for another branch's totals — and the cards always count the
+  // same rows `getReturns` lists.
   const summary = await salesReturnService.getReturnsSummary(
     req.shop._id,
-    req.query
+    {
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
+      branchId: req.branchId || null,
+    }
   );
   return ApiResponse.success(res, {
     data: summary,

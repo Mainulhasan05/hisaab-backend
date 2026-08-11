@@ -229,11 +229,30 @@ salesReturnSchema.statics.generateReturnNo = async function(shopId) {
 };
 
 // Static: Get returns summary for date range
-salesReturnSchema.statics.getReturnsSummary = async function(shopId, startDate, endDate) {
+//
+// `branchId` is not optional decoration — it is what keeps these totals over
+// the same rows `getReturns` lists. Without it the cards summed every branch
+// while the table below them showed one, so a branch with no returns of its own
+// still displayed another branch's count and pending-refund amount.
+//
+// Cast, not passed through: `req.branchId` arrives as a STRING off the Redis
+// auth payload, and `$match` compares raw BSON types rather than casting the
+// way `find()` does. An uncast string here matches zero documents and silently
+// falls back to the zeros below — the same failure `salesSummaryBranchCast`
+// pins for sales.
+// An absent bound means unbounded, exactly as it does for the list — see the
+// note in the service. `Purchase.getSummary` reads the same way.
+salesReturnSchema.statics.getReturnsSummary = async function(shopId, startDate, endDate, branchId = null) {
   const match = {
     shop: new mongoose.Types.ObjectId(shopId),
-    createdAt: { $gte: startDate, $lte: endDate }
   };
+  if (branchId) match.branch = new mongoose.Types.ObjectId(branchId);
+
+  if (startDate || endDate) {
+    match.createdAt = {};
+    if (startDate) match.createdAt.$gte = startDate;
+    if (endDate) match.createdAt.$lte = endDate;
+  }
 
   const summary = await this.aggregate([
     { $match: match },
