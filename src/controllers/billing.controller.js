@@ -27,6 +27,8 @@ const withLegacyPaymentFields = (body) => ({
   ...body,
   mode: body.mode || 'months',
   value: body.value ?? body.months ?? 1,
+  // `backdate` arrives from a checkbox, so it can be the string "false".
+  backdate: body.backdate === true || body.backdate === 'true',
 });
 
 const withLegacySmsFields = (body) => ({

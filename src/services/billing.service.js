@@ -90,12 +90,19 @@ class BillingService {
    *                          late does not get three weeks of backdated credit
    *                          it never used.
    *
+   * `anchorAt` replaces "today" in that second line. It exists for the common
+   * case of money that arrived days before anyone keyed it in: pass the date it
+   * was actually received and the month runs from then, so the shop gets the
+   * period it paid for rather than a bonus for the operator's backlog. It is
+   * opt-in — defaulting to it would silently shorten access every time a
+   * payment was entered late.
+   *
    * Everything lands on the END of a Bangladesh day, so the date the operator
    * typed is the last date the shop can trade.
    *
    * @returns {{ expiresAt: Date, anchor: Date, days: number|null }}
    */
-  computeExpiry({ currentExpiresAt, mode, value, now = new Date() }) {
+  computeExpiry({ currentExpiresAt, mode, value, now = new Date(), anchorAt = null }) {
     if (mode === 'until') {
       const expiresAt = endOfBangladeshDay(value);
       if (!expiresAt || Number.isNaN(expiresAt.getTime())) {
@@ -124,7 +131,11 @@ class BillingService {
       );
     }
 
-    const anchor = currentExpiresAt > now ? currentExpiresAt : now;
+    // `anchorAt` is where "now" moves to for a backdated payment. Days already
+    // paid for still win over it, so backdating can never cut an active
+    // subscription short — only extend a lapsed one from the right date.
+    const from = anchorAt ? new Date(anchorAt) : now;
+    const anchor = currentExpiresAt > from ? currentExpiresAt : from;
 
     if (mode === 'days') {
       if (amount > MAX_EXTEND_DAYS) {
@@ -218,7 +229,7 @@ class BillingService {
    * blocked shop leaves it blocked; the caller surfaces that instead of
    * silently undoing an operator's decision.
    */
-  async _applyExtension(shop, { mode, value, now = new Date(), becomesPaid }) {
+  async _applyExtension(shop, { mode, value, now = new Date(), anchorAt = null, becomesPaid }) {
     const before = {
       expiresAt: shop.subscription?.expiresAt || null,
       plan: shop.subscription?.plan,
@@ -230,6 +241,7 @@ class BillingService {
       mode,
       value,
       now,
+      anchorAt,
     });
 
     shop.subscription.expiresAt = expiresAt;
@@ -260,10 +272,17 @@ class BillingService {
    *
    * Any positive day count is valid — there is no policy cap, because the
    * bargain is struck on the phone and the panel exists to record it, not to
-   * argue with it. Works on a shop that has already paid (a goodwill re-trial)
-   * and never converts the plan to paid.
+   * argue with it.
+   *
+   * **Trial and paid never coexist.** `plan` is one field with two values, so a
+   * shop is on exactly one of them, and a trial REPLACES the expiry date rather
+   * than sitting beside it. That makes starting a trial on a shop with paid
+   * time left destructive — a 14-day trial on a shop paid through December
+   * throws away four months — so it is refused unless the caller says
+   * `force: true`. The discarded date is written to the event either way, so a
+   * forced one can be undone from the timeline.
    */
-  async startTrial(actor, shopId, { days, reason } = {}) {
+  async startTrial(actor, shopId, { days, reason, force = false } = {}) {
     const count = Number(days);
     if (!Number.isFinite(count) || count <= 0 || count > MAX_EXTEND_DAYS) {
       throw new AppError(
@@ -275,6 +294,22 @@ class BillingService {
 
     const shop = await this._loadShop(shopId);
     const now = new Date();
+
+    const paidThrough = shop.subscription?.expiresAt;
+    const hasLivePaidTime =
+      shop.subscription?.plan === 'paid' && paidThrough && new Date(paidThrough) > now;
+    if (hasLivePaidTime && !force) {
+      const until = toBangladeshDateStr(paidThrough);
+      const left = bangladeshDaysBetween(now, paidThrough);
+      throw new AppError(
+        `This shop is on a paid subscription until ${until} (${left} days left). ` +
+        'Starting a trial replaces that date — a shop is on a trial OR a paid plan, never both. ' +
+        'Confirm to proceed if that is intended.',
+        `এই দোকানের পেইড সাবস্ক্রিপশন ${until} পর্যন্ত চালু আছে (আর ${left} দিন)। ` +
+        'ট্রায়াল চালু করলে ওই মেয়াদ মুছে যাবে — একসাথে ট্রায়াল ও সাবস্ক্রিপশন থাকতে পারে না।',
+        409
+      );
+    }
     const before = {
       expiresAt: shop.subscription?.expiresAt || null,
       plan: shop.subscription?.plan,
@@ -305,10 +340,17 @@ class BillingService {
       paid: false,
       days: count,
       reason,
+      // `before.expiresAt` is the discarded paid date. It is the only record of
+      // what a forced trial threw away, and what an operator restores from.
+      note: hasLivePaidTime
+        ? `Replaced a paid subscription that ran to ${toBangladeshDateStr(paidThrough)}`
+        : undefined,
       audit: {
         action: 'subscription_trial',
         actionBn: 'ট্রায়াল চালু',
-        description: `Started a ${count}-day trial for ${shop.name} (until ${toBangladeshDateStr(after.expiresAt)})`,
+        description:
+          `Started a ${count}-day trial for ${shop.name} (until ${toBangladeshDateStr(after.expiresAt)})` +
+          (hasLivePaidTime ? ` — replaced paid time through ${toBangladeshDateStr(paidThrough)}` : ''),
         descriptionBn: `${shop.name} এর জন্য ${count} দিনের ট্রায়াল চালু করা হয়েছে`,
       },
     });
@@ -419,6 +461,10 @@ class BillingService {
    * `source: 'gateway'` with `gateway.paymentId` after verifying the signature.
    * The gateway branch is idempotent on that id, so a retried webhook returns
    * the original result instead of granting a second month.
+   *
+   * `receivedAt` is when the money arrived, which is routinely not when it was
+   * keyed in. It always dates the LEDGER row. It only moves the subscription
+   * period too when `backdate` is set — see the anchor note on `computeExpiry`.
    */
   async applySubscriptionPayment({
     shopId,
@@ -429,6 +475,7 @@ class BillingService {
     transactionId,
     reference,
     receivedAt,
+    backdate = false,
     notes,
     note,
     source = 'manual',
@@ -454,17 +501,24 @@ class BillingService {
 
     const shop = await this._loadShop(shopId);
     const now = new Date();
-    const periodStart = shop.subscription?.expiresAt > now ? shop.subscription.expiresAt : now;
+    const paidOn = receivedAt ? new Date(receivedAt) : now;
+    // Only honour a backdate that is actually in the past. A future
+    // `receivedAt` would otherwise push the period start forward and hand out
+    // days nobody has paid for yet.
+    const anchorAt = backdate && paidOn < now ? paidOn : null;
+    const from = anchorAt || now;
+    const periodStart = shop.subscription?.expiresAt > from ? shop.subscription.expiresAt : from;
 
     // Set before the extension so both land in the one save `_applyExtension`
     // performs — a second save here would be a second cache invalidation and a
     // window where the shop is extended but shows no payment date.
-    shop.subscription.lastPaymentAt = receivedAt ? new Date(receivedAt) : now;
+    shop.subscription.lastPaymentAt = paidOn;
 
     const { before, after, days, expiresAt } = await this._applyExtension(shop, {
       mode,
       value,
       now,
+      anchorAt,
       becomesPaid: true,
     });
 
@@ -476,7 +530,7 @@ class BillingService {
       method,
       transactionId,
       reference,
-      receivedAt: receivedAt ? new Date(receivedAt) : now,
+      receivedAt: paidOn,
       periodStart,
       periodEnd: expiresAt,
       months: mode === 'months' ? Number(value) : undefined,

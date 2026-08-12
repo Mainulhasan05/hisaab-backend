@@ -21,7 +21,12 @@ const Shop = require('../models/Shop.model');
 const PlatformPayment = require('../models/PlatformPayment.model');
 const SubscriptionEvent = require('../models/SubscriptionEvent.model');
 const AuditLog = require('../models/AuditLog.model');
-const { endOfBangladeshDay, toBangladeshDateStr } = require('../utils/bdTime.util');
+const { addBangladeshMonths } = require('../services/billing.service');
+const {
+  endOfBangladeshDay,
+  toBangladeshDateStr,
+  addBangladeshDays,
+} = require('../utils/bdTime.util');
 
 jest.mock('../utils/authCache.util', () => ({
   invalidateShopAuthCache: jest.fn().mockResolvedValue(undefined),
@@ -179,6 +184,106 @@ describe('paid extensions', () => {
   });
 });
 
+describe('money received before it was keyed in', () => {
+  // The everyday case: bKash arrives on the 3rd, the operator enters it on the
+  // 12th. The ledger must date it to the 3rd, and the shop must not be charged
+  // nine days for the operator's backlog.
+  const RECEIVED = '2026-08-01T04:00:00.000Z';
+
+  beforeEach(() => {
+    // Lapsed on 15 July, so there is no paid time to protect.
+    shop.subscription.expiresAt = endOfBangladeshDay('2026-07-15');
+  });
+
+  it('always dates the ledger row to when the money arrived', async () => {
+    await billingService.applySubscriptionPayment({
+      shopId: 'shop1', amount: 800, mode: 'months', value: 1,
+      receivedAt: RECEIVED, actor: ADMIN,
+    });
+    expect(toBangladeshDateStr(PlatformPayment.create.mock.calls.at(-1)[0].receivedAt)).toBe('2026-08-01');
+    expect(toBangladeshDateStr(shop.subscription.lastPaymentAt)).toBe('2026-08-01');
+  });
+
+  it('runs the period from the payment date when asked to backdate', async () => {
+    await billingService.applySubscriptionPayment({
+      shopId: 'shop1', amount: 800, mode: 'months', value: 1,
+      receivedAt: RECEIVED, backdate: true, actor: ADMIN,
+    });
+    // 1 Aug + 1 month, not (entry date) + 1 month.
+    expect(toBangladeshDateStr(shop.subscription.expiresAt)).toBe('2026-09-01');
+  });
+
+  it('runs the period from today when not asked to', async () => {
+    await billingService.applySubscriptionPayment({
+      shopId: 'shop1', amount: 800, mode: 'months', value: 1,
+      receivedAt: RECEIVED, actor: ADMIN,
+    });
+    const expected = toBangladeshDateStr(addBangladeshMonths(new Date(), 1));
+    expect(toBangladeshDateStr(shop.subscription.expiresAt)).toBe(expected);
+  });
+
+  it('never lets a backdate cut an active subscription short', async () => {
+    // Paid through 30 Sep already; a backdated top-up must extend from there,
+    // not from the (earlier) payment date.
+    shop.subscription.expiresAt = endOfBangladeshDay('2026-09-30');
+    await billingService.applySubscriptionPayment({
+      shopId: 'shop1', amount: 800, mode: 'months', value: 1,
+      receivedAt: RECEIVED, backdate: true, actor: ADMIN,
+    });
+    expect(toBangladeshDateStr(shop.subscription.expiresAt)).toBe('2026-10-30');
+  });
+
+  it('ignores a receivedAt in the future rather than granting unpaid days', async () => {
+    const future = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString();
+    await billingService.applySubscriptionPayment({
+      shopId: 'shop1', amount: 800, mode: 'days', value: 10,
+      receivedAt: future, backdate: true, actor: ADMIN,
+    });
+    const expected = toBangladeshDateStr(addBangladeshDays(new Date(), 10));
+    expect(toBangladeshDateStr(shop.subscription.expiresAt)).toBe(expected);
+  });
+});
+
+describe('trial and paid never coexist', () => {
+  it('refuses to trial a shop that still has paid time left', async () => {
+    shop.subscription.plan = 'paid';
+    shop.subscription.expiresAt = endOfBangladeshDay('2027-12-31');
+    await expect(billingService.startTrial(ADMIN, 'shop1', { days: 14 })).rejects.toThrow(
+      /paid subscription until 2027-12-31/i
+    );
+    expect(shop.save).not.toHaveBeenCalled();
+  });
+
+  it('allows it when forced, and records what was thrown away', async () => {
+    shop.subscription.plan = 'paid';
+    shop.subscription.expiresAt = endOfBangladeshDay('2027-12-31');
+    await billingService.startTrial(ADMIN, 'shop1', { days: 14, force: true, reason: 'downgrade agreed' });
+
+    expect(shop.subscription.plan).toBe('trial');
+    const event = lastEvent();
+    // The discarded date survives on the event; without it the paid period is
+    // simply gone and nobody can restore it.
+    expect(toBangladeshDateStr(event.before.expiresAt)).toBe('2027-12-31');
+    expect(event.note).toMatch(/2027-12-31/);
+  });
+
+  it('needs no confirmation when the paid time has already lapsed', async () => {
+    shop.subscription.plan = 'paid';
+    shop.subscription.expiresAt = endOfBangladeshDay('2026-01-01');
+    await expect(billingService.startTrial(ADMIN, 'shop1', { days: 14 })).resolves.toBeDefined();
+    expect(shop.subscription.plan).toBe('trial');
+  });
+
+  it('leaves exactly one plan set — taking a payment ends the trial', async () => {
+    shop.subscription.plan = 'trial';
+    await billingService.applySubscriptionPayment({
+      shopId: 'shop1', amount: 800, mode: 'months', value: 1, actor: ADMIN,
+    });
+    expect(shop.subscription.plan).toBe('paid');
+    expect(shop.subscription.trialEndedAt).toBeInstanceOf(Date);
+  });
+});
+
 describe('access', () => {
   it('refuses to block without a reason', async () => {
     await expect(billingService.setAccess(ADMIN, 'shop1', { action: 'block' })).rejects.toThrow(
@@ -222,6 +327,9 @@ describe('access', () => {
 
 describe('trials', () => {
   it('accept any day count and never mark the shop paid', async () => {
+    // Lapsed, so no paid time is at stake — the guard for that case is in
+    // "trial and paid never coexist" below.
+    shop.subscription.expiresAt = endOfBangladeshDay('2026-01-01');
     await billingService.startTrial(ADMIN, 'shop1', { days: 45, reason: 'pilot' });
     expect(shop.subscription.plan).toBe('trial');
     expect(shop.subscription.trialDays).toBe(45);
