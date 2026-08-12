@@ -18,6 +18,7 @@ const { normalizePackaging } = require('../utils/packaging.util');
 const { hasFeature } = require('../utils/features.util');
 const { normalizeWholesalePrice } = require('../utils/pricing.util');
 const cacheService = require('./cache.service');
+const mediaService = require('./media.service');
 const { KEYS, getTTL } = require('../config/cacheKeys');
 const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.util');
 const { capBatchesToStock } = require('../utils/batch.util');
@@ -31,6 +32,52 @@ const escapeRegex = (str) => String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // so sorting by it costs no extra query — it rides the {shop, isDeleted,
 // totalSold} index the same way createdAt does.
 const PRODUCT_SORT_FIELDS = new Set(['createdAt', 'name', 'code', 'stock', 'sellingPrice', 'buyingPrice', 'updatedAt', 'totalSold']);
+
+// Catalogue photos per product, counted over images in OUR pool only. The real
+// ceiling on a shop's storage is its quota; this one is about the product page
+// staying legible and about a runaway client loop not turning into 200 uploads.
+const MAX_CATALOG_MEDIA = 5;
+
+// ── What a LIST row does not need ───────────────────────────────────────────
+//
+// Stated as an exclusion, not an allowlist, and deliberately so: `getProducts`
+// feeds eleven different screens, and an allowlist that misses one field is a
+// blank column somewhere nobody looks until a shopkeeper reports it. What CAN
+// be asserted with confidence is that no paginated list renders any of these.
+//
+// These five are the whole reason a product document is large:
+//   description    up to 2000 chars, schema-capped
+//   batches[]      one subdocument per purchase batch, grows forever
+//   serials[]      one string per tracked unit
+//   images[]       Mixed — unbounded shape
+//   catalogImages[] subdocuments
+//
+// Everything else on the model is a scalar. Detail reads (`getProductById`,
+// `getProductByCode`) are deliberately NOT filtered — the edit form reads
+// `description`, and the batch manager reads `batches`.
+const LIST_EXCLUDE = '-description -batches -serials -images -catalogImages';
+
+// ── Why this is a Symbol and not the string 'fields' ────────────────────────
+//
+// `getProducts` is called as `productService.getProducts(shopId, req.query, req)`
+// (product.controller.js:8). Its options object IS the client's query string.
+// A plain `options.fields` key would therefore let anyone pass
+// `?fields=-shop` and strip the tenant field off every row, or `?fields=_id`
+// and blank the list — a projection the caller was never meant to control.
+//
+// A Symbol key cannot be produced by a query string, an HTTP header, or JSON,
+// so this channel is reachable only from inside this module.
+const PROJECTION = Symbol('projection');
+
+// The POS picker CAN be an allowlist, because the exact field set is visible
+// twenty lines below in `searchProductsForSale`'s mapper — it already discards
+// everything else in JavaScript, after paying to fetch and deserialise it, on
+// an endpoint that fires per keystroke.
+const POS_FIELDS = [
+  'name', 'code', 'barcode', 'hasVariants', 'buyingPrice', 'sellingPrice',
+  'wholesalePrice', 'stock', 'minStock', 'unit', 'packaging', 'category',
+  'totalSold', 'variants',
+].join(' ');
 
 class ProductService {
   // Get all products with filtering, searching, pagination
@@ -234,6 +281,12 @@ class ProductService {
 
     const [products, total] = await Promise.all([
       Product.find(query)
+        // Projection, not post-filtering. Without it every row carried its
+        // description, batch array, serial array and both image arrays across
+        // the wire to be deserialised, re-serialised and then never rendered.
+        // The POS asks for its own narrower set via the PROJECTION symbol —
+        // see LIST_EXCLUDE / POS_FIELDS / PROJECTION at the top of this file.
+        .select(options[PROJECTION] || LIST_EXCLUDE)
         .populate('category', 'name')
         // Populated unconditionally rather than behind `hasFeature`. The field
         // is null for every product in a shop without the capability, so this
@@ -267,6 +320,10 @@ class ProductService {
       status: 'active',
       page: options.page || 1,
       limit: options.limit || 30,
+      // The mapper below reduces every row to exactly these fields anyway. Ask
+      // the database for them instead of fetching whole documents per keystroke
+      // and throwing four fifths of each away in JS.
+      [PROJECTION]: POS_FIELDS,
     }, req);
 
     // Sent ONLY to shops that have the capability. A flag-off shop's POS
@@ -633,6 +690,13 @@ class ProductService {
     // the update path below has to.
     rest.brand = await this._resolveBrand(shopId, rest.brand, req);
 
+    // Forced, not merely defaulted. The schema default already says `false`, but
+    // a default only applies to a key the client omitted — and the client is not
+    // the authority on whether this shop may sell online. A stale or hand-rolled
+    // request sending `isAvailableOnline: true` to a shop without the capability
+    // would otherwise put a product on a surface the shop was never given.
+    this._applyOnlineFields(rest, req, { create: true });
+
     // Code uniqueness is per branch — the same code in another branch is a
     // different product, which is the whole point of per-branch catalogues.
     const existingProduct = await Product.findOne(branchFilter(req, { shop: shopId, code }));
@@ -646,6 +710,18 @@ class ProductService {
       if (!categoryExists) {
         throw new AppError('ক্যাটাগরি পাওয়া যায়নি', 'Category not found', 404);
       }
+    }
+
+    // Ownership-checks every `mediaId` in the payload and rewrites the URLs from
+    // the ShopMedia documents. Runs before `_formatVariants` so the variant rows
+    // it reads already carry resolved ids. Drops the image keys entirely when
+    // the shop does not have the capability.
+    const imagePayload = { catalogImages: rest.catalogImages, variants };
+    await this._applyImageRefs(shopId, imagePayload, req);
+    if ('catalogImages' in imagePayload) {
+      rest.catalogImages = imagePayload.catalogImages;
+    } else {
+      delete rest.catalogImages;
     }
 
     const formattedVariants = this._formatVariants(variants, wholesaleEnabled);
@@ -688,6 +764,11 @@ class ProductService {
       },
     });
 
+    // The images this product now claims stop being `staged` and become
+    // referenced. Done after the write, never before: a create that failed
+    // validation must not leave a reference to a product that does not exist.
+    await mediaService.reconcileRefs(shopId, [], mediaService.mediaIdsOfProduct(product));
+
     return this._transformProduct(product);
   }
 
@@ -701,6 +782,10 @@ class ProductService {
     }
 
     const beforeData = product.toObject();
+    // Captured before anything is assigned onto the document, because that is
+    // the only moment the OLD reference set still exists. The diff against the
+    // saved result is what moves every refCount.
+    const previousMediaIds = mediaService.mediaIdsOfProduct(product);
 
     this._assertUnitAllowed(req, updateData.unit);
     if ('barcode' in updateData) {
@@ -749,6 +834,19 @@ class ProductService {
       }
     }
 
+    // Same `in`-guard reasoning as `brand` and `wholesalePrice` above: with the
+    // capability off the keys are DROPPED, so a shop that once sold online keeps
+    // its stored settings and gets them back if the flag is switched on again.
+    // With it on, whatever the form sent is honoured — including `false`.
+    this._applyOnlineFields(updateData, req);
+
+    // Ownership-checks the payload's media ids and takes the URLs from the
+    // ShopMedia documents rather than from the client. With the capability off
+    // this DELETES `catalogImages` from the payload, so `Object.assign` below
+    // never touches the stored array — the photos survive the flag being turned
+    // off, exactly as the brand and wholesale fields above do.
+    await this._applyImageRefs(shopId, updateData, req);
+
     // Changing the unit does NOT convert the stored stock — 100 (kg) becoming
     // 100 (gram) is a data-entry correction, not a x1000 conversion, and
     // guessing wrong silently revalues the whole inventory. The UI warns and
@@ -794,6 +892,17 @@ class ProductService {
           // and honouring that is the whole point of the box.
           if (!wholesaleEnabled) {
             variant.wholesalePrice = existingVariant.wholesalePrice;
+          }
+
+          // Identical hazard, higher stakes. A flag-off shop's variant rows have
+          // no image control, so the rebuilt row holds no photo and this array
+          // replaces the stored one wholesale — which would not merely blank the
+          // picture but DROP the reference, sending a still-wanted image into the
+          // orphan grace period to be deleted a week later. Losing a wholesale
+          // price is recoverable by retyping it; losing the bytes is not.
+          if (!hasFeature(req, 'productImages')) {
+            variant.image = existingVariant.image;
+            variant.imageMediaId = existingVariant.imageMediaId || null;
           }
         }
 
@@ -866,6 +975,16 @@ class ProductService {
       changes: auditDiff(beforeData, product, AUDIT_FIELDS.product),
     });
 
+    // Whatever the edit did to the photo set, settle up: newly referenced images
+    // graduate from `staged`, dropped ones lose a reference and start their
+    // orphan clock. A no-op when the payload carried no image keys at all, which
+    // is most edits.
+    await mediaService.reconcileRefs(
+      shopId,
+      previousMediaIds,
+      mediaService.mediaIdsOfProduct(product)
+    );
+
     // If stock was provided and this is a non-variant product, update stock through
     // the proper channel so it's tracked in StockTransaction
     if (stock !== undefined && stock !== null && !product.hasVariants) {
@@ -894,6 +1013,9 @@ class ProductService {
     }
 
     const originalCode = product.code;
+    // Read while the document still carries them — after the save below there is
+    // no other record of what this product pointed at.
+    const previousMediaIds = mediaService.mediaIdsOfProduct(product);
 
     product.isDeleted = true;
     product.deletedAt = new Date();
@@ -908,6 +1030,23 @@ class ProductService {
     // unaffected by this rename.
     product.code = `${originalCode}~DEL~${Date.now().toString(36)}`;
     await product.save();
+
+    // The photos stop being referenced the moment the product leaves every
+    // listing. Without this the count never falls to zero, `orphanedAt` is never
+    // stamped, and the reclamation sweep can never see them — a deleted
+    // product's images would occupy the shop's quota permanently.
+    //
+    // Safe to do on a SOFT delete because there is no restore path: a deleted
+    // product is only ever purged (admin.service.purgeProducts), never revived.
+    // If one is ever added it must re-attach, or it will resurrect a product
+    // whose images were reclaimed during the grace period.
+    //
+    // The `mediaId`s stay on the document on purpose. `purgeProducts` repeats
+    // this detach, which is a no-op for anything deleted after this change but
+    // is the only thing that ever releases the images of products soft-deleted
+    // BEFORE it — their refCount was never decremented. The `refCount > 0` guard
+    // in `reconcileRefs` makes running it twice harmless.
+    await mediaService.reconcileRefs(shopId, previousMediaIds, []);
 
     // Invalidate the cached inventory stats so totals reflect the deletion
     const statsKeyBase = `shop:${shopId}:invstats:`;
@@ -1620,6 +1759,159 @@ class ProductService {
   }
 
   /**
+   * Decide what a payload may say about selling this product online.
+   *
+   * The four online fields move together — being listed online, the price
+   * charged there, the description shown there and whether it is featured — so
+   * they are gated together. Splitting them would let a shop without the
+   * capability still store an online price, which is a number that means nothing
+   * and that somebody would eventually render.
+   *
+   * ── CREATE vs UPDATE ────────────────────────────────────────────────────────
+   * The difference is deliberate and is the same one `brand` makes:
+   *
+   *   create  →  FORCE `isAvailableOnline: false` and drop the rest. There is
+   *              nothing stored to preserve, and the client must not be able to
+   *              opt a new product into a surface the shop was not given.
+   *   update  →  DELETE the keys. Absent means "leave it alone", so a shop that
+   *              had the capability, listed products online, and then had it
+   *              switched off keeps every stored setting — and gets them back
+   *              intact if an admin switches it on again. Clearing them here
+   *              would make the toggle one-way.
+   *
+   * With the capability ON this does nothing at all: the form is the authority,
+   * and an unticked box is a real "do not sell this online".
+   *
+   * Mutates `data` in place.
+   *
+   * @param {Object} data  create payload (`rest`) or update payload
+   * @param {Object} req   for the feature flag
+   * @param {Object} [options] `{ create: true }` to force rather than drop
+   */
+  _applyOnlineFields(data, req, { create = false } = {}) {
+    if (hasFeature(req, 'onlineSelling')) return;
+
+    delete data.onlinePrice;
+    delete data.onlineDescription;
+    delete data.isFeaturedOnline;
+
+    if (create) {
+      data.isAvailableOnline = false;
+    } else {
+      delete data.isAvailableOnline;
+    }
+  }
+
+  /**
+   * Resolve and authorise every image reference in a product payload.
+   *
+   * Two jobs, and the first is a security boundary:
+   *
+   *   1. OWNERSHIP. `mediaId` arrives from the client. Without checking it
+   *      against `{shop}`, one shop could reference another's image — and would
+   *      then hold a reference the owning shop's reclamation job cannot see, so
+   *      that shop's cleanup would silently blank this one's catalogue.
+   *      `mediaService.resolveOwned` 400s on anything foreign or unknown.
+   *
+   *   2. AUTHORITY OVER URLs. When a row carries a `mediaId`, the URLs are taken
+   *      from the `ShopMedia` document and the client's are discarded. A client
+   *      that could pair our media id with an arbitrary URL could point a
+   *      product at anything at all while the row still looked like ours.
+   *
+   * Rows WITHOUT a `mediaId` pass through with their URL intact — that is the
+   * legacy ImgBB shape, and it is how the old endpoint's rows survive a round
+   * trip through the edit form. See the header of services/media.service.js.
+   *
+   * ── WHEN THE CAPABILITY IS OFF ──────────────────────────────────────────────
+   * The payload's image keys are dropped, not applied — same treatment as
+   * `brand` and `wholesalePrice` above, and for the same reason: a flag an admin
+   * can turn back on must not destroy data while it is off. `catalogImages`
+   * simply never reaches `Object.assign`, so the stored array survives. Variants
+   * are the harder half, because that array is REPLACED wholesale on update, so
+   * the stored values are carried forward explicitly by the caller.
+   *
+   * Mutates `data` in place and returns nothing.
+   *
+   * @param {ObjectId} shopId
+   * @param {Object} data  create/update payload; `catalogImages` and `variants`
+   * @param {Object} req   for the feature flag
+   */
+  async _applyImageRefs(shopId, data, req) {
+    if (!hasFeature(req, 'productImages')) {
+      delete data.catalogImages;
+      if (Array.isArray(data.variants)) {
+        data.variants.forEach((v) => { if (v) delete v.imageMediaId; });
+      }
+      return;
+    }
+
+    const rows = Array.isArray(data.catalogImages) ? data.catalogImages : [];
+    const variants = Array.isArray(data.variants) ? data.variants : [];
+
+    // One round trip for every id in the payload, catalogue and variants alike.
+    const owned = await mediaService.resolveOwned(shopId, [
+      ...rows.map((r) => r?.mediaId),
+      ...variants.map((v) => v?.imageMediaId),
+    ]);
+
+    if ('catalogImages' in data) {
+      const resolved = rows.map((row) => {
+        const media = row?.mediaId ? owned.get(String(row.mediaId)) : null;
+        if (!media) {
+          // An external URL — ImgBB or hand-entered. Not our bytes, so no
+          // mediaId is invented for it.
+          return {
+            mediaId: null,
+            url: row?.url,
+            thumbnail: row?.thumbnail,
+            isPrimary: row?.isPrimary === true,
+          };
+        }
+        return {
+          mediaId: media._id,
+          // The medium rendition, not the original: this URL is what the product
+          // detail screen renders, and the full-size image is worth fetching
+          // only on an explicit zoom.
+          url: media.mediumUrl || media.url,
+          thumbnail: media.thumbUrl || media.url,
+          isPrimary: row?.isPrimary === true,
+        };
+      });
+
+      // The plan's per-product ceiling, counted over OUR images only. Legacy
+      // ImgBB rows are exempt: a product that already carries seven of them must
+      // stay editable, and refusing the save would make an old photo the reason
+      // a price cannot be corrected.
+      const ours = resolved.filter((r) => r.mediaId);
+      if (ours.length > MAX_CATALOG_MEDIA) {
+        throw new AppError(
+          `A product may have at most ${MAX_CATALOG_MEDIA} photos`,
+          `একটি পণ্যে সর্বোচ্চ ${MAX_CATALOG_MEDIA}টি ছবি দেওয়া যাবে`,
+          400
+        );
+      }
+
+      // Exactly one primary, and only if there is anything to be primary of.
+      // The grid reads `catalogImages[0]` when none is flagged, so a row set
+      // with two primaries renders differently in two places on the same screen.
+      const primaryIndex = resolved.findIndex((r) => r.isPrimary);
+      resolved.forEach((r, i) => {
+        r.isPrimary = i === (primaryIndex >= 0 ? primaryIndex : 0);
+      });
+
+      data.catalogImages = resolved;
+    }
+
+    for (const variant of variants) {
+      if (!variant?.imageMediaId) continue;
+      const media = owned.get(String(variant.imageMediaId));
+      if (!media) continue;
+      variant.imageMediaId = media._id;
+      variant.image = media.mediumUrl || media.url;
+    }
+  }
+
+  /**
    * Helper to format variant arrays from client flat structure to DB nested attributes structure.
    *
    * @param {Array} variants
@@ -1654,7 +1946,7 @@ class ProductService {
         // product's `batches` array, NOT on the variant. Without it in this
         // list it would be swept into `attributes.custom` and rendered on the
         // invoice as an attribute called "openingBatch" beside size and colour.
-        !['id', '_id', 'sku', 'barcode', 'buyingPrice', 'sellingPrice', 'wholesalePrice', 'stock', 'image', 'isActive', 'attributes', 'openingBatch'].includes(k) &&
+        !['id', '_id', 'sku', 'barcode', 'buyingPrice', 'sellingPrice', 'wholesalePrice', 'stock', 'image', 'imageMediaId', 'isActive', 'attributes', 'openingBatch'].includes(k) &&
         !knownKeys.includes(k)
       );
 
@@ -1684,6 +1976,13 @@ class ProductService {
         }),
         stock: v.stock || 0,
         image: v.image,
+        // Null unless the photo is one of ours in the R2 pool. `image` stays the
+        // URL either way — this is only the answer to "are these our bytes?",
+        // which is what refCounting and reclamation key off. Resolved and
+        // ownership-checked in `_applyImageRefs` before it ever reaches here.
+        imageMediaId: v.imageMediaId
+          ? new mongoose.Types.ObjectId(v.imageMediaId)
+          : null,
         isActive: v.isActive !== false,
         attributes
       };

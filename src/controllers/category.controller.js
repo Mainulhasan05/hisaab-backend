@@ -24,7 +24,7 @@ exports.getCategory = asyncHandler(async (req, res) => {
 
 // Create category
 exports.createCategory = asyncHandler(async (req, res) => {
-  const category = await categoryService.createCategory(req.shop._id, req.body);
+  const category = await categoryService.createCategory(req.shop._id, req.body, req);
   return ApiResponse.success(res, {
     data: category,
     message: 'Category created successfully',
@@ -35,7 +35,7 @@ exports.createCategory = asyncHandler(async (req, res) => {
 
 // Update category
 exports.updateCategory = asyncHandler(async (req, res) => {
-  const category = await categoryService.updateCategory(req.shop._id, req.params.id, req.body);
+  const category = await categoryService.updateCategory(req.shop._id, req.params.id, req.body, req);
   return ApiResponse.success(res, {
     data: category,
     message: 'Category updated successfully',

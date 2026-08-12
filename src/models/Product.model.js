@@ -119,8 +119,18 @@ const variantSchema = new mongoose.Schema({
     trim: true,
     validate: asciiCodeValidator('বারকোড', 'barcode'),
   },
+  // The variant's photo URL. Stays a plain string — `product.service` reads
+  // `v.image` straight through to the client and turning it into an object
+  // would break every existing caller for no gain.
   image: {
     type: String
+  },
+  // Set only when `image` points at something in our own R2 pool. Null means
+  // "an external URL, or nothing" — either way, not our bytes to reclaim.
+  imageMediaId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'ShopMedia',
+    default: null
   },
   isActive: {
     type: Boolean,
@@ -452,7 +462,21 @@ const productSchema = new mongoose.Schema({
   // at the till as "Cannot read properties of undefined (reading 'some')".
   variants: [variantSchema],
   images: [mongoose.Schema.Types.Mixed],
+  /**
+   * Catalog photos.
+   *
+   * `mediaId` is the ONLY new thing here and it is optional on purpose. Rows
+   * written by the original ImgBB endpoint (`POST /products/:id/images`) have
+   * no `mediaId` and keep working exactly as before — they are just URLs on a
+   * host we do not manage. Rows written by the R2 pipeline carry one, and that
+   * is what makes them reclaimable: refCounting, dedupe, quota accounting and
+   * the URL-rewrite script all key off it.
+   *
+   * So "does this image cost us storage?" is answered by `mediaId != null`,
+   * never by the URL. Do not backfill the old rows with a fake id.
+   */
   catalogImages: [{
+    mediaId: { type: mongoose.Schema.Types.ObjectId, ref: 'ShopMedia', default: null },
     url: { type: String, required: true },
     thumbnail: { type: String },
     isPrimary: { type: Boolean, default: false }
@@ -488,9 +512,24 @@ const productSchema = new mongoose.Schema({
     ref: 'User'
   },
   // Online Selling
+  /**
+   * Whether this product is offered online. Gated by `Shop.features.onlineSelling`.
+   *
+   * ── WHY THE DEFAULT IS `false` ──────────────────────────────────────────────
+   * It used to be `true`, and that was a real bug rather than a preference. The
+   * online section of the product form was hidden behind a build-time constant,
+   * so the form stopped SENDING this field — and every product created after
+   * that silently landed as online, in shops that do not sell online at all and
+   * whose owners were never shown a control to say otherwise.
+   *
+   * A flag nobody was asked about must not default to the permissive answer.
+   * Opting a product into a public surface is a decision, so it is now stored
+   * only when somebody actually made it. `product.service` forces this false for
+   * any shop without the capability, so the client cannot set it either.
+   */
   isAvailableOnline: {
     type: Boolean,
-    default: true
+    default: false
   },
   onlinePrice: {
     type: Number,

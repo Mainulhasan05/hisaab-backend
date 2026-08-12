@@ -49,18 +49,24 @@ class UserActivityService {
           return;
         }
 
-        // 2. Store timestamp in Redis key `user:lastActive:{userId}` with 24h TTL
-        const userActiveKey = `${USER_ACTIVE_PREFIX}${strUserId}`;
-        await cacheService.set(userActiveKey, nowIso, LAST_ACTIVE_TTL);
-
-        // 3. Optional: Store session-level timestamp if sessionId provided
+        // 2-4. Timestamp, optional session timestamp, and dirty-set membership.
+        //
+        // One pipelined round trip instead of three sequential ones. The rate
+        // limit above stays a separate call because its return value decides
+        // whether we get here at all — that is the one result we branch on.
+        const ops = [
+          { type: 'set', key: `${USER_ACTIVE_PREFIX}${strUserId}`, value: nowIso, ttl: LAST_ACTIVE_TTL },
+          { type: 'sAdd', key: DIRTY_SET_KEY, member: strUserId },
+        ];
         if (sessionId) {
-          const sessionActiveKey = `${SESSION_ACTIVE_PREFIX}${sessionId}`;
-          await cacheService.set(sessionActiveKey, nowIso, LAST_ACTIVE_TTL);
+          ops.push({
+            type: 'set',
+            key: `${SESSION_ACTIVE_PREFIX}${sessionId}`,
+            value: nowIso,
+            ttl: LAST_ACTIVE_TTL,
+          });
         }
-
-        // 4. Track modified user ID in Redis dirty SET
-        await cacheService.sAdd(DIRTY_SET_KEY, strUserId);
+        await cacheService.pipeline(ops);
       } else {
         // Redis Fallback: Direct database write if Redis is unreachable
         logger.warn(`Redis unavailable. Performing direct DB lastActiveAt update for user ${strUserId}`);

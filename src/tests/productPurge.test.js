@@ -214,6 +214,60 @@ describe('audit trail', () => {
   });
 });
 
+describe('media cascade', () => {
+  const mediaService = require('../services/media.service');
+
+  it('releases the product photos so the reclamation sweep can collect them', async () => {
+    const mediaId = new mongoose.Types.ObjectId();
+    const variantMediaId = new mongoose.Types.ObjectId();
+
+    allowStepUp();
+    stubProductFind([{
+      _id: P1,
+      name: 'Test product',
+      code: 'T-1',
+      shop: SHOP,
+      catalogImages: [{ mediaId }],
+      variants: [{ sku: 'v1', imageMediaId: variantMediaId }],
+    }]);
+    jest.spyOn(adminService, 'inspectProductLinks').mockResolvedValue({
+      [String(P1)]: { safeToPurge: true, blockers: [], cancelledSales: 0 },
+    });
+    jest.spyOn(AuditLog, 'create').mockResolvedValue({});
+    const reconcile = jest.spyOn(mediaService, 'reconcileRefs').mockResolvedValue({ attached: [], detached: [] });
+
+    await adminService.purgeProducts(ADMIN, { productIds: [String(P1)], password: 'ok' });
+
+    // For products soft-deleted before `deleteProduct` started detaching, this
+    // is the ONLY thing that ever decrements their refCount — without it the
+    // purge frees the row and leaves the bytes charged to the shop forever.
+    const [shop, previous, next] = reconcile.mock.calls[0];
+    expect(String(shop)).toBe(String(SHOP));
+    expect(previous.map(String).sort()).toEqual([String(mediaId), String(variantMediaId)].sort());
+    expect(next).toEqual([]);
+  });
+
+  it('does not release photos of a product it refused to purge', async () => {
+    allowStepUp();
+    stubProductFind([{
+      _id: P1, name: 'Linked', code: 'T-1', shop: SHOP,
+      catalogImages: [{ mediaId: new mongoose.Types.ObjectId() }],
+      variants: [],
+    }]);
+    jest.spyOn(adminService, 'inspectProductLinks').mockResolvedValue({
+      [String(P1)]: { safeToPurge: false, blockers: ['২টি ইনভয়েসে আছে'], cancelledSales: 0 },
+    });
+    jest.spyOn(AuditLog, 'create').mockResolvedValue({});
+    const reconcile = jest.spyOn(mediaService, 'reconcileRefs').mockResolvedValue({ attached: [], detached: [] });
+
+    await adminService.purgeProducts(ADMIN, { productIds: [String(P1)], password: 'ok' });
+
+    // The product is still live. Releasing its reference would hand its photo to
+    // the orphan sweep while the product is still showing it.
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+});
+
 describe('batch limits', () => {
   it('refuses an oversized batch', async () => {
     const ids = Array.from({ length: 501 }, () => String(new mongoose.Types.ObjectId()));

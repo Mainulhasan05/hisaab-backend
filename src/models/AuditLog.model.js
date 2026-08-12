@@ -74,6 +74,12 @@ auditLogSchema.index({ admin: 1, createdAt: -1 }); // Admin audit trail
 auditLogSchema.index({ customer: 1, createdAt: -1 }); // Customer audit trail
 auditLogSchema.index({ shop: 1, user: 1, createdAt: -1 }); // Per-user activity within a shop
 auditLogSchema.index({ shop: 1, 'entity.type': 1, 'entity.id': 1, createdAt: -1 }); // Entity history lookup
+// Action-filtered lookup across a set of shops. The admin shop list reads the
+// first `user_register` log per shop to show registration IP/device
+// (admin.service.js getAllShops); with only {shop, createdAt} above, that
+// query had to scan every log of all 20 shops on the page and discard the
+// ~99% that are not registrations.
+auditLogSchema.index({ shop: 1, action: 1, createdAt: 1 });
 
 // TTL Index - Auto-delete logs older than 90 days to prevent unbounded growth
 // For compliance, export/archive logs before deletion if needed

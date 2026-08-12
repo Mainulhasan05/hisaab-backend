@@ -303,7 +303,10 @@ describe('D — editing a product must not erase what the form never showed', ()
     expect(error).toBeUndefined();
     expect(value.batches).toEqual([]);
     expect(value.trackBatches).toBe(false);
-    expect(value.isAvailableOnline).toBe(true);
+    // Was `true`, and that was the bug: with the online section hidden the form
+    // stopped sending this key, so every product silently became an online one.
+    // A surface nobody was asked about must not be opted into by default.
+    expect(value.isAvailableOnline).toBe(false);
   });
 
   it('accepts a per-variant opening batch on create', () => {

@@ -29,6 +29,7 @@ const shopCategoryRoutes = require('./shopCategory.routes');
 const heldCartRoutes = require('./heldCart.routes');
 const stockTransferRoutes = require('./stockTransfer.routes');
 const imageUploadRoutes = require('./imageUpload.routes');
+const mediaRoutes = require('./media.routes');
 const userRoutes = require('./user.routes');
 const telegramRoutes = require('./telegram.routes');
 
@@ -37,6 +38,10 @@ router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
 router.use('/products', productRoutes);
 router.use('/upload', imageUploadRoutes);
+// Shop-owned images in the platform R2 pool. Distinct from `/upload` above,
+// which is the older ImgBB path and stores nothing of ours — see the header of
+// services/media.service.js for how the two coexist.
+router.use('/media', mediaRoutes);
 router.use('/categories', categoryRoutes);
 // Gated end-to-end on `features.brands` inside the router itself.
 router.use('/brands', brandRoutes);
@@ -92,6 +97,7 @@ router.get('/', (req, res) => {
       pages: '/api/pages',
       coupons: '/api/coupons',
       images: '/api/images',
+      media: '/api/media',
       branches: '/api/branches',
       heldCarts: '/api/held-carts',
       stockTransfers: '/api/stock-transfers',

@@ -32,15 +32,16 @@ class OnlineTrackingService {
         ...metadata
       };
 
-      await cacheService.set(userKey, userData, ONLINE_TTL);
-
-      // Add to global online users set
-      await cacheService.sAdd(ONLINE_USERS_KEY, userId);
-
-      // Add to shop-specific online users set
+      // Presence record + both set memberships in ONE round trip. These were
+      // three sequential awaits, on a path every client hits once a minute.
+      const ops = [
+        { type: 'set', key: userKey, value: userData, ttl: ONLINE_TTL },
+        { type: 'sAdd', key: ONLINE_USERS_KEY, member: userId },
+      ];
       if (shopId) {
-        await cacheService.sAdd(`${SHOP_ONLINE_PREFIX}${shopId}`, userId);
+        ops.push({ type: 'sAdd', key: `${SHOP_ONLINE_PREFIX}${shopId}`, member: userId });
       }
+      await cacheService.pipeline(ops);
 
       return { success: true, timestamp: now };
     } catch (error) {

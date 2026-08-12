@@ -34,6 +34,10 @@ const variant = Joi.object({
   wholesalePrice: Joi.number().min(0).allow(null, ''),
   stock: quantityField.default(0),
   image: Joi.string().uri().allow('', null),
+  // Present only when the photo came from our own R2 pool. Structural check
+  // only — whether the shop OWNS this media is decided in
+  // `product.service._applyImageRefs`, which is the layer that knows the shop.
+  imageMediaId: commonSchemas.objectId.allow(null, ''),
   isActive: Joi.boolean().default(true),
   attributes: Joi.object().unknown(true),
   /**
@@ -151,6 +155,32 @@ const baseProduct = {
     otherwise: Joi.array().items(variant).max(0).optional(),
   }),
   images: Joi.array().items(Joi.string().uri()),
+  /**
+   * Catalogue photos.
+   *
+   * A row is either OURS (`mediaId`, bytes in the R2 pool) or EXTERNAL (`url`
+   * only, written by the older ImgBB endpoint). `.or()` demands one of the two
+   * so a row that identifies nothing cannot be stored.
+   *
+   * The URLs are accepted but not trusted: for a row with a `mediaId` the
+   * service overwrites them from the ShopMedia document, since a client able to
+   * pair our media id with an arbitrary URL could point a product anywhere while
+   * the row still looked like ours. They are declared here only because a row
+   * WITHOUT a mediaId has nothing else to go on, and because the edit form round-
+   * trips existing rows verbatim.
+   *
+   * No `.max()`: the per-product ceiling is enforced in the service, over our
+   * images only, so a legacy product carrying seven ImgBB photos stays editable.
+   * No `.default()` either — see the CREATE_DEFAULTS note below.
+   */
+  catalogImages: Joi.array().items(
+    Joi.object({
+      mediaId: commonSchemas.objectId.allow(null, ''),
+      url: Joi.string().uri().allow('', null),
+      thumbnail: Joi.string().uri().allow('', null),
+      isPrimary: Joi.boolean(),
+    }).or('mediaId', 'url')
+  ),
   tags: Joi.array().items(Joi.string().trim().max(50)),
   isAvailableOnline: Joi.boolean(),
   onlinePrice: Joi.number().min(0).allow(null, ''),
@@ -202,7 +232,8 @@ const CREATE_DEFAULTS = {
   hasVariants: false,
   images: [],
   tags: [],
-  isAvailableOnline: true,
+  // Offline unless somebody says otherwise — see the note on the model field.
+  isAvailableOnline: false,
   isFeaturedOnline: false,
   trackBatches: false,
   batches: [],

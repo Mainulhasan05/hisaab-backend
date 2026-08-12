@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const adminController = require('../controllers/admin.controller');
+const adminStorageController = require('../controllers/adminStorage.controller');
 const billingController = require('../controllers/billing.controller');
 const { protect, adminOnly } = require('../middleware/auth.middleware');
 
@@ -68,6 +69,36 @@ router.get('/online-users', adminController.getOnlineUsers);
 // Dashboard activity: active users (from lastActiveAt, not the heartbeat set)
 // + catalogue totals + recent product changes, in one call.
 router.get('/activity-overview', adminController.getActivityOverview);
+
+// ── Image storage (R2 pool) ───────────────────────────────────────────────
+// Two halves: the account pool (what we have) and per-shop allocation (what we
+// have promised). The summary endpoint reports both, because the ratio between
+// them is the number that predicts a full bucket. See R2_STORAGE_PLAN.md.
+router.get('/storage/summary', adminStorageController.getSummary);
+router.get('/storage/accounts', adminStorageController.listAccounts);
+router.post('/storage/accounts', adminStorageController.createAccount);
+// Verify a credential BEFORE it is saved — nothing is persisted by this route.
+router.post('/storage/accounts/test', adminStorageController.testDraftAccount);
+router.patch('/storage/accounts/:id', adminStorageController.updateAccount);
+router.post('/storage/accounts/:id/test', adminStorageController.testAccount);
+// Draining stops new allocation but keeps serving reads — the safe way to
+// retire a bucket.
+router.post('/storage/accounts/:id/drain', adminStorageController.setAccountDraining);
+// Retiring an account is `draining` then `isActive: false` (PATCH above), never
+// a DELETE. Two reasons, and the second one is the real one:
+//   1. panel policy — hard deletion is disabled platform-wide, and
+//      `assertAdminMayDelete` would 403 the route even if it were mounted
+//      (see adminNoDelete.test.js).
+//   2. the account row is the ONLY map from a stored object back to the bucket
+//      holding it. Erase it and every file it ever held becomes unreachable —
+//      no URL to rebuild, no key to delete, no way to count what was lost.
+// Keeping a retired row costs one document and preserves that map forever.
+
+// Per-shop allocation table + the per-shop controls.
+router.get('/storage/shops', adminStorageController.listShopStorage);
+router.get('/shops/:id/storage', adminStorageController.getShopStorage);
+router.patch('/shops/:id/storage', adminStorageController.setShopStorage);
+router.post('/shops/:id/storage/recalculate', adminStorageController.recalculateShopStorage);
 
 // Cache/Redis management
 router.get('/cache/stats', adminController.getCacheStats);

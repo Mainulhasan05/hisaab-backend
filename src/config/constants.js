@@ -202,7 +202,17 @@ module.exports = {
 
     // Telegram notifications
     TELEGRAM_LINK: { en: 'telegram_link', bn: 'টেলিগ্রাম সংযুক্ত' },
-    TELEGRAM_UNLINK: { en: 'telegram_unlink', bn: 'টেলিগ্রাম সংযোগ বন্ধ' }
+    TELEGRAM_UNLINK: { en: 'telegram_unlink', bn: 'টেলিগ্রাম সংযোগ বন্ধ' },
+
+    // Image storage (R2 pool). Registered here so the audit screen shows a
+    // Bengali label instead of the raw key — see AuditLog.statics.log.
+    STORAGE_ENABLED: { en: 'storage_enabled', bn: 'ছবি সংরক্ষণ চালু' },
+    STORAGE_DISABLED: { en: 'storage_disabled', bn: 'ছবি সংরক্ষণ বন্ধ' },
+    STORAGE_QUOTA_CHANGED: { en: 'storage_quota_changed', bn: 'স্টোরেজ কোটা পরিবর্তন' },
+    STORAGE_ACCOUNT_CREATE: { en: 'storage_account_create', bn: 'স্টোরেজ অ্যাকাউন্ট যোগ' },
+    // Covers edits, draining and deactivation. There is no delete action —
+    // storage accounts are retired, never erased. See adminStorage.service.
+    STORAGE_ACCOUNT_UPDATE: { en: 'storage_account_update', bn: 'স্টোরেজ অ্যাকাউন্ট আপডেট' }
   },
 
   // Sales Return Refund Methods

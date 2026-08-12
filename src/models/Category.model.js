@@ -27,6 +27,15 @@ const categorySchema = new mongoose.Schema({
   image: {
     type: String
   },
+  // Set only when `image` is an object we uploaded to the R2 pool, so the
+  // reclamation job knows whose bytes these are. Null for an external URL or
+  // for no image at all. `image` itself stays a plain string — every existing
+  // reader keeps working untouched.
+  imageMediaId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'ShopMedia',
+    default: null
+  },
   parent: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Category',

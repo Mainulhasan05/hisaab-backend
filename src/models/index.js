@@ -25,6 +25,12 @@ module.exports = {
   SMSQuota: require('./SMSQuota.model'),
   ShopCategory: require('./ShopCategory.model'),
   GeminiKey: require('./GeminiKey.model'),
+  // The R2 storage pool. One document per Cloudflare bucket; see
+  // services/storage.service.js for how one is chosen per upload.
+  R2Account: require('./R2Account.model'),
+  // One uploaded image. Carries the dedupe hash, the refCount that makes
+  // reclamation possible, and the account+key that make URLs rebuildable.
+  ShopMedia: require('./ShopMedia.model'),
   TelegramLink: require('./TelegramLink.model'),
   TelegramLinkToken: require('./TelegramLinkToken.model'),
   NotificationLog: require('./NotificationLog.model')

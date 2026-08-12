@@ -239,6 +239,65 @@ class CacheService {
   }
 
   /**
+   * Run several writes in ONE Redis round trip.
+   *
+   * Presence tracking is the motivating case: recording a heartbeat was a
+   * `set` then an `sAdd` then another `sAdd`, and recording activity was a
+   * `setNX` then two `set`s then an `sAdd` — seven sequential round trips per
+   * user per minute, none of whose results the caller inspects.
+   *
+   * Ops are `{ type, key, value, ttl, member }`. Only the shapes those two call
+   * sites need are supported; anything else should use the typed methods.
+   * Falls back to applying the same ops against the memory cache in order, so
+   * behaviour is identical with Redis down.
+   *
+   * Deliberately returns nothing. `setNX`'s "did I acquire it" answer cannot be
+   * had from a pipeline without inspecting replies, so a caller that needs to
+   * BRANCH on a result must still call setNX on its own — see
+   * userActivity.service.js, which does exactly that before pipelining the rest.
+   *
+   * @param {Array<{type:string,key:string,value?:any,ttl?:number,member?:string}>} ops
+   */
+  async pipeline(ops) {
+    if (!Array.isArray(ops) || ops.length === 0) return true;
+
+    if (isConnected()) {
+      try {
+        const client = getClient();
+        const multi = client.multi();
+        for (const op of ops) {
+          switch (op.type) {
+            case 'set':
+              multi.setEx(op.key, op.ttl, JSON.stringify(op.value));
+              break;
+            case 'sAdd':
+              multi.sAdd(op.key, op.member);
+              break;
+            case 'del':
+              multi.del(op.key);
+              break;
+            default:
+              logger.warn(`cache.pipeline: unsupported op "${op.type}", skipped`);
+          }
+        }
+        await multi.exec();
+        return true;
+      } catch (error) {
+        logger.error('Redis pipeline error, falling back to memory:', error.message);
+      }
+    }
+
+    // Memory fallback — same ops, applied in order via the typed methods so the
+    // set-emulation and TTL bookkeeping stay in one place.
+    for (const op of ops) {
+      if (op.type === 'set') await this.set(op.key, op.value, op.ttl);
+      else if (op.type === 'sAdd') await this.sAdd(op.key, op.member);
+      else if (op.type === 'del') await this.delete(op.key);
+    }
+    return true;
+  }
+
+  /**
    * Get multiple values
    * @param {string[]} keys - Array of cache keys
    */

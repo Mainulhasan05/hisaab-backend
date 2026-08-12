@@ -58,7 +58,48 @@ const FEATURES = Object.freeze({
       'product form. Managing brands rides on the categories permission. ' +
       'Off = no brand field anywhere and no brand is stored, as before.',
   },
+  productImages: {
+    bn: 'পণ্যের ছবি',
+    en: 'Product photos',
+    description:
+      'Photos on products and on individual variants, stored in the platform ' +
+      'R2 pool and counted against the shop\'s storage quota. Uploading is ' +
+      'never required to save a product. Off = no image control on the product ' +
+      'form; existing photos are kept, not deleted.',
+    requiresStorage: true,
+  },
+  categoryImages: {
+    bn: 'ক্যাটাগরির ছবি',
+    en: 'Category photos',
+    description:
+      'One photo per category. Independent of productImages — a shop may have ' +
+      'either, both or neither. Off = no image control on the category form; ' +
+      'existing photos are kept.',
+    requiresStorage: true,
+  },
+  onlineSelling: {
+    bn: 'অনলাইনে বিক্রি',
+    en: 'Online selling',
+    description:
+      'Lets the shop choose, per product, whether it appears online — plus the ' +
+      'online price override, the online description and the featured flag. ' +
+      'Off = no online section on the product form and every product is stored ' +
+      'as offline. Existing settings are kept, not cleared, so the switch is ' +
+      'reversible.',
+  },
 });
+
+/**
+ * Capabilities that cannot be on while `Shop.storage.enabled` is false.
+ *
+ * A feature that writes bytes needs somewhere to put them. Without this list
+ * the panel would happily hand a shop an upload button wired to a 403, which
+ * looks like a bug to the shop and to support. `admin.service.setShopFeature`
+ * enforces it on the way in, and disabling storage cascades these off.
+ */
+const STORAGE_BACKED_FEATURES = Object.freeze(
+  Object.keys(FEATURES).filter((key) => FEATURES[key].requiresStorage === true)
+);
 
 /** Every valid feature key. */
 const FEATURE_KEYS = Object.freeze(Object.keys(FEATURES));
@@ -154,12 +195,47 @@ function requireFeature(key) {
   };
 }
 
+/**
+ * Route guard: open the endpoint if ANY of these capabilities is on.
+ *
+ * For a resource shared by several features rather than owned by one. The
+ * upload endpoint is the case it was written for: `productImages` and
+ * `categoryImages` are independent axes, and a shop given only the second still
+ * has to be able to put a photo on a category. Gating on `productImages` alone
+ * would hand that shop a feature it cannot use.
+ *
+ * Same 404-not-403 reasoning as `requireFeature`.
+ *
+ * @param {string[]} keys FEATURES keys; at least one must be on
+ */
+function requireAnyFeature(keys) {
+  if (!Array.isArray(keys) || keys.length === 0) {
+    throw new Error('requireAnyFeature needs at least one feature key');
+  }
+  keys.forEach(assertKnownFeature);
+
+  return (req, res, next) => {
+    if (keys.some((key) => hasFeature(req, key))) return next();
+
+    const error = new AppError(
+      'Not found',
+      'এই সুবিধাটি আপনার দোকানে চালু নেই',
+      404
+    );
+    error.code = 'FEATURE_DISABLED';
+    error.feature = keys.join('|');
+    return next(error);
+  };
+}
+
 module.exports = {
   FEATURES,
   FEATURE_KEYS,
+  STORAGE_BACKED_FEATURES,
   hasFeature,
   shopHasFeature,
   featureMap,
   assertKnownFeature,
   requireFeature,
+  requireAnyFeature,
 };

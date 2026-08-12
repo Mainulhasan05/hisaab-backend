@@ -25,7 +25,7 @@ const { invalidateShopAuthCache, invalidateBranchCache } = require('../utils/aut
 const { resolveSubscription } = require('../utils/subscriptionState.util');
 const { refuseDeletion } = require('../utils/deletionDisabled.util');
 const { KEYS, getTTL } = require('../config/cacheKeys');
-const { FEATURES, FEATURE_KEYS } = require('../utils/features.util');
+const { FEATURES, FEATURE_KEYS, STORAGE_BACKED_FEATURES } = require('../utils/features.util');
 
 const escapeRegex = (value) => String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -95,6 +95,21 @@ class AdminService {
     const yesterdayStart = new Date(todayStart);
     yesterdayStart.setDate(yesterdayStart.getDate() - 1);
 
+    const Customer = require('../models/Customer.model');
+
+    // The three sales windows are read in ONE pass via $facet.
+    //
+    // The outer $match must cover the earliest boundary any facet needs. On the
+    // 1st of a month `yesterdayStart` falls in the PREVIOUS month, i.e. before
+    // `monthStart` — matching on `monthStart` alone would silently drop
+    // yesterday's revenue on exactly one day in thirty and make `revenueGrowth`
+    // read +100% every month. So the floor is the earlier of the two.
+    const salesRangeStart = monthStart < yesterdayStart ? monthStart : yesterdayStart;
+
+    // Every query below is independent of the others. They used to run as
+    // fifteen sequential `await`s — eight batched plus seven one at a time —
+    // so the endpoint paid a full round trip per query, each an unindexed
+    // platform-wide scan. One Promise.all collapses that to roughly one.
     const [
       totalShops,
       activeShops,
@@ -104,6 +119,10 @@ class AdminService {
       totalUsers,
       todayNewShops,
       todayNewUsers,
+      salesFacet,
+      platformRevenueFacet,
+      todayNewCustomers,
+      todayNewProducts,
     ] = await Promise.all([
       Shop.countDocuments(),
       Shop.countDocuments({ 'subscription.status': 'active' }),
@@ -113,58 +132,80 @@ class AdminService {
       User.countDocuments({ isActive: true }),
       Shop.countDocuments({ createdAt: { $gte: todayStart } }),
       User.countDocuments({ createdAt: { $gte: todayStart } }),
-    ]);
 
-    // Today's sales stats across all shops
-    const todaySalesResult = await Sale.aggregate([
-      { $match: { createdAt: { $gte: todayStart }, status: { $ne: 'cancelled' } } },
-      {
-        $group: {
-          _id: null,
-          totalSales: { $sum: 1 },
-          totalRevenue: { $sum: '$grandTotal' },
-          totalItems: { $sum: { $size: '$items' } },
+      // Today's / yesterday's / this month's sales across all shops.
+      //
+      // `$total` is the field the Sale schema actually defines — `sale.service.js`
+      // writes it and `getAllShops` below already sums it. These three facets
+      // summed `$grandTotal`, which exists nowhere on the model, so `$sum`
+      // returned 0 for a missing path and the platform's revenue figures,
+      // month figures and growth percentage have all read ৳0 since they were
+      // written. The 60s cache faithfully cached the zero.
+      Sale.aggregate([
+        { $match: { createdAt: { $gte: salesRangeStart }, status: { $ne: 'cancelled' } } },
+        {
+          $facet: {
+            today: [
+              { $match: { createdAt: { $gte: todayStart } } },
+              {
+                $group: {
+                  _id: null,
+                  totalSales: { $sum: 1 },
+                  totalRevenue: { $sum: '$total' },
+                  totalItems: { $sum: { $size: '$items' } },
+                },
+              },
+            ],
+            yesterday: [
+              { $match: { createdAt: { $gte: yesterdayStart, $lt: todayStart } } },
+              { $group: { _id: null, totalRevenue: { $sum: '$total' } } },
+            ],
+            month: [
+              { $match: { createdAt: { $gte: monthStart } } },
+              {
+                $group: {
+                  _id: null,
+                  totalSales: { $sum: 1 },
+                  totalRevenue: { $sum: '$total' },
+                },
+              },
+            ],
+          },
         },
-      },
-    ]);
+      ]),
 
-    // Yesterday's sales for comparison
-    const yesterdaySalesResult = await Sale.aggregate([
-      { $match: { createdAt: { $gte: yesterdayStart, $lt: todayStart }, status: { $ne: 'cancelled' } } },
-      { $group: { _id: null, totalRevenue: { $sum: '$grandTotal' } } },
-    ]);
-
-    // This month's sales
-    const monthSalesResult = await Sale.aggregate([
-      { $match: { createdAt: { $gte: monthStart }, status: { $ne: 'cancelled' } } },
-      {
-        $group: {
-          _id: null,
-          totalSales: { $sum: 1 },
-          totalRevenue: { $sum: '$grandTotal' },
+      // Platform revenue — from PlatformPayment, not the shops' own ledger.
+      //
+      // These two used to read `Payment` with `type: 'subscription'`, a value
+      // that is not in that model's enum, so every write threw and both figures
+      // were structurally ৳0. Dated by `receivedAt` (when the money arrived), not
+      // `createdAt` (when it was keyed in).
+      //
+      // Both facets read the same `type: 'subscription'` set, so they share one
+      // pass rather than scanning it twice.
+      PlatformPayment.aggregate([
+        { $match: { type: 'subscription' } },
+        {
+          $facet: {
+            allTime: [{ $group: { _id: null, totalRevenue: { $sum: '$amount' } } }],
+            month: [
+              { $match: { receivedAt: { $gte: monthStart } } },
+              { $group: { _id: null, monthlyRevenue: { $sum: '$amount' } } },
+            ],
+          },
         },
-      },
+      ]),
+
+      // Today's new customers / products across all shops
+      Customer.countDocuments({ createdAt: { $gte: todayStart } }),
+      Product.countDocuments({ createdAt: { $gte: todayStart } }),
     ]);
 
-    // Platform revenue — from PlatformPayment, not the shops' own ledger.
-    //
-    // These two used to read `Payment` with `type: 'subscription'`, a value
-    // that is not in that model's enum, so every write threw and both figures
-    // were structurally ৳0. Dated by `receivedAt` (when the money arrived), not
-    // `createdAt` (when it was keyed in).
-    const revenueResult = await PlatformPayment.aggregate([
-      { $match: { type: 'subscription' } },
-      { $group: { _id: null, totalRevenue: { $sum: '$amount' } } },
-    ]);
-
-    const monthlyRevenueResult = await PlatformPayment.aggregate([
-      { $match: { type: 'subscription', receivedAt: { $gte: monthStart } } },
-      { $group: { _id: null, monthlyRevenue: { $sum: '$amount' } } },
-    ]);
-
-    // Today's new customers across all shops
-    const Customer = require('../models/Customer.model');
-    const todayNewCustomers = await Customer.countDocuments({ createdAt: { $gte: todayStart } });
+    const todaySalesResult = salesFacet[0]?.today || [];
+    const yesterdaySalesResult = salesFacet[0]?.yesterday || [];
+    const monthSalesResult = salesFacet[0]?.month || [];
+    const revenueResult = platformRevenueFacet[0]?.allTime || [];
+    const monthlyRevenueResult = platformRevenueFacet[0]?.month || [];
 
     // Calculate growth percentages
     const todayRevenue = todaySalesResult[0]?.totalRevenue || 0;
@@ -172,10 +213,6 @@ class AdminService {
     const revenueGrowth = yesterdayRevenue > 0
       ? Math.round(((todayRevenue - yesterdayRevenue) / yesterdayRevenue) * 100)
       : 0;
-
-    // Today's new products across all shops
-    const Product = require('../models/Product.model');
-    const todayNewProducts = await Product.countDocuments({ createdAt: { $gte: todayStart } });
 
     const result = {
       // Shop stats
@@ -232,13 +269,22 @@ class AdminService {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-    // Top 5 shops by sales revenue (last 30 days)
-    const topShops = await Sale.aggregate([
+    // Most active shops (by number of transactions today)
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    // These three aggregations are independent; they used to run sequentially.
+    const [topShops, topProducts, mostActiveToday] = await Promise.all([
+    // Top 5 shops by sales revenue (last 30 days).
+    // `$total`, not `$grandTotal` — see the note in getStats(). This leaderboard
+    // was sorting by a field the Sale schema does not define, so every shop
+    // scored 0 and the "top 5" was whatever order the group happened to emit.
+    Sale.aggregate([
       { $match: { createdAt: { $gte: thirtyDaysAgo }, status: { $ne: 'cancelled' } } },
       {
         $group: {
           _id: '$shop',
-          totalRevenue: { $sum: '$grandTotal' },
+          totalRevenue: { $sum: '$total' },
           totalSales: { $sum: 1 },
         },
       },
@@ -262,29 +308,32 @@ class AdminService {
           totalSales: 1,
         },
       },
-    ]);
+    ]),
 
-    // Top 5 products by quantity sold (last 30 days)
-    const topProducts = await Sale.aggregate([
+    // Top 5 products by quantity sold (last 30 days).
+    //
+    // Revenue reads the stored line total. It used to be
+    // `$multiply: ['$items.price', '$items.quantity']`, but a sale item has no
+    // `price` field — it has `unitPrice` and `total` (Sale.model.js:84,103).
+    // `$multiply` over a missing path yields null, `$sum` skips nulls, so this
+    // column was structurally ৳0 too. `$items.total` is also what
+    // report.service.js sums for the same figure, so the two now agree.
+    Sale.aggregate([
       { $match: { createdAt: { $gte: thirtyDaysAgo }, status: { $ne: 'cancelled' } } },
       { $unwind: '$items' },
       {
         $group: {
           _id: '$items.product',
           totalQuantity: { $sum: '$items.quantity' },
-          totalRevenue: { $sum: { $multiply: ['$items.price', '$items.quantity'] } },
+          totalRevenue: { $sum: '$items.total' },
           name: { $first: '$items.productName' },
         },
       },
       { $sort: { totalQuantity: -1 } },
       { $limit: 5 },
-    ]);
+    ]),
 
-    // Most active shops (by number of transactions today)
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-
-    const mostActiveToday = await Sale.aggregate([
+    Sale.aggregate([
       { $match: { createdAt: { $gte: todayStart } } },
       {
         $group: {
@@ -310,6 +359,7 @@ class AdminService {
           salesCount: 1,
         },
       },
+    ]),
     ]);
 
     const result = {
@@ -556,11 +606,14 @@ class AdminService {
       };
     });
 
-    // Fetch registration audit logs (IP/device) for all shops in this page
+    // Fetch registration audit logs (IP/device) for all shops in this page.
+    // Only `shop` and `metadata` are read below, and only the FIRST log per
+    // shop survives — so the whole document was being fetched for nothing.
+    // Served by the {shop, action, createdAt} index added to AuditLog.model.js.
     const registrationLogs = await AuditLog.find({
       shop: { $in: shopIds },
       action: 'user_register',
-    }).sort({ createdAt: 1 }).lean();
+    }).select('shop metadata').sort({ createdAt: 1 }).lean();
 
     // Map: first registration log per shop
     const regLogMap = new Map();
@@ -929,10 +982,13 @@ class AdminService {
 
     // Rule 1 — the filter is `isDeleted: true`, so a live id simply does not
     // come back and is reported as not-eligible below.
+    // `catalogImages` and `variants` come along so the purge can release the
+    // product's photos — the document is about to stop existing, and it is the
+    // only record of which images it held.
     const products = await Product.find({
       _id: { $in: productIds.filter((id) => mongoose.Types.ObjectId.isValid(id)) },
       isDeleted: true,
-    }).select('name code shop').lean();
+    }).select('name code shop catalogImages variants').lean();
 
     const foundIds = products.map((p) => String(p._id));
     const links = await this.inspectProductLinks(foundIds); // Rule 2
@@ -1004,6 +1060,23 @@ class AdminService {
       // fails the build. Do not copy the marker to widen the hole.
       await StockTransaction.deleteMany({ product: id }); // admin-purge:reviewed
       await Product.deleteOne({ _id: id });
+
+      // Release the product's photos. For anything soft-deleted after
+      // `product.service.deleteProduct` started detaching, this is a no-op — the
+      // `refCount > 0` guard makes the repeat harmless. For the backlog of
+      // products soft-deleted BEFORE that, this is the ONLY thing that ever
+      // decrements them, and without it a purge frees the row while leaving the
+      // bytes charged to the shop forever.
+      //
+      // After the delete, not before: a refCount released against a product that
+      // then failed to purge would leave a live product pointing at an image the
+      // orphan sweep is free to collect.
+      const mediaService = require('./media.service');
+      await mediaService.reconcileRefs(
+        product.shop,
+        mediaService.mediaIdsOfProduct(product),
+        []
+      );
 
       purged.push({ productId: id, name: product.name, shop: product.shop });
     }
@@ -2321,6 +2394,20 @@ class AdminService {
       return shop.toObject();
     }
 
+    // A capability that writes bytes needs somewhere to put them. Enabling one
+    // while `storage.enabled` is false would give the shop an upload button
+    // wired to a 403 — which reads as a bug to them and as a support ticket to
+    // us. The mirror of this rule (disabling storage cascades these off) lives
+    // in adminStorage.service.setShopStorage; between the two, the broken
+    // combination is unreachable from either direction.
+    if (value && STORAGE_BACKED_FEATURES.includes(key) && shop.storage?.enabled !== true) {
+      throw new AppError(
+        `"${FEATURES[key].en}" needs image storage. Enable storage for this shop first.`,
+        `"${FEATURES[key].bn}" চালু করতে হলে আগে এই দোকানে ছবি সংরক্ষণ (স্টোরেজ) চালু করুন`,
+        400
+      );
+    }
+
     if (!shop.features) shop.features = {};
     shop.features[key] = value;
     // `features` is a nested object; Mongoose does not always see a mutation on
@@ -2357,20 +2444,33 @@ class AdminService {
    * capability appears in the admin panel the moment it is registered.
    */
   async getShopFeatures(shopId) {
-    const shop = await Shop.findById(shopId).select('name features').lean();
+    const shop = await Shop.findById(shopId).select('name features storage').lean();
     if (!shop) {
       throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
     }
 
+    const storageEnabled = shop.storage?.enabled === true;
+
     return {
       shop: { _id: String(shop._id), name: shop.name },
-      features: FEATURE_KEYS.map((key) => ({
-        key,
-        label: FEATURES[key].bn,
-        labelEn: FEATURES[key].en,
-        description: FEATURES[key].description,
-        enabled: shop.features?.[key] === true,
-      })),
+      // Reported so the panel can render a storage-backed toggle as disabled
+      // with a reason, instead of letting an admin click it and read a 400.
+      storageEnabled,
+      features: FEATURE_KEYS.map((key) => {
+        const needsStorage = STORAGE_BACKED_FEATURES.includes(key);
+        return {
+          key,
+          label: FEATURES[key].bn,
+          labelEn: FEATURES[key].en,
+          description: FEATURES[key].description,
+          enabled: shop.features?.[key] === true,
+          requiresStorage: needsStorage,
+          blocked: needsStorage && !storageEnabled,
+          blockedReason: needsStorage && !storageEnabled
+            ? 'আগে এই দোকানে ছবি সংরক্ষণ (স্টোরেজ) চালু করুন'
+            : null,
+        };
+      }),
     };
   }
 
