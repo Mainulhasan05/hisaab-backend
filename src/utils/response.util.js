@@ -23,19 +23,35 @@ class ApiResponse {
 
   /**
    * Send error response
+   *
+   * `messageBn` is the whole point of this app's error copy and it used to be
+   * silently dropped here: callers all over the codebase — `validate.middleware`
+   * included — passed a carefully written Bengali sentence into `badRequest`,
+   * `notFound`, `conflict` and friends, and this method destructured only
+   * `message`, `statusCode` and `errors`. The Bengali never reached the wire,
+   * so `lib/axios.js` read `data.messageBn` as undefined and every Redux thunk's
+   * `error.messageBn || error.message` fell through to English. For a
+   * Bengali-first audience that happened at exactly the moments users panic.
+   *
+   * It is omitted from the body rather than sent as `null` when absent, so a
+   * client can distinguish "no Bengali copy for this error" from "the key is
+   * always there and always empty".
    */
   static error(res, {
     message = 'Something went wrong',
+    messageBn = null,
     statusCode = 500,
     errors = null
   }) {
-    return res.status(statusCode).json({
+    const body = {
       success: false,
       statusCode,
       message,
       errors,
       timestamp: new Date().toISOString()
-    });
+    };
+    if (messageBn) body.messageBn = messageBn;
+    return res.status(statusCode).json(body);
   }
 
   /**
@@ -100,18 +116,20 @@ class ApiResponse {
    */
   static badRequest(res, {
     message = 'Bad request',
+    messageBn = null,
     errors = null
   }) {
-    return this.error(res, { message, statusCode: 400, errors });
+    return this.error(res, { message, messageBn, statusCode: 400, errors });
   }
 
   /**
    * Send unauthorized response (401)
    */
   static unauthorized(res, {
-    message = 'Unauthorized'
+    message = 'Unauthorized',
+    messageBn = null
   }) {
-    return this.error(res, { message, statusCode: 401 });
+    return this.error(res, { message, messageBn, statusCode: 401 });
   }
 
   /**
@@ -119,9 +137,11 @@ class ApiResponse {
    */
   static forbidden(res, {
     message = 'Access forbidden',
+    messageBn = null,
     code = null
   }) {
     const body = { success: false, statusCode: 403, message, timestamp: new Date().toISOString() };
+    if (messageBn) body.messageBn = messageBn;
     if (code) body.code = code;
     return res.status(403).json(body);
   }
@@ -131,33 +151,38 @@ class ApiResponse {
    */
   static paymentRequired(res, {
     message = 'Subscription required',
+    messageBn = null,
     code = 'SUBSCRIPTION_EXPIRED'
   }) {
-    return res.status(402).json({
+    const body = {
       success: false,
       statusCode: 402,
       message,
       code,
       timestamp: new Date().toISOString()
-    });
+    };
+    if (messageBn) body.messageBn = messageBn;
+    return res.status(402).json(body);
   }
 
   /**
    * Send not found response (404)
    */
   static notFound(res, {
-    message = 'Resource not found'
+    message = 'Resource not found',
+    messageBn = null
   }) {
-    return this.error(res, { message, statusCode: 404 });
+    return this.error(res, { message, messageBn, statusCode: 404 });
   }
 
   /**
    * Send conflict response (409)
    */
   static conflict(res, {
-    message = 'Resource already exists'
+    message = 'Resource already exists',
+    messageBn = null
   }) {
-    return this.error(res, { message, statusCode: 409 });
+    return this.error(res, { message, messageBn, statusCode: 409 });
   }
 
   /**
@@ -165,27 +190,30 @@ class ApiResponse {
    */
   static validationError(res, {
     message = 'Validation failed',
+    messageBn = null,
     errors = null
   }) {
-    return this.error(res, { message, statusCode: 422, errors });
+    return this.error(res, { message, messageBn, statusCode: 422, errors });
   }
 
   /**
    * Send too many requests response (429)
    */
   static tooManyRequests(res, {
-    message = 'Too many requests'
+    message = 'Too many requests',
+    messageBn = null
   }) {
-    return this.error(res, { message, statusCode: 429 });
+    return this.error(res, { message, messageBn, statusCode: 429 });
   }
 
   /**
    * Send server error response (500)
    */
   static serverError(res, {
-    message = 'Internal server error'
+    message = 'Internal server error',
+    messageBn = null
   }) {
-    return this.error(res, { message, statusCode: 500 });
+    return this.error(res, { message, messageBn, statusCode: 500 });
   }
 }
 

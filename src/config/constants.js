@@ -219,8 +219,13 @@ module.exports = {
     MAX_LIMIT: 100
   },
 
-  // Subscription Price (BDT/month)
-  SUBSCRIPTION_PRICE: 1000,
+  // Subscription Price (BDT/month) — the LIST price, and it must equal what the
+  // marketing site says. It was 1000 while the landing page, the signup screen
+  // and the public help centre all advertised ৳800, so every shop that did not
+  // bargain saw one number before signing up and another on their billing card.
+  // This seeds `PlatformSetting.defaultMonthlyPrice` and every new shop's
+  // `billing.monthlyPrice`; per-shop negotiation still overrides it.
+  SUBSCRIPTION_PRICE: 800,
 
   // JWT Token Expiry
   JWT_EXPIRES_IN: '30d',

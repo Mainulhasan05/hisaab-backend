@@ -1,5 +1,11 @@
 const mongoose = require('mongoose');
-const { SHOP_TYPES, SUBSCRIPTION_PLANS, SUBSCRIPTION_STATUS, DEFAULT_SETTINGS } = require('../config/constants');
+const {
+  SHOP_TYPES,
+  SUBSCRIPTION_PLANS,
+  SUBSCRIPTION_STATUS,
+  DEFAULT_SETTINGS,
+  SUBSCRIPTION_PRICE,
+} = require('../config/constants');
 
 const shopSchema = new mongoose.Schema({
   name: {
@@ -69,7 +75,7 @@ const shopSchema = new mongoose.Schema({
     /** @deprecated moved to `billing.monthlyPrice`; kept so old docs still read. */
     monthlyPrice: {
       type: Number,
-      default: 1000
+      default: SUBSCRIPTION_PRICE
     },
     // Extra days of full access after expiry, granted per shop by the admin.
     // Platform-wide grace does not exist: 0 here means expiry behaves exactly
@@ -103,7 +109,7 @@ const shopSchema = new mongoose.Schema({
   billing: {
     monthlyPrice: {
       type: Number,
-      default: 1000,
+      default: SUBSCRIPTION_PRICE,
       min: 0
     },
     // What this shop usually buys at a time (1/3/6/12). Prefills the payment

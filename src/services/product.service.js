@@ -1799,15 +1799,22 @@ class ProductService {
         const unit = item.unit ? String(item.unit).trim() : 'piece';
         const trackBatches = Boolean(item.trackBatches);
 
-        const batches = [];
-        if (trackBatches && item.batchNumber && stock > 0) {
-          batches.push({
-            batchNumber: String(item.batchNumber).trim(),
-            expiryDate: item.expiryDate ? new Date(item.expiryDate) : null,
-            quantity: stock,
-            costPrice: buyingPrice,
-          });
-        }
+        // Routed through `_buildOpeningBatches` rather than assembled here, so
+        // the CSV path and the create form cannot disagree about what an
+        // opening batch is. They did: this block required `item.batchNumber`,
+        // so a row carrying `expiryDate` and no batch code imported the product
+        // and DROPPED the date — no error, no skipped-row entry, and the
+        // expiry-alerts screen simply never mentioned it. Same rule, one place:
+        // a row needs a number or a date plus stock on the shelf, and a missing
+        // number is generated from the product code.
+        const batches = trackBatches
+          ? this._buildOpeningBatches([], [], [{
+              batchNumber: item.batchNumber,
+              expiryDate: item.expiryDate,
+              quantity: stock,
+              costPrice: buyingPrice,
+            }], code)
+          : [];
 
         const product = await Product.create({
           shop: shopId,

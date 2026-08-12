@@ -74,6 +74,37 @@ const batchBody = {
   variantId: commonSchemas.objectId.allow(null, ''),
 };
 
+/**
+ * An OPENING batch, as the create form posts it. Same shape as `batchBody` with
+ * one deliberate difference: THE BATCH NUMBER IS OPTIONAL.
+ *
+ * An expiry date with no batch number is the ordinary case in a small shop — the
+ * date is printed on the packet, the batch code often is not legible or is not
+ * worth typing. Every other layer already agrees on that:
+ * `product.service._buildOpeningBatches` generates `B-<CODE>-<n>` for exactly
+ * this row, `variants[].openingBatch` accepts a blank number, and the create
+ * form's own hint under the field reads «না দিলেও চলবে — তারিখটাই আসল».
+ *
+ * This schema used to reuse `batchBody`, so Joi rejected that payload with
+ * «"batches[0].batchNumber" is not allowed to be empty» BEFORE the generator
+ * could run. Filling in only the expiry date — the thing the form tells you to
+ * do — failed to save the product at all, and the only way through was to invent
+ * a batch code. `batchBody` keeps its `required()` because the batch endpoints
+ * name an EXISTING batch, where an unnamed one would be unaddressable.
+ *
+ * `variantId` is absent by design, not by omission: on create the client has no
+ * variant ids yet (they are minted in `_formatVariants`), and
+ * `_buildOpeningBatches` forces `null` on this path so a client cannot smuggle
+ * one onto a product with no variants. A variant's opening batch travels on
+ * `variants[].openingBatch` instead.
+ */
+const openingBatchBody = {
+  batchNumber: Joi.string().trim().max(100).allow('', null),
+  expiryDate: Joi.date().allow('', null),
+  quantity: quantityField.required(),
+  costPrice: Joi.number().min(0).allow(null, ''),
+};
+
 const baseProduct = {
   code: Joi.string().trim().uppercase().max(100),
   barcode: Joi.string().trim().max(100).allow('', null),
@@ -129,7 +160,7 @@ const baseProduct = {
   // Create only — `updateProduct` forbids this key outright. A variant
   // product's opening batches arrive on `variants[].openingBatch` instead,
   // because the client has no variant id to reference yet.
-  batches: Joi.array().items(Joi.object(batchBody)),
+  batches: Joi.array().items(Joi.object(openingBatchBody)),
   trackSerials: Joi.boolean(),
   serials: Joi.array().items(Joi.string().trim()),
 };

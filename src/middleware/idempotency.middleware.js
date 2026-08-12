@@ -35,7 +35,18 @@ function idempotency(options = {}) {
       if (cached) {
         if (cached.status === 'processing') {
           logger.warn(`[Idempotency] Active duplicate request detected for key: ${idempotencyKey}`);
-          return ApiResponse.error(res, 'A request with this idempotency key is currently being processed.', 409);
+          // `ApiResponse.error` takes an OPTIONS OBJECT. This was called with
+          // positional arguments — `(res, 'A request…', 409)` — so the string
+          // was destructured for `message`/`statusCode`, both came out
+          // undefined, the defaults applied, and the 409 was ignored entirely.
+          // The client got a 500 reading "Something went wrong" for what is a
+          // perfectly ordinary in-flight duplicate. Nothing surfaced it because
+          // no client sent the header, so this branch had never once run.
+          return ApiResponse.error(res, {
+            message: 'A request with this idempotency key is currently being processed.',
+            messageBn: 'এই অনুরোধটি এখনো প্রক্রিয়াধীন। একটু পরে আবার চেষ্টা করুন।',
+            statusCode: 409,
+          });
         }
 
         if (cached.status === 'completed') {

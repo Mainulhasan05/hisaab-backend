@@ -90,6 +90,10 @@ const sendErrorDev = (err, res) => {
     success: false,
     statusCode: err.statusCode || 500,
     message: err.message,
+    // Top-level, not just nested inside `error` below. `lib/axios.js` reads
+    // `data.messageBn`, so burying it in the debug blob meant the Bengali was
+    // missing in development too — the same bug the production path had.
+    messageBn: err.messageBn || null,
     error: err,
     stack: err.stack,
     timestamp: new Date().toISOString()
@@ -106,8 +110,17 @@ const sendErrorProd = (err, res) => {
       success: false,
       statusCode: err.statusCode,
       message: err.message,
+      // Every `AppError` in this codebase is constructed with a Bengali
+      // sentence beside the English one, and this response object used to
+      // serialise only the English. The result was that the whole Bengali
+      // error vocabulary — hundreds of hand-written messages — existed, was
+      // maintained, and never once reached a shopkeeper's screen in
+      // production. Omitted rather than sent as null when there is no Bengali
+      // copy, matching `ApiResponse.error`.
       timestamp: new Date().toISOString()
     };
+
+    if (err.messageBn) response.messageBn = err.messageBn;
 
     // Pass through custom error codes and data for frontend handling
     if (err.code) response.code = err.code;
@@ -126,6 +139,10 @@ const sendErrorProd = (err, res) => {
     success: false,
     statusCode: err.statusCode || 500,
     message: err.message || 'Something went wrong!',
+    // A non-operational error has no authored Bengali copy — it is a crash, not
+    // a message we wrote. A generic sentence still beats showing a shopkeeper
+    // an English stack fragment with no idea what to do next.
+    messageBn: 'কিছু একটা সমস্যা হয়েছে। আবার চেষ্টা করুন।',
     errors: null,
     timestamp: new Date().toISOString()
   });

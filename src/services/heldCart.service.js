@@ -99,7 +99,25 @@ class HeldCartService {
   }
 
   /**
-   * Mark cart as converted to sale
+   * Mark cart as converted to sale.
+   *
+   * ⚠️ NOTHING CALLS THIS. There is no route for it and `sale.service.createSale`
+   * does not invoke it, so a held cart that has been resumed and sold stays
+   * `status: 'held'` for the rest of its life. It keeps showing in the held
+   * list, and resuming it a second time produces a second invoice, a second
+   * stock deduction and a second entry on the customer's due — for goods that
+   * left the shop once.
+   *
+   * The hold-cart UI is switched off for exactly this reason
+   * (`hisaab-frontend/lib/uiFlags.js` → `HOLD_CART_ENABLED`), which is what
+   * makes the bug currently unreachable from the app. The routes stay mounted,
+   * so a direct API caller can still hit it.
+   *
+   * Finishing it means calling this from inside `createSale`'s transaction —
+   * with the session, so a rolled-back sale does not leave a cart marked
+   * converted — and passing the held-cart id through the POS payload. Then a
+   * test that resumes and sells the same cart twice, and only then flip the
+   * flag.
    */
   async markConverted(shopId, cartId, saleId, req = null) {
     await HeldCart.updateOne(
