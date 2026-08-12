@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const adminController = require('../controllers/admin.controller');
+const billingController = require('../controllers/billing.controller');
 const { protect, adminOnly } = require('../middleware/auth.middleware');
 
 // Public admin routes
@@ -80,12 +81,36 @@ router.post('/cache/flush', adminController.flushCache);
 // Legacy route (keep for backward compatibility)
 router.get('/cache-stats', adminController.getCacheStats);
 
-// Payments
-router.get('/payments', adminController.getPayments);
-router.post('/payments', adminController.recordPayment);
+// ── Subscription & billing ────────────────────────────────────────────────
+// The lifecycle lives in billing.controller / billing.service; the admin
+// service keeps only the shop CRUD it always had. See SUBSCRIPTION_PLAN.md §9.
+//
+// Blocking and unblocking are ONE route with one permission: a shop that can be
+// switched off must always be switchable back on by whoever can reach here.
+router.get('/subscriptions', billingController.getWorklist);
+router.get('/billing/summary', billingController.getSummary);
+router.get('/billing/payments', billingController.listPayments);
+router.post('/billing/payments', billingController.recordPayment);
+router.post('/billing/payments/:paymentId/reverse', billingController.reversePayment);
+router.get('/shops/:id/billing', billingController.getShopBilling);
+router.post('/shops/:id/trial', billingController.startTrial);
+router.post('/shops/:id/subscription/extend', billingController.extendSubscription);
+router.post('/shops/:id/access', billingController.setAccess);
+router.patch('/shops/:id/billing', billingController.updateBillingProfile);
+
+// Platform defaults (trial length, standard prices, SMS tiers, support phone).
+// Settings, not policy enforcement — the per-shop negotiated figures always win.
+router.get('/settings/platform', billingController.getPlatformSettings);
+router.patch('/settings/platform', billingController.updatePlatformSettings);
+
+// Payments — the pre-billing routes. Kept mounted and pointed at the new
+// service so the existing admin screens keep working; new work should call
+// /billing/payments above.
+router.get('/payments', billingController.listPayments);
+router.post('/payments', billingController.recordPayment);
 
 // SMS
-router.post('/sms/allocate', adminController.allocateSMS);
+router.post('/sms/allocate', billingController.allocateSms);
 router.get('/sms/logs', adminController.getSMSLogs);
 router.get('/sms/allocations', adminController.getSMSAllocations);
 router.get('/sms/stats', adminController.getSMSStats);

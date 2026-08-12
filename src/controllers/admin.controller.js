@@ -83,36 +83,11 @@ exports.updateShopSubscription = asyncHandler(async (req, res) => {
   });
 });
 
-// Get subscription payments
-exports.getPayments = asyncHandler(async (req, res) => {
-  const result = await adminService.getSubscriptionPayments(req.query);
-  return ApiResponse.paginated(res, {
-    ...result,
-    message: 'Payments retrieved successfully',
-    messageBn: 'পেমেন্ট তালিকা সফলভাবে লোড হয়েছে',
-  });
-});
-
-// Record subscription payment
-exports.recordPayment = asyncHandler(async (req, res) => {
-  const result = await adminService.recordSubscriptionPayment(req.admin._id, req.body);
-  return ApiResponse.success(res, {
-    data: result,
-    message: 'Payment recorded successfully',
-    messageBn: 'পেমেন্ট সফলভাবে রেকর্ড হয়েছে',
-    statusCode: 201,
-  });
-});
-
-// Allocate SMS quota
-exports.allocateSMS = asyncHandler(async (req, res) => {
-  const quota = await adminService.allocateSMSQuota(req.admin._id, req.body);
-  return ApiResponse.success(res, {
-    data: quota,
-    message: 'SMS quota allocated successfully',
-    messageBn: 'এসএমএস কোটা সফলভাবে বরাদ্দ হয়েছে',
-  });
-});
+// Payments, payment recording and SMS allocation now live in
+// billing.controller (see routes/admin.routes.js). They were moved rather than
+// wrapped: they write to the PlatformPayment ledger, which is a different
+// collection from the shops' own `Payment`, and keeping a second entry point
+// here is how the two would drift back together.
 
 // Get SMS logs (all shops)
 exports.getSMSLogs = asyncHandler(async (req, res) => {

@@ -14,6 +14,11 @@ module.exports = {
   Product: require('./Product.model'),
   Sale: require('./Sale.model'),
   Payment: require('./Payment.model'),
+  // Platform billing — what shops pay HisaabBD. Separate from `Payment`, which
+  // is what a shop's customers pay the shop.
+  PlatformPayment: require('./PlatformPayment.model'),
+  SubscriptionEvent: require('./SubscriptionEvent.model'),
+  PlatformSetting: require('./PlatformSetting.model'),
   StockTransaction: require('./StockTransaction.model'),
   AuditLog: require('./AuditLog.model'),
   SMSLog: require('./SMSLog.model'),

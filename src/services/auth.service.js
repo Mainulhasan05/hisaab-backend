@@ -5,7 +5,10 @@ const Admin = require('../models/Admin.model');
 const AuditLog = require('../models/AuditLog.model');
 const SMSService = require('./sms.service');
 const { AppError } = require('../middleware/error.middleware');
-const { AUDIT_ACTIONS, TRIAL_PERIOD_DAYS } = require('../config/constants');
+const { AUDIT_ACTIONS, TRIAL_PERIOD_DAYS, SUBSCRIPTION_PRICE } = require('../config/constants');
+const { resolveSubscription, buildSubscriptionNotice } = require('../utils/subscriptionState.util');
+const { addBangladeshDays } = require('../utils/bdTime.util');
+const billingService = require('./billing.service');
 const { ROLE_PRESETS, PRESET_VERSION, buildPermissionsFromConfig, buildPermissions, LEGACY_PERMISSION_MAP } = require('../config/permissions');
 const jwt = require('jsonwebtoken');
 const cacheService = require('./cache.service');
@@ -45,6 +48,12 @@ class AuthService {
     const resolvedShopType = shopType || 'other';
     const enabledVariantTypes = await this.resolveDefaultVariantTypes(resolvedShopType);
 
+    // Trial length and starting prices come from the platform settings document
+    // so the operator can change them without a deploy. The constants remain the
+    // fallback: a Mongo hiccup here must not be what stops a shop registering.
+    const settings = await billingService.getSettings();
+    const trialDays = settings?.defaultTrialDays ?? TRIAL_PERIOD_DAYS;
+
     // Create shop first
     const shop = await Shop.create({
       name: shopName,
@@ -55,7 +64,14 @@ class AuthService {
         plan: 'trial',
         status: 'active',
         startedAt: new Date(),
-        expiresAt: new Date(Date.now() + TRIAL_PERIOD_DAYS * 24 * 60 * 60 * 1000)
+        // End of the trial's last Bangladesh day, not a timestamp N×24h out —
+        // otherwise a shop that signed up at 9pm loses most of its final day.
+        expiresAt: addBangladeshDays(new Date(), trialDays),
+        trialDays
+      },
+      billing: {
+        monthlyPrice: settings?.defaultMonthlyPrice ?? SUBSCRIPTION_PRICE,
+        smsUnitPrice: settings?.defaultSmsUnitPrice ?? 0.4
       },
       settings: {
         enabledVariantTypes
@@ -428,37 +444,35 @@ class AuthService {
       throw err;
     }
 
-    // Check if shop is active
+    // Subscription & access — same resolver the request middleware and the
+    // owner's banner use, so what login says and what the next request does can
+    // never disagree.
     const shop = await Shop.findById(user.shop);
-    if (!shop || !shop.isActive) {
+    const access = resolveSubscription(shop);
+
+    if (!shop || access.isBlocked) {
       await AuditLog.log({
         shop: user.shop,
         user: user._id,
         action: AUDIT_ACTIONS.AUTH_FAILED.en,
-        description: `Failed login attempt for ${user.name} (${normalizedPhone}) — Shop deactivated`,
+        description: `Failed login attempt for ${user.name} (${normalizedPhone}) — shop access blocked`,
         entity: { type: 'auth', id: user._id, name: user.name },
         req
       }).catch(() => {});
 
       throw new AppError(
-        'Shop is deactivated',
-        'দোকান নিষ্ক্রিয়',
+        'Access to this shop has been suspended. Please contact support on 01757995016.',
+        'আপনার দোকানের অ্যাক্সেস বন্ধ করা হয়েছে। যোগাযোগ করুন — ০১৭৫৭৯৯৫০১৬',
         403
       );
     }
 
-    // Check subscription
-    const subscriptionExpired = !shop.isSubscriptionValid;
-    if (subscriptionExpired) {
-      if (
-        shop.subscription &&
-        shop.subscription.status === 'active' &&
-        shop.subscription.expiresAt &&
-        shop.subscription.expiresAt < new Date()
-      ) {
-        shop.subscription.status = 'expired';
-        shop.save().catch(() => {});
-      }
+    const subscriptionExpired = !access.canWrite;
+    if (subscriptionExpired && shop.subscription?.status === 'active') {
+      // Keep the denormalised label in step with the date; nothing reads it for
+      // enforcement, so a failed write here changes nothing.
+      shop.subscription.status = 'expired';
+      shop.save().catch(() => {});
     }
 
     // Populate role for employees (to embed permissions in JWT)
@@ -503,6 +517,9 @@ class AuthService {
       token: tokens.accessToken,
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
+      // The banner, computed server-side. null when there is nothing to say, so
+      // the client renders on truthiness and never has to know the 3-day rule.
+      subscriptionNotice: buildSubscriptionNotice(shop),
       ...(subscriptionExpired && {
         subscriptionExpired: true,
         subscriptionMessage: 'আপনার সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে। আপনি ডেটা দেখতে পারবেন, কিন্তু পরিবর্তন করতে পারবেন না।',

@@ -11,6 +11,7 @@ const cacheService = require('../services/cache.service');
 const userActivityService = require('../services/userActivity.service');
 const logger = require('../utils/logger.util');
 const { assertAdminMayDelete } = require('../utils/deletionDisabled.util');
+const { resolveSubscription } = require('../utils/subscriptionState.util');
 
 // Auth cache TTL: 5 minutes. Mutations that must take effect immediately
 // (shop status/subscription/settings changes, staff deactivation, branch
@@ -304,54 +305,59 @@ const protect = asyncHandler(async (req, res, next) => {
       });
     }
 
-    // Check shop status
-    if (user.shop && !user.shop.isActive) {
-      return ApiResponse.forbidden(res, {
-        message: 'Your shop is deactivated',
-        messageBn: 'আপনার দোকান নিষ্ক্রিয়'
-      });
-    }
+    // ── Subscription & access enforcement ──
+    //
+    // One resolver decides this, and the same resolver builds the banner the
+    // owner sees (utils/subscriptionState.util.js). The two used to be separate
+    // date comparisons in separate files, which is how a shop could be told it
+    // had 2 days left while its writes were already 402ing.
+    if (user.shop) {
+      const access = resolveSubscription(user.shop);
 
-    // Check subscription
-    if (user.shop && !user.shop.isSubscriptionValid) {
-      // Auto-update DB status to 'expired' if it's still showing 'active' but the date has passed
-      if (
-        user.shop.subscription &&
-        user.shop.subscription.status === 'active' &&
-        user.shop.subscription.expiresAt &&
-        user.shop.subscription.expiresAt < new Date()
-      ) {
-        // SET NX marker so this write fires once per 5 min, not on every
-        // request from every terminal of the expired shop
-        cacheService.setNX(`shop:${user.shop._id}:expmarked`, 1, 300)
-          .then((acquired) => {
-            if (acquired) {
-              return Shop.findByIdAndUpdate(user.shop._id, {
-                'subscription.status': 'expired',
-              });
-            }
-          })
-          .catch(() => {}); // fire-and-forget, don't block the response
+      // A manual admin block, or a shop switched off by the legacy
+      // isActive/'suspended' path. Total: no read either.
+      if (access.isBlocked) {
+        return ApiResponse.forbidden(res, {
+          message: 'Access to this shop has been suspended. Please contact support on 01757995016.',
+          messageBn: 'আপনার দোকানের অ্যাক্সেস বন্ধ করা হয়েছে। যোগাযোগ করুন — ০১৭৫৭৯৯৫০১৬',
+          code: 'SHOP_BLOCKED'
+        });
       }
 
-      // Read-only grace mode: GET requests are allowed so users can still view their data.
-      // RBAC context must still be set here — without it rbac() denies every GET
-      // for owners and staff alike, inverting the intended access.
-      if (req.method === 'GET') {
-        req.user = user;
-        req.shop = user.shop;
-        const rbacCtx = resolveRbacContext(user);
-        req.user.isOwner = rbacCtx.isOwner;
-        req.user.permissions = rbacCtx.permissions;
-        req.subscriptionExpired = true; // Route handlers can check this if needed
-        return next();
-      }
+      if (!access.canWrite) {
+        // Keep the denormalised label in step with the date. It is not read by
+        // the resolver — only by the older admin list filters — so this stays a
+        // fire-and-forget write, guarded by a SET NX marker that caps it to one
+        // per 5 minutes instead of one per request per till.
+        if (user.shop.subscription?.status === 'active') {
+          cacheService.setNX(`shop:${user.shop._id}:expmarked`, 1, 300)
+            .then((acquired) => {
+              if (acquired) {
+                return Shop.findByIdAndUpdate(user.shop._id, {
+                  'subscription.status': 'expired',
+                });
+              }
+            })
+            .catch(() => {}); // fire-and-forget, don't block the response
+        }
 
-      // All write operations are blocked with 402 Payment Required
-      return ApiResponse.paymentRequired(res, {
-        message: 'Your subscription has expired. You can still view your data, but cannot make changes. Please contact support to renew.',
-        messageBn: 'আপনার সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে। আপনি ডেটা দেখতে পারবেন, কিন্তু পরিবর্তন করতে পারবেন না। পুনরায় সক্রিয় করতে সাপোর্টে যোগাযোগ করুন।',
-      });
+        // Writes stop; reads do not. An unpaid shop can still get yesterday's
+        // numbers and its due list out, which is deliberate — see
+        // SUBSCRIPTION_PLAN.md §3.
+        if (req.method !== 'GET') {
+          return ApiResponse.paymentRequired(res, {
+            message: 'Your subscription has expired. You can still view your data, but cannot make changes. Call 01757995016 to renew.',
+            messageBn: 'আপনার সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে। আপনি ডেটা দেখতে পারবেন, কিন্তু পরিবর্তন করতে পারবেন না। রিনিউ করতে কল করুন — ০১৭৫৭৯৯৫০১৬',
+          });
+        }
+
+        // Read-only mode falls through to the normal setup below rather than
+        // returning early. The early return used to skip branch resolution
+        // entirely, so an expired multi-branch shop's staff read every branch's
+        // data instead of their own.
+        req.subscriptionExpired = true;
+        req.subscriptionState = access.state;
+      }
     }
 
     req.user = user;
@@ -537,7 +543,10 @@ const softProtect = asyncHandler(async (req, res, next) => {
 
     const user = await getCachedUser(decoded.id);
     if (user && user.isActive && !user.changedPasswordAfter(decoded.iat)) {
-      if (user.shop && user.shop.isActive) {
+      // A blocked shop carries no identity on optional-auth routes either.
+      // Same resolver as `protect`, so `isActive: false` and a manual block are
+      // one check rather than two conditions that can drift.
+      if (user.shop && !resolveSubscription(user.shop).isBlocked) {
         req.user = user;
         req.shop = user.shop;
         const rbacCtx = resolveRbacContext(user);

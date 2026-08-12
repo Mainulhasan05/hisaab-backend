@@ -11,6 +11,7 @@ const SMSLog = require('../models/SMSLog.model');
 const SMSQuota = require('../models/SMSQuota.model');
 const AuditLog = require('../models/AuditLog.model');
 const Payment = require('../models/Payment.model');
+const PlatformPayment = require('../models/PlatformPayment.model');
 const Product = require('../models/Product.model');
 const Branch = require('../models/Branch.model');
 const HeldCart = require('../models/HeldCart.model');
@@ -21,6 +22,7 @@ const jwt = require('jsonwebtoken');
 const { AppError } = require('../middleware/error.middleware');
 const cacheService = require('./cache.service');
 const { invalidateShopAuthCache, invalidateBranchCache } = require('../utils/authCache.util');
+const { resolveSubscription } = require('../utils/subscriptionState.util');
 const { refuseDeletion } = require('../utils/deletionDisabled.util');
 const { KEYS, getTTL } = require('../config/cacheKeys');
 const { FEATURES, FEATURE_KEYS } = require('../utils/features.util');
@@ -144,14 +146,19 @@ class AdminService {
       },
     ]);
 
-    // Subscription revenue
-    const revenueResult = await Payment.aggregate([
+    // Platform revenue — from PlatformPayment, not the shops' own ledger.
+    //
+    // These two used to read `Payment` with `type: 'subscription'`, a value
+    // that is not in that model's enum, so every write threw and both figures
+    // were structurally ৳0. Dated by `receivedAt` (when the money arrived), not
+    // `createdAt` (when it was keyed in).
+    const revenueResult = await PlatformPayment.aggregate([
       { $match: { type: 'subscription' } },
       { $group: { _id: null, totalRevenue: { $sum: '$amount' } } },
     ]);
 
-    const monthlyRevenueResult = await Payment.aggregate([
-      { $match: { type: 'subscription', createdAt: { $gte: monthStart } } },
+    const monthlyRevenueResult = await PlatformPayment.aggregate([
+      { $match: { type: 'subscription', receivedAt: { $gte: monthStart } } },
       { $group: { _id: null, monthlyRevenue: { $sum: '$amount' } } },
     ]);
 
@@ -514,23 +521,29 @@ class AdminService {
     const productCountMap = new Map(productCounts.map(r => [String(r._id), r.count]));
     const salesTotalMap = new Map(salesTotals.map(r => [String(r._id), r.totalSales]));
 
-    // Merge SMS quota data with shops, compute effective status, attach stats
+    // Merge SMS quota data with shops, resolve subscription state, attach stats
     const shopsWithQuota = shops.map((shop) => {
-      // Compute effective status: active in DB but past expiresAt = effectively expired
-      let effectiveStatus = shop.subscription?.status || 'trial';
-      if (
-        effectiveStatus === 'active' &&
-        shop.subscription?.expiresAt &&
-        new Date(shop.subscription.expiresAt) < now
-      ) {
-        effectiveStatus = 'expired';
-      }
+      // The same resolver the auth middleware and the owner's banner use, so
+      // the chip in this list cannot say "active" while the shop is being
+      // refused writes. It also understands grace days and manual blocks, which
+      // the old inline `status` comparison here did not.
+      const resolved = resolveSubscription(shop, now);
+      // `effectiveStatus` keeps its original vocabulary (active/expired/
+      // suspended/trial) because the shops page renders chips off it; the
+      // richer state rides alongside for anything that wants it.
+      const effectiveStatus =
+        resolved.state === 'blocked' ? 'suspended'
+          : resolved.state === 'expired' ? 'expired'
+            : resolved.state === 'trial' ? 'trial'
+              : 'active';
 
       const shopKey = shop._id.toString();
 
       return {
         ...shop,
         effectiveStatus,
+        subscriptionState: resolved.state,
+        daysRemaining: resolved.daysRemaining,
         smsQuota: quotaMap.get(shopKey) || null,
         stats: {
           // `|| 0` preserves the previous shape: a shop with no matching rows
@@ -1023,16 +1036,40 @@ class AdminService {
   }
 
   // Update shop status
+  //
+  // 'suspended' and its reversal are a BLOCK, and blocks now live in
+  // billing.service where they carry an actor, a reason and a timeline entry.
+  // Delegating rather than writing `isActive` here is what keeps invariant §8.1
+  // true: exactly one code path can take a shop offline.
   async updateShopStatus(adminId, shopId, status, reason) {
+    const billingService = require('./billing.service');
+    const actor = { kind: 'admin', id: adminId };
+
+    if (status === 'suspended') {
+      await billingService.setAccess(actor, shopId, {
+        action: 'block',
+        reason: reason || 'Suspended from the shop status control',
+      });
+      return Shop.findById(shopId);
+    }
+
     const shop = await Shop.findById(shopId);
     if (!shop) {
-      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
+      throw new AppError('Shop not found', 'দোকান পাওয়া যায়নি', 404);
+    }
+
+    // Coming back from a suspension is an unblock, including the legacy
+    // `isActive: false` switch — otherwise a shop suspended by the old code
+    // would stay locked out no matter what status it was given.
+    const wasBlocked = !!shop.access?.blockedAt || shop.isActive === false ||
+      shop.subscription?.status === 'suspended';
+    if (status === 'active' && wasBlocked) {
+      await billingService.setAccess(actor, shopId, { action: 'unblock', reason });
+      return Shop.findById(shopId);
     }
 
     const previousStatus = shop.subscription.status;
     shop.subscription.status = status;
-    // Only suspended shops should be deactivated — trial/active/expired shops remain accessible
-    shop.isActive = status !== 'suspended';
     await shop.save();
     await invalidateShopAuthCache(shop._id);
 
@@ -1057,182 +1094,33 @@ class AdminService {
     return shop;
   }
 
-  // Update shop subscription (admin sets expiry directly)
+  // Update shop subscription (admin sets an expiry date directly)
+  //
+  // Delegates to billing.service so the date lands at the END of the chosen
+  // Bangladesh day and the change is recorded on the shop's billing timeline.
+  // The old inline version also forced `plan: 'paid'` and `isActive: true`, so
+  // extending a trial silently converted it and renewing a deliberately blocked
+  // shop silently let it back in. Neither happens now.
   async updateShopSubscription(adminId, shopId, expiresAt) {
-    const shop = await Shop.findById(shopId);
-    if (!shop) {
-      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
-    }
-
-    const previousExpiry = shop.subscription.expiresAt;
-
-    shop.subscription.plan = 'paid';
-    shop.subscription.expiresAt = new Date(expiresAt);
-    shop.subscription.status = 'active';
-    shop.isActive = true;
-    await shop.save();
-    await invalidateShopAuthCache(shop._id);
-
-    // Create audit log
-    await AuditLog.create({
-      admin: adminId,
-      action: 'subscription_update',
-      actionBn: 'সাবস্ক্রিপশন আপডেট',
-      description: `Updated subscription for ${shop.name}: expires ${new Date(expiresAt).toLocaleDateString()}`,
-      descriptionBn: `${shop.name} এর সাবস্ক্রিপশন আপডেট করা হয়েছে`,
-      entity: {
-        type: 'shop',
-        id: shop._id,
-        name: shop.name,
-      },
-      changes: {
-        before: { expiresAt: previousExpiry },
-        after: { expiresAt },
-      },
-    });
-
-    return shop;
+    const billingService = require('./billing.service');
+    await billingService.extendSubscription(
+      { kind: 'admin', id: adminId },
+      shopId,
+      {
+        mode: 'until',
+        value: expiresAt,
+        payment: null,
+        reason: 'Expiry set directly from the shop panel',
+      }
+    );
+    return Shop.findById(shopId);
   }
 
-  // Get subscription payments
-  async getSubscriptionPayments(options = {}) {
-    const { page = 1, limit = 20, shopId } = options;
-
-    const query = { type: 'subscription' };
-    if (shopId) {
-      query.shop = shopId;
-    }
-
-    const skip = (page - 1) * limit;
-
-    const [payments, total] = await Promise.all([
-      Payment.find(query)
-        .populate('shop', 'name')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit))
-        .lean(),
-      Payment.countDocuments(query),
-    ]);
-
-    return {
-      data: payments,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit),
-      },
-    };
-  }
-
-  // Record subscription payment (flat ১০০০৳/month)
-  async recordSubscriptionPayment(adminId, paymentData) {
-    const { shopId, amount, months = 1, method, transactionId, notes } = paymentData;
-
-    const shop = await Shop.findById(shopId);
-    if (!shop) {
-      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
-    }
-
-    // Create payment record
-    const payment = await Payment.create({
-      shop: shopId,
-      amount,
-      method,
-      transactionId,
-      type: 'subscription',
-      notes: `Subscription: ${months} month(s). ${notes || ''}`,
-      receivedBy: adminId,
-    });
-
-    // Calculate new expiry date (extend from current expiry or now)
-    const currentExpiry = shop.subscription.expiresAt > new Date()
-      ? shop.subscription.expiresAt
-      : new Date();
-    const newExpiry = new Date(currentExpiry);
-    newExpiry.setMonth(newExpiry.getMonth() + months);
-
-    // Update shop subscription
-    shop.subscription.plan = 'paid';
-    shop.subscription.expiresAt = newExpiry;
-    shop.subscription.status = 'active';
-    shop.isActive = true;
-    await shop.save();
-    await invalidateShopAuthCache(shop._id);
-
-    // Create audit log
-    await AuditLog.create({
-      admin: adminId,
-      action: 'payment_recorded',
-      actionBn: 'পেমেন্ট রেকর্ড',
-      description: `Recorded payment ৳${amount} for ${shop.name} (${months} month(s))`,
-      descriptionBn: `${shop.name} এর জন্য ৳${amount} পেমেন্ট রেকর্ড করা হয়েছে (${months} মাস)`,
-      entity: {
-        type: 'shop',
-        id: shop._id,
-        name: shop.name,
-      },
-    });
-
-    return { payment, shop };
-  }
-
-  // Allocate SMS quota
-  async allocateSMSQuota(adminId, allocationData) {
-    const { shopId, quantity, price, paymentMethod, transactionId, notes } = allocationData;
-
-    const shop = await Shop.findById(shopId);
-    if (!shop) {
-      throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
-    }
-
-    // Find or create SMS quota
-    let smsQuota = await SMSQuota.findOne({ shop: shopId });
-    if (!smsQuota) {
-      smsQuota = await SMSQuota.create({
-        shop: shopId,
-        totalQuota: 0,
-        usedQuota: 0,
-        remainingQuota: 0,
-        isEnabled: true,
-      });
-    }
-
-    // Update quota
-    smsQuota.totalQuota += quantity;
-    smsQuota.remainingQuota += quantity;
-    smsQuota.isEnabled = true;
-    smsQuota.allocations.push({
-      quantity,
-      price,
-      allocatedBy: adminId,
-      allocatedAt: new Date(),
-      paymentMethod,
-      transactionId,
-    });
-    await smsQuota.save();
-
-    // Create audit log
-    await AuditLog.create({
-      admin: adminId,
-      action: 'sms_allocation',
-      actionBn: 'এসএমএস বরাদ্দ',
-      description: `Allocated ${quantity} SMS to ${shop.name}`,
-      descriptionBn: `${shop.name} কে ${quantity} এসএমএস বরাদ্দ করা হয়েছে`,
-      entity: {
-        type: 'shop',
-        id: shop._id,
-        name: shop.name,
-      },
-      changes: {
-        before: { remainingQuota: smsQuota.remainingQuota - quantity },
-        after: { remainingQuota: smsQuota.remainingQuota },
-      },
-    });
-
-    return smsQuota;
-  }
+  // Subscription payments, SMS allocation and payment recording now live in
+  // billing.service (PlatformPayment ledger). The versions that used to sit
+  // here wrote into the shops' OWN `Payment` collection with a type its enum
+  // does not contain — every call threw, and platform revenue read ৳0 forever.
+  // See SUBSCRIPTION_PLAN.md §2.1–2.3.
 
   // ── Telegram notifications ────────────────────────────────────────────
 

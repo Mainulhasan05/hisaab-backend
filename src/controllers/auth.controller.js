@@ -5,6 +5,7 @@ const User = require('../models/User.model');
 const cacheService = require('../services/cache.service');
 const { invalidateShopAuthCache } = require('../utils/authCache.util');
 const { featureMap } = require('../utils/features.util');
+const { buildSubscriptionNotice } = require('../utils/subscriptionState.util');
 const {
   setUserTokenCookie,
   setAdminTokenCookie,
@@ -203,6 +204,12 @@ const getMe = asyncHandler(async (req, res) => {
         // hottest endpoint to save a file that has to exist anyway is a bad
         // trade.
         features: featureMap(req.shop),
+        // The subscription banner, decided server-side by the same resolver
+        // that decides whether this request may write. null = nothing to say.
+        // Every user gets it, staff included: a cashier who sees "৩ দিন পর
+        // মেয়াদ শেষ" tells the owner, and when writes do stop they already
+        // know why instead of thinking the app broke.
+        subscriptionNotice: buildSubscriptionNotice(req.shop),
       },
       message: 'Profile retrieved',
       messageBn: 'প্রোফাইল পাওয়া গেছে'

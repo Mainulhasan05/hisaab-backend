@@ -68,13 +68,39 @@ module.exports = {
     CANCELLED: 'cancelled'
   },
 
-  // Payment Types
+  // Payment Types — money a shop's CUSTOMERS pay the shop (models/Payment).
+  // Money a SHOP pays HisaabBD is a different collection with its own types
+  // below; do not add 'subscription' here (see PlatformPayment.model.js).
   PAYMENT_TYPES: {
     SALE_PAYMENT: 'sale_payment',
     PURCHASE_PAYMENT: 'purchase_payment',
     DUE_COLLECTION: 'due_collection',
     REFUND: 'refund'
   },
+
+  // Platform billing — money a shop pays HisaabBD (models/PlatformPayment)
+  PLATFORM_PAYMENT_TYPES: {
+    SUBSCRIPTION: 'subscription',
+    SMS: 'sms',
+    SETUP: 'setup',
+    OTHER: 'other',
+    ADJUSTMENT: 'adjustment'
+  },
+
+  PLATFORM_PAYMENT_METHODS: {
+    CASH: 'cash',
+    BKASH: 'bkash',
+    NAGAD: 'nagad',
+    ROCKET: 'rocket',
+    BANK: 'bank',
+    CARD: 'card',
+    ONLINE: 'online'
+  },
+
+  // Warn a shop this many calendar days before its subscription expires.
+  // The enforcement threshold lives in utils/subscriptionState.util.js; this is
+  // the platform default the admin panel shows and the worklist filters on.
+  SUBSCRIPTION_WARNING_DAYS: 3,
 
   // Stock Transaction Types
   STOCK_TRANSACTION_TYPES: {
