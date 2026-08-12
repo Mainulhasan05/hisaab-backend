@@ -91,6 +91,11 @@ router.get('/subscriptions', billingController.getWorklist);
 router.get('/billing/summary', billingController.getSummary);
 router.get('/billing/payments', billingController.listPayments);
 router.post('/billing/payments', billingController.recordPayment);
+// Correcting a mis-keyed detail (usually the received date) vs undoing a
+// payment that should not exist. There is no DELETE: hard deletion is refused
+// for admins platform-wide by utils/deletionDisabled.util.js, and the ledger
+// carries immutableGuard on top of that.
+router.patch('/billing/payments/:paymentId', billingController.amendPayment);
 router.post('/billing/payments/:paymentId/reverse', billingController.reversePayment);
 router.get('/shops/:id/billing', billingController.getShopBilling);
 router.post('/shops/:id/trial', billingController.startTrial);

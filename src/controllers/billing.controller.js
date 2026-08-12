@@ -127,6 +127,19 @@ exports.recordPayment = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * Correct a payment's details in place — the received date, the TrxID, the
+ * method, the note. Not the amount and not the shop: those are a reversal.
+ */
+exports.amendPayment = asyncHandler(async (req, res) => {
+  const data = await billingService.amendPayment(actorOf(req), req.params.paymentId, req.body);
+  return ApiResponse.success(res, {
+    data,
+    message: 'Payment details corrected',
+    messageBn: 'পেমেন্টের তথ্য সংশোধন করা হয়েছে',
+  });
+});
+
 exports.reversePayment = asyncHandler(async (req, res) => {
   const data = await billingService.reversePayment(actorOf(req), req.params.paymentId, req.body?.reason);
   return ApiResponse.success(res, {

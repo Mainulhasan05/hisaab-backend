@@ -21,6 +21,7 @@ const EVENT_TYPES = [
   'extended',
   'payment_recorded',
   'payment_reversed',
+  'payment_amended',
   'sms_allocated',
   'blocked',
   'unblocked',

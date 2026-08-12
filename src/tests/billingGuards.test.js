@@ -244,6 +244,87 @@ describe('money received before it was keyed in', () => {
   });
 });
 
+describe('correcting a mis-keyed payment', () => {
+  // There is no delete: `assertAdminMayDelete` refuses every admin DELETE
+  // platform-wide and the ledger carries immutableGuard. A payment that really
+  // happened but was typed wrong is corrected in place and stamped; one that
+  // should never have existed is reversed.
+  let payment;
+
+  beforeEach(() => {
+    payment = {
+      _id: 'pay1',
+      shop: 'shop1',
+      amount: 800,
+      type: 'subscription',
+      method: 'bkash',
+      transactionId: 'OLD1',
+      receivedAt: new Date('2026-08-10T06:00:00.000Z'),
+      reversalOf: null,
+      amendments: [],
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    jest.spyOn(PlatformPayment, 'findById').mockResolvedValue(payment);
+    jest.spyOn(PlatformPayment, 'findOne').mockReturnValue({
+      sort: () => ({ lean: () => Promise.resolve({ receivedAt: new Date('2026-08-01T06:00:00.000Z') }) }),
+    });
+  });
+
+  it('fixes the received date and keeps what it used to be', async () => {
+    await billingService.amendPayment(ADMIN, 'pay1', {
+      receivedAt: '2026-08-01', reason: 'entered with the wrong date',
+    });
+
+    expect(toBangladeshDateStr(payment.receivedAt)).toBe('2026-08-01');
+    const amendment = payment.amendments.at(-1);
+    expect(toBangladeshDateStr(amendment.before.receivedAt)).toBe('2026-08-10');
+    expect(amendment.by.id).toBe('admin1');
+    expect(amendment.reason).toMatch(/wrong date/);
+    expect(lastEvent().type).toBe('payment_amended');
+  });
+
+  it('re-points the shop\'s last-payment date at the corrected row', async () => {
+    await billingService.amendPayment(ADMIN, 'pay1', { receivedAt: '2026-08-01' });
+    expect(toBangladeshDateStr(shop.subscription.lastPaymentAt)).toBe('2026-08-01');
+  });
+
+  it('refuses to change the amount — money moves only by reversal', async () => {
+    await expect(
+      billingService.amendPayment(ADMIN, 'pay1', { amount: 5000 })
+    ).rejects.toThrow(/nothing to change/i);
+    expect(payment.amount).toBe(800);
+  });
+
+  it('refuses to move the payment to another shop', async () => {
+    await expect(
+      billingService.amendPayment(ADMIN, 'pay1', { shop: 'shop2' })
+    ).rejects.toThrow(/nothing to change/i);
+    expect(payment.shop).toBe('shop1');
+  });
+
+  it('refuses a received date in the future', async () => {
+    const future = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+    await expect(
+      billingService.amendPayment(ADMIN, 'pay1', { receivedAt: future })
+    ).rejects.toThrow(/cannot be in the future/i);
+  });
+
+  it('refuses to edit a reversal row', async () => {
+    payment.reversalOf = 'pay0';
+    await expect(
+      billingService.amendPayment(ADMIN, 'pay1', { receivedAt: '2026-08-01' })
+    ).rejects.toThrow(/reversal row cannot be edited/i);
+  });
+
+  it('leaves the subscription expiry alone', async () => {
+    const before = shop.subscription.expiresAt;
+    await billingService.amendPayment(ADMIN, 'pay1', { receivedAt: '2026-08-01' });
+    // The days were granted when the payment was recorded and the shop has been
+    // trading on them; fixing the paperwork must not move the date they stop.
+    expect(shop.subscription.expiresAt).toBe(before);
+  });
+});
+
 describe('trial and paid never coexist', () => {
   it('refuses to trial a shop that still has paid time left', async () => {
     shop.subscription.plan = 'paid';

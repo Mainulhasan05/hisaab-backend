@@ -109,13 +109,33 @@ const platformPaymentSchema = new mongoose.Schema({
     paymentId: { type: String },
     raw: { type: mongoose.Schema.Types.Mixed },
   },
-  // Corrections are new rows pointing at the row they undo. The original is
-  // never edited and never deleted.
+  // A payment that should never have existed is undone with a new row pointing
+  // at it. The original is never deleted — hard deletion is refused for admins
+  // platform-wide (utils/deletionDisabled.util.js) and this model carries
+  // immutableGuard besides.
   reversalOf: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'PlatformPayment',
     default: null,
   },
+  // A payment that DID happen but was keyed in wrong — usually the received
+  // date — is corrected in place and the correction is kept here.
+  //
+  // Deliberately not a reversal: a mistyped date is one event, and recording it
+  // as +৳800 / -৳800 / +৳800 makes a shop's history harder to read than the
+  // typo ever was. What may be corrected is fixed in the service, and `amount`
+  // and `shop` are not in that list — anything that moves money is a reversal.
+  amendments: [{
+    at: { type: Date, default: Date.now },
+    by: {
+      kind: { type: String, enum: ['admin', 'system'], default: 'admin' },
+      id: { type: mongoose.Schema.Types.ObjectId },
+      name: { type: String },
+    },
+    before: { type: mongoose.Schema.Types.Mixed },
+    after: { type: mongoose.Schema.Types.Mixed },
+    reason: { type: String, maxlength: 500 },
+  }],
   notes: {
     type: String,
     maxlength: 1000,

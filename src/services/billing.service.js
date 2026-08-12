@@ -618,6 +618,119 @@ class BillingService {
   }
 
   /**
+   * Correct a payment that happened but was keyed in wrong.
+   *
+   * The case this exists for: the money arrived on the 3rd, it was entered with
+   * today's date, and now the month's revenue is wrong. That is one mistake
+   * about one real payment — reversing and re-entering would leave three rows
+   * (+৳800, −৳800, +৳800) in a shop's history to describe a mistyped date.
+   *
+   * Only the fields below may change. `amount` and `shop` are deliberately not
+   * among them: anything that moves money between shops or changes how much was
+   * taken is a reversal, so the ledger's totals can never be quietly rewritten.
+   * Every correction is stamped with who, when, and the previous values.
+   *
+   * The subscription expiry is NOT recomputed. The days were granted when the
+   * payment was recorded and the shop has been trading on them; correcting the
+   * paperwork must not silently move the date they stop working. Adjust it
+   * explicitly with an extension if it is genuinely wrong.
+   */
+  async amendPayment(actor, paymentId, patch = {}) {
+    const AMENDABLE = ['receivedAt', 'transactionId', 'reference', 'method', 'notes'];
+
+    const payment = await PlatformPayment.findById(paymentId);
+    if (!payment) {
+      throw new AppError('Payment not found', 'পেমেন্ট পাওয়া যায়নি', 404);
+    }
+    if (payment.reversalOf) {
+      throw new AppError(
+        'A reversal row cannot be edited',
+        'বাতিল এন্ট্রি সম্পাদনা করা যায় না',
+        400
+      );
+    }
+
+    const before = {};
+    const after = {};
+    for (const field of AMENDABLE) {
+      if (patch[field] === undefined) continue;
+      const next = field === 'receivedAt' ? new Date(patch[field]) : patch[field];
+      if (field === 'receivedAt' && Number.isNaN(next.getTime())) {
+        throw new AppError('Received date is not valid', 'তারিখ সঠিক নয়', 400);
+      }
+      // A received date in the future would date revenue to a month that has
+      // not happened yet.
+      if (field === 'receivedAt' && next > new Date()) {
+        throw new AppError(
+          'The received date cannot be in the future',
+          'টাকা পাওয়ার তারিখ ভবিষ্যতে হতে পারে না',
+          400
+        );
+      }
+      if (String(payment[field] ?? '') === String(next ?? '')) continue;
+      before[field] = payment[field];
+      after[field] = next;
+      payment[field] = next;
+    }
+
+    if (!Object.keys(after).length) {
+      throw new AppError('Nothing to change', 'পরিবর্তন করার কিছু নেই', 400);
+    }
+
+    payment.amendments.push({
+      at: new Date(),
+      by: { kind: actor?.kind || 'admin', id: actor?.id, name: actor?.name },
+      before,
+      after,
+      reason: patch.reason,
+    });
+    await payment.save();
+
+    const shop = await Shop.findById(payment.shop);
+    if (shop) {
+      // `lastPaymentAt` mirrors the newest payment's date, so a corrected date
+      // has to be mirrored too or the shop's billing card keeps the wrong one.
+      if (after.receivedAt) {
+        const newest = await PlatformPayment.findOne({
+          shop: shop._id,
+          type: PLATFORM_PAYMENT_TYPES.SUBSCRIPTION,
+          reversalOf: null,
+        }).sort({ receivedAt: -1 }).lean();
+        if (newest) {
+          shop.subscription.lastPaymentAt = newest.receivedAt;
+          await shop.save();
+          await invalidateShopAuthCache(shop._id);
+        }
+      }
+
+      await this._recordEvent({
+        shop,
+        type: 'payment_amended',
+        actor,
+        payment,
+        amount: payment.amount,
+        reason: patch.reason,
+        note: Object.keys(after).join(', '),
+        audit: {
+          action: 'platform_payment_amended',
+          actionBn: 'পেমেন্ট সংশোধন',
+          description:
+            `Corrected ${Object.keys(after).join(', ')} on a ৳${payment.amount} payment for ` +
+            `${shop.name}.` +
+            (after.receivedAt
+              ? ` Received date ${toBangladeshDateStr(before.receivedAt)} → ` +
+                `${toBangladeshDateStr(after.receivedAt)}.`
+              : '') +
+            (patch.reason ? ` Reason: ${patch.reason}` : ''),
+          descriptionBn: `${shop.name} এর ৳${payment.amount} পেমেন্টের তথ্য সংশোধন করা হয়েছে`,
+        },
+      });
+    }
+
+    return payment;
+  }
+
+  /**
    * Undo a payment with a reversal row. The original is never edited — the
    * ledger is append-only, so a mistake becomes two visible rows rather than
    * one silently corrected one.
@@ -987,6 +1100,26 @@ class BillingService {
         .lean(),
       PlatformPayment.countDocuments(query),
     ]);
+
+    // Flag the originals that have since been reversed. Without this a reversed
+    // ৳800 and a live ৳800 look identical in the list, and the operator has to
+    // scan for the offsetting row to tell them apart. One query for the page,
+    // not one per row — and it looks across pages, since a reversal written
+    // months later will not sit next to its original.
+    const originalIds = data.filter((p) => !p.reversalOf).map((p) => p._id);
+    if (originalIds.length) {
+      const reversals = await PlatformPayment.find({ reversalOf: { $in: originalIds } })
+        .select('reversalOf receivedAt notes')
+        .lean();
+      const byOriginal = new Map(reversals.map((r) => [String(r.reversalOf), r]));
+      for (const row of data) {
+        const reversal = byOriginal.get(String(row._id));
+        if (reversal) {
+          row.reversedAt = reversal.receivedAt;
+          row.reversalReason = reversal.notes || null;
+        }
+      }
+    }
 
     return {
       data,
