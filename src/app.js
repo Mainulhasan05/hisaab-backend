@@ -7,7 +7,11 @@ const mongoSanitize = require('express-mongo-sanitize');
 const hpp = require('hpp');
 const morgan = require('morgan');
 
-const { apiLimiter, authLimiter } = require('./middleware/rateLimiter.middleware');
+const {
+  apiLimiter,
+  authLimiter,
+  isPublicStorefrontPath,
+} = require('./middleware/rateLimiter.middleware');
 const { errorHandler, notFoundHandler } = require('./middleware/error.middleware');
 const { requestContext } = require('./middleware/requestContext.middleware');
 const { getCacheInfo } = require('./config/redis.config');
@@ -64,7 +68,17 @@ app.use(cors(corsOptions));
 
 // Rate Limiting — BEFORE body parsing so rejected/flooding requests never pay
 // for a multi-MB JSON.parse + sanitize walk (previously the limiter ran last)
-app.use('/api', apiLimiter);
+//
+// `/api/public/*` is skipped here and carries `storefrontLimiter` instead, from
+// its own router. The two are alternatives rather than layers: a request that
+// counted against both buckets would make a 429 impossible to attribute, and
+// the tighter ceiling would silently become the only one that mattered. The
+// point of a separate tier is that a storefront being hammered cannot spend the
+// allowance the till is relying on (ECOMMERCE_PLAN.md §13).
+app.use('/api', (req, res, next) => {
+  if (isPublicStorefrontPath(req)) return next();
+  return apiLimiter(req, res, next);
+});
 
 // Response Compression (gzip/deflate) — reduces transfer size by 60-80%.
 // Level 4 gives ~90% of the size reduction of the default (6) at a fraction of the CPU.

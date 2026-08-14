@@ -315,20 +315,90 @@ function storageUnit(product) {
  * @param {string} [field] dotted path to the stock field
  * @returns {Object|Array} `{ $inc: {...} }` or an aggregation-pipeline update
  */
-function buildStockUpdate(delta, unit = DEFAULT_UNIT, field = 'stock') {
+function buildStockUpdate(delta, unit = DEFAULT_UNIT, field = 'stock', opts = {}) {
   const dp = unitDecimals(unit);
+  const { clampAtZero = false } = opts;
 
-  if (dp === 0) {
+  if (dp === 0 && !clampAtZero) {
     return { $inc: { [field]: delta } };
   }
 
+  const sum = { $round: [{ $add: [{ $ifNull: [`$${field}`, 0] }, delta] }, dp] };
+
   return [{
-    $set: {
-      [field]: {
-        $round: [{ $add: [{ $ifNull: [`$${field}`, 0] }, delta] }, dp],
+    $set: { [field]: clampAtZero ? { $max: [0, sum] } : sum },
+  }];
+}
+
+/**
+ * Increment ONE variant's stock and recompute the product-level rollup, in a
+ * single atomic pipeline update.
+ *
+ * ── Why this exists ─────────────────────────────────────────────────────────
+ *
+ * The sales-return path needs both halves together: a variant return has to
+ * change `variants[n].stock` AND `stock`, because the product-level number is
+ * defined as the sum across variants and goes stale otherwise.
+ *
+ * It used to do that by reading the document, computing both numbers in JS, and
+ * `$set`-ting the absolute results. That is a read-modify-write with no guard —
+ * two returns for the same product processed concurrently each computed from
+ * the state they read, and the second overwrote the first. The sale path has
+ * never done this; it uses guarded `$inc`, and the asymmetry meant returns could
+ * silently lose stock that a customer had physically handed back.
+ *
+ * A pipeline update fixes it because later stages see earlier ones: stage 1
+ * applies the delta to the matching variant, stage 2 sums the array stage 1 just
+ * produced. Both read from the document as it exists at write time on the
+ * server, so nothing is computed from a stale read.
+ *
+ * `variantId` MUST be cast — `$eq` inside a pipeline compares BSON types, so a
+ * string id matches no element and the update silently does nothing (I-3).
+ *
+ * @param {ObjectId|string} variantId
+ * @param {number} delta  signed change
+ * @param {string} unit
+ * @returns {Array} an aggregation-pipeline update
+ */
+function buildVariantStockRollupUpdate(variantId, delta, unit = DEFAULT_UNIT) {
+  const dp = unitDecimals(unit);
+  const vid = new mongoose.Types.ObjectId(variantId);
+
+  return [
+    {
+      $set: {
+        variants: {
+          $map: {
+            input: { $ifNull: ['$variants', []] },
+            as: 'v',
+            in: {
+              $cond: [
+                { $eq: ['$$v._id', vid] },
+                {
+                  $mergeObjects: [
+                    '$$v',
+                    { stock: { $round: [{ $add: [{ $ifNull: ['$$v.stock', 0] }, delta] }, dp] } },
+                  ],
+                },
+                '$$v',
+              ],
+            },
+          },
+        },
       },
     },
-  }];
+    {
+      // The rollup, from the array the stage above just wrote.
+      $set: {
+        stock: {
+          $round: [
+            { $sum: { $map: { input: { $ifNull: ['$variants', []] }, as: 'v', in: { $ifNull: ['$$v.stock', 0] } } } },
+            dp,
+          ],
+        },
+      },
+    },
+  ];
 }
 
 /**
@@ -349,18 +419,23 @@ function buildStockUpdate(delta, unit = DEFAULT_UNIT, field = 'stock') {
  * @param {string} unit
  * @returns {Object|Array}
  */
-function buildVariantStockUpdate(variantId, delta, unit = DEFAULT_UNIT) {
+function buildVariantStockUpdate(variantId, delta, unit = DEFAULT_UNIT, opts = {}) {
   const dp = unitDecimals(unit);
+  const { clampAtZero = false } = opts;
 
-  if (dp === 0) {
+  if (dp === 0 && !clampAtZero) {
     return { $inc: { 'variants.$.stock': delta } };
   }
 
   const vid = new mongoose.Types.ObjectId(variantId);
+  const sum = { $round: [{ $add: [{ $ifNull: ['$$v.stock', 0] }, delta] }, dp] };
 
   return [{
     $set: {
       variants: {
+        // `'$variants'` unwrapped, deliberately: this branch is only reachable
+        // for a product that has variants, and `packagingUnits.test.js` asserts
+        // the untouched elements pass through by identity.
         $map: {
           input: '$variants',
           as: 'v',
@@ -370,7 +445,7 @@ function buildVariantStockUpdate(variantId, delta, unit = DEFAULT_UNIT) {
               {
                 $mergeObjects: [
                   '$$v',
-                  { stock: { $round: [{ $add: [{ $ifNull: ['$$v.stock', 0] }, delta] }, dp] } },
+                  { stock: clampAtZero ? { $max: [0, sum] } : sum },
                 ],
               },
               '$$v',
@@ -388,6 +463,7 @@ module.exports = {
   isEffectivelyZero,
   parseQuantity,
   quantityUnit,
+  buildVariantStockRollupUpdate,
   storageUnit,
   formatQuantity,
   formatQuantityWithUnit,

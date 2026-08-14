@@ -284,6 +284,87 @@ const shopSchema = new mongoose.Schema({
     brands: {
       type: Boolean,
       default: false
+    },
+    // Photos on products and their variants. Requires `storage.enabled` below —
+    // admin.service refuses to turn this on without it, and turning storage off
+    // turns this off too. Off = no image control anywhere on the product form,
+    // and nothing is ever written to catalogImages by the R2 pipeline.
+    productImages: {
+      type: Boolean,
+      default: false
+    },
+    // The same, for category photos. A separate axis on purpose: a shop that
+    // wants a tidy category grid does not necessarily want 500 product photos,
+    // and the storage cost of the two is an order of magnitude apart.
+    categoryImages: {
+      type: Boolean,
+      default: false
+    },
+    // Per-product "sell this online" settings, the online price override and the
+    // featured flag. Off = the product form has no online section at all and
+    // `isAvailableOnline` is forced false, which is how every shop behaved
+    // before the capability existed. Was a build-time constant in the
+    // frontend's lib/uiFlags.js; it became a real per-shop flag the moment one
+    // shop needed it and another did not.
+    onlineSelling: {
+      type: Boolean,
+      default: false
+    },
+    // The public website and the separate /online panel that manages it.
+    // Requires `onlineSelling` + `productImages` — see the `requires` chain in
+    // utils/features.util.js, which is what stops a shop being handed a
+    // storefront it has no products or photos for. Off = the panel does not
+    // render and the public page 404s; the Storefront document is kept.
+    storefront: {
+      type: Boolean,
+      default: false
+    },
+    // Cart, checkout and the order worklist. A separate axis from `storefront`
+    // on purpose: a catalogue site with call/WhatsApp buttons is the FINISHED
+    // product for a shop that will not run a parcel operation, and forcing a
+    // cart on them means orders arrive that nobody processes.
+    onlineOrders: {
+      type: Boolean,
+      default: false
+    },
+    // Combo/offer products: a sellable bundle of other products (buy-1-get-1,
+    // gift packs) whose sale deducts each component's own stock. Off = the
+    // product form has no combo option, `type: 'combo'` is refused on create,
+    // and existing combos stop being sellable — their documents and every
+    // sale/ledger row are kept, so the switch is reversible.
+    combos: {
+      type: Boolean,
+      default: false
+    }
+  },
+
+  /**
+   * Which storefront templates this shop has been GRANTED.
+   *
+   * The platform admin ticks templates here; the shop picks one of them from
+   * its own panel. Two separate acts, and they must stay separate — "which
+   * templates exist" is a platform decision and "which one are we running" is
+   * the shop's.
+   *
+   * ── THE INVARIANT THIS FIELD EXISTS TO CARRY ────────────────────────────────
+   * Revoking a grant NEVER takes a live site down. `allowedTemplates` is
+   * checked when a shop APPLIES a template, and never when one is RENDERED —
+   * the applied key lives on the Storefront document and the public page reads
+   * it from there. So an admin tidying up the template list cannot blank a
+   * shop's website, discover it from a support call, and be unable to say which
+   * shops they broke.
+   *
+   * Same shape as the rule in Product.model.js that the `unit` enum accepts the
+   * full registry regardless of which units a shop may currently CHOOSE: a
+   * validation list has to keep accepting anything already stored.
+   *
+   * Empty (the default) = no templates granted, which is every shop that an
+   * admin has never touched.
+   */
+  storefront: {
+    allowedTemplates: {
+      type: [String],
+      default: []
     }
   },
   // Whether branches share one customer book or keep separate ones (Phase 7).
@@ -303,6 +384,50 @@ const shopSchema = new mongoose.Schema({
     type: String,
     enum: ['shop', 'branch'],
     default: 'branch'
+  },
+
+  /**
+   * Image storage: whether this shop may keep photos at all, and how much.
+   *
+   * ── THREE DISTINCT STATES, AND THEY ARE NOT INTERCHANGEABLE ────────────────
+   *   enabled: false   the shop was never given the storage feature.
+   *                    Upload → 403 "এই দোকানে ছবি সংরক্ষণ চালু নেই"
+   *   quotaMb: 0       it has the feature, and an allowance of nothing.
+   *                    Upload → 413 "স্টোরেজ কোটা শেষ"
+   *   quotaMb: null    it has the feature and follows the platform default.
+   *
+   * Conflating any two of those produces an error message that sends the shop
+   * owner to the wrong person for help, so the checks and the copy stay
+   * separate all the way down. `null` is the default rather than a number so
+   * raising `PlatformSetting.defaultStorageQuotaMb` lifts every shop that has
+   * not been individually negotiated — the same relationship `billing` has with
+   * the platform's standard prices.
+   *
+   * `enabled` is the master switch: turning it off also turns off the
+   * `productImages` / `categoryImages` capabilities, because a shop that can
+   * see an upload button but cannot store anything is a support ticket. That
+   * cascade lives in `admin.service`, which is the only writer here. Nothing is
+   * ever deleted by flipping this off.
+   */
+  storage: {
+    enabled: { type: Boolean, default: false },
+    enabledAt: { type: Date, default: null },
+    enabledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin', default: null },
+
+    // null = use PlatformSetting.defaultStorageQuotaMb
+    quotaMb: { type: Number, default: null, min: 0 },
+
+    // Sum of ShopMedia.totalBytes for this shop. Mongo is the source of truth;
+    // Redis only ever caches it. Can drift if a refCount goes wrong, which is
+    // what the admin panel's "recalculate" button is for.
+    usedBytes: { type: Number, default: 0, min: 0 },
+    fileCount: { type: Number, default: 0, min: 0 },
+
+    lastUploadAt: { type: Date, default: null },
+    // High-water mark. Survives deletions, so "this shop needed 400MB once" is
+    // still answerable after they clean up — useful when negotiating a quota.
+    peakUsedBytes: { type: Number, default: 0, min: 0 },
+    lastRecalculatedAt: { type: Date, default: null }
   }
 }, {
   timestamps: true,

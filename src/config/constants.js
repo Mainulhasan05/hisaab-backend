@@ -202,7 +202,32 @@ module.exports = {
 
     // Telegram notifications
     TELEGRAM_LINK: { en: 'telegram_link', bn: 'টেলিগ্রাম সংযুক্ত' },
-    TELEGRAM_UNLINK: { en: 'telegram_unlink', bn: 'টেলিগ্রাম সংযোগ বন্ধ' }
+    TELEGRAM_UNLINK: { en: 'telegram_unlink', bn: 'টেলিগ্রাম সংযোগ বন্ধ' },
+
+    // Image storage (R2 pool). Registered here so the audit screen shows a
+    // Bengali label instead of the raw key — see AuditLog.statics.log.
+    STORAGE_ENABLED: { en: 'storage_enabled', bn: 'ছবি সংরক্ষণ চালু' },
+    STORAGE_DISABLED: { en: 'storage_disabled', bn: 'ছবি সংরক্ষণ বন্ধ' },
+    STORAGE_QUOTA_CHANGED: { en: 'storage_quota_changed', bn: 'স্টোরেজ কোটা পরিবর্তন' },
+    STORAGE_ACCOUNT_CREATE: { en: 'storage_account_create', bn: 'স্টোরেজ অ্যাকাউন্ট যোগ' },
+    // Covers edits, draining and deactivation. There is no delete action —
+    // storage accounts are retired, never erased. See adminStorage.service.
+    STORAGE_ACCOUNT_UPDATE: { en: 'storage_account_update', bn: 'স্টোরেজ অ্যাকাউন্ট আপডেট' },
+
+    // Online storefront. Registered here rather than passed as `actionBn` at
+    // each call site, for the reason AuditLog.model.js gives: a hand-passed
+    // label is how one action ends up with two different Bengali names
+    // depending on which service happened to write the row.
+    STOREFRONT_TEMPLATE_CREATED: { en: 'storefront_template_created', bn: 'টেমপ্লেট তৈরি' },
+    STOREFRONT_TEMPLATE_PUBLISHED: { en: 'storefront_template_published', bn: 'টেমপ্লেট প্রকাশ' },
+    STOREFRONT_TEMPLATE_RETIRED: { en: 'storefront_template_retired', bn: 'টেমপ্লেট প্রত্যাহার' },
+    STOREFRONT_TEMPLATES_GRANTED: { en: 'storefront_templates_granted', bn: 'টেমপ্লেট বরাদ্দ' },
+    STOREFRONT_TEMPLATE_APPLIED: { en: 'storefront_template_applied', bn: 'টেমপ্লেট প্রয়োগ' },
+    STOREFRONT_PUBLISHED: { en: 'storefront_published', bn: 'ওয়েবসাইট প্রকাশ' },
+    STOREFRONT_ROLLBACK: { en: 'storefront_rollback', bn: 'ওয়েবসাইট পুনরুদ্ধার' },
+    STOREFRONT_PAUSED_BY_ADMIN: { en: 'storefront_paused_by_admin', bn: 'অনলাইন দোকান বন্ধ' },
+    STOREFRONT_RESUMED_BY_ADMIN: { en: 'storefront_resumed_by_admin', bn: 'অনলাইন দোকান চালু' },
+    ONLINE_CATALOG_BULK_UPDATE: { en: 'online_catalog_bulk_update', bn: 'অনলাইন পণ্য একসাথে হালনাগাদ' }
   },
 
   // Sales Return Refund Methods

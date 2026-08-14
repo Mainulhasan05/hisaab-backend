@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const adminController = require('../controllers/admin.controller');
+const adminStorageController = require('../controllers/adminStorage.controller');
+const adminStorefrontController = require('../controllers/adminStorefront.controller');
 const billingController = require('../controllers/billing.controller');
 const { protect, adminOnly } = require('../middleware/auth.middleware');
 
@@ -35,6 +37,15 @@ router.patch('/shops/:id/customer-scope', adminController.setCustomerScope);
 // with a method per verb. New capabilities need no route change at all.
 router.get('/shops/:id/features', adminController.getShopFeatures);
 router.patch('/shops/:id/features/:key', adminController.setShopFeature);
+// Which storefront templates this shop may pick from. Distinct from the
+// capability toggle above: `features.storefront` decides whether the shop has a
+// website at all, this decides which designs it may choose. The GET reports
+// what is currently applied so the panel can warn before a grant is revoked.
+router.get('/shops/:id/storefront/templates', adminStorefrontController.getShopTemplates);
+router.put('/shops/:id/storefront/templates', adminStorefrontController.setShopTemplates);
+// The platform kill switch. Takes ONE storefront dark without touching the
+// shop's POS — they keep trading at the counter. See adminStorefront.service.
+router.patch('/shops/:id/storefront/pause', adminStorefrontController.setStorefrontPause);
 router.get('/shops/:id/branches', adminController.getShopBranches);
 router.post('/shops/:id/branches', adminController.addShopBranch);
 router.patch('/shops/:id/branches/:branchId', adminController.updateShopBranch);
@@ -68,6 +79,51 @@ router.get('/online-users', adminController.getOnlineUsers);
 // Dashboard activity: active users (from lastActiveAt, not the heartbeat set)
 // + catalogue totals + recent product changes, in one call.
 router.get('/activity-overview', adminController.getActivityOverview);
+
+// ── Image storage (R2 pool) ───────────────────────────────────────────────
+// Two halves: the account pool (what we have) and per-shop allocation (what we
+// have promised). The summary endpoint reports both, because the ratio between
+// them is the number that predicts a full bucket. See R2_STORAGE_PLAN.md.
+router.get('/storage/summary', adminStorageController.getSummary);
+router.get('/storage/accounts', adminStorageController.listAccounts);
+router.post('/storage/accounts', adminStorageController.createAccount);
+// Verify a credential BEFORE it is saved — nothing is persisted by this route.
+router.post('/storage/accounts/test', adminStorageController.testDraftAccount);
+router.patch('/storage/accounts/:id', adminStorageController.updateAccount);
+router.post('/storage/accounts/:id/test', adminStorageController.testAccount);
+// Draining stops new allocation but keeps serving reads — the safe way to
+// retire a bucket.
+router.post('/storage/accounts/:id/drain', adminStorageController.setAccountDraining);
+// Retiring an account is `draining` then `isActive: false` (PATCH above), never
+// a DELETE. Two reasons, and the second one is the real one:
+//   1. panel policy — hard deletion is disabled platform-wide, and
+//      `assertAdminMayDelete` would 403 the route even if it were mounted
+//      (see adminNoDelete.test.js).
+//   2. the account row is the ONLY map from a stored object back to the bucket
+//      holding it. Erase it and every file it ever held becomes unreachable —
+//      no URL to rebuild, no key to delete, no way to count what was lost.
+// Keeping a retired row costs one document and preserves that map forever.
+
+// Per-shop allocation table + the per-shop controls.
+router.get('/storage/shops', adminStorageController.listShopStorage);
+router.get('/shops/:id/storage', adminStorageController.getShopStorage);
+router.patch('/shops/:id/storage', adminStorageController.setShopStorage);
+router.post('/shops/:id/storage/recalculate', adminStorageController.recalculateShopStorage);
+
+// ── Online storefront (template catalogue + oversight) ────────────────────
+//
+// The per-shop grant routes live up with the other /shops/:id verbs. These are
+// the platform-wide ones: the catalogue itself, and the list answering "who is
+// actually using this feature".
+//
+// There is no DELETE. A template is retired, never erased — it keeps rendering
+// for every shop already on it. See StorefrontTemplate.model.js.
+router.get('/storefront/templates', adminStorefrontController.listTemplates);
+router.post('/storefront/templates', adminStorefrontController.createTemplate);
+router.patch('/storefront/templates/:id', adminStorefrontController.updateTemplate);
+router.post('/storefront/templates/:id/publish', adminStorefrontController.publishTemplate);
+router.post('/storefront/templates/:id/retire', adminStorefrontController.retireTemplate);
+router.get('/storefront/shops', adminStorefrontController.listStorefronts);
 
 // Cache/Redis management
 router.get('/cache/stats', adminController.getCacheStats);

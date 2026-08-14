@@ -2,6 +2,7 @@ const Expense = require('../models/Expense.model');
 const ExpenseCategory = require('../models/ExpenseCategory.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
+const { endOfBangladeshDay, getBangladeshTodayRange, getBangladeshMonthRange, toBangladeshMonthStr } = require('../utils/bdTime.util');
 const { branchFilter, requireBranch, branchMatch } = require('../utils/branchScope.util');
 
 class ExpenseService {
@@ -37,11 +38,10 @@ class ExpenseService {
     if (startDate || endDate) {
       query.date = {};
       if (startDate) query.date.$gte = new Date(startDate);
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        query.date.$lte = end;
-      }
+      // End of the Bangladesh calendar day the client named. `setHours` here
+      // was server-local, so on a UTC host "to the 31st" ended at 05:59 Dhaka
+      // on the 31st and dropped almost a full day of entries.
+      if (endDate) query.date.$lte = endOfBangladeshDay(endDate);
     }
 
     const skip = (page - 1) * limit;
@@ -241,14 +241,17 @@ class ExpenseService {
 
     if (startDate && endDate) {
       start = new Date(startDate);
-      end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
+      end = endOfBangladeshDay(endDate);
     } else {
-      // Default to current month
-      const now = new Date();
-      start = new Date(now.getFullYear(), now.getMonth(), 1);
-      end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+      // Default to the current BANGLADESH month, not the server's.
+      const { startOfMonth, endOfMonth } = getBangladeshMonthRange(toBangladeshMonthStr(new Date()));
+      start = startOfMonth;
+      end = endOfMonth;
     }
+
+    // One resolution of "today", reused — calling the helper twice below would
+    // straddle midnight on the one request per day where it matters.
+    const { startOfDay: todayStart, endOfDay: todayEnd } = getBangladeshTodayRange();
 
     // Summary must match the scope of the list it sits beside — it was
     // shop-wide while the list was branch-scoped, so the two disagreed on the
@@ -260,8 +263,8 @@ class ExpenseService {
       Expense.getTotal(shopId, start, end, branchId),
       Expense.getTotal(
         shopId,
-        new Date(new Date().setHours(0, 0, 0, 0)),
-        new Date(new Date().setHours(23, 59, 59, 999)),
+        todayStart,
+        todayEnd,
         branchId
       ),
     ]);

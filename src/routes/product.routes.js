@@ -5,6 +5,7 @@ const { protect } = require('../middleware/auth.middleware');
 const { rbac, rbacAny } = require('../middleware/permission.middleware');
 const { validate } = require('../middleware/validate.middleware');
 const productValidation = require('../validations/product.validation');
+const { requireFeature } = require('../utils/features.util');
 
 const { upload } = require('../middleware/upload.middleware');
 
@@ -22,6 +23,15 @@ router.get('/stock-transactions', rbacAny([['products', 'view'], ['stock', 'view
 // stock.manual_adjust is the dedicated permission for it
 router.post('/bulk-stock', rbacAny([['products', 'update'], ['stock', 'manual_adjust']]), validate(productValidation.bulkUpdateStock), productController.bulkUpdateStock);
 router.post('/bulk-import', rbac('products', 'create'), validate(productValidation.bulkImportProducts), productController.bulkImport);
+// The online catalogue screen's write path. Behind `onlineSelling` — the same
+// capability that puts the online section on the product form — so a shop
+// without it gets a 404 rather than a way in through the side door.
+router.post(
+  '/bulk-online',
+  requireFeature('onlineSelling'),
+  rbac('products', 'update'),
+  productController.bulkSetOnlineStatus
+);
 // MUST stay above `/:id` — Express matches in declaration order, and
 // `/expiring-batches` is a perfectly good `:id` as far as the router is
 // concerned. Registered below it, this route would never be reached and the

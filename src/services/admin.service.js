@@ -16,6 +16,7 @@ const Product = require('../models/Product.model');
 const Branch = require('../models/Branch.model');
 const HeldCart = require('../models/HeldCart.model');
 const mongoose = require('mongoose');
+const { getBangladeshTodayRange } = require('../utils/bdTime.util');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
@@ -25,7 +26,14 @@ const { invalidateShopAuthCache, invalidateBranchCache } = require('../utils/aut
 const { resolveSubscription } = require('../utils/subscriptionState.util');
 const { refuseDeletion } = require('../utils/deletionDisabled.util');
 const { KEYS, getTTL } = require('../config/cacheKeys');
-const { FEATURES, FEATURE_KEYS } = require('../utils/features.util');
+const {
+  FEATURES,
+  FEATURE_KEYS,
+  STORAGE_BACKED_FEATURES,
+  missingDepsFor,
+  unavailableReason,
+  dependentsOf,
+} = require('../utils/features.util');
 
 const escapeRegex = (value) => String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -95,6 +103,21 @@ class AdminService {
     const yesterdayStart = new Date(todayStart);
     yesterdayStart.setDate(yesterdayStart.getDate() - 1);
 
+    const Customer = require('../models/Customer.model');
+
+    // The three sales windows are read in ONE pass via $facet.
+    //
+    // The outer $match must cover the earliest boundary any facet needs. On the
+    // 1st of a month `yesterdayStart` falls in the PREVIOUS month, i.e. before
+    // `monthStart` — matching on `monthStart` alone would silently drop
+    // yesterday's revenue on exactly one day in thirty and make `revenueGrowth`
+    // read +100% every month. So the floor is the earlier of the two.
+    const salesRangeStart = monthStart < yesterdayStart ? monthStart : yesterdayStart;
+
+    // Every query below is independent of the others. They used to run as
+    // fifteen sequential `await`s — eight batched plus seven one at a time —
+    // so the endpoint paid a full round trip per query, each an unindexed
+    // platform-wide scan. One Promise.all collapses that to roughly one.
     const [
       totalShops,
       activeShops,
@@ -104,6 +127,10 @@ class AdminService {
       totalUsers,
       todayNewShops,
       todayNewUsers,
+      salesFacet,
+      platformRevenueFacet,
+      todayNewCustomers,
+      todayNewProducts,
     ] = await Promise.all([
       Shop.countDocuments(),
       Shop.countDocuments({ 'subscription.status': 'active' }),
@@ -113,58 +140,80 @@ class AdminService {
       User.countDocuments({ isActive: true }),
       Shop.countDocuments({ createdAt: { $gte: todayStart } }),
       User.countDocuments({ createdAt: { $gte: todayStart } }),
-    ]);
 
-    // Today's sales stats across all shops
-    const todaySalesResult = await Sale.aggregate([
-      { $match: { createdAt: { $gte: todayStart }, status: { $ne: 'cancelled' } } },
-      {
-        $group: {
-          _id: null,
-          totalSales: { $sum: 1 },
-          totalRevenue: { $sum: '$grandTotal' },
-          totalItems: { $sum: { $size: '$items' } },
+      // Today's / yesterday's / this month's sales across all shops.
+      //
+      // `$total` is the field the Sale schema actually defines — `sale.service.js`
+      // writes it and `getAllShops` below already sums it. These three facets
+      // summed `$grandTotal`, which exists nowhere on the model, so `$sum`
+      // returned 0 for a missing path and the platform's revenue figures,
+      // month figures and growth percentage have all read ৳0 since they were
+      // written. The 60s cache faithfully cached the zero.
+      Sale.aggregate([
+        { $match: { createdAt: { $gte: salesRangeStart }, status: { $ne: 'cancelled' } } },
+        {
+          $facet: {
+            today: [
+              { $match: { createdAt: { $gte: todayStart } } },
+              {
+                $group: {
+                  _id: null,
+                  totalSales: { $sum: 1 },
+                  totalRevenue: { $sum: '$total' },
+                  totalItems: { $sum: { $size: '$items' } },
+                },
+              },
+            ],
+            yesterday: [
+              { $match: { createdAt: { $gte: yesterdayStart, $lt: todayStart } } },
+              { $group: { _id: null, totalRevenue: { $sum: '$total' } } },
+            ],
+            month: [
+              { $match: { createdAt: { $gte: monthStart } } },
+              {
+                $group: {
+                  _id: null,
+                  totalSales: { $sum: 1 },
+                  totalRevenue: { $sum: '$total' },
+                },
+              },
+            ],
+          },
         },
-      },
-    ]);
+      ]),
 
-    // Yesterday's sales for comparison
-    const yesterdaySalesResult = await Sale.aggregate([
-      { $match: { createdAt: { $gte: yesterdayStart, $lt: todayStart }, status: { $ne: 'cancelled' } } },
-      { $group: { _id: null, totalRevenue: { $sum: '$grandTotal' } } },
-    ]);
-
-    // This month's sales
-    const monthSalesResult = await Sale.aggregate([
-      { $match: { createdAt: { $gte: monthStart }, status: { $ne: 'cancelled' } } },
-      {
-        $group: {
-          _id: null,
-          totalSales: { $sum: 1 },
-          totalRevenue: { $sum: '$grandTotal' },
+      // Platform revenue — from PlatformPayment, not the shops' own ledger.
+      //
+      // These two used to read `Payment` with `type: 'subscription'`, a value
+      // that is not in that model's enum, so every write threw and both figures
+      // were structurally ৳0. Dated by `receivedAt` (when the money arrived), not
+      // `createdAt` (when it was keyed in).
+      //
+      // Both facets read the same `type: 'subscription'` set, so they share one
+      // pass rather than scanning it twice.
+      PlatformPayment.aggregate([
+        { $match: { type: 'subscription' } },
+        {
+          $facet: {
+            allTime: [{ $group: { _id: null, totalRevenue: { $sum: '$amount' } } }],
+            month: [
+              { $match: { receivedAt: { $gte: monthStart } } },
+              { $group: { _id: null, monthlyRevenue: { $sum: '$amount' } } },
+            ],
+          },
         },
-      },
+      ]),
+
+      // Today's new customers / products across all shops
+      Customer.countDocuments({ createdAt: { $gte: todayStart } }),
+      Product.countDocuments({ createdAt: { $gte: todayStart } }),
     ]);
 
-    // Platform revenue — from PlatformPayment, not the shops' own ledger.
-    //
-    // These two used to read `Payment` with `type: 'subscription'`, a value
-    // that is not in that model's enum, so every write threw and both figures
-    // were structurally ৳0. Dated by `receivedAt` (when the money arrived), not
-    // `createdAt` (when it was keyed in).
-    const revenueResult = await PlatformPayment.aggregate([
-      { $match: { type: 'subscription' } },
-      { $group: { _id: null, totalRevenue: { $sum: '$amount' } } },
-    ]);
-
-    const monthlyRevenueResult = await PlatformPayment.aggregate([
-      { $match: { type: 'subscription', receivedAt: { $gte: monthStart } } },
-      { $group: { _id: null, monthlyRevenue: { $sum: '$amount' } } },
-    ]);
-
-    // Today's new customers across all shops
-    const Customer = require('../models/Customer.model');
-    const todayNewCustomers = await Customer.countDocuments({ createdAt: { $gte: todayStart } });
+    const todaySalesResult = salesFacet[0]?.today || [];
+    const yesterdaySalesResult = salesFacet[0]?.yesterday || [];
+    const monthSalesResult = salesFacet[0]?.month || [];
+    const revenueResult = platformRevenueFacet[0]?.allTime || [];
+    const monthlyRevenueResult = platformRevenueFacet[0]?.month || [];
 
     // Calculate growth percentages
     const todayRevenue = todaySalesResult[0]?.totalRevenue || 0;
@@ -172,10 +221,6 @@ class AdminService {
     const revenueGrowth = yesterdayRevenue > 0
       ? Math.round(((todayRevenue - yesterdayRevenue) / yesterdayRevenue) * 100)
       : 0;
-
-    // Today's new products across all shops
-    const Product = require('../models/Product.model');
-    const todayNewProducts = await Product.countDocuments({ createdAt: { $gte: todayStart } });
 
     const result = {
       // Shop stats
@@ -232,13 +277,23 @@ class AdminService {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-    // Top 5 shops by sales revenue (last 30 days)
-    const topShops = await Sale.aggregate([
+    // Most active shops (by number of transactions today)
+    // Bangladesh midnight — the platform and every shop on it are in BD, so
+    // "today" must not mean the server's UTC day.
+    const { startOfDay: todayStart } = getBangladeshTodayRange();
+
+    // These three aggregations are independent; they used to run sequentially.
+    const [topShops, topProducts, mostActiveToday] = await Promise.all([
+    // Top 5 shops by sales revenue (last 30 days).
+    // `$total`, not `$grandTotal` — see the note in getStats(). This leaderboard
+    // was sorting by a field the Sale schema does not define, so every shop
+    // scored 0 and the "top 5" was whatever order the group happened to emit.
+    Sale.aggregate([
       { $match: { createdAt: { $gte: thirtyDaysAgo }, status: { $ne: 'cancelled' } } },
       {
         $group: {
           _id: '$shop',
-          totalRevenue: { $sum: '$grandTotal' },
+          totalRevenue: { $sum: '$total' },
           totalSales: { $sum: 1 },
         },
       },
@@ -262,29 +317,32 @@ class AdminService {
           totalSales: 1,
         },
       },
-    ]);
+    ]),
 
-    // Top 5 products by quantity sold (last 30 days)
-    const topProducts = await Sale.aggregate([
+    // Top 5 products by quantity sold (last 30 days).
+    //
+    // Revenue reads the stored line total. It used to be
+    // `$multiply: ['$items.price', '$items.quantity']`, but a sale item has no
+    // `price` field — it has `unitPrice` and `total` (Sale.model.js:84,103).
+    // `$multiply` over a missing path yields null, `$sum` skips nulls, so this
+    // column was structurally ৳0 too. `$items.total` is also what
+    // report.service.js sums for the same figure, so the two now agree.
+    Sale.aggregate([
       { $match: { createdAt: { $gte: thirtyDaysAgo }, status: { $ne: 'cancelled' } } },
       { $unwind: '$items' },
       {
         $group: {
           _id: '$items.product',
           totalQuantity: { $sum: '$items.quantity' },
-          totalRevenue: { $sum: { $multiply: ['$items.price', '$items.quantity'] } },
+          totalRevenue: { $sum: '$items.total' },
           name: { $first: '$items.productName' },
         },
       },
       { $sort: { totalQuantity: -1 } },
       { $limit: 5 },
-    ]);
+    ]),
 
-    // Most active shops (by number of transactions today)
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-
-    const mostActiveToday = await Sale.aggregate([
+    Sale.aggregate([
       { $match: { createdAt: { $gte: todayStart } } },
       {
         $group: {
@@ -310,6 +368,7 @@ class AdminService {
           salesCount: 1,
         },
       },
+    ]),
     ]);
 
     const result = {
@@ -556,11 +615,14 @@ class AdminService {
       };
     });
 
-    // Fetch registration audit logs (IP/device) for all shops in this page
+    // Fetch registration audit logs (IP/device) for all shops in this page.
+    // Only `shop` and `metadata` are read below, and only the FIRST log per
+    // shop survives — so the whole document was being fetched for nothing.
+    // Served by the {shop, action, createdAt} index added to AuditLog.model.js.
     const registrationLogs = await AuditLog.find({
       shop: { $in: shopIds },
       action: 'user_register',
-    }).sort({ createdAt: 1 }).lean();
+    }).select('shop metadata').sort({ createdAt: 1 }).lean();
 
     // Map: first registration log per shop
     const regLogMap = new Map();
@@ -929,10 +991,13 @@ class AdminService {
 
     // Rule 1 — the filter is `isDeleted: true`, so a live id simply does not
     // come back and is reported as not-eligible below.
+    // `catalogImages` and `variants` come along so the purge can release the
+    // product's photos — the document is about to stop existing, and it is the
+    // only record of which images it held.
     const products = await Product.find({
       _id: { $in: productIds.filter((id) => mongoose.Types.ObjectId.isValid(id)) },
       isDeleted: true,
-    }).select('name code shop').lean();
+    }).select('name code shop catalogImages variants').lean();
 
     const foundIds = products.map((p) => String(p._id));
     const links = await this.inspectProductLinks(foundIds); // Rule 2
@@ -1004,6 +1069,23 @@ class AdminService {
       // fails the build. Do not copy the marker to widen the hole.
       await StockTransaction.deleteMany({ product: id }); // admin-purge:reviewed
       await Product.deleteOne({ _id: id });
+
+      // Release the product's photos. For anything soft-deleted after
+      // `product.service.deleteProduct` started detaching, this is a no-op — the
+      // `refCount > 0` guard makes the repeat harmless. For the backlog of
+      // products soft-deleted BEFORE that, this is the ONLY thing that ever
+      // decrements them, and without it a purge frees the row while leaving the
+      // bytes charged to the shop forever.
+      //
+      // After the delete, not before: a refCount released against a product that
+      // then failed to purge would leave a live product pointing at an image the
+      // orphan sweep is free to collect.
+      const mediaService = require('./media.service');
+      await mediaService.reconcileRefs(
+        product.shop,
+        mediaService.mediaIdsOfProduct(product),
+        []
+      );
 
       purged.push({ productId: id, name: product.name, shop: product.shop });
     }
@@ -1322,8 +1404,7 @@ class AdminService {
     const SMSLog = require('../models/SMSLog.model');
 
     // Get today's SMS stats
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const { startOfDay: today } = getBangladeshTodayRange();
 
     const todayStats = await SMSLog.aggregate([
       { $match: { createdAt: { $gte: today } } },
@@ -1660,6 +1741,24 @@ class AdminService {
    *
    * Redis down: `getMultipleLastActive` falls through to Mongo and the whole
    * panel degrades from ~60s resolution to ~5 minutes. Nothing errors.
+   *
+   * ── What "today" and "this week" mean here ──────────────────────────────────
+   *
+   * Sales and product figures use the Bangladesh CALENDAR day for "today" and
+   * a rolling 7 days for "this week". Calendar-day matters because "revenue
+   * today" is a number the operator compares against what a shop's own daily
+   * summary shows, and that one is BD-calendar. Getting it wrong would put the
+   * first six hours of every Bangladeshi trading day in the wrong bucket on a
+   * UTC host — see bdTime.util.js for the same bug in report land.
+   *
+   * User buckets stay rolling windows. They measure presence ("has this person
+   * touched the app in the last day"), where a midnight boundary would make the
+   * figure collapse every morning for no reason the operator would recognise.
+   * That difference is why the dashboard labels the user buckets "Last 24h"
+   * rather than letting two different spans share the word "today".
+   *
+   * Cancelled sales are excluded from both the counts and the revenue, and
+   * reported separately, so a voided ৳50,000 invoice cannot inflate the day.
    */
   async getActivityOverview() {
     const User = require('../models/User.model');
@@ -1668,53 +1767,130 @@ class AdminService {
 
     const now = Date.now();
     const since = (minutes) => new Date(now - minutes * 60 * 1000);
+    const { startOfDay: bdTodayStart } = getBangladeshTodayRange();
+    const salesWindowStart = since(60 * 24 * 7);
 
-    const [buckets, recentUsers, productCounts, recentProducts] = await Promise.all([
-      // Counts come from Mongo in one pass. Up to 5 minutes stale by design —
-      // a headline count does not justify reading every Redis key on the
-      // platform, and the per-user list below is exact where it matters.
-      User.aggregate([
-        {
-          $group: {
-            _id: null,
-            total: { $sum: 1 },
-            online: { $sum: { $cond: [{ $gte: ['$lastActiveAt', since(5)] }, 1, 0] } },
-            today: { $sum: { $cond: [{ $gte: ['$lastActiveAt', since(60 * 24)] }, 1, 0] } },
-            week: { $sum: { $cond: [{ $gte: ['$lastActiveAt', since(60 * 24 * 7)] }, 1, 0] } },
-            never: { $sum: { $cond: [{ $ifNull: ['$lastActiveAt', false] }, 0, 1] } },
-          },
-        },
-      ]),
-      User.find({ lastActiveAt: { $ne: null } })
-        .select('name phone role lastActiveAt lastLogin')
-        .populate('shop', 'name')
-        .sort({ lastActiveAt: -1 })
-        .limit(8)
-        .lean(),
-      Product.aggregate([
-        {
-          $group: {
-            _id: null,
-            total: { $sum: 1 },
-            deleted: { $sum: { $cond: [{ $eq: ['$isDeleted', true] }, 1, 0] } },
-            inactive: {
-              $sum: { $cond: [{ $and: [{ $ne: ['$isDeleted', true] }, { $eq: ['$isActive', false] }] }, 1, 0] },
+    const [buckets, recentUsers, productCounts, recentProducts, saleBuckets, recentSales, salesTotal] =
+      await Promise.all([
+        // Counts come from Mongo in one pass. Up to 5 minutes stale by design —
+        // a headline count does not justify reading every Redis key on the
+        // platform, and the per-user list below is exact where it matters.
+        User.aggregate([
+          {
+            $group: {
+              _id: null,
+              total: { $sum: 1 },
+              online: { $sum: { $cond: [{ $gte: ['$lastActiveAt', since(5)] }, 1, 0] } },
+              today: { $sum: { $cond: [{ $gte: ['$lastActiveAt', since(60 * 24)] }, 1, 0] } },
+              week: { $sum: { $cond: [{ $gte: ['$lastActiveAt', since(60 * 24 * 7)] }, 1, 0] } },
+              never: { $sum: { $cond: [{ $ifNull: ['$lastActiveAt', false] }, 0, 1] } },
             },
-            addedToday: { $sum: { $cond: [{ $gte: ['$createdAt', since(60 * 24)] }, 1, 0] } },
-            addedWeek: { $sum: { $cond: [{ $gte: ['$createdAt', since(60 * 24 * 7)] }, 1, 0] } },
           },
-        },
-      ]),
-      // Most recently touched, not most recently created — "what changed" is
-      // the question a console asks. `createdBy` answers who put it there.
-      Product.find({})
-        .select('name code sellingPrice stock isDeleted isActive createdAt updatedAt')
-        .populate('shop', 'name')
-        .populate('createdBy', 'name role')
-        .sort({ updatedAt: -1 })
-        .limit(8)
-        .lean(),
-    ]);
+        ]),
+        User.find({ lastActiveAt: { $ne: null } })
+          .select('name phone role lastActiveAt lastLogin')
+          .populate('shop', 'name')
+          .sort({ lastActiveAt: -1 })
+          .limit(8)
+          .lean(),
+        Product.aggregate([
+          {
+            $group: {
+              _id: null,
+              total: { $sum: 1 },
+              deleted: { $sum: { $cond: [{ $eq: ['$isDeleted', true] }, 1, 0] } },
+              inactive: {
+                $sum: { $cond: [{ $and: [{ $ne: ['$isDeleted', true] }, { $eq: ['$isActive', false] }] }, 1, 0] },
+              },
+              // BD calendar day, matching the sales figures below rather than
+              // the rolling 24h this used to be. The dashboard shows "added
+              // today" next to "sales today"; the two words have to mean the
+              // same span or the screen is quietly lying about one of them.
+              addedToday: { $sum: { $cond: [{ $gte: ['$createdAt', bdTodayStart] }, 1, 0] } },
+              addedWeek: { $sum: { $cond: [{ $gte: ['$createdAt', salesWindowStart] }, 1, 0] } },
+            },
+          },
+        ]),
+        // Newest first, not most-recently-touched. This feed answers "what has
+        // been uploaded", and sorting by `updatedAt` let a five-month-old
+        // product whose stock ticked down a minute ago outrank a genuine new
+        // upload — so the panel that claimed to show new products routinely
+        // showed none. `updatedAt` is still returned so the UI can mark a row
+        // that has been edited since it was created.
+        Product.find({})
+          .select('name code sellingPrice stock unit isDeleted isActive createdAt updatedAt')
+          .populate('shop', 'name')
+          .populate('branch', 'name')
+          .populate('createdBy', 'name role')
+          .sort({ createdAt: -1 })
+          .limit(8)
+          .lean(),
+        // One pass over the last 7 days of sales yields both windows. Bounding
+        // the $match at 7 days is what keeps this off a full collection scan:
+        // Sale is one of the three collections that actually grows.
+        Sale.aggregate([
+          { $match: { createdAt: { $gte: salesWindowStart } } },
+          {
+            $group: {
+              _id: null,
+              weekCount: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 0, 1] } },
+              weekRevenue: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 0, '$total'] } },
+              weekCancelled: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] } },
+              todayCount: {
+                $sum: {
+                  $cond: [
+                    { $and: [{ $gte: ['$createdAt', bdTodayStart] }, { $ne: ['$status', 'cancelled'] }] },
+                    1,
+                    0,
+                  ],
+                },
+              },
+              todayRevenue: {
+                $sum: {
+                  $cond: [
+                    { $and: [{ $gte: ['$createdAt', bdTodayStart] }, { $ne: ['$status', 'cancelled'] }] },
+                    '$total',
+                    0,
+                  ],
+                },
+              },
+              todayDue: {
+                $sum: {
+                  $cond: [
+                    { $and: [{ $gte: ['$createdAt', bdTodayStart] }, { $ne: ['$status', 'cancelled'] }] },
+                    '$due',
+                    0,
+                  ],
+                },
+              },
+              todayCancelled: {
+                $sum: {
+                  $cond: [
+                    { $and: [{ $gte: ['$createdAt', bdTodayStart] }, { $eq: ['$status', 'cancelled'] }] },
+                    1,
+                    0,
+                  ],
+                },
+              },
+            },
+          },
+        ]),
+        // `items` is deliberately not selected: a sale carries its whole line
+        // array, and eight of them would be the heaviest thing on the endpoint
+        // for a number the panel does not show.
+        Sale.find({})
+          .select('invoiceNo total paid due status paymentMethod customerName isOnline channel createdAt')
+          .populate('shop', 'name')
+          .populate('branch', 'name')
+          .populate('customer', 'name phone')
+          .populate('createdBy', 'name role')
+          .sort({ createdAt: -1 })
+          .limit(8)
+          .lean(),
+        // Metadata read, not a scan. "Sales ever recorded" is a scale figure,
+        // not an accounting one, so an estimate is the honest cost/benefit.
+        Sale.estimatedDocumentCount(),
+      ]);
 
     // Sharpen the listed users with live Redis values — 8 keys, one MGET.
     const liveMap = await userActivityService.getMultipleLastActive(recentUsers.map((u) => u._id));
@@ -1740,6 +1916,7 @@ class AdminService {
 
     const u = buckets[0] || {};
     const p = productCounts[0] || {};
+    const s = saleBuckets[0] || {};
 
     return {
       users: {
@@ -1762,6 +1939,28 @@ class AdminService {
           inactive: p.inactive || 0,
           addedToday: p.addedToday || 0,
           addedWeek: p.addedWeek || 0,
+        },
+      },
+      sales: {
+        recent: recentSales,
+        counts: {
+          // `total` is an estimate; every other figure here is exact.
+          total: salesTotal || 0,
+          todayCount: s.todayCount || 0,
+          todayRevenue: s.todayRevenue || 0,
+          todayDue: s.todayDue || 0,
+          todayCancelled: s.todayCancelled || 0,
+          weekCount: s.weekCount || 0,
+          weekRevenue: s.weekRevenue || 0,
+          weekCancelled: s.weekCancelled || 0,
+        },
+        // The UI labels its own windows, but it should not have to hardcode
+        // where they start — a reader comparing this against a shop's daily
+        // summary needs to know which midnight we used.
+        windows: {
+          todayStart: bdTodayStart,
+          weekStart: salesWindowStart,
+          timezone: 'Asia/Dhaka',
         },
       },
       generatedAt: new Date(),
@@ -2321,8 +2520,68 @@ class AdminService {
       return shop.toObject();
     }
 
+    // A key can be registered before the feature it names is built — the
+    // permission, the nav entry and the frontend's `hasFeature` call all need
+    // it to exist first. Enabling one of those tells the shop it has something
+    // it does not. Turning it OFF is always allowed, so this can never strand a
+    // shop that was switched on before the guard existed.
+    const unavailable = value ? unavailableReason(key) : null;
+    if (unavailable) {
+      throw new AppError(
+        `"${FEATURES[key].en}" cannot be enabled yet — ${unavailable}`,
+        `"${FEATURES[key].bn}" এখনো চালু করা যাবে না — সুবিধাটি এখনো তৈরি হয়নি`,
+        400
+      );
+    }
+
+    // A capability that writes bytes needs somewhere to put them. Enabling one
+    // while `storage.enabled` is false would give the shop an upload button
+    // wired to a 403 — which reads as a bug to them and as a support ticket to
+    // us. The mirror of this rule (disabling storage cascades these off) lives
+    // in adminStorage.service.setShopStorage; between the two, the broken
+    // combination is unreachable from either direction.
+    const missing = missingDepsFor(shop, key);
+    if (value && missing.storage) {
+      throw new AppError(
+        `"${FEATURES[key].en}" needs image storage. Enable storage for this shop first.`,
+        `"${FEATURES[key].bn}" চালু করতে হলে আগে এই দোকানে ছবি সংরক্ষণ (স্টোরেজ) চালু করুন`,
+        400
+      );
+    }
+
+    // The same argument, one level up: a capability whose prerequisite is off
+    // is a screen wired to a feature that is not there. `storefront` without
+    // `onlineSelling` is a website with no way to put a product on it.
+    //
+    // Only DIRECT prerequisites are named. A shop whose grandparent flag is off
+    // necessarily has its parent off too — that is what the cascade below
+    // guarantees — so naming the immediate blocker gives the admin the one
+    // toggle they actually have to flip next.
+    if (value && missing.features.length) {
+      const names = missing.features.map((k) => FEATURES[k].bn).join(', ');
+      const namesEn = missing.features.map((k) => FEATURES[k].en).join(', ');
+      throw new AppError(
+        `"${FEATURES[key].en}" needs ${namesEn}. Enable ${missing.features.length > 1 ? 'those' : 'that'} first.`,
+        `"${FEATURES[key].bn}" চালু করতে হলে আগে "${names}" চালু করুন`,
+        400
+      );
+    }
+
+    // Turning a capability OFF turns off everything that depends on it,
+    // transitively. Without this the shop keeps a screen whose foundation has
+    // been removed — the mirror of the check above, and the same shape as the
+    // storage cascade in adminStorage.service. Between the two directions the
+    // broken combination is unreachable.
+    //
+    // Only flags that are actually on are touched, so the audit entry lists
+    // what really changed rather than every dependent that exists.
+    const cascaded = value
+      ? []
+      : dependentsOf(key).filter((k) => shop.features?.[k] === true);
+
     if (!shop.features) shop.features = {};
     shop.features[key] = value;
+    cascaded.forEach((k) => { shop.features[k] = false; });
     // `features` is a nested object; Mongoose does not always see a mutation on
     // a sub-path of a non-subdocument object, and a missed change here would
     // return 200 while saving nothing.
@@ -2336,9 +2595,15 @@ class AdminService {
       action: value ? 'shop_feature_enabled' : 'shop_feature_disabled',
       description: value
         ? `"${shop.name}" দোকানে "${meta.bn}" ফিচার চালু করা হয়েছে`
-        : `"${shop.name}" দোকানে "${meta.bn}" ফিচার বন্ধ করা হয়েছে`,
+        : `"${shop.name}" দোকানে "${meta.bn}" ফিচার বন্ধ করা হয়েছে`
+          + (cascaded.length
+            ? ` (সাথে বন্ধ হয়েছে: ${cascaded.map((k) => FEATURES[k].bn).join(', ')})`
+            : ''),
       entity: { type: 'shop', id: shop._id, name: shop.name },
-      changes: { before: { [`features.${key}`]: previous }, after: { [`features.${key}`]: value } }
+      changes: {
+        before: { [`features.${key}`]: previous },
+        after: { [`features.${key}`]: value, cascadedOff: cascaded },
+      }
     });
 
     // The flag rides in the shop payload of the auth cache, so every session
@@ -2357,20 +2622,48 @@ class AdminService {
    * capability appears in the admin panel the moment it is registered.
    */
   async getShopFeatures(shopId) {
-    const shop = await Shop.findById(shopId).select('name features').lean();
+    const shop = await Shop.findById(shopId).select('name features storage').lean();
     if (!shop) {
       throw new AppError('দোকান পাওয়া যায়নি', 'Shop not found', 404);
     }
 
+    const storageEnabled = shop.storage?.enabled === true;
+
     return {
       shop: { _id: String(shop._id), name: shop.name },
-      features: FEATURE_KEYS.map((key) => ({
-        key,
-        label: FEATURES[key].bn,
-        labelEn: FEATURES[key].en,
-        description: FEATURES[key].description,
-        enabled: shop.features?.[key] === true,
-      })),
+      // Reported so the panel can render a storage-backed toggle as disabled
+      // with a reason, instead of letting an admin click it and read a 400.
+      storageEnabled,
+      features: FEATURE_KEYS.map((key) => {
+        const needsStorage = STORAGE_BACKED_FEATURES.includes(key);
+        const missing = missingDepsFor(shop, key);
+        // What turning this OFF would take with it. Reported so the panel can
+        // warn BEFORE the click rather than letting an admin discover it from
+        // the audit log — the same reason `storageEnabled` is reported above.
+        const dependents = dependentsOf(key).filter((k) => shop.features?.[k] === true);
+
+        const blockedReason = missing.storage
+          ? 'আগে এই দোকানে ছবি সংরক্ষণ (স্টোরেজ) চালু করুন'
+          : missing.features.length
+            ? `আগে "${missing.features.map((k) => FEATURES[k].bn).join(', ')}" চালু করুন`
+            : null;
+
+        return {
+          key,
+          label: FEATURES[key].bn,
+          labelEn: FEATURES[key].en,
+          description: FEATURES[key].description,
+          enabled: shop.features?.[key] === true,
+          requiresStorage: needsStorage,
+          requires: FEATURES[key].requires || [],
+          missingRequires: missing.features,
+          // Disabling this would cascade these off. Empty for every feature
+          // nothing depends on, which is most of them.
+          cascadesOff: dependents,
+          blocked: Boolean(blockedReason),
+          blockedReason,
+        };
+      }),
     };
   }
 

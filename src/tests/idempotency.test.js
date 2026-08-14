@@ -27,11 +27,24 @@
  * "Something went wrong". Everything else here is an invariant guard: the
  * middleware's non-blocking promise (no key, or a broken cache, must never
  * cost a shopkeeper a sale) already held and must keep holding.
+ *
+ * THE CLAIM IS `setNX`, NOT `get` THEN `set`
+ * ------------------------------------------
+ * These tests used to assert the reservation was a `cacheService.set`. It was,
+ * and that was the bug: a `get` that missed followed by a `set` is two
+ * operations, and two requests arriving together both missed and both wrote.
+ * The middleware exists to stop a double-tap, and a double-tap is precisely the
+ * case where the two requests are concurrent — so it caught the sequential
+ * retry and nothing else.
+ *
+ * `setNX` makes checking and claiming one atomic operation: exactly one caller
+ * is told it won. `setNXWins()` / `setNXLoses()` below name the two sides.
  */
 
 jest.mock('../services/cache.service', () => ({
   get: jest.fn(),
   set: jest.fn().mockResolvedValue(undefined),
+  setNX: jest.fn().mockResolvedValue(true),
   delete: jest.fn().mockResolvedValue(undefined),
 }));
 jest.mock('../utils/logger.util', () => ({
@@ -81,9 +94,22 @@ function mockReq(overrides = {}) {
 
 const KEY = '2f1c9e7a-0b3d-4f88-9a41-5c0d7e6b2a13';
 
+/** This request is the one that claimed the key — it proceeds to the handler. */
+const setNXWins = () => cacheService.setNX.mockResolvedValue(true);
+
+/**
+ * Another request already holds the key. `setNX` declines, and the middleware
+ * reads what the winner has recorded so far.
+ */
+const setNXLoses = (existing) => {
+  cacheService.setNX.mockResolvedValue(false);
+  cacheService.get.mockResolvedValue(existing);
+};
+
 beforeEach(() => {
   jest.clearAllMocks();
   cacheService.get.mockResolvedValue(null);
+  setNXWins();
 });
 
 describe('no key supplied — the non-blocking promise', () => {
@@ -97,6 +123,7 @@ describe('no key supplied — the non-blocking promise', () => {
     expect(next).toHaveBeenCalledTimes(1);
     expect(cacheService.get).not.toHaveBeenCalled();
     expect(cacheService.set).not.toHaveBeenCalled();
+    expect(cacheService.setNX).not.toHaveBeenCalled();
   });
 
   it('a GET is never gated, even carrying a key', async () => {
@@ -110,7 +137,7 @@ describe('no key supplied — the non-blocking promise', () => {
   });
 
   it('a cache outage lets the sale through rather than blocking the till', async () => {
-    cacheService.get.mockRejectedValue(new Error('redis down'));
+    cacheService.setNX.mockRejectedValue(new Error('redis down'));
     const req = mockReq({ headers: { 'x-idempotency-key': KEY } });
     const next = jest.fn();
 
@@ -121,16 +148,17 @@ describe('no key supplied — the non-blocking promise', () => {
 });
 
 describe('a key is supplied', () => {
-  it('claims the key before running the handler', async () => {
+  it('claims the key atomically before running the handler', async () => {
     const req = mockReq({ headers: { 'x-idempotency-key': KEY } });
     const next = jest.fn();
 
     await idempotency()(req, mockRes(), next);
 
     expect(next).toHaveBeenCalledTimes(1);
-    expect(cacheService.set).toHaveBeenCalledTimes(1);
+    // One operation, not a get-then-set. See the header note.
+    expect(cacheService.setNX).toHaveBeenCalledTimes(1);
 
-    const [lockKey, value] = cacheService.set.mock.calls[0];
+    const [lockKey, value] = cacheService.setNX.mock.calls[0];
     expect(value.status).toBe('processing');
     // The shop is part of the key, so two shops cannot collide on one uuid.
     expect(lockKey).toContain('shop1');
@@ -143,7 +171,7 @@ describe('a key is supplied', () => {
 
     await idempotency()(req, mockRes(), next);
 
-    expect(cacheService.set).toHaveBeenCalledTimes(1);
+    expect(cacheService.setNX).toHaveBeenCalledTimes(1);
     expect(next).toHaveBeenCalledTimes(1);
   });
 
@@ -156,9 +184,27 @@ describe('a key is supplied', () => {
       next
     );
 
-    const first = cacheService.set.mock.calls[0][0];
-    const second = cacheService.set.mock.calls[1][0];
+    const first = cacheService.setNX.mock.calls[0][0];
+    const second = cacheService.setNX.mock.calls[1][0];
     expect(first).not.toBe(second);
+  });
+
+  it('scopes the key by the resolved shop, not a stringified shop document', async () => {
+    // `req.shop` is a hydrated Mongoose document on a real request. Reading
+    // `req.user.shop` and interpolating it — which is what this used to do —
+    // put an entire serialised document into the Redis key.
+    const req = mockReq({
+      headers: { 'x-idempotency-key': KEY },
+      shop: { _id: 'shop-42', name: 'Test Shop', toString: () => '[object Object]' },
+      user: { shop: { _id: 'shop-42', name: 'Test Shop' } },
+    });
+
+    await idempotency()(req, mockRes(), jest.fn());
+
+    const [lockKey] = cacheService.setNX.mock.calls[0];
+    expect(lockKey).toContain('shop-42');
+    expect(lockKey).not.toContain('object Object');
+    expect(lockKey).not.toContain('Test Shop');
   });
 });
 
@@ -168,11 +214,7 @@ describe('a retry of a sale the server already completed', () => {
       success: true,
       data: { _id: 'sale1', invoiceNo: 'INV-1', total: 450 },
     };
-    cacheService.get.mockResolvedValue({
-      status: 'completed',
-      statusCode: 201,
-      body: original,
-    });
+    setNXLoses({ status: 'completed', statusCode: 201, body: original });
 
     const req = mockReq({ headers: { 'x-idempotency-key': KEY } });
     const res = mockRes();
@@ -192,7 +234,7 @@ describe('a retry of a sale the server already completed', () => {
 
 describe('a duplicate arriving while the first is still running', () => {
   it('answers 409, not 500', async () => {
-    cacheService.get.mockResolvedValue({ status: 'processing', timestamp: Date.now() });
+    setNXLoses({ status: 'processing', timestamp: Date.now() });
 
     const req = mockReq({ headers: { 'x-idempotency-key': KEY } });
     const res = mockRes();
@@ -209,6 +251,48 @@ describe('a duplicate arriving while the first is still running', () => {
     // And it says so in Bengali, like every other error this app returns.
     expect(typeof res.body.messageBn).toBe('string');
     expect(res.body.messageBn.length).toBeGreaterThan(0);
+  });
+});
+
+describe('two taps landing at the same instant', () => {
+  /**
+   * THE REGRESSION THIS FIX EXISTS FOR.
+   *
+   * A shopkeeper double-taps চেকআউট, or `syncManager` fires a retry while the
+   * original request is still in flight. Under the old get-then-set both
+   * requests saw an empty cache and both reached the handler — two invoices,
+   * two stock deductions, one lot of goods.
+   *
+   * Modelled the way it actually happens: a real `setNX` answers `true` to
+   * exactly one caller and `false` to every other, whatever order they arrive
+   * in, because the check and the claim are the same operation.
+   */
+  it('only one of them reaches the handler', async () => {
+    let claimed = false;
+    cacheService.setNX.mockImplementation(async () => {
+      if (claimed) return false;
+      claimed = true;
+      return true;
+    });
+    cacheService.get.mockResolvedValue({ status: 'processing', timestamp: Date.now() });
+
+    const headers = { 'x-idempotency-key': KEY };
+    const nextA = jest.fn();
+    const nextB = jest.fn();
+    const resA = mockRes();
+    const resB = mockRes();
+
+    await Promise.all([
+      idempotency()(mockReq({ headers }), resA, nextA),
+      idempotency()(mockReq({ headers }), resB, nextB),
+    ]);
+
+    const reached = nextA.mock.calls.length + nextB.mock.calls.length;
+    expect(reached).toBe(1);
+
+    // The loser is told to wait rather than being run or silently dropped.
+    const loser = nextA.mock.calls.length === 0 ? resA : resB;
+    expect(loser.statusCode).toBe(409);
   });
 });
 

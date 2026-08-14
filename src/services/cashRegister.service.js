@@ -8,15 +8,24 @@ const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const { branchFilter, requireBranch, isAllBranchesView } = require('../utils/branchScope.util');
+const { toBangladeshDateStr, getBangladeshDayRange } = require('../utils/bdTime.util');
 
 class CashRegisterService {
-  // Helper: get start and end of a date
+  /**
+   * The till's day — Bangladesh local, like every other "today" in this system.
+   *
+   * This used to be `setHours(0, 0, 0, 0)`, i.e. SERVER local midnight. The
+   * server runs UTC, so the register's day began at 06:00 Dhaka: a sale rung up
+   * at 2am counted into yesterday's till while `getTodaySummary` (which has
+   * always used Bangladesh time) put it in today's sales. The dashboard and the
+   * drawer disagreed by exactly the night's takings, every night.
+   *
+   * `bdTime.util` is the one definition of that conversion — see the note at the
+   * top of it. Nothing here computes an offset of its own.
+   */
   _dayRange(date = new Date()) {
-    const start = new Date(date);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(date);
-    end.setHours(23, 59, 59, 999);
-    return { start, end };
+    const { startOfDay, endOfDay } = getBangladeshDayRange(toBangladeshDateStr(date));
+    return { start: startOfDay, end: endOfDay };
   }
 
   // Helper: aggregate today's cash flows from all sources
@@ -32,28 +41,83 @@ class CashRegisterService {
       cashRefunds,
       cashSupplierPayments,
     ] = await Promise.all([
-      // Cash sales (paid amount from cash sales)
+      // ── Cash taken at the counter ────────────────────────────────────────
+      //
+      // Summed from the sale's `payments[]` LEGS, not from `paid` filtered on
+      // `paymentMethod`. `paymentMethod` is only "whichever leg was largest"
+      // (sale.service.js, split-payment block), so filtering on it was wrong in
+      // both directions and by the full amount:
+      //
+      //   ৳400 cash + ৳600 bKash → paymentMethod 'bkash' → ৳0 counted as cash
+      //   ৳600 cash + ৳400 card  → paymentMethod 'cash'  → ৳1000 counted as cash
+      //
+      // The drawer was short on the first and over on the second, and neither
+      // was attributable to anything the shopkeeper could see.
+      //
+      // `payments[]` covers only what was settled AT CHECKOUT; money collected
+      // later against the same invoice writes a `Payment{type:'sale_payment'}`
+      // and is picked up by `cashSaleCollections` below. The two are disjoint,
+      // so nothing is counted twice.
+      //
+      // The fallback branch is for sales written before `createSale` began
+      // populating `payments[]` unconditionally. Those all predate today, so in
+      // practice it only ever sees `paid: 0` rows and contributes nothing.
       Sale.aggregate([
         {
           $match: {
             shop: shopOid,
             ...branchMatch,
-            paymentMethod: 'cash',
             status: { $ne: 'cancelled' },
             createdAt: { $gte: start, $lte: end },
           },
         },
-        { $group: { _id: null, total: { $sum: '$paid' } } },
+        {
+          $project: {
+            cashAmount: {
+              $cond: [
+                { $gt: [{ $size: { $ifNull: ['$payments', []] } }, 0] },
+                {
+                  $sum: {
+                    $map: {
+                      input: {
+                        $filter: {
+                          input: '$payments',
+                          as: 'p',
+                          cond: { $eq: ['$$p.method', 'cash'] },
+                        },
+                      },
+                      as: 'p',
+                      in: { $ifNull: ['$$p.amount', 0] },
+                    },
+                  },
+                },
+                { $cond: [{ $eq: ['$paymentMethod', 'cash'] }, '$paid', 0] },
+              ],
+            },
+          },
+        },
+        { $group: { _id: null, total: { $sum: '$cashAmount' } } },
       ]),
 
-      // Cash due collections (from Payment model)
+      // ── Cash collected against invoices, whenever it arrives ─────────────
+      //
+      // Both streams that settle a customer's debt, in one bucket:
+      //
+      //   `due_collection` — the customer-level "বাকি আদায়" screen
+      //   `sale_payment`   — `recordPayment` on a specific invoice
+      //
+      // The second was counted by NOTHING. `cashSales` above is bounded by the
+      // SALE's `createdAt`, so cash taken today against an invoice raised on any
+      // earlier day fell through both filters: real money in the drawer that no
+      // bucket accounted for, and the till read over by exactly that amount
+      // every time an old due was settled from the invoice screen.
       Payment.aggregate([
         {
           $match: {
             shop: shopOid,
             ...branchMatch,
             method: 'cash',
-            type: 'due_collection',
+            type: { $in: ['due_collection', 'sale_payment'] },
             createdAt: { $gte: start, $lte: end },
           },
         },
@@ -185,6 +249,25 @@ class CashRegisterService {
         previousDate: previousRegister?.date || null,
         unclosedPrevious,
       };
+    }
+
+    // ── A closed register is a settled record, not a live view ──────────────
+    //
+    // This recalculated and SAVED unconditionally, and the model's pre-save
+    // derives `expectedClosing` and `difference` from those figures. So closing
+    // the till at 10pm with a difference of ৳0 and merely OPENING the page
+    // afterwards could rewrite it into a discrepancy — a reconciliation that
+    // changes after the fact is worse than no reconciliation, because the
+    // shopkeeper has already signed off on the number they saw.
+    //
+    // Reopening is the sanctioned way to make a closed day's figures move
+    // again; `reopenRegister` recalculates on the way through.
+    //
+    // (This is also why the recalculation is not simply hoisted out of the GET:
+    // an open register genuinely is a live view, and the page has to show the
+    // day's takings as they accumulate.)
+    if (register.status === 'closed') {
+      return { exists: true, register: register.toJSON() };
     }
 
     // Auto-calculate cash flows from live data

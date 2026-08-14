@@ -9,6 +9,10 @@ const logger = require('./utils/logger.util');
 
 const { startSyncJob, stopSyncJob } = require('./jobs/userActivitySync.job');
 const { startDigestJob, stopDigestJob } = require('./jobs/dailyDigest.job');
+const {
+  startStorageMaintenanceJob,
+  stopStorageMaintenanceJob,
+} = require('./jobs/storageMaintenance.job');
 const telegramService = require('./services/telegram.service');
 
 // Register all models early so Mongoose can resolve populate refs
@@ -23,6 +27,12 @@ process.on('uncaughtException', (err) => {
 
 const PORT = process.env.PORT || 5000;
 let server = null;
+
+// PM2 sets NODE_APP_INSTANCE per worker in cluster mode ('0', '1', …). When it
+// is absent the process was started directly, which is a single process and so
+// is itself the primary. See ecosystem.config.js.
+const isPrimaryWorker =
+  !process.env.NODE_APP_INSTANCE || process.env.NODE_APP_INSTANCE === '0';
 
 async function runSeeders() {
   try {
@@ -99,18 +109,47 @@ async function start() {
   server.headersTimeout = 66000;
 
   // Seeders run after the server is accepting traffic — they're idempotent
-  // and must not delay startup
-  runSeeders().catch((err) => logger.warn('Seeding error:', err.message));
+  // and must not delay startup. Only the primary worker runs them: they are
+  // idempotent, but four workers racing to seed the same defaults at boot is
+  // pointless write contention on every restart.
+  if (isPrimaryWorker) {
+    runSeeders().catch((err) => logger.warn('Seeding error:', err.message));
+  }
 
-  // Start 5-minute background user activity database sync job
-  startSyncJob();
+  // ── Background jobs: primary worker only ──────────────────────────────────
+  //
+  // Under PM2 cluster mode (ecosystem.config.js) this file runs once per core.
+  // These are interval timers, not request handlers, so running them in every
+  // worker multiplies the work without doing anything useful:
+  //
+  //   - the digest job would tick N times a minute instead of once. Duplicate
+  //     SENDS are already prevented — TelegramLink.claimDigest claims the date
+  //     atomically — so this is waste rather than breakage, but it is waste
+  //     that queries every candidate link N times a minute, forever.
+  //   - the activity sync would have N workers reading the same Redis dirty set
+  //     and issuing the same bulkWrite.
+  //
+  // NODE_APP_INSTANCE is set by PM2 ('0', '1', …). Unset means a plain
+  // `node src/index.js`, which is a single process and therefore primary.
+  if (isPrimaryWorker) {
+    // Start 5-minute background user activity database sync job
+    startSyncJob();
 
-  // Telegram. Started outside the Redis path on purpose — a Redis blip at boot
-  // must not leave the process with no bot until the next restart. initialize()
-  // never throws; with no token it logs and returns, and the digest job then
-  // no-ops on every tick.
-  telegramService.initialize().catch((err) => logger.warn(`Telegram init error: ${err.message}`));
-  startDigestJob();
+    // Telegram. Started outside the Redis path on purpose — a Redis blip at boot
+    // must not leave the process with no bot until the next restart. initialize()
+    // never throws; with no token it logs and returns, and the digest job then
+    // no-ops on every tick.
+    telegramService.initialize().catch((err) => logger.warn(`Telegram init error: ${err.message}`));
+    startDigestJob();
+
+    // Hourly R2 pool repair: hands back byte reservations leaked by crashed
+    // uploads and resets the monthly Class A/B counters. Without it a killed
+    // process permanently shrinks a bucket's usable capacity, and the symptom
+    // is "uploads started failing" with nothing in the logs. See the job file.
+    startStorageMaintenanceJob();
+  } else {
+    logger.info(`Worker ${process.env.NODE_APP_INSTANCE}: background jobs run on the primary worker only`);
+  }
 }
 
 start().catch((err) => {
@@ -140,6 +179,7 @@ async function shutdown(code = 0) {
   try {
     stopSyncJob();
     stopDigestJob();
+    stopStorageMaintenanceJob();
     telegramService.shutdown();
     if (server) {
       await new Promise((resolve) => server.close(resolve));

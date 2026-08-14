@@ -33,6 +33,17 @@ function sanitizeProductDoc(doc, allowCost) {
 
   if (!allowCost) {
     delete obj.buyingPrice;
+    // Derived component cost of a combo — same confidential figure as
+    // `buyingPrice`, computed instead of stored. The per-row figure the
+    // decorator attaches is stripped for the same reason.
+    delete obj.comboCost;
+    if (Array.isArray(obj.comboItems)) {
+      obj.comboItems = obj.comboItems.map((c) => {
+        const cObj = typeof c.toObject === 'function' ? c.toObject() : { ...c };
+        delete cObj.buyingPrice;
+        return cObj;
+      });
+    }
     if (Array.isArray(obj.variants)) {
       obj.variants = obj.variants.map((v) => {
         const vObj = typeof v.toObject === 'function' ? v.toObject() : { ...v };
@@ -89,6 +100,15 @@ function sanitizeSaleDoc(doc, allowCost, allowProfit) {
     obj.items = obj.items.map((item) => {
       const itemObj = typeof item.toObject === 'function' ? item.toObject() : { ...item };
       delete itemObj.buyingPrice;
+      // Combo lines snapshot each component's cost — the same confidential
+      // figure as `buyingPrice`, reached by a different path.
+      if (Array.isArray(itemObj.comboComponents)) {
+        itemObj.comboComponents = itemObj.comboComponents.map((c) => {
+          const compObj = typeof c.toObject === 'function' ? c.toObject() : { ...c };
+          delete compObj.unitCost;
+          return compObj;
+        });
+      }
       return itemObj;
     });
   }
@@ -140,6 +160,7 @@ const PROFIT_KEYS = new Set([
 ]);
 const COST_KEYS = new Set([
   'buyingPrice', 'unitCost', 'totalCost', 'totalBuyingValue', 'inventoryValue',
+  'comboCost',
 ]);
 
 function isPlainObject(val) {

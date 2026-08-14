@@ -1,0 +1,63 @@
+name: Sync MongoDB Indexes
+
+# ── Why this is manual and not a step in deploy.yml ─────────────────────────
+#
+# `autoIndex` is disabled in production (src/config/database.js), so an index
+# added to a model file does NOT exist on the cluster until this runs. Before
+# this workflow there was no step anywhere that created one, so every index
+# declared since that setting was turned off has been inert.
+#
+# It is deliberately NOT wired into the deploy, because `model.syncIndexes()`
+# DROPS any index the schema no longer declares. On a push that happens to
+# carry a half-finished model edit, an automatic run would quietly drop a
+# production index and turn an index scan into a collection scan on the
+# largest collection in the system — during a deploy, when nobody is looking
+# at query plans.
+#
+# So: run the dry run, read what it says, then run apply. The dry run is the
+# default and is safe to run at any time.
+#
+# ── Prerequisite ────────────────────────────────────────────────────────────
+#
+# Needs a MONGODB_URI secret, and the cluster must accept connections from
+# GitHub-hosted runners (Atlas: Network Access must allow the runner's egress,
+# which in practice means 0.0.0.0/0 or a self-hosted runner). If that is not
+# acceptable, run the same two commands from a machine that can reach the
+# cluster instead — the script is the same:
+#
+#     npm run sync-indexes            # dry run
+#     npm run sync-indexes:apply      # apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Apply changes (unchecked = dry run, shows planned changes only)'
+        type: boolean
+        default: false
+
+jobs:
+  sync-indexes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci --omit=dev
+
+      - name: Dry run — show planned index changes
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        run: npm run sync-indexes
+
+      - name: Apply index changes
+        if: ${{ inputs.apply }}
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        run: npm run sync-indexes:apply

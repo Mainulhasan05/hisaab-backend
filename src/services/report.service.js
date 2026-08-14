@@ -340,6 +340,21 @@ class ReportService {
   async getSalesReport(shopId, options = {}, branchId = null) {
     const { startDate, endDate, groupBy = 'day' } = options;
 
+    // Versioned cache, same contract as getDashboardStats/getProfitLoss: sale
+    // writes bump the shop's version (debounced to once per 30s) and superseded
+    // entries age out on TTL. `KEYS.SALES_REPORT` and `getTTL.salesReport` were
+    // already defined in config/cacheKeys.js and had no caller.
+    //
+    // The key carries every input the pipeline is scoped by — dates, groupBy AND
+    // branch. Dropping branch here would serve one branch's figures to another
+    // for five minutes; see the long note on the inventory-stats key in
+    // product.service.js for what that looks like in practice.
+    const srVersion = await cacheService.getShopCacheVersion(shopId);
+    const srCacheKey =
+      `${KEYS.SALES_REPORT(shopId, startDate, endDate, groupBy)}:branch:${branchId || 'all'}:v${srVersion}`;
+    const srCached = await cacheService.get(srCacheKey);
+    if (srCached) return srCached;
+
     const matchStage = {
       ...this._baseMatch(shopId, branchId),
       status: { $ne: 'cancelled' },
@@ -406,15 +421,30 @@ class ReportService {
     const data = facetResult[0]?.byPeriod || [];
     const summary = facetResult[0]?.summary[0] || { totalSales: 0, totalPaid: 0, totalDue: 0, totalProfit: 0, count: 0 };
 
-    return {
+    const srResult = {
       data,
       summary,
     };
+
+    await cacheService.set(srCacheKey, srResult, getTTL.salesReport);
+    return srResult;
   }
 
   // Get product report
   async getProductReport(shopId, options = {}, branchId = null) {
     const { startDate, endDate } = options;
+
+    // Cached for the same reason `_lowStockCount` above is: two of the four
+    // queries below carry `$expr: { $lt: ['$stock', '$minStock'] }`, a
+    // comparison between two fields of one document that MongoDB cannot serve
+    // from an index at any arrangement. Each is a collection scan of the shop's
+    // catalogue. The dashboard already shields its copy behind a 60s cache;
+    // this method ran the same scan twice on every call with no cache at all.
+    const prVersion = await cacheService.getShopCacheVersion(shopId);
+    const prCacheKey =
+      `${KEYS.PRODUCT_REPORT(shopId, startDate, endDate)}:branch:${branchId || 'all'}:v${prVersion}`;
+    const prCached = await cacheService.get(prCacheKey);
+    if (prCached) return prCached;
 
     // Top selling products
     const matchStage = {
@@ -427,60 +457,68 @@ class ReportService {
       matchStage.createdAt = dateMatch;
     }
 
-    const topSelling = await Sale.aggregate([
-      { $match: matchStage },
-      { $unwind: '$items' },
-      {
-        $group: {
-          _id: '$items.product',
-          productName: { $first: '$items.productName' },
-          totalQuantity: { $sum: '$items.quantity' },
-          totalRevenue: { $sum: '$items.total' },
-          salesCount: { $sum: 1 },
+    // These four are independent of one another and used to run as four
+    // sequential `await`s — four full round trips before the first byte.
+    const [topSelling, lowStock, noStock, summaryResult] = await Promise.all([
+      Sale.aggregate([
+        { $match: matchStage },
+        { $unwind: '$items' },
+        {
+          $group: {
+            _id: '$items.product',
+            productName: { $first: '$items.productName' },
+            totalQuantity: { $sum: '$items.quantity' },
+            totalRevenue: { $sum: '$items.total' },
+            salesCount: { $sum: 1 },
+          },
         },
-      },
-      roundQtyStage,
-      { $sort: { totalQuantity: -1 } },
-      { $limit: 20 },
+        roundQtyStage,
+        { $sort: { totalQuantity: -1 } },
+        { $limit: 20 },
+      ]),
+
+      // Low stock products
+      Product.find(
+        productScope(shopId, branchId, { isActive: true, $expr: { $lt: ['$stock', '$minStock'] } })
+      )
+        .select('name code stock minStock sellingPrice')
+        .sort({ stock: 1 })
+        .limit(20)
+        .lean(),
+
+      // No stock products
+      Product.find(
+        productScope(shopId, branchId, { isActive: true, stock: { $lte: 0 } })
+      )
+        .select('name code stock minStock sellingPrice')
+        .limit(20)
+        .lean(),
+
+      // Product summary
+      Product.aggregate([
+        { $match: productScope(shopId, branchId, { isActive: true }) },
+        {
+          $group: {
+            _id: null,
+            totalProducts: { $sum: 1 },
+            totalStock: { $sum: '$stock' },
+            totalValue: { $sum: { $multiply: ['$stock', '$sellingPrice'] } },
+          },
+        },
+      ]),
     ]);
 
-    // Low stock products
-    const lowStock = await Product.find(
-      productScope(shopId, branchId, { isActive: true, $expr: { $lt: ['$stock', '$minStock'] } })
-    )
-      .select('name code stock minStock sellingPrice')
-      .sort({ stock: 1 })
-      .limit(20)
-      .lean();
-
-    // No stock products
-    const noStock = await Product.find(
-      productScope(shopId, branchId, { isActive: true, stock: { $lte: 0 } })
-    )
-      .select('name code stock minStock sellingPrice')
-      .limit(20)
-      .lean();
-
-    // Product summary
-    const summaryResult = await Product.aggregate([
-      { $match: productScope(shopId, branchId, { isActive: true }) },
-      {
-        $group: {
-          _id: null,
-          totalProducts: { $sum: 1 },
-          totalStock: { $sum: '$stock' },
-          totalValue: { $sum: { $multiply: ['$stock', '$sellingPrice'] } },
-        },
-      },
-    ]);
     const summary = summaryResult[0] || { totalProducts: 0, totalStock: 0, totalValue: 0 };
 
-    return {
+    const prResult = {
       topSelling,
       lowStock,
       noStock,
       summary,
     };
+
+    await cacheService.set(prCacheKey, prResult, getTTL.productReport);
+    return prResult;
   }
 
   // Get customer report
@@ -902,9 +940,31 @@ class ReportService {
    *
    * The match and the money expressions are the same ones getDailySummary uses,
    * so the digest total always equals what the owner sees on the dashboard.
-   * Note that `revenue` is net of returns while `profit` is not; that asymmetry
-   * is inherited on purpose, because matching the dashboard matters more than
-   * being internally tidy — an owner comparing the two must not find a gap.
+   *
+   * ── BOTH numbers here are net of returns. ─────────────────────────────────
+   *
+   * This comment used to claim the opposite — that `revenue` was net of returns
+   * and `profit` was not, and that the gap was deliberate. It was not true, and
+   * a wrong comment on a money expression is worse than none: the next person to
+   * read it goes looking for the asymmetry, "fixes" it by subtracting
+   * `SalesReturn.profitReduction` somewhere, and double-counts every return on
+   * the platform.
+   *
+   * What actually happens is that a return writes BOTH adjustments back onto the
+   * original `Sale` document, in `salesReturn.service.createReturn`:
+   *
+   *     returnedAmount += refund          → `netSaleAmountExpr` nets revenue
+   *     profit         -= profitReduction → `$sum: '$profit'` is already net
+   *
+   * So the two agree, and `SalesReturn.profitReduction` must never be subtracted
+   * again downstream. `getProfitLoss` reports it as a separate line for the
+   * owner's information and correctly leaves it out of `netProfit`.
+   *
+   * The one consequence worth knowing: because both adjustments land on the
+   * original sale, a return re-dates itself to the day of the SALE. A report for
+   * last Tuesday, re-run after a Tuesday sale is returned on Friday, shows less
+   * revenue and less profit than the same report did on Wednesday. That is a
+   * deliberate accounting choice, not drift.
    */
   async getDigestTotals(shopId, dateStr, { multiBranch = false } = {}) {
     const { startOfDay, endOfDay } = getBangladeshDayRange(dateStr);
@@ -1145,7 +1205,21 @@ class ReportService {
     // COGS = Revenue - Profit (since profit = revenue - COGS - discounts, and revenue already has discounts subtracted)
     const cogs = sales.totalRevenue - sales.totalProfit;
 
-    // Net profit = Sales profit - Expenses - Returns profit loss
+    /**
+     * Net profit = Sales profit - Expenses. Returns are NOT subtracted here,
+     * and the comment that used to sit on this line claiming they were
+     * ("- Returns profit loss") described an expression the code has never
+     * evaluated.
+     *
+     * They are not subtracted because they are already gone: `createReturn`
+     * decrements `profit` on the original Sale, so `sales.totalProfit` above is
+     * net of every return raised against the period. Subtracting
+     * `returns.totalProfitLoss` again would count each return twice.
+     *
+     * It is still reported, as `returnsLoss` below — an owner wants to see how
+     * much of the month walked back through the door, and cannot read that off
+     * a profit figure it has already been removed from.
+     */
     const netProfit = sales.totalProfit - expenses.totalExpenses;
 
     // Merge daily sales and expenses into a single chart dataset
@@ -1278,7 +1352,12 @@ class ReportService {
       ]),
     ]);
 
-    // Build the days array for the entire month
+    // Build the days array for the entire month.
+    // Indexed once rather than re-scanned per day: the two `.find()` calls that
+    // used to sit inside this loop made it O(days x rows).
+    const salesByDate = new Map(dailySales.map((s) => [s._id, s]));
+    const expensesByDate = new Map(dailyExpenses.map((e) => [e._id, e]));
+
     const days = [];
     let monthTotalSales = 0;
     let monthTotalExpenses = 0;
@@ -1287,8 +1366,8 @@ class ReportService {
 
     for (let d = 1; d <= lastDay; d++) {
       const dateStr = `${year}-${String(mon).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-      const salesData = dailySales.find((s) => s._id === dateStr);
-      const expenseData = dailyExpenses.find((e) => e._id === dateStr);
+      const salesData = salesByDate.get(dateStr);
+      const expenseData = expensesByDate.get(dateStr);
 
       const sales = salesData?.totalSales || 0;
       const expenses = expenseData?.totalExpenses || 0;

@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const { PAYMENT_METHODS, SALE_STATUS } = require('../config/constants');
 const { immutableGuard } = require('../utils/immutableGuard.util');
+const { quantizeMoney } = require('../utils/quantity.util');
 
 const saleItemSchema = new mongoose.Schema({
   product: {
@@ -103,6 +104,44 @@ const saleItemSchema = new mongoose.Schema({
   total: {
     type: Number,
     required: true
+  },
+  // ── Combo lines ────────────────────────────────────────────────────────────
+  //
+  // 'combo' = this line is a bundle whose stock went out of the COMPONENT
+  // products, one guarded op each; the combo product itself moved no stock.
+  // Absent (i.e. 'standard') on every line written before combos existed.
+  itemType: {
+    type: String,
+    enum: ['standard', 'combo'],
+    default: 'standard'
+  },
+  // The sale-time freeze of what one combo contained — names, variants,
+  // quantities and unit costs AS SOLD. This is the array `cancelSale` and the
+  // returns path restore stock from, which is exactly why it is a snapshot and
+  // not a lookup: editing or deleting the combo (or a component) later must
+  // never change what this sale can undo. Same denormalisation rule as
+  // `productName` / `unit` / `packSize` above.
+  //
+  // `unitCost` is per base unit of the COMPONENT at sale time; the line's own
+  // `buyingPrice` is the per-combo sum of these, which is what keeps the
+  // pre('save') profit arithmetic below untouched.
+  comboComponents: {
+    type: [{
+      product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
+      productName: { type: String, required: true },
+      productCode: { type: String },
+      variantId: { type: mongoose.Schema.Types.ObjectId, default: null },
+      variantSku: { type: String },
+      variantAttributes: { type: mongoose.Schema.Types.Mixed },
+      unit: { type: String },
+      // Base units of this component in ONE combo…
+      quantityPerCombo: { type: Number, required: true, min: 0.001 },
+      // …and across the whole line (quantityPerCombo × line quantity) — the
+      // figure the stock guard deducted and a cancel puts back.
+      totalQuantity: { type: Number, required: true, min: 0.001 },
+      unitCost: { type: Number, default: 0, min: 0 },
+    }],
+    default: undefined
   }
 }, { _id: true });
 
@@ -232,11 +271,39 @@ const saleSchema = new mongoose.Schema({
   cancelReason: {
     type: String
   },
-  // Return tracking
+  // ── Return tracking ────────────────────────────────────────────────────────
+  //
+  // Three accumulators, all `$inc`-ed by the returns path. They exist as STORED
+  // fields rather than as a live join because `pre('save')` below has to derive
+  // `due` and `profit` from them, and a hook cannot go to the database.
+  //
+  // Before they existed, the returns path wrote `due`/`profit` with `updateOne`
+  // specifically to bypass this hook — and any OTHER save of the document
+  // (recordPayment, cancelSale) silently recomputed both from `items` and threw
+  // the return away. Collecting the rest of a due on a partly-returned invoice
+  // restored the money the return had just taken off it.
+  //
+  // The rule now: these three are the only inputs the hook needs, and every
+  // figure it derives is a pure function of the document. Saving twice changes
+  // nothing.
   returnedAmount: {
     type: Number,
     default: 0,
     min: [0, 'ফেরত ০ এর কম হতে পারবে না']
+  },
+  // The part of `returnedAmount` that was settled AGAINST THE DUE rather than
+  // paid back in cash — i.e. `refundMethod: 'adjustment'`. A cash refund hands
+  // money back and leaves the obligation alone, so it must not appear here.
+  returnedAdjustment: {
+    type: Number,
+    default: 0,
+    min: [0, 'সমন্বয় ০ এর কম হতে পারবে না']
+  },
+  // Accumulated `SalesReturn.profitReduction`. Subtracted from the item-derived
+  // profit below, so a returned line stops counting as earnings.
+  returnedProfit: {
+    type: Number,
+    default: 0
   },
   // Online sale tracking & logistics
   isOnline: {
@@ -253,6 +320,17 @@ const saleSchema = new mongoose.Schema({
     default: 0,
     min: [0, 'ডেলিভারি চার্জ ০ এর কম হতে পারবে না']
   },
+  /**
+   * Money taken UP FRONT on a parcel order, before the goods ship — the MFS
+   * transfer a shop asks for to cover delivery on a COD parcel.
+   *
+   * RESERVED, and currently always 0. It is not `paid` by another name: `paid`
+   * is what has been settled against the invoice, and on a COD sale that stays 0
+   * until the courier remits. The till used to send `advancePaid = paid` for
+   * every online sale, which made it a verbatim duplicate that nothing read —
+   * removed, because a populated field that means nothing is worse than an empty
+   * one for whoever builds checkout (ECOMMERCE_PLAN.md §13).
+   */
   advancePaid: {
     type: Number,
     default: 0,
@@ -292,6 +370,14 @@ saleSchema.index({ shop: 1, createdAt: -1 }); // Single-branch listing, recent s
 saleSchema.index({ shop: 1, due: 1 }); // Dues listing/sort
 saleSchema.index({ shop: 1, total: -1 }); // Sort by amount (whitelisted sort field)
 saleSchema.index({ shop: 1, createdBy: 1, createdAt: -1 }); // Staff attribution filter + staff sales report
+// Cross-shop, admin-only. Every index above is shop-prefixed, which is correct
+// for the shop app — but the operator console has no shop predicate by
+// definition: the dashboard's recent-sales feed and GET /api/admin/sales both
+// sort the whole collection by date. Without this they are a COLLSCAN plus an
+// in-memory sort, which is fine at 10k documents and is not at 10M.
+// Never used by a shop-scoped query: the planner prefers the compound indexes
+// there because they satisfy the equality on `shop` as well as the sort.
+saleSchema.index({ createdAt: -1 });
 
 // Calculate totals before saving
 saleSchema.pre('save', function(next) {
@@ -309,13 +395,26 @@ saleSchema.pre('save', function(next) {
   if (!Number.isFinite(this.paid) || this.paid > this.total) {
     this.paid = Math.min(Math.max(0, this.paid || 0), this.total);
   }
-  this.due = Math.max(0, this.total - this.paid);
 
-  // Calculate profit
-  this.profit = this.items.reduce((sum, item) => {
+  // `due` and `profit` both carry the returns terms, so that saving the document
+  // for an unrelated reason cannot undo a return. See the accumulator block on
+  // the schema above for why they are stored fields.
+  //
+  // Only `returnedAdjustment` reduces the due — a return refunded in CASH hands
+  // the money back and leaves the obligation exactly where it was. Zeroing the
+  // due on any full return (which is what this used to do) wrote off debt with
+  // no counterpart on the customer's ledger: a ৳1000 invoice with ৳300 paid,
+  // fully refunded in cash, paid out ৳1000, read as settled, and left the
+  // customer still owing ৳700 in `Customer.totalDue` with nothing on the
+  // invoice to explain it.
+  this.due = Math.max(0, this.total - this.paid - (this.returnedAdjustment || 0));
+
+  // Calculate profit, net of anything returned.
+  const itemsProfit = this.items.reduce((sum, item) => {
     const itemProfit = (item.unitPrice - (item.buyingPrice || 0)) * item.quantity - item.discount;
     return sum + itemProfit;
-  }, 0) - discountAmount;
+  }, 0);
+  this.profit = quantizeMoney(itemsProfit - discountAmount - (this.returnedProfit || 0));
 
   // Set payment status unless the sale has been explicitly cancelled.
   if (this.status !== SALE_STATUS.CANCELLED) {
@@ -356,78 +455,31 @@ saleSchema.virtual('netTotal').get(function() {
   return this.total - (this.returnedAmount || 0);
 });
 
-// Static: Generate invoice number
-saleSchema.statics.generateInvoiceNo = async function(shopId, prefix = 'INV') {
-  const today = new Date();
-  const dateStr = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
-
-  const lastSale = await this.findOne({
-    shop: shopId,
-    invoiceNo: { $regex: `^${prefix}${dateStr}` }
-  }).sort({ invoiceNo: -1 });
-
-  let sequence = 1;
-  if (lastSale) {
-    const lastSequence = parseInt(lastSale.invoiceNo.slice(-4));
-    sequence = lastSequence + 1;
-  }
-
-  return `${prefix}${dateStr}${String(sequence).padStart(4, '0')}`;
-};
-
-// Static: Get sales summary
-saleSchema.statics.getSalesSummary = async function(shopId, startDate, endDate) {
-  const match = {
-    shop: new mongoose.Types.ObjectId(shopId),
-    status: { $ne: SALE_STATUS.CANCELLED },
-    createdAt: { $gte: startDate, $lte: endDate }
-  };
-
-  const summary = await this.aggregate([
-    { $match: match },
-    {
-      $group: {
-        _id: null,
-        totalSales: { $sum: '$total' },
-        totalPaid: { $sum: '$paid' },
-        totalDue: { $sum: '$due' },
-        totalProfit: { $sum: '$profit' },
-        count: { $sum: 1 }
-      }
-    }
-  ]);
-
-  return summary[0] || {
-    totalSales: 0,
-    totalPaid: 0,
-    totalDue: 0,
-    totalProfit: 0,
-    count: 0
-  };
-};
-
-// Method: Add payment
-saleSchema.methods.addPayment = async function(amount) {
-  this.paid += amount;
-  this.due = Math.max(0, this.total - this.paid);
-
-  if (this.due === 0) {
-    this.status = SALE_STATUS.COMPLETED;
-  } else if (this.paid > 0) {
-    this.status = SALE_STATUS.PARTIAL;
-  }
-
-  await this.save();
-};
-
-// Method: Cancel sale
-saleSchema.methods.cancelSale = async function(userId, reason) {
-  this.status = SALE_STATUS.CANCELLED;
-  this.cancelledAt = new Date();
-  this.cancelledBy = userId;
-  this.cancelReason = reason;
-  await this.save();
-};
+/* ───────────────────────────────────────────────────────────────────────────
+ * REMOVED: generateInvoiceNo / getSalesSummary / addPayment / cancelSale
+ * ───────────────────────────────────────────────────────────────────────────
+ *
+ * Four dead members, deleted rather than left as reference, because each had
+ * drifted into disagreeing with the code that actually runs — and a plausible
+ * helper sitting on the model is an invitation to call it.
+ *
+ *   generateInvoiceNo  Superseded by InvoiceCounter (see that model's header
+ *                      for the race it fixes). It had also gone stale: it
+ *                      matched `^INV<YYYYMMDD>`, while live invoice numbers are
+ *                      `INV-<branch>-<date>-<seq>`, so its "last sale" lookup
+ *                      found nothing and it restarted at 0001 every call.
+ *
+ *   getSalesSummary    Summed raw `$total`, contradicting saleService's summary
+ *                      which sums NET of `returnedAmount`. Two "sales totals"
+ *                      that disagree by the value of every return.
+ *
+ *   addPayment         Duplicated saleService.recordPayment minus the Payment
+ *                      row, the customer ledger and the audit entry.
+ *
+ *   cancelSale         Marked a sale cancelled and saved — no stock restored,
+ *                      no batches, no customer balance unwound. The service
+ *                      method of the same name does all four.
+ * ─────────────────────────────────────────────────────────────────────────── */
 
 // Apply immutable ledger guard — prevents hard deletion of sale records
 saleSchema.plugin(immutableGuard, { modelName: 'Sale' });

@@ -497,20 +497,20 @@ const ownerOnly = asyncHandler(async (req, res, next) => {
   next();
 });
 
-/**
- * Restrict to specific roles
+/*
+ * REMOVED: restrictTo(...roles)
+ *
+ * Never mounted on a route, and broken in a way that would have failed open in
+ * the wrong direction the moment anyone did mount it: it compared
+ * `req.user.role` against role NAMES, but `role` became an ObjectId reference
+ * when RBAC landed. `['manager'].includes(ObjectId(...))` is false for every
+ * user, including the ones the guard was meant to admit — so it would have
+ * locked out the whole shop rather than letting anyone through.
+ *
+ * Use `rbac(resource, action)` from permission.middleware.js, which reads the
+ * DB-backed role document that `resolveRbacContext` puts on the request, or
+ * `ownerOnly` for owner-only routes.
  */
-const restrictTo = (...roles) => {
-  return asyncHandler(async (req, res, next) => {
-    if (!roles.includes(req.user.role)) {
-      return ApiResponse.forbidden(res, {
-        message: 'You do not have permission to perform this action',
-        messageBn: 'এই কাজ করার অনুমতি নেই'
-      });
-    }
-    next();
-  });
-};
 
 /**
  * Soft protect middleware - Optional token validation
@@ -608,6 +608,5 @@ module.exports = {
   adminOnly,
   superAdminOnly,
   ownerOnly,
-  restrictTo,
   hydrateBranchList // exported for tests only
 };

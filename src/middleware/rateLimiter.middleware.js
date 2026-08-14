@@ -151,6 +151,60 @@ const smsLimiter = rateLimit({
 });
 
 /**
+ * Public Storefront Limiter
+ * 120 requests per minute per IP.
+ *
+ * ── WHY THIS IS A SEPARATE TIER AND NOT JUST `apiLimiter` ───────────────────
+ *
+ * `/api/public/*` is the only surface a stranger can reach without a session,
+ * and it is the only one whose traffic volume is set by someone other than us —
+ * a shop's Facebook post going around, or a bot walking the catalogue. Sharing
+ * `apiLimiter`'s bucket would mean a storefront getting hugged to death is
+ * accounted against the same counter as the till (ECOMMERCE_PLAN.md §13), and
+ * the till is the thing that must never stop.
+ *
+ * `app.js` therefore SKIPS `apiLimiter` for this prefix rather than stacking
+ * the two. One request, one bucket: stacked limiters make a 429 impossible to
+ * attribute, and the tighter of the two silently becomes the real limit.
+ *
+ * 120/min is deliberately below the 300 of `apiLimiter`. A real customer
+ * browsing a catalogue on a phone issues a handful of requests per minute; a
+ * page that needs more than two per view is a page built wrong. It is per IP,
+ * which is imprecise in a country where a lot of mobile traffic leaves through
+ * carrier NAT — hence 120 and not 30. When ordering lands, checkout gets its
+ * own stricter limit keyed on the PHONE as well as the IP (§13), because that
+ * is a write and this is not.
+ */
+const storefrontLimiter = rateLimit({
+  windowMs: parseInt(process.env.STOREFRONT_RATE_LIMIT_WINDOW_MS) || 60 * 1000,
+  max: parseInt(process.env.STOREFRONT_RATE_LIMIT_MAX) || 120,
+  store: new HybridStore('rl:sf:'),
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    return ApiResponse.tooManyRequests(res, {
+      // Bengali first, and written for a SHOPPER rather than a shopkeeper —
+      // this is the one rate-limit message in the app that a customer can see,
+      // and "অনুরোধ সীমা" means nothing to someone buying rice.
+      message: 'Too many requests, please try again in a moment.',
+      messageBn: 'একটু বেশি দ্রুত চাপা হয়েছে। কিছুক্ষণ পর আবার চেষ্টা করুন।'
+    });
+  }
+});
+
+/**
+ * Does this request belong to the public storefront surface?
+ *
+ * Read off `originalUrl`, which is the untouched path as it arrived. `req.path`
+ * is relative to the current mount point, so inside `app.use('/api', …)` it
+ * reads `/public/…` — correct today and quietly wrong the moment the router is
+ * mounted somewhere else. The query string is stripped because `originalUrl`
+ * carries it and a `?` would break the prefix match.
+ */
+const isPublicStorefrontPath = (req) =>
+  String(req.originalUrl || '').split('?')[0].startsWith('/api/public/');
+
+/**
  * Telegram Link Token Limiter
  * 10 deep links per 10 minutes per owner.
  *
@@ -178,5 +232,7 @@ module.exports = {
   apiLimiter,
   authLimiter,
   smsLimiter,
+  storefrontLimiter,
+  isPublicStorefrontPath,
   telegramLinkLimiter
 };

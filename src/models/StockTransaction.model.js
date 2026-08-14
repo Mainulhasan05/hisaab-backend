@@ -1,6 +1,16 @@
 const mongoose = require('mongoose');
 const { STOCK_TRANSACTION_TYPES } = require('../config/constants');
 
+// See the `viaCombo` field below. A named schema rather than an inline object
+// so the nested keys can never be misread as SchemaType options.
+const viaComboSchema = new mongoose.Schema({
+  product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
+  name: { type: String },
+  code: { type: String },
+  // How many combos this deduction served.
+  comboQuantity: { type: Number },
+}, { _id: false });
+
 const stockTransactionSchema = new mongoose.Schema({
   shop: {
     type: mongoose.Schema.Types.ObjectId,
@@ -81,6 +91,15 @@ const stockTransactionSchema = new mongoose.Schema({
   supplier: {
     type: String,
     trim: true
+  },
+  // Set when this movement happened because a COMBO was sold, cancelled or
+  // returned — the row itself is on the component product, and this says which
+  // bundle pulled it. Name and code are snapshots (the combo may be renamed or
+  // deleted later; this ledger row must keep reading the same). Absent on every
+  // ordinary movement, so pre-combo rows are untouched.
+  viaCombo: {
+    type: viaComboSchema,
+    default: undefined
   },
   notes: {
     type: String,
@@ -171,7 +190,11 @@ stockTransactionSchema.statics.getStockValuation = async function(shopId) {
 
   const products = await Product.find({
     shop: shopId,
-    isActive: true
+    isActive: true,
+    // Combos hold no stock of their own — their value IS their components',
+    // which are already counted. Explicit here so a future combo with a stray
+    // stock figure can never double-count.
+    type: { $ne: 'combo' }
   }).select('name code stock buyingPrice hasVariants variants');
 
   let totalValue = 0;

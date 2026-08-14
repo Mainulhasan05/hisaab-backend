@@ -190,28 +190,84 @@ purchaseSchema.pre('save', function(next) {
     this.paid = Math.min(Math.max(0, this.paid || 0), this.totalAmount);
   }
   this.due = Math.max(0, this.totalAmount - this.paid);
-  if (this.due === 0) {
-    this.status = 'completed';
-  } else if (this.paid > 0) {
-    this.status = 'partial';
-  } else {
-    this.status = 'unpaid';
+
+  // Payment status is derived — EXCEPT for a cancelled purchase, which is a
+  // lifecycle state and not a payment state.
+  //
+  // Without this guard `cancelPurchase` was a no-op on the field it exists to
+  // set: it assigns `status = 'cancelled'` and saves, and this hook immediately
+  // recomputed 'completed' from `due === 0`. Everything else about the
+  // cancellation happened — stock reversed, batches removed, supplier balance
+  // unwound — and the purchase stayed in every list and summary as an active
+  // one.
+  //
+  // Worse than the wrong label: `cancelPurchase`'s own "already cancelled"
+  // guard could never fire, so the whole reversal was repeatable. Each replay
+  // `$inc`-ed SupplierBalance down again while the Supplier rollup clamped at
+  // zero — the exact two-books drift that code comments there say it exists to
+  // prevent.
+  //
+  // Sale.model.js has carried this guard since it was written; this is the same
+  // rule, and the two must not diverge again.
+  if (this.status !== 'cancelled') {
+    if (this.due === 0) {
+      this.status = 'completed';
+    } else if (this.paid > 0) {
+      this.status = 'partial';
+    } else {
+      this.status = 'unpaid';
+    }
   }
   next();
 });
 
-// Static: Generate invoice number
+/**
+ * Static: generate a purchase invoice number, `PUR<YYYY><MM><NNNN>`.
+ *
+ * ── What this replaces ──────────────────────────────────────────────────────
+ *
+ * `countDocuments() + 1` — the exact pattern `Sale` abandoned, for the exact
+ * reasons written up in InvoiceCounter.model.js. Two purchases entered at once
+ * both read the same count, both built the same number, and the unique index on
+ * `{shop, invoiceNo}` turned the second one into a raw E11000 in the user's
+ * face. The sale path at least had a retry loop; `createPurchase` never did.
+ *
+ * The month window was also bounded with `new Date(year, month, 1)` — SERVER
+ * local midnight. On a UTC host that is 06:00 Dhaka, so a purchase entered in
+ * the first six hours of the month was counted into the previous month and
+ * collided with a number already issued.
+ *
+ * Both go away by handing the number out atomically, keyed on the Bangladesh
+ * calendar month.
+ *
+ * ── Sharing InvoiceCounter with sales ───────────────────────────────────────
+ *
+ * The counter's `date` field is an opaque period key, so the two sequences
+ * coexist in one collection as long as they can never collide. A sale's key is
+ * a bare `YYYY-MM-DD`; this one is prefixed `PUR:YYYY-MM`, which no date string
+ * can equal. `branch` is null here because purchase numbers are shop-wide —
+ * unlike sales, the prefix carries no branch code, so a per-branch sequence
+ * would make the numbering gappy for no visible reason.
+ */
 purchaseSchema.statics.generateInvoiceNo = async function(shopId) {
-  const today = new Date();
-  const prefix = `PUR${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}`;
-  const count = await this.countDocuments({
+  // Required here rather than at module top only to keep model load order
+  // irrelevant; neither module requires this one, so there is no cycle.
+  const InvoiceCounter = require('./InvoiceCounter.model');
+  const { toBangladeshMonthStr, getBangladeshMonthRange } = require('../utils/bdTime.util');
+
+  const monthStr = toBangladeshMonthStr(new Date());
+  const { startOfMonth, startOfNext } = getBangladeshMonthRange(monthStr);
+
+  // Consulted only the first time this shop records a purchase in this month —
+  // the counter seeds itself from what is already there, so a shop switching
+  // over mid-month continues its sequence rather than restarting at 0001.
+  const countExisting = () => this.countDocuments({
     shop: shopId,
-    createdAt: {
-      $gte: new Date(today.getFullYear(), today.getMonth(), 1),
-      $lt: new Date(today.getFullYear(), today.getMonth() + 1, 1)
-    }
+    createdAt: { $gte: startOfMonth, $lt: startOfNext },
   });
-  return `${prefix}${String(count + 1).padStart(4, '0')}`;
+
+  const seq = await InvoiceCounter.nextSeq(shopId, null, `PUR:${monthStr}`, countExisting);
+  return `PUR${monthStr.replace('-', '')}${String(seq).padStart(4, '0')}`;
 };
 
 // Static: Get purchase summary

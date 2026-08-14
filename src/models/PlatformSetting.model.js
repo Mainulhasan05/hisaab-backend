@@ -62,6 +62,42 @@ const platformSettingSchema = new mongoose.Schema({
     default: 'none',
   },
 
+  // ── Image storage (R2 pool) ───────────────────────────────────────────────
+  // See R2_STORAGE_PLAN.md. Per-shop overrides live on `Shop.storage` and
+  // always win, exactly as `Shop.billing` overrides the figures above.
+
+  // What a shop gets when `Shop.storage.quotaMb` is null. Raising this lifts
+  // every non-overridden shop at once, which is the point of the null default.
+  defaultStorageQuotaMb: { type: Number, default: 100, min: 0 },
+
+  /**
+   * How `storage.service` picks a bucket for the next upload.
+   *
+   *   least_used  — lowest (used+reserved)/capacity ratio. Identical to
+   *                 round-robin while every account is the same size, and still
+   *                 correct once one of them is upgraded.
+   *   round_robin — strict rotation by last-allocated cursor.
+   *
+   * Default is least_used; round_robin is kept because it is the behaviour
+   * people expect to be able to ask for, not because it is better.
+   */
+  storageStrategy: {
+    type: String,
+    enum: ['least_used', 'round_robin'],
+    default: 'least_used',
+  },
+
+  // Where the shop-facing "storage almost full" banner starts.
+  storageWarnPercent: { type: Number, default: 80, min: 1, max: 99 },
+
+  // How long an image sits at refCount 0 before it is actually deleted. The
+  // grace exists so an accidental detach is recoverable.
+  orphanGraceDays: { type: Number, default: 7, min: 0 },
+
+  // Round-robin cursor. Meaningless under least_used; kept here rather than on
+  // R2Account so allocation never has to write to two collections.
+  storageRoundRobinCursor: { type: Number, default: 0 },
+
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },
 }, {
   timestamps: true,

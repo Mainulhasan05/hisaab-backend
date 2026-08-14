@@ -181,6 +181,31 @@ exports.bulkUpdateStock = asyncHandler(async (req, res) => {
   });
 });
 
+// Put products online / take them off, in bulk. The online catalogue screen's
+// only write path — see productService.bulkSetOnlineStatus for why bulk is
+// load-bearing here rather than a convenience.
+exports.bulkSetOnlineStatus = asyncHandler(async (req, res) => {
+  const result = await productService.bulkSetOnlineStatus(
+    req.shop._id,
+    req.user._id,
+    req,
+    req.body
+  );
+
+  // The skipped count is the whole reason this returns a summary rather than a
+  // bare 204: a shopkeeper who put 80 products online and got 74 needs to be
+  // told why, in the same breath, or they will assume it failed.
+  const messageBn = result.skippedNoPhoto
+    ? `${result.modified}টি পণ্য হালনাগাদ হয়েছে। ${result.skippedNoPhoto}টি পণ্যে ছবি না থাকায় অনলাইনে দেওয়া যায়নি।`
+    : `${result.modified}টি পণ্য হালনাগাদ হয়েছে`;
+
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Online catalogue updated',
+    messageBn,
+  });
+});
+
 // Toggle product status
 exports.toggleStatus = asyncHandler(async (req, res) => {
   const { isActive } = req.body;

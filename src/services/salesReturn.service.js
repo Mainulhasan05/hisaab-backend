@@ -18,8 +18,11 @@ const {
   storageUnit,
   quantize,
   quantizeMoney,
+  buildStockUpdate,
+  buildVariantStockRollupUpdate,
 } = require('../utils/quantity.util');
 const { restoreBatches, batchWriteOp } = require('../utils/batch.util');
+const { findComponentVariant } = require('../utils/combo.util');
 
 const getInvoiceDiscountAmount = (sale) => {
   const discount = Number(sale.discount) || 0;
@@ -197,7 +200,7 @@ class SalesReturnService {
       const itemReturnTotal = quantizeMoney((saleItem.unitPrice * returnItem.quantity) - itemReturnDiscount);
       const itemProfitLoss = quantizeMoney(((saleItem.unitPrice - (saleItem.buyingPrice || 0)) * returnItem.quantity) - itemReturnDiscount);
 
-      processedItems.push({
+      const processedItem = {
         saleItemId: saleItem._id,
         product: saleItem.product,
         productName: saleItem.productName,
@@ -212,7 +215,34 @@ class SalesReturnService {
         total: itemReturnTotal,
         profitLoss: itemProfitLoss,
         reason: returnItem.reason || reason || '',
-      });
+      };
+
+      // ── Combo lines return WHOLE ─────────────────────────────────────────
+      //
+      // A combo is one priced thing; "kept the shampoo, returned the soap"
+      // has no per-component price to refund against, so it is not offered.
+      // `parseQuantity` above already forced the quantity to whole combos
+      // (a combo's unit is integer). Scale the sale's frozen component
+      // snapshot to this return, and the stock loop below restores from it.
+      if (saleItem.itemType === 'combo' && Array.isArray(saleItem.comboComponents)) {
+        processedItem.itemType = 'combo';
+        processedItem.comboComponents = saleItem.comboComponents.map((c) => ({
+          product: c.product,
+          productName: c.productName,
+          productCode: c.productCode,
+          variantId: c.variantId || null,
+          variantSku: c.variantSku,
+          variantAttributes: c.variantAttributes,
+          unit: c.unit,
+          quantityPerCombo: c.quantityPerCombo,
+          // Rounded at write time in the stock loop, where the component's
+          // unit precision is known; this keeps float noise out of the record.
+          totalQuantity: Math.round(c.quantityPerCombo * returnItem.quantity * 1e6) / 1e6,
+          unitCost: c.unitCost || 0,
+        }));
+      }
+
+      processedItems.push(processedItem);
 
       totalRefundAmount = quantizeMoney(totalRefundAmount + itemReturnTotal);
       totalProfitReduction = quantizeMoney(totalProfitReduction + itemProfitLoss);
@@ -266,7 +296,13 @@ class SalesReturnService {
     // just `_id` and `unit` used for precision resolution — it carries no
     // `stock` or `variants` and so cannot back a stock write. These are the
     // full documents.
-    const stockProductIds = [...new Set(processedItems.map(i => String(i.product)))];
+    // Combo lines restore onto their COMPONENT products, not the combo doc.
+    const stockProductIds = [...new Set(processedItems.flatMap(i => {
+      if (i.itemType === 'combo' && Array.isArray(i.comboComponents)) {
+        return i.comboComponents.map(c => String(c.product));
+      }
+      return [String(i.product)];
+    }))];
     const stockProducts = await Product.find({
       _id: { $in: stockProductIds }, shop: shopId,
     }).session(session || null);
@@ -276,6 +312,86 @@ class SalesReturnService {
     const returnTxns = [];
 
     for (const item of processedItems) {
+      // ── Combo line: restore each component from the return's snapshot ─────
+      if (item.itemType === 'combo' && Array.isArray(item.comboComponents)) {
+        for (const c of item.comboComponents) {
+          const comp = stockProductMap.get(String(c.product));
+          if (!comp) continue;
+
+          const compStkUnit = storageUnit(comp);
+          const restoreQty = quantize(c.totalQuantity, compStkUnit);
+          let compPrev;
+          let compNew;
+
+          if (c.variantId && comp.hasVariants) {
+            const variant = findComponentVariant(comp, c.variantId);
+            if (variant) {
+              compPrev = variant.stock;
+              variant.stock = quantize(variant.stock + restoreQty, compStkUnit);
+              compNew = variant.stock;
+            }
+            // Same rollup rule as the standard branch below.
+            comp.stock = quantize(
+              comp.variants.reduce((sum, v) => quantize(sum + v.stock, compStkUnit), 0),
+              compStkUnit
+            );
+            if (variant) {
+              // Delta, applied server-side — see `buildVariantStockRollupUpdate`
+              // for why the previous absolute `$set` was a lost-update race.
+              returnStockOps.push({
+                updateOne: {
+                  filter: { _id: comp._id },
+                  update: buildVariantStockRollupUpdate(c.variantId, restoreQty, compStkUnit),
+                },
+              });
+            }
+          } else {
+            compPrev = comp.stock;
+            comp.stock = quantize(comp.stock + restoreQty, compStkUnit);
+            compNew = comp.stock;
+            returnStockOps.push({
+              updateOne: {
+                filter: { _id: comp._id },
+                update: buildStockUpdate(restoreQty, compStkUnit),
+              },
+            });
+          }
+
+          if (restoreBatches(comp, c.variantId || null, restoreQty)) {
+            returnStockOps.push(batchWriteOp(comp));
+          }
+
+          returnTxns.push({
+            shop: shopId,
+            branch: branchId,
+            product: c.product,
+            productName: c.productName,
+            productCode: c.productCode,
+            variantId: c.variantId || null,
+            variantSku: c.variantSku,
+            variantAttributes: c.variantAttributes,
+            type: 'return',
+            quantity: restoreQty,
+            previousStock: compPrev || 0,
+            newStock: compNew || 0,
+            reference: {
+              type: 'return',
+              id: salesReturn._id,
+              invoiceNo: returnNo,
+            },
+            notes: `মাল ফেরত: ${returnNo} (কম্বো: ${item.productName}, বিক্রয়: ${sale.invoiceNo})`,
+            viaCombo: {
+              product: item.product,
+              name: item.productName,
+              code: item.productCode,
+              comboQuantity: item.quantity,
+            },
+            createdBy: userId,
+          });
+        }
+        continue;
+      }
+
       const product = stockProductMap.get(String(item.product));
       if (!product) continue;
 
@@ -300,16 +416,15 @@ class SalesReturnService {
         );
 
         if (variant) {
+          // The variant delta AND the rollup, both derived server-side from the
+          // document at write time. This was an absolute `$set` of two numbers
+          // computed in JS from an unguarded read — see
+          // `buildVariantStockRollupUpdate` for the race that lost returned
+          // stock when two returns for one product overlapped.
           returnStockOps.push({
             updateOne: {
               filter: { _id: product._id },
-              update: {
-                $set: {
-                  'variants.$[v].stock': variant.stock,
-                  stock: product.stock, // the rollup, not the line quantity
-                },
-              },
-              arrayFilters: [{ 'v._id': item.variantId }],
+              update: buildVariantStockRollupUpdate(item.variantId, item.quantity, stkUnit),
             },
           });
         }
@@ -320,7 +435,7 @@ class SalesReturnService {
         returnStockOps.push({
           updateOne: {
             filter: { _id: product._id },
-            update: { $set: { stock: product.stock } },
+            update: buildStockUpdate(item.quantity, stkUnit),
           },
         });
       }
@@ -376,29 +491,73 @@ class SalesReturnService {
       await StockTransaction.insertMany(returnTxns, sessionOpt);
     }
 
-    // 9. Update Sale: returnedAmount, profit, due and status (using updateOne to bypass pre-save hook recalculations)
-    const newReturnedAmount = (sale.returnedAmount || 0) + totalRefundAmount;
-    const newProfit = (sale.profit || 0) - totalProfitReduction;
-    
-    let newDue = sale.due;
-    if (refundMethod === 'adjustment') {
-      newDue = Math.max(0, sale.due - totalRefundAmount);
-    }
-    
+    // 9. Update the Sale.
+    //
+    // ── Written through the ACCUMULATORS, not as computed end-values ─────────
+    //
+    // `returnedAmount` / `returnedAdjustment` / `returnedProfit` are the three
+    // inputs `Sale.pre('save')` needs to derive `due` and `profit` (see the
+    // block comment on those fields). Setting the derived values directly is
+    // what made this fragile before: it was done with `updateOne` precisely to
+    // dodge the hook, and then any other save of the document — recordPayment,
+    // cancelSale — recomputed `due` and `profit` from `items` alone and threw
+    // the return away. Collecting the rest of a due on a partly-returned
+    // invoice put back the money the return had just taken off it.
+    //
+    // Now the hook owns the derivation and the derivation is idempotent, so the
+    // same values are still written here (an `updateOne` skips the hook) and
+    // any later `save()` arrives at exactly the same answer instead of a
+    // different one.
+    //
+    // ── Where a refund lands ────────────────────────────────────────────────
+    //
+    // Only an `adjustment` refund settles against the due — that is what
+    // "সমন্বয়" means. A CASH refund hands money back and leaves the obligation
+    // untouched; `store_credit` does nothing until `settleRefund` pays it out.
+    //
+    // This used to force `due = 0` on any full return regardless of method,
+    // which wrote off debt with no counterpart anywhere. A ৳1000 invoice with
+    // ৳300 paid, fully refunded in cash, paid out ৳1000, showed as settled, and
+    // left the customer owing ৳700 on `Customer.totalDue` with nothing on the
+    // invoice to account for it.
+    const newReturnedAmount = quantizeMoney((sale.returnedAmount || 0) + totalRefundAmount);
+    const newReturnedProfit = quantizeMoney((sale.returnedProfit || 0) + totalProfitReduction);
+    const newReturnedAdjustment = quantizeMoney(
+      (sale.returnedAdjustment || 0) + (refundMethod === 'adjustment' ? totalRefundAmount : 0)
+    );
+
+    const newDue = Math.max(
+      0,
+      quantizeMoney((sale.total || 0) - (sale.paid || 0) - newReturnedAdjustment)
+    );
+    const newProfit = quantizeMoney(
+      (sale.profit || 0) + (sale.returnedProfit || 0) - newReturnedProfit
+    );
+
+    // Fully returned AND nothing left owing is the only case that closes the
+    // invoice out. A fully-returned sale that still carries a due is not
+    // 'cancelled' — marking it so would hide it from the dues list (which
+    // excludes cancelled) while `Customer.totalDue` kept counting it, which is
+    // the same divergence in a different place.
     const isFullyReturned = newReturnedAmount >= (sale.total || 0) - 0.01;
     let newStatus = sale.status;
-    if (isFullyReturned) {
-      newStatus = 'cancelled';
-      newDue = 0;
-    } else if (newDue === 0 && sale.status !== 'cancelled') {
-      newStatus = 'completed';
-    } else if (newDue < sale.due && sale.status !== 'cancelled') {
-      newStatus = 'partial';
+    if (sale.status !== 'cancelled') {
+      if (isFullyReturned && newDue === 0) {
+        newStatus = 'cancelled';
+      } else if (newDue === 0) {
+        newStatus = 'completed';
+      } else if ((sale.paid || 0) > 0) {
+        newStatus = 'partial';
+      } else {
+        newStatus = 'unpaid';
+      }
     }
 
     const saleUpdate = {
       returnedAmount: newReturnedAmount,
-      profit: isFullyReturned ? 0 : newProfit,
+      returnedAdjustment: newReturnedAdjustment,
+      returnedProfit: newReturnedProfit,
+      profit: newProfit,
       due: newDue,
       status: newStatus,
     };
@@ -548,11 +707,15 @@ class SalesReturnService {
     }
 
     if (search) {
+      // Escaped, exactly as saleService._buildQuery does. Raw user input in
+      // `$regex` is a ReDoS vector, and this was the one list search that still
+      // passed it through untouched.
+      const escaped = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       query.$or = [
-        { returnNo: { $regex: search, $options: 'i' } },
-        { invoiceNo: { $regex: search, $options: 'i' } },
-        { customerName: { $regex: search, $options: 'i' } },
-        { customerPhone: { $regex: search, $options: 'i' } },
+        { returnNo: { $regex: escaped, $options: 'i' } },
+        { invoiceNo: { $regex: escaped, $options: 'i' } },
+        { customerName: { $regex: escaped, $options: 'i' } },
+        { customerPhone: { $regex: escaped, $options: 'i' } },
       ];
     }
 
@@ -574,7 +737,12 @@ class SalesReturnService {
     }
 
     const skip = (page - 1) * limit;
-    const sortField = ['createdAt', 'total', 'returnNo'].includes(sortBy) ? sortBy : 'createdAt';
+    // `totalAmount`, not `total` — the whitelist named a field this model does
+    // not have, so "sort by amount" silently fell through to no sort at all and
+    // Mongo returned natural order. `total` is still accepted as an alias
+    // because that is what the client sends.
+    const SORT_FIELDS = { createdAt: 'createdAt', returnNo: 'returnNo', total: 'totalAmount', totalAmount: 'totalAmount' };
+    const sortField = SORT_FIELDS[sortBy] || 'createdAt';
     const sort = { [sortField]: sortOrder === 'asc' ? 1 : -1 };
 
     const [returns, total] = await Promise.all([

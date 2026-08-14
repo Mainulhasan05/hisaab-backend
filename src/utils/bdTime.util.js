@@ -29,6 +29,41 @@ function getBangladeshDayRange(dateStr) {
 }
 
 /**
+ * Today's Bangladesh calendar day as UTC start/end instants.
+ *
+ * The one definition of "today" for anything that reports on a day. Several
+ * services used to build this with `setHours(0, 0, 0, 0)` — SERVER local
+ * midnight — which on a UTC host is 06:00 Dhaka. That put the first six hours
+ * of every Bangladeshi day into the previous day's figures, and only for the
+ * services that did it, so the cash register and the sales dashboard disagreed
+ * with each other every night by exactly the night's trading.
+ */
+function getBangladeshTodayRange() {
+  return getBangladeshDayRange(getBangladeshTodayStr());
+}
+
+/** The Bangladesh calendar month of an instant, as "YYYY-MM". */
+function toBangladeshMonthStr(dateLike) {
+  const dateStr = toBangladeshDateStr(dateLike);
+  return dateStr ? dateStr.slice(0, 7) : null;
+}
+
+/**
+ * Convert a Bangladesh month string ("YYYY-MM") to UTC start/end instants.
+ *
+ * The purchase invoice sequence is per calendar month, and it used to bound its
+ * count with `new Date(year, month, 1)` — SERVER-local midnight. On a UTC host
+ * that is 06:00 Dhaka on the 1st, so purchases entered in the first six hours of
+ * a month were counted into the previous one.
+ */
+function getBangladeshMonthRange(monthStr) {
+  const [year, month] = String(monthStr).split('-').map(Number);
+  const startOfMonth = new Date(Date.UTC(year, month - 1, 1) - BD_OFFSET_MS);
+  const startOfNext = new Date(Date.UTC(year, month, 1) - BD_OFFSET_MS);
+  return { startOfMonth, endOfMonth: new Date(startOfNext.getTime() - 1), startOfNext };
+}
+
+/**
  * Current Bangladesh wall-clock time as "HH:MM" (24h).
  *
  * Compared as a string against the owner's configured digest time, which is
@@ -114,6 +149,9 @@ module.exports = {
   BD_OFFSET_MS,
   getBangladeshTodayStr,
   getBangladeshDayRange,
+  getBangladeshTodayRange,
+  getBangladeshMonthRange,
+  toBangladeshMonthStr,
   getBangladeshTimeStr,
   minutesOfDay,
   toBangladeshDateStr,

@@ -25,12 +25,41 @@ function idempotency(options = {}) {
       return next();
     }
 
-    const shopId = req.shopId || req.user?.shop || 'global';
+    // ── Scoping the key to a tenant ──────────────────────────────────────────
+    //
+    // `req.shopId` is read first for historical reasons and is never set by
+    // anything in this codebase, so this always fell through to `req.user.shop`
+    // — which, for a normal user, is the POPULATED Shop document that
+    // `getCachedUser` hydrates, not an id. Interpolated into a template string
+    // that stringifies a whole Mongoose document into the Redis key.
+    //
+    // `req.shop` is the resolved shop on every authenticated request, so take
+    // the id from there and coerce it explicitly. `_id` covers a document,
+    // `toString` covers a bare ObjectId (the shape a platform admin gets).
+    const shopScope = req.shop?._id || req.shop || req.user?.shop?._id || req.user?.shop;
+    const shopId = shopScope ? String(shopScope) : 'global';
     const lockKey = `idempotency:${shopId}:${req.method}:${req.baseUrl}${req.path}:${idempotencyKey}`;
     let isCompleted = false;
 
     try {
-      const cached = await cacheService.get(lockKey);
+      // ── Reserve the key ATOMICALLY ─────────────────────────────────────────
+      //
+      // This was a `get` followed by a `set`. Two genuinely simultaneous
+      // requests — the double-tap this middleware exists to stop — both saw an
+      // empty cache, both wrote 'processing', and both went through to create
+      // two sales. It only ever caught the sequential retry, which is the case
+      // that was never really the problem.
+      //
+      // `setNX` makes the reservation the same operation as the check: exactly
+      // one caller gets `true`. The loser falls into the branch below and reads
+      // whatever the winner has recorded so far.
+      const acquired = await cacheService.setNX(
+        lockKey,
+        { status: 'processing', timestamp: Date.now() },
+        lockTtlSeconds
+      );
+
+      const cached = acquired ? null : await cacheService.get(lockKey);
 
       if (cached) {
         if (cached.status === 'processing') {
@@ -56,8 +85,13 @@ function idempotency(options = {}) {
         }
       }
 
-      // Mark request as processing
-      await cacheService.set(lockKey, { status: 'processing', timestamp: Date.now() }, lockTtlSeconds);
+      // A key that exists but is neither 'processing' nor 'completed' is a
+      // corrupt or truncated entry. `setNX` above declined to claim it, and
+      // neither branch handled it, so the request would proceed with no
+      // reservation at all. Re-stamp it rather than leaving the window open.
+      if (cached) {
+        await cacheService.set(lockKey, { status: 'processing', timestamp: Date.now() }, lockTtlSeconds);
+      }
 
       // Clean up lock if connection closes abruptly or encounters server error (5xx)
       res.on('finish', () => {

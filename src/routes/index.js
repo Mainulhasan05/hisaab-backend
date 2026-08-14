@@ -29,14 +29,21 @@ const shopCategoryRoutes = require('./shopCategory.routes');
 const heldCartRoutes = require('./heldCart.routes');
 const stockTransferRoutes = require('./stockTransfer.routes');
 const imageUploadRoutes = require('./imageUpload.routes');
+const mediaRoutes = require('./media.routes');
 const userRoutes = require('./user.routes');
 const telegramRoutes = require('./telegram.routes');
+const storefrontRoutes = require('./storefront.routes');
+const publicRoutes = require('./public.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
 router.use('/products', productRoutes);
 router.use('/upload', imageUploadRoutes);
+// Shop-owned images in the platform R2 pool. Distinct from `/upload` above,
+// which is the older ImgBB path and stores nothing of ours — see the header of
+// services/media.service.js for how the two coexist.
+router.use('/media', mediaRoutes);
 router.use('/categories', categoryRoutes);
 // Gated end-to-end on `features.brands` inside the router itself.
 router.use('/brands', brandRoutes);
@@ -64,6 +71,23 @@ router.use('/branches', branchRoutes);
 router.use('/held-carts', heldCartRoutes);
 router.use('/stock-transfers', stockTransferRoutes);
 router.use('/telegram', telegramRoutes);
+// The shop's own storefront management. Gated end-to-end on
+// `features.storefront` inside the router itself. The PUBLIC storefront reads
+// are a separate, unauthenticated router and do not live here — see
+// ECOMMERCE_PLAN.md §13 for why that surface is treated as its own workstream.
+router.use('/storefront', storefrontRoutes);
+
+/**
+ * The public storefront reads — mounted LAST, and mounted here rather than in
+ * `app.js`, because every router above applies `protect` itself. There is no
+ * enclosing protected tree to be "outside" of; being outside it means carrying
+ * no guard, which is what `public.routes.js` does and documents.
+ *
+ * `/public` is its own prefix so that the boundary is legible in a URL: anything
+ * under it is readable by a stranger, and anything not under it is not. `app.js`
+ * keys its rate-limiter skip off exactly this prefix.
+ */
+router.use('/public', publicRoutes);
 
 // API Info
 router.get('/', (req, res) => {
@@ -92,10 +116,13 @@ router.get('/', (req, res) => {
       pages: '/api/pages',
       coupons: '/api/coupons',
       images: '/api/images',
+      media: '/api/media',
       branches: '/api/branches',
       heldCarts: '/api/held-carts',
       stockTransfers: '/api/stock-transfers',
       telegram: '/api/telegram',
+      storefront: '/api/storefront',
+      public: '/api/public',
     }
   });
 });

@@ -15,6 +15,18 @@ function validateEnv(env = process.env) {
     throw new Error('IMAGE_UPLOAD_PROVIDER=imgbb requires IMGBB_API_KEY');
   }
 
+  // R2 credential encryption. Optional — with no key the storage pool simply
+  // reports itself unconfigured and the admin panel refuses to save an account.
+  // A MALFORMED key is fatal though: it would pass `isConfigured()` nowhere but
+  // would let someone believe encryption is on, and every account save would
+  // fail at the last moment with a crypto error instead of at boot.
+  if (env.STORAGE_ENC_KEY && !/^[0-9a-fA-F]{64}$/.test(env.STORAGE_ENC_KEY.trim())) {
+    throw new Error(
+      'STORAGE_ENC_KEY must be 64 hex characters (32 bytes). Generate with: ' +
+      'node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
+    );
+  }
+
   // Meta Conversions API is optional, but half-configured is worse than off:
   // it would silently drop every conversion instead of failing loudly here.
   if (env.META_CAPI_ACCESS_TOKEN && !env.META_PIXEL_ID) {

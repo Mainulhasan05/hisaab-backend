@@ -7,6 +7,7 @@ const { STOCK_TRANSACTION_TYPES } = require('../config/constants');
 const { isActiveBranch, isAllBranchesView, isMultiBranch } = require('../utils/branchScope.util');
 const { storageUnit, quantize } = require('../utils/quantity.util');
 const { takeBatches, addBatches, batchWriteOp } = require('../utils/batch.util');
+const { assertNotCombo } = require('../utils/combo.util');
 
 // Helper to create errors with statusCode (no AppError class in this project)
 const createError = (message, statusCode = 400) => {
@@ -244,6 +245,8 @@ exports.createTransfer = async (data, userId, req = null) => {
     if (!product) {
       throw createError(`${item.productName || 'পণ্য'} উৎস শাখায় পাওয়া যায়নি`, 404);
     }
+    // A combo has no stock to move between branches — transfer its components.
+    assertNotCombo(product, 'শাখা স্থানান্তর');
     const available = readStock(product, item.variantId || null);
     if (available < item.quantity) {
       throw createError(`${item.productName || 'পণ্য'} এর স্টক অপর্যাপ্ত (আছে: ${available}, চাহিদা: ${item.quantity})`, 400);

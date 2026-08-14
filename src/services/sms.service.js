@@ -9,6 +9,16 @@ const { SMS_TYPES, SMS_STATUS } = require('../config/constants');
 const logger = require('../utils/logger.util');
 const { countSms, isUnicode } = require('../utils/smsCounter.util');
 const { branchFilter, requireBranch, isBranchCustomerScope } = require('../utils/branchScope.util');
+// Message bodies live in one place because the dashboard previews them to the
+// shopkeeper before sending — see the header of smsTemplates.util.js.
+const {
+  formatSmsAmount,
+  gsmSafeShopName: getGsmSafeShopName,
+  buildSaleReceipt,
+  buildPaymentReceipt,
+  buildDueReminder,
+  buildOtp,
+} = require('../utils/smsTemplates.util');
 
 // MimSMS API Configuration
 const MIMSMS = {
@@ -19,25 +29,13 @@ const MIMSMS = {
   BALANCE: '/balanceCheck'
 };
 
-const formatSmsAmount = (amount) => {
-  const value = Number(amount) || 0;
-  return Number.isInteger(value) ? value.toString() : value.toFixed(2);
-};
-
-const getGsmSafeShopName = (shopName) => {
-  if (!shopName) {
-    return 'Hisaab';
-  }
-  return shopName;
-};
-
 class SMSService {
   /**
    * Send OTP (no quota check for registration)
    */
   async sendOTP(phone, otp) {
     const formattedPhone = formatPhone(phone);
-    const message = `Your Hisaab OTP: ${otp}\nValid for 5 minutes`;
+    const message = buildOtp(otp);
 
     // OTPs are secrets — only log them in development, never in production logs
     if (process.env.NODE_ENV === 'development' || process.env.SKIP_SMS === 'true') {
@@ -413,7 +411,11 @@ class SMSService {
       phone: customer.phone,
       customerId: customer._id,
       customerName: customer.name,
-      message: `Dear ${customer.name},\nYour due: Tk${formatSmsAmount(due)}\nPlease pay as soon as possible.\nThank you - ${getGsmSafeShopName(shop.name)}`,
+      message: buildDueReminder({
+        customerName: customer.name,
+        due,
+        shopName: shop.name,
+      }),
     }));
 
     return this.sendDynamic(shopId, userId, recipients, req);
@@ -536,12 +538,15 @@ class SMSService {
           return;
         }
 
-        // Keep sale receipt SMS ASCII/GSM-7 so it usually costs one segment.
-        const shopLabel = getGsmSafeShopName(shop.name);
-        // The shop name signs off at the bottom only. It used to head the
-        // message as well, so every receipt named the shop twice — wasted
-        // characters in a message that is billed by 160-character segment.
-        const message = `Inv:${invoiceNo}\nTotal:Tk${formatSmsAmount(saleData.total)}\nPaid:Tk${formatSmsAmount(saleData.paid)}\nDue:Tk${formatSmsAmount(saleData.due)}\nThanks for visiting\n- ${shopLabel}`;
+        // Built from the shared template so the till's preview and this message
+        // cannot disagree — see smsTemplates.util.js.
+        const message = buildSaleReceipt({
+          invoiceNo,
+          total: saleData.total,
+          paid: saleData.paid,
+          due: saleData.due,
+          shopName: shop.name,
+        });
 
         // Send SMS with invoice metadata
         const sendResult = await this.sendSingle(shopId, userId, customerPhone, message, saleData.customerId, null, {
@@ -590,8 +595,15 @@ class SMSService {
         const quota = await SMSQuota.findOne({ shop: shopId });
         if (!quota || !quota.isEnabled || quota.remainingQuota < 1) return;
 
-        const shopLabel = getGsmSafeShopName(shop.name);
-        const message = `${customer.name},\nTk${formatSmsAmount(paymentData.amount)} payment received.\nCurrent due: Tk${formatSmsAmount(customer.totalDue)}\nThank you - ${shopLabel}`;
+        // `customer` is re-read here, after the collection has settled, so
+        // `totalDue` is already the post-payment balance. The client preview
+        // subtracts the amount itself to arrive at the same number.
+        const message = buildPaymentReceipt({
+          customerName: customer.name,
+          amount: paymentData.amount,
+          remainingDue: customer.totalDue,
+          shopName: shop.name,
+        });
 
         await this.sendSingle(shopId, userId, customer.phone, message, customer._id);
         logger.info(`SMS: Payment receipt sent to ${customer.phone}`);
@@ -621,26 +633,49 @@ class SMSService {
       }
     }
 
+    // Built by passing placeholders THROUGH the real builders, so a template
+    // offered on the SMS page always has the same shape as the message the
+    // automatic flows send. Editing a body in smsTemplates.util.js updates the
+    // picker for free; forgetting to update the picker is no longer possible.
     return [
       {
         id: 'due_reminder',
         name: 'Due Reminder',
         nameEn: 'Due Reminder',
-        template: `Dear {customer_name},\nYour due: Tk{due_amount}\nPlease pay as soon as possible.\nThank you - ${shopName}`,
+        template: buildDueReminder({
+          customerName: '{customer_name}',
+          due: '{due_amount}',
+          shopName,
+        }),
         variables: ['customer_name', 'due_amount', 'shop_name'],
       },
       {
         id: 'payment_received',
+        // This one used to open "Dear {customer_name}," while the message the
+        // app actually sends on a due collection opens with the bare name. The
+        // template now IS that message, so the picker stops advertising a
+        // greeting the automatic flow never sends.
         name: 'Payment Received',
         nameEn: 'Payment Received',
-        template: `Dear {customer_name},\nTk{amount} payment received.\nCurrent due: Tk{remaining_due}\nThank you - ${shopName}`,
+        template: buildPaymentReceipt({
+          customerName: '{customer_name}',
+          amount: '{amount}',
+          remainingDue: '{remaining_due}',
+          shopName,
+        }),
         variables: ['customer_name', 'amount', 'remaining_due', 'shop_name'],
       },
       {
         id: 'sale_receipt',
         name: 'Sale Receipt',
         nameEn: 'Sale Receipt',
-        template: `Inv:{invoice_no}\nTotal:Tk{total}\nPaid:Tk{paid}\nDue:Tk{due}\nThanks for visiting\n- ${shopName}`,
+        template: buildSaleReceipt({
+          invoiceNo: '{invoice_no}',
+          total: '{total}',
+          paid: '{paid}',
+          due: '{due}',
+          shopName,
+        }),
         variables: ['shop_name', 'invoice_no', 'total', 'paid', 'due'],
       },
       {
