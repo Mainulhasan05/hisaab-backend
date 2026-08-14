@@ -23,6 +23,12 @@ const {
 const { resolveLineQuantity } = require('../utils/packaging.util');
 const { deductBatches, batchWriteOp, sameOwner } = require('../utils/batch.util');
 const { assertNotCombo } = require('../utils/combo.util');
+const {
+  buildProductCostUpdate,
+  buildVariantCostUpdate,
+  blendedCost,
+} = require('../utils/costing.util');
+const { toMoney } = require('../utils/invoiceMath.util');
 
 class PurchaseService {
   // Get all purchases with filtering and pagination
@@ -210,7 +216,21 @@ class PurchaseService {
         packUnitPrice = quantizeMoney(Number(item.packUnitPrice));
         unitPrice = packUnitPrice / line.packSize;
       } else {
-        unitPrice = parseFloat(item.unitPrice);
+        // Validated, not `parseFloat`-ed and hoped for. `quantity` has always
+        // gone through `parseQuantity`; the cost beside it was the one money
+        // input on this path with no check at all, so a missing or malformed
+        // `unitPrice` became NaN, rode through `quantizeMoney` (which returns 0
+        // for non-finite) into a ৳0 line total, and — now that cost feeds the
+        // moving average below — would have written the shelf's cost basis to
+        // zero. A number this important must fail loudly.
+        unitPrice = Number(item.unitPrice);
+        if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+          throw new AppError(
+            `Invalid unit price for ${product.name}`,
+            `"${product.name}" এর ক্রয় মূল্য ঠিকভাবে লিখুন`,
+            400
+          );
+        }
         if (line.mode === 'pack') packUnitPrice = quantizeMoney(unitPrice * line.packSize);
       }
       const itemTotal = quantizeMoney(quantity * unitPrice);
@@ -298,13 +318,22 @@ class PurchaseService {
     const purchaseStockOps = [];
     const purchaseTxns = [];
 
-    const getVariantStock = (p, vId) => {
-      if (!p.variants) return 0;
-      const v = typeof p.variants.id === 'function' ? p.variants.id(vId) : p.variants.find(x => (x._id || x.id)?.toString() === vId?.toString());
-      return v?.stock || 0;
+    const findVariant = (p, vId) => {
+      if (!p.variants) return null;
+      return typeof p.variants.id === 'function'
+        ? p.variants.id(vId)
+        : p.variants.find(x => (x._id || x.id)?.toString() === vId?.toString()) || null;
     };
+    const getVariantStock = (p, vId) => findVariant(p, vId)?.stock || 0;
+    const getVariantCost = (p, vId) => findVariant(p, vId)?.buyingPrice ?? p.buyingPrice ?? 0;
 
-    for (const item of preparedItems) {
+    // Cost-basis snapshots, keyed by position in `preparedItems`. Collected here
+    // and written onto the purchase after the loop, because `Purchase.create`
+    // above has already copied `preparedItems` into subdocuments — mutating the
+    // plain array would persist nothing.
+    const costSnapshots = new Map();
+
+    for (const [itemIndex, item] of preparedItems.entries()) {
       const product = purchaseProductMap.get(String(item.product));
       // Validation above already threw on an unresolvable product; this guard
       // only covers the impossible case rather than silently skipping stock.
@@ -316,6 +345,47 @@ class PurchaseService {
 
       const stkUnit = storageUnit(product);
       let newStock;
+
+      // ── Re-blend the cost basis, BEFORE the stock moves ──────────────────
+      //
+      // Nothing used to maintain `Product.buyingPrice`, and it is the number
+      // every profit figure in the app is computed from (see costing.util.js).
+      // A delivery at a new rate now blends into it as a weighted average.
+      //
+      // Ordered first deliberately: the formula wants the stock as it was BEFORE
+      // this delivery landed, and `bulkWrite` applies ops in order.
+      //
+      // `costBefore` / `costAfter` are snapshotted onto the line so
+      // `cancelPurchase` can tell whether it still owns the number — see the
+      // reversal note there. `blendedCost` mirrors the pipeline arithmetic
+      // exactly; it is not a second opinion, it is the same formula in JS.
+      const previousCost = item.variantId
+        ? getVariantCost(product, item.variantId)
+        : (product.buyingPrice || 0);
+      const costUpdate = item.variantId && product.hasVariants
+        ? buildVariantCostUpdate(item.variantId, item.quantity, item.unitPrice)
+        : buildProductCostUpdate(item.quantity, item.unitPrice);
+
+      if (costUpdate) {
+        purchaseStockOps.push({
+          updateOne: { filter: { _id: product._id }, update: costUpdate },
+        });
+
+        const costAfter = blendedCost(previousStock, previousCost, item.quantity, item.unitPrice);
+        costSnapshots.set(itemIndex, { costBefore: previousCost, costAfter });
+
+        // Keep the in-memory document in step, so a second line for the same
+        // product in this delivery blends against the first line's result rather
+        // than against the pre-delivery cost. The server-side pipeline sequences
+        // itself correctly regardless (ordered bulkWrite); this is what keeps
+        // the SNAPSHOTS honest.
+        if (item.variantId && product.hasVariants) {
+          const variant = findVariant(product, item.variantId);
+          if (variant) variant.buyingPrice = costAfter;
+        } else {
+          product.buyingPrice = costAfter;
+        }
+      }
 
       // ── The received batch ──────────────────────────────────────────────
       //
@@ -428,6 +498,19 @@ class PurchaseService {
       await StockTransaction.insertMany(purchaseTxns, sessionOpt);
     }
 
+    // Record what this delivery did to each shelf's cost basis. Without it a
+    // cancellation has no way to know whether the cost it would be reversing is
+    // still the one this purchase set — see `cancelPurchase`.
+    if (costSnapshots.size > 0) {
+      for (const [index, snapshot] of costSnapshots) {
+        const line = purchase.items[index];
+        if (!line) continue;
+        line.costBefore = snapshot.costBefore;
+        line.costAfter = snapshot.costAfter;
+      }
+      await purchase.save(sessionOpt);
+    }
+
     // Update supplier stats
     if (supplierDoc) {
       supplierDoc.totalPurchases += 1;
@@ -485,12 +568,21 @@ class PurchaseService {
     });
   }
 
-  // Cancel purchase (reverse stock)
+  // Cancel purchase (reverse stock).
+  //
+  // Runs in a transaction, as `createPurchase` already did. Without one, a
+  // failure part-way through left the books split: stock reversed but the
+  // supplier still owed, or the supplier balance unwound while the goods stayed
+  // on the shelf. Every write below — stock, batches, ledger, supplier, status —
+  // now lands together or not at all.
   async cancelPurchase(shopId, userId, purchaseId, req = null) {
-    const purchase = await Purchase.findOne(branchFilter(req, {
-      _id: purchaseId,
-      shop: shopId,
-    }));
+    return await runInTransaction(async (session) => {
+      const sessionOpt = session ? { session } : {};
+
+      const purchase = await Purchase.findOne(branchFilter(req, {
+        _id: purchaseId,
+        shop: shopId,
+      })).session(session || null);
 
     if (!purchase) {
       throw new AppError('ক্রয়টি পাওয়া যায়নি', 'Purchase not found', 404);
@@ -505,17 +597,21 @@ class PurchaseService {
     // referenced product, one bulkWrite, one ledger insert — instead of a
     // findById + save + create per line.
     const cancelIds = [...new Set(purchase.items.map(i => String(i.product)))];
-    const cancelProducts = await Product.find({ _id: { $in: cancelIds }, shop: shopId });
+    const cancelProducts = await Product.find({ _id: { $in: cancelIds }, shop: shopId })
+      .session(session || null);
     const cancelProductMap = new Map(cancelProducts.map(p => [String(p._id), p]));
 
     const cancelStockOps = [];
     const cancelTxns = [];
 
-    const getVariantStock = (p, vId) => {
-      if (!p.variants) return 0;
-      const v = typeof p.variants.id === 'function' ? p.variants.id(vId) : p.variants.find(x => (x._id || x.id)?.toString() === vId?.toString());
-      return v?.stock || 0;
+    const findVariant = (p, vId) => {
+      if (!p.variants) return null;
+      return typeof p.variants.id === 'function'
+        ? p.variants.id(vId)
+        : p.variants.find(x => (x._id || x.id)?.toString() === vId?.toString()) || null;
     };
+    const getVariantStock = (p, vId) => findVariant(p, vId)?.stock || 0;
+    const getVariantCost = (p, vId) => findVariant(p, vId)?.buyingPrice ?? p.buyingPrice ?? 0;
 
     for (const item of purchase.items) {
       const product = cancelProductMap.get(String(item.product));
@@ -525,6 +621,48 @@ class PurchaseService {
       const previousStock = item.variantId
         ? getVariantStock(product, item.variantId)
         : product.stock;
+
+      // ── Put the cost basis back, but only if it is still ours ─────────────
+      //
+      // Receiving blended this line's rate into `buyingPrice` (costing.util.js).
+      // A moving average has no general inverse — the shelf has been sold from
+      // and possibly received into since — so rather than compute a wrong
+      // reversal, this restores the exact pre-delivery figure and ONLY when the
+      // current cost is still the one this delivery wrote.
+      //
+      // If a later delivery has moved it on, that delivery owns the number and
+      // reversing to a value from before it would silently discard a correct
+      // cost basis. Leaving it is the honest answer: the average reflects goods
+      // that genuinely passed through the shop.
+      //
+      // Compared with a paisa tolerance because `costAfter` was rounded at
+      // write time on both sides.
+      if (item.costAfter != null && item.costBefore != null) {
+        const currentCost = item.variantId
+          ? getVariantCost(product, item.variantId)
+          : (product.buyingPrice || 0);
+
+        if (Math.abs(currentCost - item.costAfter) < 0.005) {
+          if (item.variantId && product.hasVariants) {
+            const variant = findVariant(product, item.variantId);
+            if (variant) variant.buyingPrice = item.costBefore;
+            cancelStockOps.push({
+              updateOne: {
+                filter: { _id: product._id, 'variants._id': item.variantId },
+                update: { $set: { 'variants.$.buyingPrice': item.costBefore } },
+              },
+            });
+          } else {
+            product.buyingPrice = item.costBefore;
+            cancelStockOps.push({
+              updateOne: {
+                filter: { _id: product._id },
+                update: { $set: { buyingPrice: item.costBefore } },
+              },
+            });
+          }
+        }
+      }
 
       // Flag-independent, like every other reversal path: what was received
       // must be removable at the same precision even if packaging was later
@@ -618,20 +756,20 @@ class PurchaseService {
     }
 
     if (cancelStockOps.length > 0) {
-      await Product.bulkWrite(cancelStockOps);
+      await Product.bulkWrite(cancelStockOps, sessionOpt);
     }
     if (cancelTxns.length > 0) {
-      await StockTransaction.insertMany(cancelTxns);
+      await StockTransaction.insertMany(cancelTxns, sessionOpt);
     }
 
     // Update supplier stats
     if (purchase.supplier) {
-      const supplier = await Supplier.findById(purchase.supplier);
+      const supplier = await Supplier.findById(purchase.supplier).session(session || null);
       if (supplier) {
         supplier.totalPurchases = Math.max(0, supplier.totalPurchases - 1);
         supplier.totalAmount = Math.max(0, supplier.totalAmount - purchase.totalAmount);
         supplier.totalDue = Math.max(0, supplier.totalDue - purchase.due);
-        await supplier.save();
+        await supplier.save(sessionOpt);
       }
 
       // Unwound at the branch that raised the purchase — the only branch whose
@@ -645,19 +783,19 @@ class PurchaseService {
         amount: -purchase.totalAmount,
         paid: -(purchase.totalAmount - purchase.due),
         count: -1,
-      });
+      }, session);
       await SupplierBalance.recomputeDue({
         shop: shopId,
         supplier: purchase.supplier,
         branch: purchase.branch,
-      });
+      }, session);
     }
 
     purchase.status = 'cancelled';
-    await purchase.save();
+    await purchase.save(sessionOpt);
 
     // Audit log
-    await AuditLog.create({
+    await AuditLog.create([{
       shop: shopId,
       user: userId,
       action: 'purchase_cancel',
@@ -669,9 +807,10 @@ class PurchaseService {
         id: purchase._id,
         name: purchase.invoiceNo,
       },
-    });
+    }], sessionOpt);
 
     return { success: true };
+    });
   }
 
   // Get purchase summary
@@ -708,7 +847,11 @@ class PurchaseService {
   }
   // Record payment for a purchase
   async recordPayment(shopId, userId, purchaseId, paymentData, req = null) {
-    const { amount, method = 'cash', notes } = paymentData;
+    const { method = 'cash', notes } = paymentData;
+    // Coerced before the comparisons below. The `<= 0` guard was already here
+    // and correct, but a string amount slipped past it into `purchase.paid +=`,
+    // where `0 + '500'` concatenates rather than adds.
+    const amount = toMoney(paymentData.amount);
 
     const purchase = await Purchase.findOne(branchFilter(req, { _id: purchaseId, shop: shopId }));
     if (!purchase) {

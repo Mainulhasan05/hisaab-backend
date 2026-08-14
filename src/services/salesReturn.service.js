@@ -23,17 +23,16 @@ const {
 } = require('../utils/quantity.util');
 const { restoreBatches, batchWriteOp } = require('../utils/batch.util');
 const { findComponentVariant } = require('../utils/combo.util');
+const { discountAmountFor, toMoney } = require('../utils/invoiceMath.util');
 
-const getInvoiceDiscountAmount = (sale) => {
-  const discount = Number(sale.discount) || 0;
-  const subtotal = Number(sale.subtotal) || 0;
-
-  if (sale.discountType === 'percentage') {
-    return (subtotal * discount) / 100;
-  }
-
-  return discount;
-};
+// The invoice-level discount in taka, from the same bounded definition the sale
+// itself was totalled with. This used to repeat the arithmetic unbounded: a
+// fixed discount larger than the subtotal, or a percentage above 100, allocated
+// MORE discount across the returned lines than the invoice ever gave — so the
+// refund came out below zero while `Sale` had clamped the discount to the
+// subtotal. See invoiceMath.util.js.
+const getInvoiceDiscountAmount = (sale) =>
+  discountAmountFor(sale.subtotal, sale.discount, sale.discountType);
 
 const getInvoiceDiscountShareForItem = (sale, saleItem) => {
   const subtotal = Number(sale.subtotal) || 0;
@@ -534,12 +533,31 @@ class SalesReturnService {
       (sale.profit || 0) + (sale.returnedProfit || 0) - newReturnedProfit
     );
 
+    // ── "Fully returned" is measured against the GOODS, not the invoice ──────
+    //
+    // `returnedAmount` only ever accumulates line refunds, i.e. the merchandise
+    // net of the invoice discount. `sale.total` additionally carries `tax` and
+    // `deliveryCharge`, and a return refunds neither — the courier was still
+    // paid, the tax was still collected.
+    //
+    // Comparing the two therefore made a full return IMPOSSIBLE to detect on any
+    // sale with a delivery charge or tax: every item could come back through the
+    // door and the invoice would stay open, never get its `cancelReason`, and
+    // keep sitting on the dues list. Online orders, which always carry delivery,
+    // could never be closed out at all.
+    //
+    // `merchandise` is `subtotal - discountAmount` — the exact base the refunds
+    // are drawn from — so the comparison is now like for like.
+    const returnableBase = toMoney(
+      Math.max(0, (sale.subtotal || 0) - getInvoiceDiscountAmount(sale))
+    );
+
     // Fully returned AND nothing left owing is the only case that closes the
     // invoice out. A fully-returned sale that still carries a due is not
     // 'cancelled' — marking it so would hide it from the dues list (which
     // excludes cancelled) while `Customer.totalDue` kept counting it, which is
     // the same divergence in a different place.
-    const isFullyReturned = newReturnedAmount >= (sale.total || 0) - 0.01;
+    const isFullyReturned = returnableBase > 0 && newReturnedAmount >= returnableBase - 0.01;
     let newStatus = sale.status;
     if (sale.status !== 'cancelled') {
       if (isFullyReturned && newDue === 0) {

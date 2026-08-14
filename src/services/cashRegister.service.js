@@ -8,7 +8,7 @@ const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const { branchFilter, requireBranch, isAllBranchesView } = require('../utils/branchScope.util');
-const { toBangladeshDateStr, getBangladeshDayRange } = require('../utils/bdTime.util');
+const { toBangladeshDateStr, getBangladeshDayRange, endOfBangladeshDay } = require('../utils/bdTime.util');
 
 class CashRegisterService {
   /**
@@ -99,9 +99,9 @@ class CashRegisterService {
         { $group: { _id: null, total: { $sum: '$cashAmount' } } },
       ]),
 
-      // ── Cash collected against invoices, whenever it arrives ─────────────
+      // ── Cash collected against invoices AFTER checkout ───────────────────
       //
-      // Both streams that settle a customer's debt, in one bucket:
+      // Both streams that settle a customer's debt later, in one bucket:
       //
       //   `due_collection` — the customer-level "বাকি আদায়" screen
       //   `sale_payment`   — `recordPayment` on a specific invoice
@@ -111,6 +111,21 @@ class CashRegisterService {
       // earlier day fell through both filters: real money in the drawer that no
       // bucket accounted for, and the till read over by exactly that amount
       // every time an old due was settled from the invoice screen.
+      //
+      // ── `atCheckout` is what makes this disjoint from `cashSales` ─────────
+      //
+      // The comment here used to claim `payments[]` and `Payment{sale_payment}`
+      // were disjoint "by construction". They were not: `createSale` writes a
+      // `sale_payment` row for the checkout amount, so every cash sale was
+      // counted once from its legs above and again here. Expected closing ran
+      // over by essentially the whole day's cash takings, and the shopkeeper saw
+      // a drawer that was short by exactly what was in it.
+      //
+      // The flag is the discriminator (see its note on Payment.model). Excluding
+      // it with `$ne: true` rather than `$eq: false` so rows written before the
+      // field existed — where it is simply absent — are still matched by the
+      // legacy-collection case they belong to; `backfill-payment-at-checkout.js`
+      // stamps the checkout ones.
       Payment.aggregate([
         {
           $match: {
@@ -118,6 +133,7 @@ class CashRegisterService {
             ...branchMatch,
             method: 'cash',
             type: { $in: ['due_collection', 'sale_payment'] },
+            atCheckout: { $ne: true },
             createdAt: { $gte: start, $lte: end },
           },
         },
@@ -314,14 +330,24 @@ class CashRegisterService {
       register.openingBalance = openingBalance;
       await register.save();
     } else {
-      // Create new register
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-
+      // Stamped with the start of the BANGLADESH day — the same instant every
+      // lookup in this file searches from.
+      //
+      // This was `new Date()` + `setHours(0,0,0,0)`, i.e. SERVER-local midnight,
+      // while `_dayRange` (used by every read) works in Bangladesh time. On a UTC
+      // host the two agree for most of the day and diverge between 00:00 and
+      // 06:00 Dhaka: a register opened at 2am was written with yesterday's UTC
+      // midnight, which falls outside today's Bangladesh range, so
+      // `getTodayRegister` reported no register existed and a second one could be
+      // opened for the same day — until the unique index on
+      // {shop, branch, date} refused it and the till could not be opened at all.
+      //
+      // This is the exact defect the header comment on `_dayRange` describes as
+      // fixed; the write path had been missed.
       register = await CashRegister.create({
         shop: shopId,
         branch: branchId,
-        date: today,
+        date: start,
         openingBalance: openingBalance || 0,
         createdBy: userId,
       });
@@ -638,11 +664,12 @@ class CashRegisterService {
     if (startDate || endDate) {
       query.date = {};
       if (startDate) query.date.$gte = new Date(startDate);
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        query.date.$lte = end;
-      }
+      // End of the BANGLADESH day, not the server's. `setHours(23,59,59,999)` on
+      // a UTC host ended the window at 05:59 the next morning Dhaka time, so the
+      // history list and the registers it lists disagreed about which day a
+      // register belonged to — the same six-hour drift `_dayRange` exists to
+      // eliminate.
+      if (endDate) query.date.$lte = endOfBangladeshDay(endDate);
     }
 
     const [registers, total] = await Promise.all([

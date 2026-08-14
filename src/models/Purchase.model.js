@@ -94,6 +94,25 @@ const purchaseItemSchema = new mongoose.Schema({
   total: {
     type: Number,
     required: true
+  },
+  // ── What this line did to the shelf's cost basis ───────────────────────────
+  //
+  // Receiving goods re-blends `Product.buyingPrice` as a moving weighted average
+  // (see costing.util.js). These two record the before and after so a
+  // cancellation can tell whether it is still the owner of that number: if the
+  // product's cost has moved on since — a later delivery, a manual edit —
+  // reversing to `costBefore` would throw away a figure this purchase did not
+  // set. `cancelPurchase` restores only when `costAfter` still stands.
+  //
+  // Absent on every purchase written before costing existed, and on any line
+  // received at zero cost (which deliberately does not move the average).
+  costBefore: {
+    type: Number,
+    min: [0, 'ক্রয় মূল্য ০ এর কম হতে পারবে না']
+  },
+  costAfter: {
+    type: Number,
+    min: [0, 'ক্রয় মূল্য ০ এর কম হতে পারবে না']
   }
 }, { _id: true });
 

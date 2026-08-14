@@ -26,6 +26,12 @@ const {
   buildVariantStockUpdate,
 } = require('../utils/quantity.util');
 const { resolveLineQuantity, unitPriceFor } = require('../utils/packaging.util');
+const {
+  computeInvoiceTotals,
+  clampPaymentLegs,
+  statusFor,
+  toMoney,
+} = require('../utils/invoiceMath.util');
 const { priceTierFor, sellingPriceFor, hasWholesalePrice } = require('../utils/pricing.util');
 const { deductBatches, restoreBatches, batchWriteOp } = require('../utils/batch.util');
 const { hasFeature } = require('../utils/features.util');
@@ -221,6 +227,16 @@ class SaleService {
       query.status = { $ne: 'cancelled' };
     }
 
+    // `totalSales` and `totalProfit` are NET of returns (`netSaleAmountExpr`
+    // subtracts `returnedAmount`; `Sale.profit` already carries
+    // `returnedProfit`). `totalPaid` is GROSS — it is what was collected against
+    // these invoices, and a cash refund is a separate movement out of the
+    // drawer, not an un-collection.
+    //
+    // Mixing the two without saying so made the cards unreconcilable on any day
+    // with a return: sales fell, paid did not, and nothing on screen explained
+    // the gap. `totalReturned` is that explanation, so the four figures tie out
+    // as `totalSales = (gross sales) - totalReturned`.
     const result = await Sale.aggregate([
       { $match: query },
       {
@@ -230,12 +246,15 @@ class SaleService {
           totalPaid: { $sum: '$paid' },
           totalDue: { $sum: '$due' },
           totalProfit: { $sum: '$profit' },
+          totalReturned: { $sum: { $ifNull: ['$returnedAmount', 0] } },
           count: { $sum: 1 },
         },
       },
     ]);
 
-    return result[0] || { totalSales: 0, totalPaid: 0, totalDue: 0, totalProfit: 0, count: 0 };
+    return result[0] || {
+      totalSales: 0, totalPaid: 0, totalDue: 0, totalProfit: 0, totalReturned: 0, count: 0,
+    };
   }
 
   // Get single sale by ID
@@ -717,7 +736,10 @@ class SaleService {
           discount: comboItemDiscount,
           total: comboItemTotal,
         });
-        subtotal += comboItemTotal;
+        // Quantized on every accumulation, not just at the end: summing raw
+        // doubles is what puts 0.30000000000000004 into a subtotal and leaves
+        // an invoice with a due of 1.4e-14 that no payment can clear.
+        subtotal = quantizeMoney(subtotal + comboItemTotal);
         continue;
       }
 
@@ -971,7 +993,8 @@ class SaleService {
         total: itemTotal,
       });
 
-      subtotal += itemTotal;
+      // Quantized on every accumulation — see the combo branch above.
+      subtotal = quantizeMoney(subtotal + itemTotal);
     }
 
     // --- BATCH: Execute all stock updates in one bulkWrite with race-condition guard ---
@@ -1005,16 +1028,43 @@ class SaleService {
       await StockTransaction.insertMany(stockTransactions, sessionOpt);
     }
 
-    let discountAmount = discount;
-    if (discountType === 'percentage') {
-      discountAmount = (subtotal * discount) / 100;
-    }
+    // ── Every derived money figure, from the ONE shared definition ────────────
+    //
+    // This block used to do its own arithmetic and hand the results to
+    // `Customer` / `CustomerBalance` below, while `Sale.pre('save')` computed
+    // the same figures again its own way for the invoice. The two disagreed on
+    // every overpayment (the POS paid box is free text, so a cashier keying the
+    // tendered ৳500 on a ৳420 bill credited the customer ৳80 they never paid),
+    // on any discount larger than the bill, and on a non-numeric `tax` — the
+    // sale routes carry no Joi schema, so `tax` arrived unvalidated.
+    //
+    // Now both call `computeInvoiceTotals` and neither does money arithmetic of
+    // its own, so the invoice and the ledger cannot drift apart again. See the
+    // header of invoiceMath.util.js.
+    const totals = computeInvoiceTotals({
+      subtotal,
+      discount,
+      discountType,
+      tax,
+      deliveryCharge,
+      paid,
+    });
 
-    const numDeliveryCharge = Number(deliveryCharge) || 0;
-    const numAdvancePaid = Number(advancePaid) || 0;
-    const total = subtotal - discountAmount + tax + numDeliveryCharge;
-    const due = Math.max(0, total - paid);
-    const status = due <= 0 ? 'completed' : (paid > 0 ? 'partial' : 'unpaid');
+    subtotal = totals.subtotal;
+    const numDeliveryCharge = totals.deliveryCharge;
+    const numAdvancePaid = toMoney(advancePaid);
+    const total = totals.total;
+    // Clamped to the total. Everything downstream — the customer ledger, the
+    // Payment row, the SMS receipt — reads THIS value, so no consumer can see a
+    // figure the invoice itself rejected.
+    paid = totals.paid;
+    const due = totals.due;
+    const status = statusFor({ due, paid });
+
+    // The legs have to be trimmed to match, or the cash register (which sums
+    // `payments[]` to work out what is in the drawer) counts the change handed
+    // back as takings. See `clampPaymentLegs`.
+    payments = clampPaymentLegs(payments, paid);
 
     // Handle customer.
     //
@@ -1080,9 +1130,19 @@ class SaleService {
           priceTier,
           items: processedItems,
           subtotal,
-          discount,
+          // The NORMALISED figures, not the raw request values. Storing the raw
+          // ones left Mongoose to cast them: a non-numeric `tax` that
+          // `computeInvoiceTotals` had already read as 0 would then throw a
+          // CastError here, so the invoice was rejected over a field the
+          // arithmetic had deliberately tolerated.
+          //
+          // `discount` and `discountType` keep their given meaning — "10" and
+          // 'percentage' — because that is what the invoice has to print. The
+          // resolved taka figure rides alongside as `discountAmount`, written by
+          // the hook; see that field's note for why reports must sum it.
+          discount: toMoney(discount),
           discountType,
-          tax,
+          tax: totals.tax,
           total,
           paid,
           due,
@@ -1134,7 +1194,20 @@ class SaleService {
       }, session);
     }
 
-    // Create payment record if paid amount > 0
+    // Create payment record if paid amount > 0.
+    //
+    // ── `atCheckout` is load-bearing, not metadata ───────────────────────────
+    //
+    // This row exists so the invoice's payment history is complete. But the
+    // money it describes is ALSO in `sale.payments[]`, and the cash register
+    // counts both: `cashSales` sums the legs, `cashDueCollections` sums every
+    // `Payment{type:'sale_payment'}`. Untagged, this row made the till's
+    // expected closing over by the whole day's cash takings — the drawer looked
+    // short by exactly what was in it, every single day.
+    //
+    // The flag is what tells the register "this one is already counted". Money
+    // collected LATER against the same invoice (`recordPayment`) leaves the flag
+    // false and is counted there, which is the case that bucket exists for.
     if (paid > 0) {
       await Payment.create([{
         shop: shopId,
@@ -1144,6 +1217,7 @@ class SaleService {
         amount: paid,
         method: paymentMethod,
         type: 'sale_payment',
+        atCheckout: true,
         receivedBy: userId,
       }], sessionOpt);
     }
@@ -1221,97 +1295,154 @@ class SaleService {
     });
   }
 
-  // Record payment for existing sale
+  // Record payment for existing sale.
+  //
+  // ── Transactional, and guarded against a concurrent collection ─────────────
+  //
+  // This was a plain read-modify-write outside any transaction: read the sale,
+  // check `amount > sale.due`, mutate, save. Two collections against the same
+  // invoice at once — the counter and the owner's phone, or a double-tapped
+  // button — both passed the check against the same stale `due`, and the second
+  // `save()` overwrote the first. Both `Payment` rows and both `Customer.$inc`
+  // decrements survived, so the customer's ledger went down by twice what the
+  // invoice recorded, with nothing to show which was wrong.
+  //
+  // Two changes fix it: the whole thing runs in a transaction (as `createSale`
+  // and `createReturn` already do), and the sale is claimed with a conditional
+  // `updateOne` whose filter re-asserts the due. Losing that race is a 409, not
+  // a silent overwrite.
   async recordPayment(shopId, userId, saleId, paymentData, branchId = null) {
-    const { amount, method, transactionId, notes } = paymentData;
+    return await runInTransaction(async (session) => {
+      const sessionOpt = session ? { session } : {};
+      const { method, transactionId, notes } = paymentData;
 
-    const saleQuery = { _id: saleId, shop: shopId };
-    if (branchId) saleQuery.branch = branchId;
-    const sale = await Sale.findOne(saleQuery);
-    if (!sale) {
-      throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
-    }
+      // Coerced and bounded before anything reads it. `amount` arrives from a
+      // route with no Joi schema, and the only check here used to be
+      // `amount > sale.due` — which a NEGATIVE amount passes. That ran the
+      // ledger backwards: `paid` down, `due` up, and a negative cash-in row the
+      // register subtracted from the drawer. `purchase.recordPayment` has always
+      // had the `<= 0` guard; the asymmetry was the bug.
+      const amount = toMoney(paymentData.amount);
+      if (amount <= 0) {
+        throw new AppError(
+          'Payment amount must be greater than 0',
+          'পেমেন্টের পরিমাণ ০ এর বেশি হতে হবে',
+          400
+        );
+      }
 
-    if (sale.status === 'cancelled') {
-      throw new AppError('Cannot record payment for cancelled sale', 'বাতিল বিক্রয়ে পেমেন্ট নেওয়া যাবে না', 400);
-    }
+      const saleQuery = { _id: saleId, shop: shopId };
+      if (branchId) saleQuery.branch = branchId;
+      const sale = await Sale.findOne(saleQuery).session(session || null);
+      if (!sale) {
+        throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
+      }
 
-    if (amount > sale.due) {
-      throw new AppError('Payment amount exceeds due balance', 'পেমেন্টের পরিমাণ বাকির চেয়ে বেশি', 400);
-    }
+      if (sale.status === 'cancelled') {
+        throw new AppError('Cannot record payment for cancelled sale', 'বাতিল বিক্রয়ে পেমেন্ট নেওয়া যাবে না', 400);
+      }
 
-    // Update sale
-    sale.paid += amount;
-    sale.due -= amount;
-    sale.status = sale.due <= 0 ? 'completed' : 'partial';
-    await sale.save();
+      if (amount > sale.due) {
+        throw new AppError('Payment amount exceeds due balance', 'পেমেন্টের পরিমাণ বাকির চেয়ে বেশি', 400);
+      }
 
-    // Create payment record
-    const payment = await Payment.create({
-      shop: shopId,
-      branch: sale.branch || null,
-      sale: saleId,
-      customer: sale.customer,
-      amount,
-      method: method || 'cash',
-      transactionId,
-      type: 'sale_payment',
-      notes,
-      receivedBy: userId,
-    });
+      const beforePaid = sale.paid;
+      const beforeDue = sale.due;
 
-    // Update customer balance if applicable
-    if (sale.customer) {
-      await Customer.findByIdAndUpdate(sale.customer, {
-        $inc: { totalPaid: amount, totalDue: -amount },
-      });
+      // Claim the payment atomically. `due: { $gte: amount }` is the guard: if a
+      // concurrent collection got there first the filter no longer matches and
+      // nothing is written, exactly as the stock `$gte` guard works in
+      // `createSale`. The derived fields are recomputed by the `save()` below,
+      // which is a pure function of the document (see `Sale.pre('save')`), so
+      // writing `paid` here and re-deriving there cannot disagree.
+      const claim = await Sale.updateOne(
+        { _id: sale._id, shop: shopId, status: { $ne: 'cancelled' }, due: { $gte: amount } },
+        { $inc: { paid: amount } },
+        sessionOpt
+      );
+      if (claim.modifiedCount !== 1) {
+        throw new AppError(
+          'This invoice was settled by another payment — please reload and retry.',
+          'এই বিলে ইতিমধ্যে অন্য একটি পেমেন্ট জমা হয়েছে — পাতা রিফ্রেশ করে আবার চেষ্টা করুন।',
+          409
+        );
+      }
 
-      // Attributed to the SALE's branch, not the collector's. The due being
-      // cleared belongs to whichever branch raised the invoice; crediting it to
-      // the branch that happened to take the cash would leave the issuing
-      // branch permanently overstated and the collecting one negative. The
-      // Payment row above keeps `sale.branch` for the same reason.
-      await CustomerBalance.applyDelta({
+      // Re-read and save so `due`, `status` and `profit` are re-derived from the
+      // returns accumulators rather than patched by hand — the arithmetic that
+      // used to live here ignored `returnedAdjustment` entirely.
+      const claimed = await Sale.findById(sale._id).session(session || null);
+      await claimed.save(sessionOpt);
+
+      // Create payment record. `atCheckout` stays false: this is money arriving
+      // AFTER the sale, which is precisely what the cash register's
+      // due-collection bucket is for.
+      const [payment] = await Payment.create([{
         shop: shopId,
-        customer: sale.customer,
-        branch: sale.branch,
-        paid: amount,
-        due: -amount,
-      });
-    }
-
-    // Create audit log
-    await AuditLog.create({
-      shop: shopId,
-      user: userId,
-      action: 'payment_received',
-      actionBn: 'পেমেন্ট গ্রহণ',
-      description: `Received ৳${amount} for ${sale.invoiceNo}`,
-      descriptionBn: `${sale.invoiceNo} এর জন্য ৳${amount} পেমেন্ট গ্রহণ`,
-      entity: {
-        type: 'sale',
-        id: sale._id,
-        name: sale.invoiceNo,
-      },
-      changes: {
-        before: { paid: sale.paid - amount, due: sale.due + amount },
-        after: { paid: sale.paid, due: sale.due },
-      },
-    });
-
-    // Send payment receipt SMS (non-blocking — runs in background)
-    if (sale.customer) {
-      const SMSService = require('./sms.service');
-      SMSService.sendPaymentReceiptAsync(shopId, userId, {
-        customerId: sale.customer,
+        branch: claimed.branch || null,
+        sale: saleId,
+        customer: claimed.customer,
         amount,
-      });
-    }
+        method: method || 'cash',
+        transactionId,
+        type: 'sale_payment',
+        notes,
+        receivedBy: userId,
+      }], sessionOpt);
 
-    // Invalidate related caches
-    this.invalidateCache(shopId).catch(() => {}); // Non-blocking
+      // Update customer balance if applicable
+      if (claimed.customer) {
+        await Customer.findByIdAndUpdate(claimed.customer, {
+          $inc: { totalPaid: amount, totalDue: -amount },
+        }, sessionOpt);
 
-    return { sale, payment };
+        // Attributed to the SALE's branch, not the collector's. The due being
+        // cleared belongs to whichever branch raised the invoice; crediting it to
+        // the branch that happened to take the cash would leave the issuing
+        // branch permanently overstated and the collecting one negative. The
+        // Payment row above keeps `sale.branch` for the same reason.
+        await CustomerBalance.applyDelta({
+          shop: shopId,
+          customer: claimed.customer,
+          branch: claimed.branch,
+          paid: amount,
+          due: -amount,
+        }, session);
+      }
+
+      // Create audit log
+      await AuditLog.create([{
+        shop: shopId,
+        user: userId,
+        action: 'payment_received',
+        actionBn: 'পেমেন্ট গ্রহণ',
+        description: `Received ৳${amount} for ${claimed.invoiceNo}`,
+        descriptionBn: `${claimed.invoiceNo} এর জন্য ৳${amount} পেমেন্ট গ্রহণ`,
+        entity: {
+          type: 'sale',
+          id: claimed._id,
+          name: claimed.invoiceNo,
+        },
+        changes: {
+          before: { paid: beforePaid, due: beforeDue },
+          after: { paid: claimed.paid, due: claimed.due },
+        },
+      }], sessionOpt);
+
+      // Send payment receipt SMS (non-blocking — runs in background)
+      if (claimed.customer) {
+        const SMSService = require('./sms.service');
+        SMSService.sendPaymentReceiptAsync(shopId, userId, {
+          customerId: claimed.customer,
+          amount,
+        });
+      }
+
+      // Invalidate related caches
+      this.invalidateCache(shopId).catch(() => {}); // Non-blocking
+
+      return { sale: claimed, payment };
+    });
   }
 
   // Cancel sale
@@ -1325,6 +1456,26 @@ class SaleService {
 
     if (sale.status === 'cancelled') {
       throw new AppError('Sale is already cancelled', 'বিক্রয় ইতিমধ্যে বাতিল করা হয়েছে', 400);
+    }
+
+    // ── A partly-returned invoice cannot be cancelled ─────────────────────────
+    //
+    // Cancellation restores every line's FULL `item.quantity` and unwinds the
+    // whole of `sale.total` / `sale.paid` from the customer's ledger. A return
+    // has already put some of that stock back and already reduced
+    // `totalPurchases` by the refund. Doing both counts the goods twice on the
+    // shelf and credits the customer twice.
+    //
+    // A FULL return already reaches 'cancelled' via `createReturn` and so was
+    // caught by the guard above — only the partial case fell through, which is
+    // why this went unnoticed. The remedy is to return the rest, not to cancel:
+    // a return is the reversal that knows what has already been reversed.
+    if ((sale.returnedAmount || 0) > 0) {
+      throw new AppError(
+        'This sale has returns against it — return the remaining items instead of cancelling.',
+        'এই বিক্রয়ের বিপরীতে মাল ফেরত নেওয়া হয়েছে — বাতিল না করে বাকি পণ্যগুলোও ফেরত নিন।',
+        400
+      );
     }
 
     // --- BATCH: Restore stock using bulkWrite ---

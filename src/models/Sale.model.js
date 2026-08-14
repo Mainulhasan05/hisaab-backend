@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const { PAYMENT_METHODS, SALE_STATUS } = require('../config/constants');
 const { immutableGuard } = require('../utils/immutableGuard.util');
 const { quantizeMoney } = require('../utils/quantity.util');
+const { computeInvoiceTotals, statusFor } = require('../utils/invoiceMath.util');
 
 const saleItemSchema = new mongoose.Schema({
   product: {
@@ -215,6 +216,29 @@ const saleSchema = new mongoose.Schema({
     enum: ['fixed', 'percentage'],
     default: 'fixed'
   },
+  /**
+   * The invoice discount in TAKA, resolved from `discount` + `discountType` and
+   * bounded to the subtotal. Derived by `pre('save')`, never sent by a client.
+   *
+   * ── Why this is stored rather than re-derived ──────────────────────────────
+   *
+   * `discount` alone is ambiguous: on a percentage invoice it holds "10", and
+   * every reader that treated it as money was wrong. `report.service` summed it
+   * straight — `$sum: '$discount'` — so a month of 10% discounts contributed ৳10
+   * each to "total discount given" regardless of the invoice size, and the
+   * figure was meaningless for any shop that discounts by percentage.
+   *
+   * Re-deriving it per reader is what let the sales-return path and the model
+   * drift apart in the first place. One derivation, stored once.
+   *
+   * Absent on sales written before this field existed; readers that need it for
+   * history should fall back through `invoiceMath.discountAmountFor`.
+   */
+  discountAmount: {
+    type: Number,
+    default: 0,
+    min: [0, 'ছাড় ০ এর কম হতে পারবে না']
+  },
   tax: {
     type: Number,
     default: 0,
@@ -387,53 +411,60 @@ saleSchema.index({ shop: 1, createdBy: 1, createdAt: -1 }); // Staff attribution
 // there because they satisfy the equality on `shop` as well as the sort.
 saleSchema.index({ createdAt: -1 });
 
-// Calculate totals before saving
+// Calculate totals before saving.
+//
+// Every figure here comes out of `invoiceMath.computeInvoiceTotals`, which
+// `sale.service.createSale` also calls before it writes the customer ledger.
+// That sharing is the point: this hook and the service used to compute `total`,
+// `paid`, `due` and `status` separately and disagree on overpayments, on
+// discounts larger than the bill, and on any non-numeric `tax` — so the invoice
+// and `Customer.totalDue` drifted apart on ordinary checkouts. See the header of
+// invoiceMath.util.js for the three cases.
 saleSchema.pre('save', function(next) {
-  // Calculate subtotal from items
-  this.subtotal = this.items.reduce((sum, item) => sum + item.total, 0);
+  const totals = computeInvoiceTotals({
+    subtotal: this.items.reduce((sum, item) => sum + (Number(item.total) || 0), 0),
+    discount: this.discount,
+    discountType: this.discountType,
+    tax: this.tax,
+    deliveryCharge: this.deliveryCharge,
+    paid: this.paid,
+    // `due` and `profit` both carry the returns terms, so that saving the
+    // document for an unrelated reason cannot undo a return. See the
+    // accumulator block on the schema above for why they are stored fields.
+    //
+    // Only `returnedAdjustment` reduces the due — a return refunded in CASH
+    // hands the money back and leaves the obligation exactly where it was.
+    // Zeroing the due on any full return (which is what this used to do) wrote
+    // off debt with no counterpart on the customer's ledger: a ৳1000 invoice
+    // with ৳300 paid, fully refunded in cash, paid out ৳1000, read as settled,
+    // and left the customer still owing ৳700 in `Customer.totalDue` with
+    // nothing on the invoice to explain it.
+    returnedAdjustment: this.returnedAdjustment,
+  });
 
-  // Calculate total
-  let discountAmount = this.discount;
-  if (this.discountType === 'percentage') {
-    discountAmount = (this.subtotal * this.discount) / 100;
-  }
+  this.subtotal = totals.subtotal;
+  this.discountAmount = totals.discountAmount;
+  this.tax = totals.tax;
+  this.deliveryCharge = totals.deliveryCharge;
+  this.total = totals.total;
+  this.paid = totals.paid;
+  this.due = totals.due;
 
-  const delivery = this.deliveryCharge || 0;
-  this.total = Math.min(Math.max(0, this.subtotal - discountAmount + this.tax + delivery), 1e11);
-  if (!Number.isFinite(this.paid) || this.paid > this.total) {
-    this.paid = Math.min(Math.max(0, this.paid || 0), this.total);
-  }
-
-  // `due` and `profit` both carry the returns terms, so that saving the document
-  // for an unrelated reason cannot undo a return. See the accumulator block on
-  // the schema above for why they are stored fields.
-  //
-  // Only `returnedAdjustment` reduces the due — a return refunded in CASH hands
-  // the money back and leaves the obligation exactly where it was. Zeroing the
-  // due on any full return (which is what this used to do) wrote off debt with
-  // no counterpart on the customer's ledger: a ৳1000 invoice with ৳300 paid,
-  // fully refunded in cash, paid out ৳1000, read as settled, and left the
-  // customer still owing ৳700 in `Customer.totalDue` with nothing on the
-  // invoice to explain it.
-  this.due = Math.max(0, this.total - this.paid - (this.returnedAdjustment || 0));
-
-  // Calculate profit, net of anything returned.
+  // Calculate profit, net of anything returned. Quantized per line before
+  // summing, for the same reason the invoice figures are: an unrounded product
+  // of a fractional quantity and a paisa price propagates into every profit
+  // report downstream.
   const itemsProfit = this.items.reduce((sum, item) => {
-    const itemProfit = (item.unitPrice - (item.buyingPrice || 0)) * item.quantity - item.discount;
-    return sum + itemProfit;
+    const lineProfit = quantizeMoney(
+      ((Number(item.unitPrice) || 0) - (Number(item.buyingPrice) || 0)) * (Number(item.quantity) || 0)
+        - (Number(item.discount) || 0)
+    );
+    return quantizeMoney(sum + lineProfit);
   }, 0);
-  this.profit = quantizeMoney(itemsProfit - discountAmount - (this.returnedProfit || 0));
+  this.profit = quantizeMoney(itemsProfit - totals.discountAmount - (this.returnedProfit || 0));
 
   // Set payment status unless the sale has been explicitly cancelled.
-  if (this.status !== SALE_STATUS.CANCELLED) {
-    if (this.due === 0) {
-      this.status = SALE_STATUS.COMPLETED;
-    } else if (this.paid > 0) {
-      this.status = SALE_STATUS.PARTIAL;
-    } else {
-      this.status = SALE_STATUS.UNPAID;
-    }
-  }
+  this.status = statusFor({ due: this.due, paid: this.paid, current: this.status });
 
   next();
 });

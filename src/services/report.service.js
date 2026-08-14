@@ -718,7 +718,13 @@ class ReportService {
             totalProfit: { $sum: '$profit' },
             totalPaid: { $sum: '$paid' },
             totalDue: { $sum: '$due' },
-            totalDiscount: { $sum: '$discount' },
+            // `discountAmount`, not `discount`. The latter holds "10" on a
+            // percentage invoice, so summing it reported ৳10 of discount given
+            // on a ৳10,000 sale — the figure was meaningless for any shop that
+            // discounts by percentage. `$ifNull` falls back for invoices written
+            // before the resolved amount was stored; those are overwhelmingly
+            // `fixed`, where the two fields agree by definition.
+            totalDiscount: { $sum: { $ifNull: ['$discountAmount', '$discount'] } },
             totalItems: { $sum: { $size: '$items' } },
             count: { $sum: 1 },
           },
@@ -1101,7 +1107,19 @@ class ReportService {
             totalProfit: { $sum: '$profit' },
             totalPaid: { $sum: '$paid' },
             totalDue: { $sum: '$due' },
-            totalDiscount: { $sum: '$discount' },
+            // `discountAmount`, not `discount`. The latter holds "10" on a
+            // percentage invoice, so summing it reported ৳10 of discount given
+            // on a ৳10,000 sale — the figure was meaningless for any shop that
+            // discounts by percentage. `$ifNull` falls back for invoices written
+            // before the resolved amount was stored; those are overwhelmingly
+            // `fixed`, where the two fields agree by definition.
+            totalDiscount: { $sum: { $ifNull: ['$discountAmount', '$discount'] } },
+            // Needed to strip pass-through money out of the COGS derivation
+            // below. Neither is refunded by a return, so both stay whole even on
+            // a fully-returned invoice — which is exactly why subtracting them
+            // from the NET revenue is correct.
+            totalTax: { $sum: { $ifNull: ['$tax', 0] } },
+            totalDelivery: { $sum: { $ifNull: ['$deliveryCharge', 0] } },
             count: { $sum: 1 },
           },
         },
@@ -1223,13 +1241,36 @@ class ReportService {
       ]),
     ]);
 
-    const sales = salesAgg[0] || { totalRevenue: 0, totalProfit: 0, totalPaid: 0, totalDue: 0, totalDiscount: 0, count: 0 };
+    const sales = salesAgg[0] || {
+      totalRevenue: 0, totalProfit: 0, totalPaid: 0, totalDue: 0,
+      totalDiscount: 0, totalTax: 0, totalDelivery: 0, count: 0,
+    };
     const expenses = expenseAgg[0] || { totalExpenses: 0, count: 0 };
     const returns = returnsAgg[0] || { totalReturns: 0, totalProfitLoss: 0, count: 0 };
     const purchases = purchaseAgg[0] || { totalPurchases: 0, totalPaid: 0, totalDue: 0, count: 0 };
 
-    // COGS = Revenue - Profit (since profit = revenue - COGS - discounts, and revenue already has discounts subtracted)
-    const cogs = sales.totalRevenue - sales.totalProfit;
+    /**
+     * ── COGS is derived from MERCHANDISE revenue, not from total revenue ──────
+     *
+     * This was `totalRevenue - totalProfit`, and the identity it relied on does
+     * not hold: `revenue` sums `Sale.total`, which includes `tax` and
+     * `deliveryCharge`, while `Sale.profit` counts neither of them (see the
+     * pre-save hook — profit is built from line margins less discounts). So
+     * every taka of delivery the shop billed, and every taka of tax it merely
+     * collected on someone else's behalf, was reported as cost of goods sold.
+     *
+     * For a shop doing home delivery that is not a rounding error: the whole
+     * delivery line lands in COGS and gross margin reads far worse than it is.
+     *
+     * Stripping both terms leaves the merchandise revenue the margin actually
+     * came from, and the three figures now tie out exactly —
+     * `merchandiseRevenue - cogs === grossProfit` — because that identity is
+     * what `Sale.pre('save')` computes per invoice.
+     */
+    const merchandiseRevenue = quantizeMoney(
+      Math.max(0, sales.totalRevenue - (sales.totalTax || 0) - (sales.totalDelivery || 0))
+    );
+    const cogs = quantizeMoney(Math.max(0, merchandiseRevenue - sales.totalProfit));
 
     /**
      * Net profit = Sales profit - Expenses. Returns are NOT subtracted here,
@@ -1265,6 +1306,11 @@ class ReportService {
     const result = {
       // Summary
       revenue: sales.totalRevenue,
+      // Revenue less the two pass-through lines. Exposed so the P&L can show
+      // why `revenue - cogs` is not `grossProfit` when a shop bills delivery.
+      merchandiseRevenue,
+      tax: sales.totalTax || 0,
+      deliveryCharge: sales.totalDelivery || 0,
       cogs,
       grossProfit: sales.totalProfit,
       totalExpenses: expenses.totalExpenses,

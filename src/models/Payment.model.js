@@ -47,6 +47,36 @@ const paymentSchema = new mongoose.Schema({
     },
     default: PAYMENT_TYPES.SALE_PAYMENT
   },
+  /**
+   * Was this row written by `createSale` as the checkout leg?
+   *
+   * ── Why a flag and not an inference ────────────────────────────────────────
+   *
+   * Checkout money is recorded TWICE by design: once inside `Sale.payments[]`
+   * (which is what makes split payments legible) and once as a `Payment` row
+   * (which is what makes the invoice's payment history complete). Both are
+   * wanted. What was missing was any way to tell the two apart afterwards —
+   * `type` is `sale_payment` either way and `sale` is set either way.
+   *
+   * `cashRegister._calculateCashFlows` reads both: it sums the cash legs of
+   * every sale, AND sums every cash `Payment{type:'sale_payment'}`. So every
+   * cash checkout was counted twice and the till's expected closing ran over by
+   * the day's takings — the drawer appeared short by exactly the money in it.
+   * The comment there asserted the two streams were disjoint; they never were.
+   *
+   * With the flag they are: `true` means "already counted in `Sale.payments[]`",
+   * `false` means money that arrived later (`recordPayment`, `collectDuePayment`)
+   * and is counted only here.
+   *
+   * Rows written before this field existed read `false` and would be
+   * double-counted, so `scripts/backfill-payment-at-checkout.js` stamps them.
+   * Only OPEN registers recalculate, so in practice that is same-day rows —
+   * closed registers are settled records and are deliberately left alone.
+   */
+  atCheckout: {
+    type: Boolean,
+    default: false
+  },
   transactionId: {
     type: String,
     trim: true

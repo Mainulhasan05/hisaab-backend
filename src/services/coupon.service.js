@@ -1,6 +1,8 @@
 const Coupon = require('../models/Coupon.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
+const { discountAmountFor } = require('../utils/invoiceMath.util');
+const { quantizeMoney } = require('../utils/quantity.util');
 
 class CouponService {
   // Create coupon
@@ -187,19 +189,17 @@ class CouponService {
       );
     }
 
-    // Calculate discount
-    let discountAmount = 0;
-    if (coupon.discountType === 'percentage') {
-      discountAmount = (cartTotal * coupon.discountValue) / 100;
-      if (coupon.maxDiscount > 0 && discountAmount > coupon.maxDiscount) {
-        discountAmount = coupon.maxDiscount;
-      }
-    } else {
-      discountAmount = coupon.discountValue;
+    // Calculate discount. `discountAmountFor` is the same bounded definition the
+    // invoice itself uses, so a percentage above 100 cannot produce a discount
+    // larger than the cart — and, more importantly, so the number quoted here
+    // and the number the sale applies come from one function.
+    let discountAmount = discountAmountFor(cartTotal, coupon.discountValue, coupon.discountType);
+    if (coupon.discountType === 'percentage' && coupon.maxDiscount > 0) {
+      discountAmount = Math.min(discountAmount, quantizeMoney(coupon.maxDiscount));
     }
 
     // Discount cannot exceed cart total
-    discountAmount = Math.min(discountAmount, cartTotal);
+    discountAmount = Math.min(discountAmount, quantizeMoney(cartTotal));
 
     return {
       valid: true,
@@ -211,7 +211,11 @@ class CouponService {
         description: coupon.description,
         descriptionBn: coupon.descriptionBn,
       },
-      discountAmount: Math.round(discountAmount),
+      // Paisa, not whole taka. `Math.round` here meant a ৳7.50 coupon discount
+      // was quoted as ৳8 and the sale then applied ৳7.50 — the customer was
+      // shown one number and charged another, and the two drifted further apart
+      // the more coupons a shop used.
+      discountAmount: quantizeMoney(discountAmount),
     };
   }
 

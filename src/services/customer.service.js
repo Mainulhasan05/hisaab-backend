@@ -11,6 +11,7 @@ const { normalizePhone } = require('../utils/phone.util');
 const { runInTransaction } = require('../utils/transaction.util');
 const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.util');
 const { resolveWholesaleFlag } = require('../utils/pricing.util');
+const { toMoney } = require('../utils/invoiceMath.util');
 const mongoose = require('mongoose');
 
 /** Escape user input before it reaches $regex — raw input is a ReDoS vector. */
@@ -884,7 +885,21 @@ class CustomerService {
   async collectDuePayment(shopId, userId, customerId, paymentData, req) {
     return await runInTransaction(async (session) => {
       const sessionOpt = session ? { session } : {};
-      const { amount, method, transactionId, notes } = paymentData;
+      const { method, transactionId, notes } = paymentData;
+
+    // Coerced and bounded before anything reads it. The only check below was
+    // `amount > due`, which a NEGATIVE amount passes — and a negative collection
+    // ran the ledger backwards: `totalPaid` down, `totalDue` UP, plus a negative
+    // cash-in row that the register subtracted from the drawer. There is no Joi
+    // schema on the customer routes, so this is the boundary.
+    const amount = toMoney(paymentData.amount);
+    if (amount <= 0) {
+      throw new AppError(
+        'Payment amount must be greater than 0',
+        'পেমেন্টের পরিমাণ ০ এর বেশি হতে হবে',
+        400
+      );
+    }
 
     const customer = await Customer.findOne({ _id: customerId, shop: shopId }).session(session || null);
     if (!customer) {
