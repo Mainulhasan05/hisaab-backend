@@ -106,7 +106,35 @@ describe('Preset upgrade', () => {
   });
 
   it('has nothing pending for presets with no upgrades', () => {
-    expect(buildPresetUpgradePatch('manager', 0)).toBeNull();
+    // `salesperson` and `inventory_manager` are named in no PRESET_UPGRADES
+    // entry, so an upgrade from version 0 has nothing to grant them.
+    //
+    // This used to assert the same of `manager`, which was true only until
+    // manager gained the v3 online-panel grant. The fact under test is "a
+    // preset nobody has upgraded stays untouched", not anything about manager
+    // specifically — so the example moved rather than the assertion.
+    expect(buildPresetUpgradePatch('salesperson', 0)).toBeNull();
+    expect(buildPresetUpgradePatch('inventory_manager', 0)).toBeNull();
+  });
+
+  it('carries the online panel to managers and cashiers (v3)', () => {
+    const manager = buildPresetUpgradePatch('manager', 2);
+    expect(manager['permissions.online_orders.view']).toBe(true);
+    expect(manager['permissions.online_orders.cancel']).toBe(true);
+    expect(manager['permissions.storefront.update']).toBe(true);
+    // Taking the shop's public face live stays the owner's call.
+    expect(manager['permissions.storefront.publish']).toBeUndefined();
+
+    const cashier = buildPresetUpgradePatch('cashier', 2);
+    expect(cashier['permissions.online_orders.view']).toBe(true);
+    expect(cashier['permissions.online_orders.update']).toBe(true);
+    // Orders arrive from Facebook and the phone too, and taking one down is
+    // counter work — see the note in config/permissions.js.
+    expect(cashier['permissions.online_orders.create']).toBe(true);
+    // Cancelling unwinds a Sale, stock and the customer's balance — withheld
+    // for the same reason `sales.delete` is.
+    expect(cashier['permissions.online_orders.cancel']).toBeUndefined();
+    expect(cashier['permissions.storefront.view']).toBeUndefined();
   });
 
   it('ignores grants naming an action the module does not have', () => {

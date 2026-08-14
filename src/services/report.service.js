@@ -940,9 +940,31 @@ class ReportService {
    *
    * The match and the money expressions are the same ones getDailySummary uses,
    * so the digest total always equals what the owner sees on the dashboard.
-   * Note that `revenue` is net of returns while `profit` is not; that asymmetry
-   * is inherited on purpose, because matching the dashboard matters more than
-   * being internally tidy — an owner comparing the two must not find a gap.
+   *
+   * ── BOTH numbers here are net of returns. ─────────────────────────────────
+   *
+   * This comment used to claim the opposite — that `revenue` was net of returns
+   * and `profit` was not, and that the gap was deliberate. It was not true, and
+   * a wrong comment on a money expression is worse than none: the next person to
+   * read it goes looking for the asymmetry, "fixes" it by subtracting
+   * `SalesReturn.profitReduction` somewhere, and double-counts every return on
+   * the platform.
+   *
+   * What actually happens is that a return writes BOTH adjustments back onto the
+   * original `Sale` document, in `salesReturn.service.createReturn`:
+   *
+   *     returnedAmount += refund          → `netSaleAmountExpr` nets revenue
+   *     profit         -= profitReduction → `$sum: '$profit'` is already net
+   *
+   * So the two agree, and `SalesReturn.profitReduction` must never be subtracted
+   * again downstream. `getProfitLoss` reports it as a separate line for the
+   * owner's information and correctly leaves it out of `netProfit`.
+   *
+   * The one consequence worth knowing: because both adjustments land on the
+   * original sale, a return re-dates itself to the day of the SALE. A report for
+   * last Tuesday, re-run after a Tuesday sale is returned on Friday, shows less
+   * revenue and less profit than the same report did on Wednesday. That is a
+   * deliberate accounting choice, not drift.
    */
   async getDigestTotals(shopId, dateStr, { multiBranch = false } = {}) {
     const { startOfDay, endOfDay } = getBangladeshDayRange(dateStr);
@@ -1183,7 +1205,21 @@ class ReportService {
     // COGS = Revenue - Profit (since profit = revenue - COGS - discounts, and revenue already has discounts subtracted)
     const cogs = sales.totalRevenue - sales.totalProfit;
 
-    // Net profit = Sales profit - Expenses - Returns profit loss
+    /**
+     * Net profit = Sales profit - Expenses. Returns are NOT subtracted here,
+     * and the comment that used to sit on this line claiming they were
+     * ("- Returns profit loss") described an expression the code has never
+     * evaluated.
+     *
+     * They are not subtracted because they are already gone: `createReturn`
+     * decrements `profit` on the original Sale, so `sales.totalProfit` above is
+     * net of every return raised against the period. Subtracting
+     * `returns.totalProfitLoss` again would count each return twice.
+     *
+     * It is still reported, as `returnsLoss` below — an owner wants to see how
+     * much of the month walked back through the door, and cannot read that off
+     * a profit figure it has already been removed from.
+     */
     const netProfit = sales.totalProfit - expenses.totalExpenses;
 
     // Merge daily sales and expenses into a single chart dataset

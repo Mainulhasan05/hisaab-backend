@@ -230,6 +230,56 @@ const packagingSchema = new mongoose.Schema({
   }
 }, { _id: false });
 
+/**
+ * One component of a combo product ("Eid Pack = 1x shampoo + 2x soap").
+ *
+ * ── WHY A COMBO IS A PRODUCT AND NOT ITS OWN COLLECTION ──────────────────────
+ * The whole sale pipeline is keyed on Product: POS search, barcode lookup,
+ * `Sale.items.product` (a required ref), per-branch scoping, soft delete, RBAC.
+ * A separate Combo collection would need parallel wiring at every one of those
+ * points. So a combo is `type: 'combo'` on this model, and `comboItems` below
+ * is what it is made of.
+ *
+ * ── A COMBO HAS NO STOCK OF ITS OWN ──────────────────────────────────────────
+ * `stock` on a combo product is inert (kept at 0). How many combos can be sold
+ * is DERIVED at read time — min(component stock / quantity) — and enforced at
+ * sale time by the same $gte-guarded bulk ops every ordinary line uses, one op
+ * per component. There is exactly one stock number per component product, so a
+ * combo can never disagree with the shelf.
+ *
+ * The name/sku fields here are DISPLAY snapshots refreshed on combo save so the
+ * builder and POS can render without a populate. They are NOT the sale-time
+ * record — `Sale.items[].comboComponents` freezes its own copy at checkout,
+ * which is what keeps history immune to combo edits and deletions.
+ */
+const comboItemSchema = new mongoose.Schema({
+  product: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Product',
+    required: [true, 'কম্বোর পণ্য নির্বাচন করুন']
+  },
+  // Required when the component product `hasVariants` — enforced in
+  // product.service._validateComboItems, where the component document is in
+  // hand. Null means "the product itself".
+  variantId: {
+    type: mongoose.Schema.Types.ObjectId,
+    default: null
+  },
+  // Display snapshots (refreshed on every combo save; see the block comment).
+  productName: { type: String },
+  productCode: { type: String },
+  variantSku: { type: String },
+  variantAttributes: { type: mongoose.Schema.Types.Mixed },
+  unit: { type: String },
+  // How many base units of the component go into ONE combo. Buy-1-get-1 of the
+  // same item is a single row with quantity 2.
+  quantity: {
+    type: Number,
+    required: [true, 'পরিমাণ দিন'],
+    min: [0.001, 'পরিমাণ ০ এর বেশি হতে হবে']
+  }
+}, { _id: true });
+
 const productSchema = new mongoose.Schema({
   shop: {
     type: mongoose.Schema.Types.ObjectId,
@@ -320,6 +370,21 @@ const productSchema = new mongoose.Schema({
   // that is simply sold as it is stocked, which is most of them.
   packaging: {
     type: packagingSchema,
+    default: undefined
+  },
+  // 'standard' = an ordinary product. 'combo' = a bundle of other products —
+  // see the block comment on `comboItemSchema`. Immutable after create
+  // (enforced in product.service): a product with sale history changing kind
+  // would orphan either its stock or its components.
+  type: {
+    type: String,
+    enum: ['standard', 'combo'],
+    default: 'standard'
+  },
+  // Only when `type === 'combo'`. `default: undefined` so the ~100% of
+  // ordinary products carry no empty array at all.
+  comboItems: {
+    type: [comboItemSchema],
     default: undefined
   },
   hasVariants: {
@@ -587,6 +652,10 @@ productSchema.index({ shop: 1, isDeleted: 1, totalSold: -1 }); // Popular-first 
 // pulled 200 products and filtered them in the browser, which is why product
 // 201's expiry was invisible.
 productSchema.index({ shop: 1, trackBatches: 1, 'batches.expiryDate': 1 }, { sparse: true });
+// "Which combos contain this product?" — the delete-guard on a component and
+// the availability recompute both ask it. Sparse: only combo products carry the
+// array at all.
+productSchema.index({ shop: 1, 'comboItems.product': 1 }, { sparse: true });
 // Note: Text search removed for scalability - use regex or external search (Elasticsearch) for large datasets
 
 /*

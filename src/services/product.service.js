@@ -22,9 +22,15 @@ const mediaService = require('./media.service');
 const { KEYS, getTTL } = require('../config/cacheKeys');
 const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.util');
 const { capBatchesToStock } = require('../utils/batch.util');
+const { isCombo, assertNotCombo, findComponentVariant, computeComboAvailability } = require('../utils/combo.util');
 
 // Escape user input before embedding it in a $regex (prevents regex injection/ReDoS)
 const escapeRegex = (str) => String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Query-string booleans arrive as the STRINGS 'true'/'false', and `'false'` is
+// truthy. Every existing flag in this file spells that comparison out inline;
+// this is the same test, named once, for the flags added since.
+const isTrue = (v) => v === true || v === 'true';
 
 // Client-controllable sort fields must be whitelisted — arbitrary fields force
 // unindexed in-memory sorts that hard-fail at 32MB on large collections
@@ -57,6 +63,31 @@ const MAX_CATALOG_MEDIA = 5;
 // `description`, and the batch manager reads `batches`.
 const LIST_EXCLUDE = '-description -batches -serials -images -catalogImages';
 
+/**
+ * The same list, but keeping `catalogImages`.
+ *
+ * ── WHY THIS EXISTS RATHER THAN JUST WIDENING LIST_EXCLUDE ──────────────────
+ *
+ * One screen genuinely needs a thumbnail per row: the online catalogue
+ * (`/online/catalog`), which shows which products appear on the website and
+ * refuses to put a photo-less one online. Without the field it cannot tell a
+ * product with three photos from one with none, so it disables every switch
+ * and tells a fully-photographed shop that nothing is ready — which is exactly
+ * what it did before this projection existed.
+ *
+ * Widening `LIST_EXCLUDE` instead would put a subdocument array on every row of
+ * the POS grid, the product list, the import preview and eight other screens
+ * that never render it — on the endpoint fired hardest in the whole app. The
+ * cost is paid by the one screen that asks.
+ *
+ * `images` (the legacy ImgBB Mixed array) stays excluded even here: it is
+ * unbounded in shape, and the online catalogue only needs to know whether a
+ * photo exists. The service reports that separately — see `hasPhoto` on the
+ * client, which treats either array as a photo, and the `$nor` in
+ * `bulkSetOnlineStatus`, which is the authority.
+ */
+const LIST_EXCLUDE_WITH_IMAGES = '-description -batches -serials -images';
+
 // ── Why this is a Symbol and not the string 'fields' ────────────────────────
 //
 // `getProducts` is called as `productService.getProducts(shopId, req.query, req)`
@@ -76,7 +107,7 @@ const PROJECTION = Symbol('projection');
 const POS_FIELDS = [
   'name', 'code', 'barcode', 'hasVariants', 'buyingPrice', 'sellingPrice',
   'wholesalePrice', 'stock', 'minStock', 'unit', 'packaging', 'category',
-  'totalSold', 'variants',
+  'totalSold', 'variants', 'type', 'comboItems',
 ].join(' ');
 
 class ProductService {
@@ -286,7 +317,14 @@ class ProductService {
         // the wire to be deserialised, re-serialised and then never rendered.
         // The POS asks for its own narrower set via the PROJECTION symbol —
         // see LIST_EXCLUDE / POS_FIELDS / PROJECTION at the top of this file.
-        .select(options[PROJECTION] || LIST_EXCLUDE)
+        // `withImages` is a BOOLEAN the caller may set, not a projection —
+        // the Symbol channel above stays the only way to name fields, so a
+        // query string still cannot strip `shop` off every row. The widest
+        // this flag can reach is "also send catalogImages".
+        .select(
+          options[PROJECTION]
+          || (isTrue(options.withImages) ? LIST_EXCLUDE_WITH_IMAGES : LIST_EXCLUDE)
+        )
         .populate('category', 'name')
         // Populated unconditionally rather than behind `hasFeature`. The field
         // is null for every product in a shop without the capability, so this
@@ -300,6 +338,10 @@ class ProductService {
         .lean(),
       Product.countDocuments(query),
     ]);
+
+    // Combo rows get their derived availability/cost — one batched read for
+    // the union of components, nothing for a page with no combos on it.
+    await this._decorateCombos(products);
 
     return {
       data: products.map(p => this._transformProduct(p)),
@@ -357,6 +399,16 @@ class ProductService {
         // Already on the document — surfaced so the POS grid can flag best
         // sellers without a second request.
         totalSold: product.totalSold || 0,
+        // Combo rows: the till renders the derived availability instead of
+        // `stock`, and the component list under the line. Advisory only —
+        // `createSale` re-checks each component under its own atomic guard.
+        ...(product.type === 'combo' ? {
+          type: 'combo',
+          comboItems: product.comboItems || [],
+          comboAvailability: product.comboAvailability ?? 0,
+          comboCost: product.comboCost,
+          comboBroken: product.comboBroken || null,
+        } : {}),
         variants: (product.variants || [])
           .filter((variant) => variant.isActive !== false)
           .map((variant) => ({
@@ -390,7 +442,9 @@ class ProductService {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
     }
 
-    return this._transformProduct(product);
+    const transformed = this._transformProduct(product);
+    if (isCombo(transformed)) await this._decorateCombos([transformed]);
+    return transformed;
   }
 
   // Get product by barcode/code
@@ -463,7 +517,9 @@ class ProductService {
       throw new AppError('Product not found', `"${raw}" দিয়ে কোনো পণ্য পাওয়া যায়নি`, 404);
     }
 
-    return this._transformProduct(product);
+    const transformed = this._transformProduct(product);
+    if (isCombo(transformed)) await this._decorateCombos([transformed]);
+    return transformed;
   }
 
   // Create new product
@@ -663,8 +719,198 @@ class ProductService {
       .filter(Boolean);
   }
 
+  /**
+   * Validate a combo's component list and return the rows to store.
+   *
+   * Everything Joi cannot see is decided here, with the component documents in
+   * hand: existence in THIS shop and branch, not deleted, not deactivated, not
+   * itself a combo (no nesting — a chain of combos makes availability and
+   * deduction order undecidable and buys the shopkeeper nothing), variantId
+   * present exactly when the component has variants, quantity legal for the
+   * component's unit, and no duplicate (product, variant) pair.
+   *
+   * The returned rows carry DISPLAY snapshots (name/code/sku/unit) refreshed
+   * from the live component — the sale path freezes its own copy at checkout.
+   *
+   * @param {string} shopId
+   * @param {Array}  rawItems  the request's comboItems
+   * @param {Object} req
+   * @param {string} [excludeId]  the combo's own id, on update — a combo
+   *   containing itself is the one-level form of nesting
+   * @returns {Promise<Array>} rows shaped for `Product.comboItems`
+   */
+  async _validateComboItems(shopId, rawItems, req, excludeId = null) {
+    const items = Array.isArray(rawItems) ? rawItems : [];
+    if (!items.length) {
+      throw new AppError('A combo needs at least one component', 'কম্বোতে অন্তত একটি পণ্য যোগ করুন', 400);
+    }
+
+    const ids = [...new Set(items.map((i) => String(i.product)))];
+    if (excludeId && ids.includes(String(excludeId))) {
+      throw new AppError('A combo cannot contain itself', 'কম্বো নিজেকে উপাদান হিসেবে রাখতে পারে না', 400);
+    }
+
+    // Same-branch, same-shop, alive. Branch matters: products are per-branch
+    // documents, so a component from another branch would deduct stock a
+    // different till is counting.
+    const components = await Product.find(
+      branchFilter(req, { _id: { $in: ids }, shop: shopId, isDeleted: { $ne: true } })
+    );
+    const compMap = new Map(components.map((c) => [String(c._id), c]));
+
+    const seen = new Set();
+    const rows = [];
+
+    for (const item of items) {
+      const comp = compMap.get(String(item.product));
+      if (!comp) {
+        throw new AppError(
+          `Combo component not found in this branch: ${item.product}`,
+          'কম্বোর উপাদান পণ্যটি এই শাখায় পাওয়া যায়নি', 404
+        );
+      }
+      if (isCombo(comp)) {
+        throw new AppError(
+          `"${comp.name}" is itself a combo — combos cannot contain combos`,
+          `"${comp.name}" নিজেই একটি কম্বো — কম্বোর ভিতরে কম্বো রাখা যাবে না`, 400
+        );
+      }
+      if (comp.isActive === false) {
+        throw new AppError(
+          `"${comp.name}" is inactive and cannot be sold`,
+          `"${comp.name}" নিষ্ক্রিয় — নিষ্ক্রিয় পণ্য কম্বোতে রাখা যাবে না`, 400
+        );
+      }
+
+      const rawVariantId = item.variantId || null;
+      let variant = null;
+      if (comp.hasVariants) {
+        if (!rawVariantId) {
+          throw new AppError(
+            `"${comp.name}" has variants — pick one for the combo`,
+            `"${comp.name}" এর ভ্যারিয়েন্ট আছে — কোনটি কম্বোতে যাবে তা নির্বাচন করুন`, 400
+          );
+        }
+        variant = findComponentVariant(comp, rawVariantId);
+        if (!variant || variant.isActive === false) {
+          throw new AppError(
+            `Variant not found on "${comp.name}"`,
+            `"${comp.name}" এর ভ্যারিয়েন্টটি পাওয়া যায়নি`, 404
+          );
+        }
+      }
+
+      // Quantity legality is the COMPONENT's business: 0.5 kg of a kg product
+      // is a real combo line, 0.5 piece is not. Same helper the sale path uses.
+      const quantity = parseQuantity(item.quantity, quantityUnit(req, comp), {
+        label: comp.name,
+      });
+
+      const key = `${comp._id}:${variant ? variant._id : ''}`;
+      if (seen.has(key)) {
+        throw new AppError(
+          `"${comp.name}" appears twice in the combo — merge the quantities into one row`,
+          `"${comp.name}" কম্বোতে দুইবার আছে — পরিমাণ এক লাইনে লিখুন`, 400
+        );
+      }
+      seen.add(key);
+
+      rows.push({
+        product: comp._id,
+        variantId: variant ? variant._id : null,
+        productName: comp.name,
+        productCode: comp.code,
+        variantSku: variant ? variant.sku : undefined,
+        variantAttributes: variant ? variant.attributes : undefined,
+        unit: comp.unit,
+        quantity,
+      });
+    }
+
+    return rows;
+  }
+
+  /**
+   * Attach `comboAvailability` / `comboCost` / `comboBroken` to combo rows.
+   *
+   * One batched read for the union of every combo's components, projected to
+   * the stock and cost columns only. Mutates the (lean) rows in place and
+   * returns them. Advisory numbers — the sale path re-checks under its own
+   * atomic $gte guard, so a stale figure here can never oversell.
+   */
+  async _decorateCombos(products) {
+    const combos = (products || []).filter(
+      (p) => p && isCombo(p) && Array.isArray(p.comboItems) && p.comboItems.length
+    );
+    if (!combos.length) return products;
+
+    const compIds = [...new Set(
+      combos.flatMap((c) => c.comboItems.map((ci) => String(ci.product)))
+    )];
+    const components = await Product.find({ _id: { $in: compIds } })
+      .select('stock hasVariants variants._id variants.stock variants.buyingPrice variants.sellingPrice variants.isActive buyingPrice sellingPrice isActive isDeleted')
+      .lean();
+    const compMap = new Map(components.map((c) => [String(c._id), c]));
+
+    for (const combo of combos) {
+      const { available, cost, broken } = computeComboAvailability(combo, compMap);
+      combo.comboAvailability = available;
+      combo.comboCost = cost;
+      combo.comboBroken = broken;
+
+      // Per-row LIVE display figures for the builder and the POS breakdown —
+      // the stored row keeps only identity + quantity, so prices and stock are
+      // read fresh rather than trusted from a snapshot that goes stale.
+      for (const ci of combo.comboItems) {
+        const comp = compMap.get(String(ci.product));
+        if (!comp) continue;
+        const variant = ci.variantId ? findComponentVariant(comp, ci.variantId) : null;
+        ci.sellingPrice = variant ? (variant.sellingPrice || 0) : (comp.sellingPrice || 0);
+        ci.buyingPrice = variant
+          ? (variant.buyingPrice ?? comp.buyingPrice ?? 0)
+          : (comp.buyingPrice || 0);
+        ci.stock = variant ? (variant.stock || 0) : (comp.stock || 0);
+      }
+    }
+    return products;
+  }
+
   async createProduct(shopId, userId, productData, req = null) {
     const { code, name, category, variants, packaging, ...rest } = productData;
+
+    // ── Combo create ─────────────────────────────────────────────────────────
+    //
+    // A combo is structurally a PLAIN product: no variants, no stock (derived
+    // from components), no batches, serials or pack. Forced here rather than
+    // trusted from the client, for the same reason `isAvailableOnline` is.
+    const creatingCombo = rest.type === 'combo';
+    if (creatingCombo) {
+      if (!hasFeature(req, 'combos')) {
+        // 404, not 403 — to a shop without the capability the combo kind does
+        // not exist. Same shape as `requireFeature`.
+        const err = new AppError('Not found', 'এই সুবিধাটি আপনার দোকানে চালু নেই', 404);
+        err.code = 'FEATURE_DISABLED';
+        err.feature = 'combos';
+        throw err;
+      }
+      if (Array.isArray(variants) && variants.length) {
+        throw new AppError('A combo cannot have variants of its own', 'কম্বোর নিজস্ব ভ্যারিয়েন্ট থাকতে পারে না', 400);
+      }
+      rest.comboItems = await this._validateComboItems(shopId, rest.comboItems, req);
+      rest.stock = 0;
+      rest.trackBatches = false;
+      rest.batches = [];
+      rest.trackSerials = false;
+      rest.serials = [];
+      // Cost is derived from components at sale time; the stored figure is a
+      // placeholder the schema requires nothing of.
+      rest.buyingPrice = rest.buyingPrice || 0;
+    } else {
+      // `type` defaults to 'standard'; Joi's `otherwise` branch only admits an
+      // empty array here, and storing it on every ordinary product would defeat
+      // the schema's `default: undefined`.
+      delete rest.comboItems;
+    }
 
     this._assertUnitAllowed(req, rest.unit);
     await this._assertBarcodeUnique(shopId, rest.barcode, req);
@@ -672,7 +918,7 @@ class ProductService {
     // pack that cannot physically hold it. Returns undefined when packaging is
     // off, which is what leaves the subdocument absent rather than half-filled.
     rest.packaging = normalizePackaging(
-      packaging,
+      creatingCombo ? undefined : packaging,
       rest.unit || DEFAULT_UNIT,
       hasFeature(req, 'packaging')
     );
@@ -786,6 +1032,37 @@ class ProductService {
     // the only moment the OLD reference set still exists. The diff against the
     // saved result is what moves every refCount.
     const previousMediaIds = mediaService.mediaIdsOfProduct(product);
+
+    // ── Combo update rules ───────────────────────────────────────────────────
+    //
+    // The KIND is immutable: a standard product with stock becoming a combo
+    // would orphan that stock, and a combo becoming standard would mint stock
+    // from nowhere. Everything meaningless on a combo (own stock, variants,
+    // pack, batches, serials) is dropped rather than refused, matching how the
+    // flag-off guards above treat fields a form should not have sent.
+    if ('type' in updateData && updateData.type !== (product.type || 'standard')) {
+      throw new AppError(
+        'A product cannot change kind (standard/combo) after creation',
+        'পণ্যের ধরন (সাধারণ/কম্বো) তৈরির পরে বদলানো যায় না', 400
+      );
+    }
+    if (isCombo(product)) {
+      if (Array.isArray(updateData.variants) && updateData.variants.length) {
+        throw new AppError('A combo cannot have variants of its own', 'কম্বোর নিজস্ব ভ্যারিয়েন্ট থাকতে পারে না', 400);
+      }
+      delete updateData.variants;
+      delete updateData.stock;
+      delete updateData.packaging;
+      delete updateData.trackBatches;
+      delete updateData.trackSerials;
+      delete updateData.serials;
+      if ('comboItems' in updateData) {
+        updateData.comboItems = await this._validateComboItems(shopId, updateData.comboItems, req, productId);
+      }
+    } else if ('comboItems' in updateData) {
+      // Joi only admits an empty array on a non-combo; do not store it.
+      delete updateData.comboItems;
+    }
 
     this._assertUnitAllowed(req, updateData.unit);
     if ('barcode' in updateData) {
@@ -1012,6 +1289,52 @@ class ProductService {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
     }
 
+    // ── Is this product a component of a live combo? ─────────────────────────
+    //
+    // Deleting it would leave those combos silently unsellable with no record
+    // of why. So: refuse by default, naming the combos; with `?force=true`
+    // deactivate them instead — visible on the product list, reversible, and
+    // written to the audit trail with its cause. Old sales are untouched either
+    // way — they froze their own component snapshots at checkout.
+    if (!isCombo(product)) {
+      const containingCombos = await Product.find({
+        shop: shopId,
+        isDeleted: { $ne: true },
+        type: 'combo',
+        'comboItems.product': product._id,
+      }).select('name code isActive');
+
+      const activeCombos = containingCombos.filter((c) => c.isActive !== false);
+      if (activeCombos.length) {
+        const force = req?.query?.force === 'true' || req?.query?.force === true;
+        const names = activeCombos.map((c) => c.name).join(', ');
+        if (!force) {
+          const err = new AppError(
+            `This product is used by active combos: ${names}. Deactivate them first, or retry with force=true to deactivate them automatically.`,
+            `পণ্যটি চালু কম্বোতে ব্যবহৃত হচ্ছে: ${names}। আগে কম্বোগুলো বন্ধ করুন, অথবা force দিয়ে মুছলে কম্বোগুলো স্বয়ংক্রিয়ভাবে বন্ধ হয়ে যাবে।`,
+            400
+          );
+          err.code = 'PRODUCT_IN_COMBO';
+          err.combos = activeCombos.map((c) => ({ id: c._id, name: c.name, code: c.code }));
+          throw err;
+        }
+
+        await Product.updateMany(
+          { _id: { $in: activeCombos.map((c) => c._id) }, shop: shopId },
+          { $set: { isActive: false } }
+        );
+        AuditLog.create({
+          shop: shopId,
+          user: userId,
+          action: 'product_deactivate',
+          actionBn: 'পণ্য নিষ্ক্রিয় করা',
+          description: `Deactivated combos [${names}] because component "${product.name}" was deleted`,
+          descriptionBn: `উপাদান পণ্য "${product.name}" মুছে ফেলায় কম্বো [${names}] বন্ধ করা হয়েছে`,
+          entity: { type: 'product', id: product._id, name: product.name },
+        }).catch((err2) => logger.error(`Audit log (combo cascade) failed: ${err2.message}`));
+      }
+    }
+
     const originalCode = product.code;
     // Read while the document still carries them — after the save below there is
     // no other record of what this product pointed at.
@@ -1120,6 +1443,8 @@ class ProductService {
     if (!product) {
       throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
     }
+    // A combo has no stock to adjust — its availability is its components'.
+    assertNotCombo(product, 'স্টক সমন্বয়');
 
     let previousStock, newStock;
     // Writing to a product implies its branch. requireBranch still runs so an
@@ -2157,6 +2482,145 @@ class ProductService {
     }
 
     return results;
+  }
+
+  /**
+   * Put products online, or take them off, in one call.
+   *
+   * ── WHY THIS EXISTS AS ITS OWN METHOD ───────────────────────────────────────
+   *
+   * A shop switched on for the storefront has a catalogue that already exists —
+   * often over a thousand rows — and every one of them is `isAvailableOnline:
+   * false`, because that is the default the field was fixed to after the
+   * uiFlags bug (Product.model.js:515). Asking the shopkeeper to open a
+   * thousand product forms is asking them not to use the feature.
+   *
+   * So this is the one screen where bulk is not a convenience, it is the
+   * difference between the capability being adopted and abandoned.
+   *
+   * ── WHAT IT DELIBERATELY WILL NOT DO ────────────────────────────────────────
+   *
+   * It does not touch price, name, stock, or anything a customer pays. It sets
+   * two booleans and nothing else. A bulk endpoint that can rewrite prices is
+   * one mis-click from re-pricing a shop's entire catalogue, and no audit entry
+   * makes that recoverable.
+   *
+   * ── PHOTOS ──────────────────────────────────────────────────────────────────
+   *
+   * A product with no photo is SKIPPED rather than refused, and the count comes
+   * back in the summary. Refusing the whole call would make "put my grocery
+   * category online" fail because one of eighty items lacks a picture, and the
+   * shopkeeper would have no idea which. Silently including them would fill the
+   * storefront with grey placeholders, which STOREFRONT_DESIGN_REF.md Ref 1 §1.4
+   * names as the fastest way to lose a shop. Skipping and reporting is the only
+   * option that leaves them able to act.
+   *
+   * Turning products OFF has no photo requirement — an unphotographed product
+   * that somehow got online must always be removable.
+   *
+   * @param {string} shopId
+   * @param {string} userId
+   * @param {Object} req      for branch scope and the feature flag
+   * @param {Object} payload  `{ productIds?, categoryId?, isAvailableOnline?, isFeaturedOnline? }`
+   */
+  async bulkSetOnlineStatus(shopId, userId, req, payload = {}) {
+    const { productIds, categoryId, isAvailableOnline, isFeaturedOnline } = payload;
+
+    if (isAvailableOnline === undefined && isFeaturedOnline === undefined) {
+      throw new AppError(
+        'Nothing to change',
+        'কী পরিবর্তন করতে চান তা নির্বাচন করুন',
+        400
+      );
+    }
+
+    // Products are branch-scoped, so the selection is too (I-2). `branchFilter`
+    // adds nothing when no branch is active, which is what keeps a
+    // single-branch shop's query identical to what it has always been (I-1).
+    const filter = branchFilter(req, { shop: shopId, isDeleted: { $ne: true } });
+
+    if (Array.isArray(productIds) && productIds.length) {
+      const valid = productIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+      if (!valid.length) {
+        throw new AppError('No valid products selected', 'কোনো পণ্য নির্বাচন করা হয়নি', 400);
+      }
+      // Capped rather than unbounded. A selection larger than this is a
+      // "select all in category" in disguise, which has its own branch below
+      // and does not have to ship ten thousand ids over a 3G connection.
+      if (valid.length > 500) {
+        throw new AppError(
+          'Select at most 500 products at a time, or filter by category instead',
+          'একবারে সর্বোচ্চ ৫০০টি পণ্য নির্বাচন করুন, অথবা ক্যাটাগরি ধরে করুন',
+          400
+        );
+      }
+      filter._id = { $in: valid };
+    } else if (categoryId && mongoose.Types.ObjectId.isValid(categoryId)) {
+      // Subcategory too — a shopkeeper picking "মসলা" means the whole branch of
+      // the tree, not the parent row on its own.
+      filter.$or = [{ category: categoryId }, { subcategory: categoryId }];
+    } else {
+      throw new AppError(
+        'Select products or a category',
+        'পণ্য অথবা ক্যাটাগরি নির্বাচন করুন',
+        400
+      );
+    }
+
+    const update = {};
+    if (isAvailableOnline !== undefined) update.isAvailableOnline = isAvailableOnline === true;
+    if (isFeaturedOnline !== undefined) update.isFeaturedOnline = isFeaturedOnline === true;
+
+    // Turning a product ON requires a photo. `catalogImages` is the R2 pipeline;
+    // `images` is the older ImgBB path and still counts — a photo is a photo,
+    // whoever is hosting it.
+    let skippedNoPhoto = 0;
+    if (update.isAvailableOnline === true) {
+      const withoutPhoto = await Product.countDocuments({
+        ...filter,
+        $and: [
+          { $or: [{ catalogImages: { $size: 0 } }, { catalogImages: { $exists: false } }] },
+          { $or: [{ images: { $size: 0 } }, { images: { $exists: false } }] },
+        ],
+      });
+      skippedNoPhoto = withoutPhoto;
+
+      // `$nor` rather than mutating `filter.$or`, which the category branch
+      // above may already be using — two `$or` keys on one object silently
+      // discard the first.
+      filter.$nor = [{
+        $and: [
+          { $or: [{ catalogImages: { $size: 0 } }, { catalogImages: { $exists: false } }] },
+          { $or: [{ images: { $size: 0 } }, { images: { $exists: false } }] },
+        ],
+      }];
+    }
+
+    const result = await Product.updateMany(filter, { $set: update });
+
+    await AuditLog.create({
+      shop: shopId,
+      user: userId,
+      action: 'online_catalog_bulk_update',
+      description:
+        `Bulk online update: ${result.modifiedCount} products changed ` +
+        `(${JSON.stringify(update)})${skippedNoPhoto ? `, ${skippedNoPhoto} skipped for having no photo` : ''}`,
+      descriptionBn:
+        `${result.modifiedCount}টি পণ্যের অনলাইন সেটিংস পরিবর্তন করা হয়েছে` +
+        (skippedNoPhoto ? `, ${skippedNoPhoto}টি পণ্যে ছবি না থাকায় বাদ পড়েছে` : ''),
+      entity: { type: 'product', id: null, name: 'bulk' },
+      changes: { after: update },
+    });
+
+    // The product listing is cached per shop and this changed a field the
+    // online listing reads. Retire the generation rather than serve stale rows.
+    await cacheService.bumpShopCacheVersion(shopId, 0).catch(() => {});
+
+    return {
+      matched: result.matchedCount,
+      modified: result.modifiedCount,
+      skippedNoPhoto,
+    };
   }
 }
 

@@ -7,6 +7,7 @@ const StockTransaction = require('../models/StockTransaction.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { branchFilter, requireBranch } = require('../utils/branchScope.util');
+const { endOfBangladeshDay, getBangladeshTodayRange, getBangladeshMonthRange, toBangladeshMonthStr } = require('../utils/bdTime.util');
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
 const {
@@ -16,9 +17,12 @@ const {
   storageUnit,
   quantize,
   quantizeMoney,
+  buildStockUpdate,
+  buildVariantStockUpdate,
 } = require('../utils/quantity.util');
 const { resolveLineQuantity } = require('../utils/packaging.util');
 const { deductBatches, batchWriteOp, sameOwner } = require('../utils/batch.util');
+const { assertNotCombo } = require('../utils/combo.util');
 
 class PurchaseService {
   // Get all purchases with filtering and pagination
@@ -52,11 +56,9 @@ class PurchaseService {
     if (startDate || endDate) {
       query.date = {};
       if (startDate) query.date.$gte = new Date(startDate);
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        query.date.$lte = end;
-      }
+      // End of the Bangladesh calendar day — see the same note in
+      // expense.service.js for what server-local `setHours` cost here.
+      if (endDate) query.date.$lte = endOfBangladeshDay(endDate);
     }
 
     const skip = (page - 1) * limit;
@@ -165,6 +167,11 @@ class PurchaseService {
           404
         );
       }
+
+      // A combo is never bought — buying one would mint stock no shelf holds.
+      // The shop purchases the COMPONENT products; the combo's availability
+      // follows from theirs.
+      assertNotCombo(product, 'ক্রয়');
 
       // `parseInt` used to live here, which is what made purchases integer-only.
       // `parseQuantity` keeps that behaviour exactly for any shop without the
@@ -341,6 +348,19 @@ class PurchaseService {
           }
         : null;
 
+      // ── The stock change is a server-side DELTA ──────────────────────────
+      //
+      // This used to `$set` an absolute figure computed here in JS from the
+      // document as it was read at the top of `createPurchase`. That is a
+      // read-modify-write with no guard: a sale completing between the read and
+      // this write was simply overwritten, and the delivery silently restored
+      // stock the till had just sold. The sale path has always used guarded
+      // deltas; receiving goods had no reason to be the exception.
+      //
+      // The batch `$push` rides in its OWN op rather than sharing this one,
+      // because a fractional unit needs a pipeline update and a pipeline cannot
+      // express `$push`. The bulkWrite is ordered, so the two land in sequence
+      // on the same document.
       if (item.variantId && product.hasVariants) {
         const variant = (product.variants && typeof product.variants.id === 'function')
           ? product.variants.id(item.variantId)
@@ -351,23 +371,31 @@ class PurchaseService {
         newStock = getVariantStock(product, item.variantId);
         purchaseStockOps.push({
           updateOne: {
-            filter: { _id: product._id },
-            update: {
-              $set: { 'variants.$[v].stock': newStock },
-              ...(batchPush ? { $push: batchPush } : {}),
-            },
-            arrayFilters: [{ 'v._id': item.variantId }],
+            // `'variants._id'` is load-bearing, not decoration: for an integer
+            // unit `buildVariantStockUpdate` returns a POSITIONAL `$inc`, and
+            // the `$` only binds to an array element the FILTER matched.
+            filter: { _id: product._id, 'variants._id': item.variantId },
+            update: buildVariantStockUpdate(item.variantId, item.quantity, stkUnit),
           },
         });
       } else {
         product.stock = quantize(product.stock + item.quantity, stkUnit);
         newStock = product.stock;
+        purchaseStockOps.push({
+          updateOne: {
+            filter: { _id: product._id },
+            update: buildStockUpdate(item.quantity, stkUnit),
+          },
+        });
+      }
 
-        const update = {
-          $set: { stock: newStock },
-          ...(batchPush ? { $push: batchPush } : {}),
-        };
-        purchaseStockOps.push({ updateOne: { filter: { _id: product._id }, update } });
+      if (batchPush) {
+        purchaseStockOps.push({
+          updateOne: {
+            filter: { _id: product._id },
+            update: { $push: batchPush },
+          },
+        });
       }
 
       purchaseTxns.push({
@@ -512,11 +540,17 @@ class PurchaseService {
           variant.stock = quantize(Math.max(0, variant.stock - item.quantity), stkUnit);
         }
         newStock = getVariantStock(product, item.variantId);
+        // A server-side delta, not an absolute `$set` of a number computed here
+        // from an unguarded read. The sale path has always used guarded deltas;
+        // this one recomputed from what it happened to read, so a cancellation
+        // overlapping any other stock movement on the same product silently
+        // discarded the other one. Clamped at zero to preserve the existing
+        // rule that a reversal cannot drive stock negative — goods already sold
+        // out of a cancelled delivery are gone, and the shop cannot un-sell them.
         cancelStockOps.push({
           updateOne: {
             filter: { _id: product._id },
-            update: { $set: { 'variants.$[v].stock': newStock } },
-            arrayFilters: [{ 'v._id': item.variantId }],
+            update: buildVariantStockUpdate(item.variantId, -item.quantity, stkUnit, { clampAtZero: true }),
           },
         });
       } else {
@@ -525,7 +559,7 @@ class PurchaseService {
         cancelStockOps.push({
           updateOne: {
             filter: { _id: product._id },
-            update: { $set: { stock: newStock } },
+            update: buildStockUpdate(-item.quantity, stkUnit, 'stock', { clampAtZero: true }),
           },
         });
       }
@@ -647,19 +681,15 @@ class PurchaseService {
     let start, end;
     if (startDate && endDate) {
       start = new Date(startDate);
-      end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
+      end = endOfBangladeshDay(endDate);
     } else {
-      // Default to current month
-      const now = new Date();
-      start = new Date(now.getFullYear(), now.getMonth(), 1);
-      end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+      // Default to the current BANGLADESH month, not the server's.
+      const { startOfMonth, endOfMonth } = getBangladeshMonthRange(toBangladeshMonthStr(new Date()));
+      start = startOfMonth;
+      end = endOfMonth;
     }
 
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const todayEnd = new Date();
-    todayEnd.setHours(23, 59, 59, 999);
+    const { startOfDay: todayStart, endOfDay: todayEnd } = getBangladeshTodayRange();
 
     // Same defect as the expense summary (H-10): shop-wide totals were shown
     // beside a branch-scoped list.

@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const { PAYMENT_METHODS, PAYMENT_TYPES } = require('../config/constants');
 const { immutableGuard } = require('../utils/immutableGuard.util');
+const { getBangladeshDayRange, toBangladeshDateStr } = require('../utils/bdTime.util');
 
 const paymentSchema = new mongoose.Schema({
   shop: {
@@ -135,11 +136,10 @@ paymentSchema.statics.getCustomerPayments = function(shopId, customerId, options
 
 // Static: Get daily collection
 paymentSchema.statics.getDailyCollection = async function(shopId, date) {
-  const startOfDay = new Date(date);
-  startOfDay.setHours(0, 0, 0, 0);
-
-  const endOfDay = new Date(date);
-  endOfDay.setHours(23, 59, 59, 999);
+  // The Bangladesh calendar day containing `date`. Server-local `setHours`
+  // made "daily collection" a UTC day, six hours out of step with every other
+  // daily figure in the app.
+  const { startOfDay, endOfDay } = getBangladeshDayRange(toBangladeshDateStr(date));
 
   const collection = await this.aggregate([
     {

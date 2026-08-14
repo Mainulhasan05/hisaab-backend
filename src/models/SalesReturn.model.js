@@ -58,6 +58,33 @@ const returnItemSchema = new mongoose.Schema({
   reason: {
     type: String,
     trim: true
+  },
+  // ── Combo lines ────────────────────────────────────────────────────────────
+  //
+  // A combo returns WHOLE: returning quantity R restores R × quantityPerCombo
+  // of every component. This array is the return's own frozen copy of what
+  // that meant — scaled from the sale item's snapshot at return time, so the
+  // return document stands on its own the way the sale does.
+  itemType: {
+    type: String,
+    enum: ['standard', 'combo'],
+    default: 'standard'
+  },
+  comboComponents: {
+    type: [{
+      product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
+      productName: { type: String, required: true },
+      productCode: { type: String },
+      variantId: { type: mongoose.Schema.Types.ObjectId, default: null },
+      variantSku: { type: String },
+      variantAttributes: { type: mongoose.Schema.Types.Mixed },
+      unit: { type: String },
+      quantityPerCombo: { type: Number, required: true, min: 0.001 },
+      // Across this RETURN (quantityPerCombo × returned combo quantity).
+      totalQuantity: { type: Number, required: true, min: 0.001 },
+      unitCost: { type: Number, default: 0, min: 0 },
+    }],
+    default: undefined
   }
 }, { _id: true });
 

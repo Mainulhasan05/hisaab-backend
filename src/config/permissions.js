@@ -24,6 +24,36 @@ const MODULES = {
   staff:         { key: 'staff',         label: 'স্টাফ ম্যানেজমেন্ট', labelEn: 'Staff Management', actions: ['view'] },
   stock:         { key: 'stock',         label: 'স্টক সমন্বয়',       labelEn: 'Stock Adjustment', actions: ['view', 'manual_adjust'] },
   stock_transfers: { key: 'stock_transfers', label: 'শাখা ট্রান্সফার', labelEn: 'Stock Transfers', actions: ['view', 'create', 'update'] },
+  // ── The online panel ───────────────────────────────────────────────────────
+  //
+  // Both modules are inert unless `features.storefront` is on, which is off for
+  // every shop by default. They appear in the roles matrix regardless, the same
+  // way `stock_transfers` does for a single-branch shop — the matrix describes
+  // what a role MAY do, and the capability decides whether the screen exists.
+  //
+  // `create` IS needed, and the first draft of this file got that wrong. The
+  // reasoning was "nobody on the shop side creates an online order — a
+  // customer does". That describes a storefront-only shop and almost none of
+  // them are. Orders arrive from Facebook, WhatsApp, Messenger, Instagram and
+  // the phone, and every one of those needs the SAME parcel lifecycle as a
+  // website order: pack, hand to a courier, track, collect COD, settle.
+  //
+  // Recording those through the POS instead — which already accepts
+  // `Sale.channel: 'facebook'` — writes the money correctly and gives the shop
+  // no fulfilment workflow at all: no packing slip, no courier field, no
+  // delivered/returned states, nothing to work through tomorrow morning. So a
+  // manual order is a real `Order`, created here.
+  //
+  // `update` covers every forward transition INCLUDING confirm — the one that
+  // runs `createSale`, deducts stock and moves the customer's balance. It is
+  // materially equivalent to `sales.create` and should be granted with the same
+  // care. `cancel` is separate because cancelling a confirmed order cancels a
+  // Sale, which unwinds stock and the customer ledger.
+  online_orders: { key: 'online_orders', label: 'অনলাইন অর্ডার', labelEn: 'Online Orders', actions: ['view', 'create', 'update', 'cancel'] },
+  // `publish` is separate from `update` because publishing is outward-facing:
+  // a junior staffer may draft the site, but making it public — under the
+  // shop's name, to the shop's customers — is the owner's call.
+  storefront:    { key: 'storefront',    label: 'অনলাইন দোকান',  labelEn: 'Online Storefront', actions: ['view', 'update', 'publish'] },
 };
 
 // List of all module keys
@@ -38,6 +68,8 @@ const ACTION_LABELS = {
   view_cost:     { label: 'ক্রয়মূল্য দেখা', labelEn: 'View cost' },
   view_profit:   { label: 'লাভ দেখা',       labelEn: 'View profit' },
   manual_adjust: { label: 'স্টক সমন্বয়',    labelEn: 'Adjust stock' },
+  cancel:        { label: 'বাতিল',           labelEn: 'Cancel' },
+  publish:       { label: 'প্রকাশ',          labelEn: 'Publish' },
 };
 
 /**
@@ -151,6 +183,11 @@ const ROLE_PRESETS = {
       staff:         ['view'],
       stock:         ['view', 'manual_adjust'],
       stock_transfers: ['view', 'create', 'update'],
+      // A manager runs the parcel desk end to end and may draft the site.
+      // `storefront.publish` is withheld: taking the shop's public face live is
+      // the owner's decision, the same way `isWholesale` is.
+      online_orders: ['view', 'create', 'update', 'cancel'],
+      storefront:    ['view', 'update'],
     }),
   },
   // Runs the counter: sells, takes payment against dues, handles walk-in
@@ -181,6 +218,12 @@ const ROLE_PRESETS = {
       staff:         [],
       stock:         ['view'],
       stock_transfers: ['view'],
+      // Processing an order is counter work by another name — same person,
+      // same judgement. `cancel` is withheld for the same reason `sales.delete`
+      // is: it unwinds a completed sale, stock and the customer's balance.
+      // A cashier taking a Facebook order over the phone is doing counter work
+      // by another name — same person, same judgement as ringing up a sale.
+      online_orders: ['view', 'create', 'update'],
     }),
   },
   // Sell and check stock, nothing else. No reports, no purchase ledger, no
@@ -224,7 +267,7 @@ const ROLE_PRESETS = {
  * created with. To roll a change out to shops that already exist, bump this and
  * add a PRESET_UPGRADES entry.
  */
-const PRESET_VERSION = 2;
+const PRESET_VERSION = 3;
 
 /**
  * Additive grants applied once per role, in version order.
@@ -252,6 +295,26 @@ const PRESET_UPGRADES = [
         customers: ['update'],
         sales: ['update'],
         stock: ['view'],
+      },
+    },
+  },
+  {
+    version: 3,
+    // The online panel. Granting these to shops that already exist costs them
+    // nothing and shows them nothing: both modules are inert until an admin
+    // turns on `features.storefront`, which is off everywhere by default. Doing
+    // it now rather than at the moment a shop is switched on means nobody has
+    // to remember to re-run a role migration on the day it matters.
+    //
+    // Salesperson and inventory_manager are deliberately left out — a shop that
+    // wants floor staff on parcels grants it explicitly.
+    grants: {
+      manager: {
+        online_orders: ['view', 'create', 'update', 'cancel'],
+        storefront: ['view', 'update'],
+      },
+      cashier: {
+        online_orders: ['view', 'create', 'update'],
       },
     },
   },

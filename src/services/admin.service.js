@@ -16,6 +16,7 @@ const Product = require('../models/Product.model');
 const Branch = require('../models/Branch.model');
 const HeldCart = require('../models/HeldCart.model');
 const mongoose = require('mongoose');
+const { getBangladeshTodayRange } = require('../utils/bdTime.util');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
@@ -25,7 +26,14 @@ const { invalidateShopAuthCache, invalidateBranchCache } = require('../utils/aut
 const { resolveSubscription } = require('../utils/subscriptionState.util');
 const { refuseDeletion } = require('../utils/deletionDisabled.util');
 const { KEYS, getTTL } = require('../config/cacheKeys');
-const { FEATURES, FEATURE_KEYS, STORAGE_BACKED_FEATURES } = require('../utils/features.util');
+const {
+  FEATURES,
+  FEATURE_KEYS,
+  STORAGE_BACKED_FEATURES,
+  missingDepsFor,
+  unavailableReason,
+  dependentsOf,
+} = require('../utils/features.util');
 
 const escapeRegex = (value) => String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -270,8 +278,9 @@ class AdminService {
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
     // Most active shops (by number of transactions today)
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    // Bangladesh midnight — the platform and every shop on it are in BD, so
+    // "today" must not mean the server's UTC day.
+    const { startOfDay: todayStart } = getBangladeshTodayRange();
 
     // These three aggregations are independent; they used to run sequentially.
     const [topShops, topProducts, mostActiveToday] = await Promise.all([
@@ -1395,8 +1404,7 @@ class AdminService {
     const SMSLog = require('../models/SMSLog.model');
 
     // Get today's SMS stats
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const { startOfDay: today } = getBangladeshTodayRange();
 
     const todayStats = await SMSLog.aggregate([
       { $match: { createdAt: { $gte: today } } },
@@ -2394,13 +2402,28 @@ class AdminService {
       return shop.toObject();
     }
 
+    // A key can be registered before the feature it names is built — the
+    // permission, the nav entry and the frontend's `hasFeature` call all need
+    // it to exist first. Enabling one of those tells the shop it has something
+    // it does not. Turning it OFF is always allowed, so this can never strand a
+    // shop that was switched on before the guard existed.
+    const unavailable = value ? unavailableReason(key) : null;
+    if (unavailable) {
+      throw new AppError(
+        `"${FEATURES[key].en}" cannot be enabled yet — ${unavailable}`,
+        `"${FEATURES[key].bn}" এখনো চালু করা যাবে না — সুবিধাটি এখনো তৈরি হয়নি`,
+        400
+      );
+    }
+
     // A capability that writes bytes needs somewhere to put them. Enabling one
     // while `storage.enabled` is false would give the shop an upload button
     // wired to a 403 — which reads as a bug to them and as a support ticket to
     // us. The mirror of this rule (disabling storage cascades these off) lives
     // in adminStorage.service.setShopStorage; between the two, the broken
     // combination is unreachable from either direction.
-    if (value && STORAGE_BACKED_FEATURES.includes(key) && shop.storage?.enabled !== true) {
+    const missing = missingDepsFor(shop, key);
+    if (value && missing.storage) {
       throw new AppError(
         `"${FEATURES[key].en}" needs image storage. Enable storage for this shop first.`,
         `"${FEATURES[key].bn}" চালু করতে হলে আগে এই দোকানে ছবি সংরক্ষণ (স্টোরেজ) চালু করুন`,
@@ -2408,8 +2431,39 @@ class AdminService {
       );
     }
 
+    // The same argument, one level up: a capability whose prerequisite is off
+    // is a screen wired to a feature that is not there. `storefront` without
+    // `onlineSelling` is a website with no way to put a product on it.
+    //
+    // Only DIRECT prerequisites are named. A shop whose grandparent flag is off
+    // necessarily has its parent off too — that is what the cascade below
+    // guarantees — so naming the immediate blocker gives the admin the one
+    // toggle they actually have to flip next.
+    if (value && missing.features.length) {
+      const names = missing.features.map((k) => FEATURES[k].bn).join(', ');
+      const namesEn = missing.features.map((k) => FEATURES[k].en).join(', ');
+      throw new AppError(
+        `"${FEATURES[key].en}" needs ${namesEn}. Enable ${missing.features.length > 1 ? 'those' : 'that'} first.`,
+        `"${FEATURES[key].bn}" চালু করতে হলে আগে "${names}" চালু করুন`,
+        400
+      );
+    }
+
+    // Turning a capability OFF turns off everything that depends on it,
+    // transitively. Without this the shop keeps a screen whose foundation has
+    // been removed — the mirror of the check above, and the same shape as the
+    // storage cascade in adminStorage.service. Between the two directions the
+    // broken combination is unreachable.
+    //
+    // Only flags that are actually on are touched, so the audit entry lists
+    // what really changed rather than every dependent that exists.
+    const cascaded = value
+      ? []
+      : dependentsOf(key).filter((k) => shop.features?.[k] === true);
+
     if (!shop.features) shop.features = {};
     shop.features[key] = value;
+    cascaded.forEach((k) => { shop.features[k] = false; });
     // `features` is a nested object; Mongoose does not always see a mutation on
     // a sub-path of a non-subdocument object, and a missed change here would
     // return 200 while saving nothing.
@@ -2423,9 +2477,15 @@ class AdminService {
       action: value ? 'shop_feature_enabled' : 'shop_feature_disabled',
       description: value
         ? `"${shop.name}" দোকানে "${meta.bn}" ফিচার চালু করা হয়েছে`
-        : `"${shop.name}" দোকানে "${meta.bn}" ফিচার বন্ধ করা হয়েছে`,
+        : `"${shop.name}" দোকানে "${meta.bn}" ফিচার বন্ধ করা হয়েছে`
+          + (cascaded.length
+            ? ` (সাথে বন্ধ হয়েছে: ${cascaded.map((k) => FEATURES[k].bn).join(', ')})`
+            : ''),
       entity: { type: 'shop', id: shop._id, name: shop.name },
-      changes: { before: { [`features.${key}`]: previous }, after: { [`features.${key}`]: value } }
+      changes: {
+        before: { [`features.${key}`]: previous },
+        after: { [`features.${key}`]: value, cascadedOff: cascaded },
+      }
     });
 
     // The flag rides in the shop payload of the auth cache, so every session
@@ -2458,6 +2518,18 @@ class AdminService {
       storageEnabled,
       features: FEATURE_KEYS.map((key) => {
         const needsStorage = STORAGE_BACKED_FEATURES.includes(key);
+        const missing = missingDepsFor(shop, key);
+        // What turning this OFF would take with it. Reported so the panel can
+        // warn BEFORE the click rather than letting an admin discover it from
+        // the audit log — the same reason `storageEnabled` is reported above.
+        const dependents = dependentsOf(key).filter((k) => shop.features?.[k] === true);
+
+        const blockedReason = missing.storage
+          ? 'আগে এই দোকানে ছবি সংরক্ষণ (স্টোরেজ) চালু করুন'
+          : missing.features.length
+            ? `আগে "${missing.features.map((k) => FEATURES[k].bn).join(', ')}" চালু করুন`
+            : null;
+
         return {
           key,
           label: FEATURES[key].bn,
@@ -2465,10 +2537,13 @@ class AdminService {
           description: FEATURES[key].description,
           enabled: shop.features?.[key] === true,
           requiresStorage: needsStorage,
-          blocked: needsStorage && !storageEnabled,
-          blockedReason: needsStorage && !storageEnabled
-            ? 'আগে এই দোকানে ছবি সংরক্ষণ (স্টোরেজ) চালু করুন'
-            : null,
+          requires: FEATURES[key].requires || [],
+          missingRequires: missing.features,
+          // Disabling this would cascade these off. Empty for every feature
+          // nothing depends on, which is most of them.
+          cascadesOff: dependents,
+          blocked: Boolean(blockedReason),
+          blockedReason,
         };
       }),
     };

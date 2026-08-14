@@ -168,6 +168,9 @@ describe('deleting an entity detaches its media', () => {
     };
 
     jest.spyOn(Product, 'findOne').mockResolvedValue(product);
+    // The combo guard asks "is this product a component of a live combo?" — an
+    // ordinary product is not.
+    jest.spyOn(Product, 'find').mockReturnValue({ select: () => Promise.resolve([]) });
     jest.spyOn(AuditLog, 'create').mockResolvedValue({});
     jest.spyOn(cacheService, 'delete').mockResolvedValue(true);
     const reconcile = jest.spyOn(mediaService, 'reconcileRefs').mockResolvedValue({ attached: [], detached: [] });
@@ -199,6 +202,8 @@ describe('deleting an entity detaches its media', () => {
     };
 
     jest.spyOn(Product, 'findOne').mockResolvedValue(product);
+    // Combo guard — see the note in the test above.
+    jest.spyOn(Product, 'find').mockReturnValue({ select: () => Promise.resolve([]) });
     jest.spyOn(AuditLog, 'create').mockResolvedValue({});
     jest.spyOn(cacheService, 'delete').mockResolvedValue(true);
     const reconcile = jest.spyOn(mediaService, 'reconcileRefs').mockResolvedValue({ attached: [], detached: [] });

@@ -27,17 +27,21 @@ const {
 } = require('../utils/quantity.util');
 const { resolveLineQuantity, unitPriceFor } = require('../utils/packaging.util');
 const { priceTierFor, sellingPriceFor, hasWholesalePrice } = require('../utils/pricing.util');
-const { deductBatches, batchWriteOp } = require('../utils/batch.util');
+const { deductBatches, restoreBatches, batchWriteOp } = require('../utils/batch.util');
+const { hasFeature } = require('../utils/features.util');
+const { isCombo, findComponentVariant } = require('../utils/combo.util');
 
-// Bangladesh is UTC+6
-const BD_OFFSET_MS = 6 * 60 * 60 * 1000;
+// "Today" in Bangladesh, from the shared definition in `bdTime.util`. This was
+// a fourth private copy of the same offset arithmetic; the copies are what let
+// the cash register drift onto a different day from the sales it counts.
+const {
+  getBangladeshTodayStr,
+  getBangladeshTodayRange: bdTodayRange,
+} = require('../utils/bdTime.util');
+
 function getBangladeshTodayRange() {
-  const bdNow = new Date(Date.now() + BD_OFFSET_MS);
-  const dateStr = bdNow.toISOString().split('T')[0];
-  const [year, month, day] = dateStr.split('-').map(Number);
-  const startOfDay = new Date(Date.UTC(year, month - 1, day) - BD_OFFSET_MS);
-  const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000 - 1);
-  return { startOfDay, endOfDay, dateStr };
+  const dateStr = getBangladeshTodayStr();
+  return { ...bdTodayRange(), dateStr };
 }
 
 function netSaleAmountExpr() {
@@ -359,6 +363,38 @@ class SaleService {
     ).session(session || null);
     const productMap = new Map(products.map(p => [p._id.toString(), p]));
 
+    // ── Combo expansion: pull every component into the SAME map ─────────────
+    //
+    // Components share `productMap` with directly-sold products on purpose: a
+    // product sold standalone on one line and inside a combo on another must
+    // deduct from ONE in-memory document, or the running stock check between
+    // lines lies about what is left. Same branch filter, same session.
+    const comboProductsOnSale = products.filter((p) => isCombo(p));
+    if (comboProductsOnSale.length) {
+      // A held cart or offline payload written before the flag was switched
+      // off must not sell through a capability the shop no longer has.
+      if (req && !hasFeature(req, 'combos')) {
+        throw new AppError(
+          'Combo products are not enabled for this shop',
+          'কম্বো সুবিধাটি আপনার দোকানে চালু নেই',
+          400
+        );
+      }
+      const componentIds = new Set();
+      for (const combo of comboProductsOnSale) {
+        for (const ci of combo.comboItems || []) {
+          const id = String(ci.product);
+          if (!productMap.has(id)) componentIds.add(id);
+        }
+      }
+      if (componentIds.size) {
+        const componentDocs = await Product.find(
+          branchFilter(req, { _id: { $in: [...componentIds] }, shop: shopId })
+        ).session(session || null);
+        for (const doc of componentDocs) productMap.set(doc._id.toString(), doc);
+      }
+    }
+
     // Prepare bulk operations
     const bulkStockOps = [];
     // FEFO batch rewrites, executed AFTER the stock guard passes — see the long
@@ -411,6 +447,199 @@ class SaleService {
       // on it and normalising at each of them is how one gets missed.
       const line = resolveLineQuantity(item, product, req, { qtyUnit });
       item.quantity = line.quantity;
+
+      // ── Combo line ─────────────────────────────────────────────────────────
+      //
+      // The combo product itself moves NO stock. The line expands into one
+      // $gte-guarded op per component — each counted into `expectedStockOps`,
+      // so the oversell guard below stays exact for them too — plus one ledger
+      // row per component stamped `viaCombo`, and ONE sale item carrying a
+      // frozen `comboComponents` snapshot that cancel/return restore from.
+      //
+      // The line's `buyingPrice` is the LIVE per-combo component cost, which is
+      // what keeps the Sale pre('save') profit arithmetic correct untouched.
+      if (isCombo(product)) {
+        if (item.variantId) {
+          throw new AppError('A combo has no variants', 'কম্বোর নিজস্ব ভ্যারিয়েন্ট নেই', 400);
+        }
+        if (product.isActive === false) {
+          throw new AppError(`Combo is inactive: ${product.name}`, `কম্বোটি বন্ধ আছে: ${product.name}`, 400);
+        }
+        if (!Array.isArray(product.comboItems) || product.comboItems.length === 0) {
+          throw new AppError(`Combo has no components: ${product.name}`, `কম্বোতে কোনো পণ্য নেই: ${product.name}`, 400);
+        }
+
+        const comboQty = item.quantity;
+        const comboUnitPrice = sellingPriceFor(product, priceTier);
+
+        // First pass: resolve and validate every component against the
+        // IN-MEMORY stock, which already reflects earlier lines of this sale.
+        const resolvedComponents = [];
+        let retailSum = 0;
+        for (const ci of product.comboItems) {
+          const comp = productMap.get(String(ci.product));
+          if (!comp || comp.isDeleted) {
+            throw new AppError(
+              `Combo "${product.name}" component no longer exists: ${ci.productName || ci.product}`,
+              `"${product.name}" কম্বোর উপাদান পণ্যটি আর নেই: ${ci.productName || ''}`,
+              400
+            );
+          }
+          if (comp.isActive === false) {
+            throw new AppError(
+              `Combo "${product.name}" component is inactive: ${comp.name}`,
+              `"${product.name}" কম্বোর উপাদান "${comp.name}" নিষ্ক্রিয়`,
+              400
+            );
+          }
+
+          let variant = null;
+          if (ci.variantId) {
+            variant = findComponentVariant(comp, ci.variantId);
+            if (!variant) {
+              throw new AppError(
+                `Combo "${product.name}": variant of "${comp.name}" was removed — edit the combo`,
+                `"${product.name}" কম্বোর "${comp.name}" এর ভ্যারিয়েন্টটি আর নেই — কম্বোটি সম্পাদনা করুন`,
+                400
+              );
+            }
+          } else if (comp.hasVariants) {
+            // The component GREW variants after the combo was built; its
+            // product-level stock no longer means anything. Refuse loudly
+            // rather than deduct from a number nobody maintains.
+            throw new AppError(
+              `Combo "${product.name}": "${comp.name}" now has variants — edit the combo and pick one`,
+              `"${product.name}" কম্বোর "${comp.name}" এ এখন ভ্যারিয়েন্ট আছে — কম্বোটি সম্পাদনা করে একটি নির্বাচন করুন`,
+              400
+            );
+          }
+
+          const compStkUnit = storageUnit(comp);
+          const required = quantize(comboQty * ci.quantity, compStkUnit);
+          const availableStock = variant ? (variant.stock || 0) : (comp.stock || 0);
+          if (availableStock < required) {
+            throw new AppError(
+              `Insufficient stock for "${comp.name}" in combo "${product.name}". Available: ${availableStock}, needed: ${required}`,
+              `"${product.name}" কম্বোর "${comp.name}" এর পর্যাপ্ত স্টক নেই। আছে: ${availableStock}, দরকার: ${required}`,
+              400
+            );
+          }
+
+          const compBuying = variant
+            ? (variant.buyingPrice ?? comp.buyingPrice ?? 0)
+            : (comp.buyingPrice || 0);
+          const compRetail = variant ? (variant.sellingPrice || 0) : (comp.sellingPrice || 0);
+          retailSum += compRetail * ci.quantity;
+          resolvedComponents.push({ ci, comp, variant, required, compStkUnit, compBuying, compRetail });
+        }
+
+        // Second pass: deduct in memory, queue the guarded ops and the ledger.
+        let comboBuying = 0; // component cost of ONE combo, at today's prices
+        const comboComponents = [];
+
+        for (const r of resolvedComponents) {
+          const { ci, comp, variant, required, compStkUnit, compBuying, compRetail } = r;
+          // The ledger's revenue figure: the combo price allocated across
+          // components in proportion to their own retail value, so "what did
+          // this stock go out at" still has an honest per-unit answer.
+          const perUnitAlloc = retailSum > 0
+            ? quantizeMoney(comboUnitPrice * (compRetail / retailSum))
+            : 0;
+
+          let previousStock;
+          let newStock;
+          if (variant) {
+            previousStock = variant.stock;
+            variant.stock = quantize(variant.stock - required, compStkUnit);
+            newStock = variant.stock;
+            bulkStockOps.push({
+              updateOne: {
+                filter: { _id: comp._id, variants: { $elemMatch: { _id: variant._id, stock: { $gte: required } } } },
+                update: buildVariantStockUpdate(variant._id, -required, compStkUnit),
+              },
+            });
+          } else {
+            previousStock = comp.stock;
+            comp.stock = quantize(comp.stock - required, compStkUnit);
+            newStock = comp.stock;
+            bulkStockOps.push({
+              updateOne: {
+                filter: { _id: comp._id, stock: { $gte: required } },
+                update: buildStockUpdate(-required, compStkUnit),
+              },
+            });
+          }
+          expectedStockOps++;
+
+          comboBuying += compBuying * ci.quantity;
+
+          stockTransactions.push({
+            shop: shopId,
+            branch: branchId,
+            product: comp._id,
+            productName: comp.name,
+            productCode: comp.code,
+            variantId: variant ? variant._id : null,
+            variantSku: variant ? variant.sku : null,
+            variantAttributes: variant ? variant.attributes : null,
+            type: 'sale',
+            quantity: -required,
+            previousStock,
+            newStock,
+            unitCost: compBuying,
+            totalCost: compBuying * required,
+            unitPrice: perUnitAlloc,
+            totalPrice: quantizeMoney(perUnitAlloc * required),
+            notes: `Sold via combo: ${product.name}`,
+            viaCombo: {
+              product: product._id,
+              name: product.name,
+              code: product.code,
+              comboQuantity: comboQty,
+            },
+            createdBy: userId,
+          });
+
+          // FEFO on the component — same helper, same owner rule as an
+          // ordinary line.
+          if (deductBatches(comp, ci.variantId || null, required)) {
+            bulkBatchOps.push(batchWriteOp(comp));
+          }
+
+          comboComponents.push({
+            product: comp._id,
+            productName: comp.name,
+            productCode: comp.code,
+            variantId: variant ? variant._id : null,
+            variantSku: variant ? variant.sku : undefined,
+            variantAttributes: variant ? variant.attributes : undefined,
+            unit: comp.unit,
+            quantityPerCombo: ci.quantity,
+            totalQuantity: required,
+            unitCost: compBuying,
+          });
+        }
+
+        const comboItemDiscount = item.discount || 0;
+        const comboItemTotal = quantizeMoney((comboUnitPrice * comboQty) - comboItemDiscount);
+
+        processedItems.push({
+          product: product._id,
+          productName: product.name,
+          productCode: product.code,
+          itemType: 'combo',
+          comboComponents,
+          quantity: comboQty,
+          unit: line.unit,
+          saleUnit: 'base',
+          unitPrice: comboUnitPrice,
+          buyingPrice: quantizeMoney(comboBuying),
+          discount: comboItemDiscount,
+          total: comboItemTotal,
+        });
+        subtotal += comboItemTotal;
+        continue;
+      }
 
       let unitPrice, buyingPrice, variantInfo = {};
       // Did THIS line actually get a wholesale rate? Not the same question as
@@ -1019,7 +1248,15 @@ class SaleService {
     }
 
     // --- BATCH: Restore stock using bulkWrite ---
-    const cancelProductIds = [...new Set(sale.items.map(item => item.product.toString()))];
+    // A combo line's stock lives on its COMPONENTS — fetch those too, so the
+    // snapshot loop below finds a document to restore onto.
+    const cancelProductIds = [...new Set(sale.items.flatMap(item => {
+      const ids = [item.product.toString()];
+      if (Array.isArray(item.comboComponents)) {
+        ids.push(...item.comboComponents.map(c => String(c.product)));
+      }
+      return ids;
+    }))];
     // `shop` is part of the filter deliberately. Every other product lookup in
     // this service is tenant-scoped; this one was not, which made it the only
     // query here that could resolve a document belonging to another shop if an
@@ -1034,8 +1271,109 @@ class SaleService {
 
     const restoreOps = [];
     const cancelStockTxns = [];
+    // FEFO rewrites, queued as their OWN ops after the stock restores — same
+    // separation the sale path keeps, so the two bookkeepings stay legible.
+    const cancelBatchOps = [];
+
+    /**
+     * Put a cancelled line's goods back into its batches.
+     *
+     * ── This was missing entirely ────────────────────────────────────────────
+     *
+     * `createSale` deducts batches, `salesReturn` restores them, `cancelPurchase`
+     * removes them — and this path restored `stock` and `variants[].stock` and
+     * never mentioned `batches` at all. So every cancellation widened the gap
+     * between `stock` and `sum(batches.quantity)` in the quiet direction: the
+     * expiry screen warns about LESS stock than is on the shelf, which is the
+     * failure nobody notices until dated goods are sold past their date.
+     *
+     * That is the same class of bug the long note at the deduction site in
+     * `createSale` describes as fixed — it was fixed on the sale path only.
+     *
+     * Restores newest-expiry-first, the mirror of the FEFO deduction, for the
+     * reason `restoreBatches` documents.
+     */
+    const queueBatchRestore = (product, variantId, quantity) => {
+      if (restoreBatches(product, variantId || null, quantity)) {
+        cancelBatchOps.push(batchWriteOp(product));
+      }
+    };
 
     for (const item of sale.items) {
+      // ── Combo line: restore from the sale-time snapshot ───────────────────
+      //
+      // The combo product moved no stock, so the combo doc is not touched at
+      // all — even a combo deleted since the sale cancels cleanly, because
+      // everything needed lives in `comboComponents`.
+      if (item.itemType === 'combo' && Array.isArray(item.comboComponents)) {
+        for (const c of item.comboComponents) {
+          const comp = cancelProductMap.get(String(c.product));
+          if (!comp) continue;
+
+          const compStkUnit = storageUnit(comp);
+          let compPrev = 0;
+          let compNew = 0;
+
+          if (c.variantId) {
+            const variant = (comp.variants && typeof comp.variants.id === 'function')
+              ? comp.variants.id(c.variantId)
+              : comp.variants?.find(v => (v._id || v.id)?.toString() === c.variantId?.toString());
+            compPrev = variant?.stock || 0;
+            compNew = quantize(compPrev + c.totalQuantity, compStkUnit);
+            if (variant) variant.stock = compNew;
+
+            restoreOps.push({
+              updateOne: {
+                filter: { _id: comp._id, 'variants._id': c.variantId },
+                update: buildVariantStockUpdate(c.variantId, c.totalQuantity, compStkUnit),
+              },
+            });
+          } else {
+            compPrev = comp.stock || 0;
+            compNew = quantize(compPrev + c.totalQuantity, compStkUnit);
+            comp.stock = compNew;
+
+            restoreOps.push({
+              updateOne: {
+                filter: { _id: comp._id },
+                update: buildStockUpdate(c.totalQuantity, compStkUnit),
+              },
+            });
+          }
+
+          queueBatchRestore(comp, c.variantId, c.totalQuantity);
+
+          cancelStockTxns.push({
+            shop: shopId,
+            branch: branchId || null,
+            product: comp._id,
+            productName: c.productName || comp.name,
+            productCode: c.productCode || comp.code,
+            variantId: c.variantId || null,
+            variantSku: c.variantSku,
+            variantAttributes: c.variantAttributes,
+            type: 'return',
+            quantity: c.totalQuantity,
+            previousStock: compPrev,
+            newStock: compNew,
+            reference: {
+              type: 'sale',
+              id: sale._id,
+              invoiceNo: sale.invoiceNo,
+            },
+            notes: `Sale cancelled: ${sale.invoiceNo} (combo: ${item.productName})`,
+            viaCombo: {
+              product: item.product,
+              name: item.productName,
+              code: item.productCode,
+              comboQuantity: item.quantity,
+            },
+            createdBy: userId,
+          });
+        }
+        continue;
+      }
+
       const product = cancelProductMap.get(item.product.toString());
       if (!product) continue;
 
@@ -1075,6 +1413,8 @@ class SaleService {
         });
       }
 
+      queueBatchRestore(product, item.variantId, item.quantity);
+
       cancelStockTxns.push({
         shop: shopId,
         branch: branchId || null,
@@ -1098,10 +1438,13 @@ class SaleService {
       });
     }
 
-    {
-      if (restoreOps.length > 0) {
-        await Product.bulkWrite(restoreOps);
-      }
+    if (restoreOps.length > 0) {
+      await Product.bulkWrite(restoreOps);
+    }
+    // After the stock restores, and in its own bulkWrite — see the note on
+    // `queueBatchRestore` above and the matching split in `createSale`.
+    if (cancelBatchOps.length > 0) {
+      await Product.bulkWrite(cancelBatchOps);
     }
     if (cancelStockTxns.length > 0) {
       await StockTransaction.insertMany(cancelStockTxns);

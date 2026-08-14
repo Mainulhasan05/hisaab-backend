@@ -8,7 +8,9 @@
     "dev": "nodemon src/index.js",
     "test": "jest",
     "sync-indexes": "node scripts/sync-indexes.js",
-    "sync-indexes:apply": "node scripts/sync-indexes.js --apply"
+    "sync-indexes:apply": "node scripts/sync-indexes.js --apply",
+    "backup": "node scripts/backup-db.js",
+    "restore": "node scripts/restore-db.js"
   },
   "keywords": [
     "pos",

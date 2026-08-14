@@ -309,6 +309,62 @@ const shopSchema = new mongoose.Schema({
     onlineSelling: {
       type: Boolean,
       default: false
+    },
+    // The public website and the separate /online panel that manages it.
+    // Requires `onlineSelling` + `productImages` — see the `requires` chain in
+    // utils/features.util.js, which is what stops a shop being handed a
+    // storefront it has no products or photos for. Off = the panel does not
+    // render and the public page 404s; the Storefront document is kept.
+    storefront: {
+      type: Boolean,
+      default: false
+    },
+    // Cart, checkout and the order worklist. A separate axis from `storefront`
+    // on purpose: a catalogue site with call/WhatsApp buttons is the FINISHED
+    // product for a shop that will not run a parcel operation, and forcing a
+    // cart on them means orders arrive that nobody processes.
+    onlineOrders: {
+      type: Boolean,
+      default: false
+    },
+    // Combo/offer products: a sellable bundle of other products (buy-1-get-1,
+    // gift packs) whose sale deducts each component's own stock. Off = the
+    // product form has no combo option, `type: 'combo'` is refused on create,
+    // and existing combos stop being sellable — their documents and every
+    // sale/ledger row are kept, so the switch is reversible.
+    combos: {
+      type: Boolean,
+      default: false
+    }
+  },
+
+  /**
+   * Which storefront templates this shop has been GRANTED.
+   *
+   * The platform admin ticks templates here; the shop picks one of them from
+   * its own panel. Two separate acts, and they must stay separate — "which
+   * templates exist" is a platform decision and "which one are we running" is
+   * the shop's.
+   *
+   * ── THE INVARIANT THIS FIELD EXISTS TO CARRY ────────────────────────────────
+   * Revoking a grant NEVER takes a live site down. `allowedTemplates` is
+   * checked when a shop APPLIES a template, and never when one is RENDERED —
+   * the applied key lives on the Storefront document and the public page reads
+   * it from there. So an admin tidying up the template list cannot blank a
+   * shop's website, discover it from a support call, and be unable to say which
+   * shops they broke.
+   *
+   * Same shape as the rule in Product.model.js that the `unit` enum accepts the
+   * full registry regardless of which units a shop may currently CHOOSE: a
+   * validation list has to keep accepting anything already stored.
+   *
+   * Empty (the default) = no templates granted, which is every shop that an
+   * admin has never touched.
+   */
+  storefront: {
+    allowedTemplates: {
+      type: [String],
+      default: []
     }
   },
   // Whether branches share one customer book or keep separate ones (Phase 7).

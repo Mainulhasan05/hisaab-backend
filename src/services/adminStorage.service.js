@@ -31,7 +31,7 @@ const cacheService = require('./cache.service');
 const crypto = require('../utils/crypto.util');
 const { AppError } = require('../middleware/error.middleware');
 const { invalidateShopAuthCache } = require('../utils/authCache.util');
-const { STORAGE_BACKED_FEATURES, FEATURES } = require('../utils/features.util');
+const { STORAGE_BACKED_FEATURES, FEATURES, storageCascadeKeys } = require('../utils/features.util');
 const {
   MB,
   platformStorageSettings,
@@ -518,7 +518,15 @@ class AdminStorageService {
       } else {
         // Cascade off. Only touch flags that are actually on, so the audit
         // entry lists what really changed.
-        cascadedFeatures = STORAGE_BACKED_FEATURES.filter((key) => shop.features?.[key] === true);
+        //
+        // `storageCascadeKeys()` rather than STORAGE_BACKED_FEATURES: the list
+        // is the storage-backed capabilities PLUS everything that transitively
+        // depends on one. `storefront` requires `productImages`, so cascading
+        // only the direct list would leave a shop with a live public website
+        // and no photos on it — a worse outcome than the upload-button-wired-
+        // to-a-403 this cascade was written to prevent. See the `requires`
+        // header in utils/features.util.js.
+        cascadedFeatures = storageCascadeKeys().filter((key) => shop.features?.[key] === true);
         if (cascadedFeatures.length) {
           if (!shop.features) shop.features = {};
           cascadedFeatures.forEach((key) => { shop.features[key] = false; });

@@ -66,6 +66,20 @@ const variant = Joi.object({
 }).unknown(true);
 
 /**
+ * One component of a combo product. Structural bounds only — whether the
+ * component exists, belongs to this shop and branch, is itself not a combo,
+ * and whether `variantId` is required (component has variants) or forbidden
+ * (it does not) are all decided in `product.service._validateComboItems`,
+ * which has the component documents in hand. Joi cannot ask any of that.
+ */
+const comboItem = Joi.object({
+  _id: commonSchemas.objectId.optional(),
+  product: commonSchemas.objectId.required(),
+  variantId: commonSchemas.objectId.allow(null, ''),
+  quantity: Joi.number().positive().max(SAFE_QUANTITY_MAX).required(),
+}).unknown(true); // display snapshots round-trip from the edit form
+
+/**
  * One batch, as the batch endpoints accept it. `variantId` is which sellable
  * thing it belongs to — absent/null means the product itself, which is what
  * every batch written before per-variant expiry existed already meant.
@@ -138,7 +152,21 @@ const baseProduct = {
     sellByPack: Joi.boolean().default(true),
     sellByUnit: Joi.boolean().default(true),
   }).allow(null),
-  buyingPrice: Joi.number().min(0).required(),
+  // 'combo' turns this product into a bundle of others — see comboItems below.
+  // Immutability after create is enforced in the service, not here.
+  type: Joi.string().valid('standard', 'combo'),
+  comboItems: Joi.when('type', {
+    is: 'combo',
+    then: Joi.array().items(comboItem).min(1).max(20).required(),
+    otherwise: Joi.array().max(0),
+  }),
+  // A combo's cost is DERIVED from its components at sale time, so the field
+  // is optional there; an ordinary product still has to state what it cost.
+  buyingPrice: Joi.when('type', {
+    is: 'combo',
+    then: Joi.number().min(0),
+    otherwise: Joi.number().min(0).required(),
+  }),
   sellingPrice: Joi.number().min(0).required(),
   // Structural bounds ONLY, exactly like `unit` and `packaging` above. Joi
   // cannot see the shop's `features.wholesale` flag, so the ENTITLEMENT

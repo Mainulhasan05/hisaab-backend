@@ -120,6 +120,25 @@ auditLogSchema.pre('validate', function (next) {
     else if (actor?.adminId) this.admin = actor.adminId;
   }
 
+  // ── A platform admin acting inside a shop is an ADMIN, not a user ──────────
+  //
+  // `protect` gives an impersonating admin a synthetic `req.user` whose `_id` is
+  // the ADMIN's id, so that shop services (which only know about `req.user`)
+  // work unchanged. Every service then logs `user: userId` — and `user` is
+  // `ref: 'User'`, so the populate resolved to null and the trail showed a blank
+  // actor for everything an admin did inside a shop. The one class of action
+  // most in need of attribution was the one class that had none.
+  //
+  // Corrected here for the same reason the metadata above is: 33 call sites pass
+  // the id they were given and none of them can tell which kind of actor it came
+  // from. `getActor()` can — `ctx.admin` is only ever set by the admin branch of
+  // `protect`.
+  const actor = getActor();
+  if (actor?.adminId && this.user && String(this.user) === String(actor.adminId)) {
+    this.admin = actor.adminId;
+    this.user = undefined;
+  }
+
   // Same treatment for branch — a null branch makes a row invisible to every
   // branch-filtered view of the trail.
   if (this.branch === undefined || this.branch === null) {

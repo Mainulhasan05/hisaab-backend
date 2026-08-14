@@ -34,7 +34,10 @@ const rbac = (module, action) => {
 
     // Get module label for user-friendly error
     const moduleLabel = MODULES[module]?.label || module;
-    const actionLabels = { view: 'দেখার', create: 'তৈরি করার', update: 'সম্পাদনা করার', delete: 'মুছে ফেলার' };
+    const actionLabels = {
+      view: 'দেখার', create: 'তৈরি করার', update: 'সম্পাদনা করার', delete: 'মুছে ফেলার',
+      cancel: 'বাতিল করার', publish: 'প্রকাশ করার',
+    };
     const actionLabel = actionLabels[action] || action;
 
     return ApiResponse.forbidden(res, {
@@ -73,7 +76,10 @@ const rbacAny = (pairs) => {
 
     const [module, action] = pairs[0];
     const moduleLabel = MODULES[module]?.label || module;
-    const actionLabels = { view: 'দেখার', create: 'তৈরি করার', update: 'সম্পাদনা করার', delete: 'মুছে ফেলার' };
+    const actionLabels = {
+      view: 'দেখার', create: 'তৈরি করার', update: 'সম্পাদনা করার', delete: 'মুছে ফেলার',
+      cancel: 'বাতিল করার', publish: 'প্রকাশ করার',
+    };
     const actionLabel = actionLabels[action] || action;
 
     return ApiResponse.forbidden(res, {

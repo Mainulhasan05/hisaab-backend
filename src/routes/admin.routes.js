@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const adminController = require('../controllers/admin.controller');
 const adminStorageController = require('../controllers/adminStorage.controller');
+const adminStorefrontController = require('../controllers/adminStorefront.controller');
 const billingController = require('../controllers/billing.controller');
 const { protect, adminOnly } = require('../middleware/auth.middleware');
 
@@ -36,6 +37,15 @@ router.patch('/shops/:id/customer-scope', adminController.setCustomerScope);
 // with a method per verb. New capabilities need no route change at all.
 router.get('/shops/:id/features', adminController.getShopFeatures);
 router.patch('/shops/:id/features/:key', adminController.setShopFeature);
+// Which storefront templates this shop may pick from. Distinct from the
+// capability toggle above: `features.storefront` decides whether the shop has a
+// website at all, this decides which designs it may choose. The GET reports
+// what is currently applied so the panel can warn before a grant is revoked.
+router.get('/shops/:id/storefront/templates', adminStorefrontController.getShopTemplates);
+router.put('/shops/:id/storefront/templates', adminStorefrontController.setShopTemplates);
+// The platform kill switch. Takes ONE storefront dark without touching the
+// shop's POS — they keep trading at the counter. See adminStorefront.service.
+router.patch('/shops/:id/storefront/pause', adminStorefrontController.setStorefrontPause);
 router.get('/shops/:id/branches', adminController.getShopBranches);
 router.post('/shops/:id/branches', adminController.addShopBranch);
 router.patch('/shops/:id/branches/:branchId', adminController.updateShopBranch);
@@ -99,6 +109,21 @@ router.get('/storage/shops', adminStorageController.listShopStorage);
 router.get('/shops/:id/storage', adminStorageController.getShopStorage);
 router.patch('/shops/:id/storage', adminStorageController.setShopStorage);
 router.post('/shops/:id/storage/recalculate', adminStorageController.recalculateShopStorage);
+
+// ── Online storefront (template catalogue + oversight) ────────────────────
+//
+// The per-shop grant routes live up with the other /shops/:id verbs. These are
+// the platform-wide ones: the catalogue itself, and the list answering "who is
+// actually using this feature".
+//
+// There is no DELETE. A template is retired, never erased — it keeps rendering
+// for every shop already on it. See StorefrontTemplate.model.js.
+router.get('/storefront/templates', adminStorefrontController.listTemplates);
+router.post('/storefront/templates', adminStorefrontController.createTemplate);
+router.patch('/storefront/templates/:id', adminStorefrontController.updateTemplate);
+router.post('/storefront/templates/:id/publish', adminStorefrontController.publishTemplate);
+router.post('/storefront/templates/:id/retire', adminStorefrontController.retireTemplate);
+router.get('/storefront/shops', adminStorefrontController.listStorefronts);
 
 // Cache/Redis management
 router.get('/cache/stats', adminController.getCacheStats);
