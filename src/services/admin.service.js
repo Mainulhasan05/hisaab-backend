@@ -1741,6 +1741,24 @@ class AdminService {
    *
    * Redis down: `getMultipleLastActive` falls through to Mongo and the whole
    * panel degrades from ~60s resolution to ~5 minutes. Nothing errors.
+   *
+   * ── What "today" and "this week" mean here ──────────────────────────────────
+   *
+   * Sales and product figures use the Bangladesh CALENDAR day for "today" and
+   * a rolling 7 days for "this week". Calendar-day matters because "revenue
+   * today" is a number the operator compares against what a shop's own daily
+   * summary shows, and that one is BD-calendar. Getting it wrong would put the
+   * first six hours of every Bangladeshi trading day in the wrong bucket on a
+   * UTC host — see bdTime.util.js for the same bug in report land.
+   *
+   * User buckets stay rolling windows. They measure presence ("has this person
+   * touched the app in the last day"), where a midnight boundary would make the
+   * figure collapse every morning for no reason the operator would recognise.
+   * That difference is why the dashboard labels the user buckets "Last 24h"
+   * rather than letting two different spans share the word "today".
+   *
+   * Cancelled sales are excluded from both the counts and the revenue, and
+   * reported separately, so a voided ৳50,000 invoice cannot inflate the day.
    */
   async getActivityOverview() {
     const User = require('../models/User.model');
@@ -1749,53 +1767,130 @@ class AdminService {
 
     const now = Date.now();
     const since = (minutes) => new Date(now - minutes * 60 * 1000);
+    const { startOfDay: bdTodayStart } = getBangladeshTodayRange();
+    const salesWindowStart = since(60 * 24 * 7);
 
-    const [buckets, recentUsers, productCounts, recentProducts] = await Promise.all([
-      // Counts come from Mongo in one pass. Up to 5 minutes stale by design —
-      // a headline count does not justify reading every Redis key on the
-      // platform, and the per-user list below is exact where it matters.
-      User.aggregate([
-        {
-          $group: {
-            _id: null,
-            total: { $sum: 1 },
-            online: { $sum: { $cond: [{ $gte: ['$lastActiveAt', since(5)] }, 1, 0] } },
-            today: { $sum: { $cond: [{ $gte: ['$lastActiveAt', since(60 * 24)] }, 1, 0] } },
-            week: { $sum: { $cond: [{ $gte: ['$lastActiveAt', since(60 * 24 * 7)] }, 1, 0] } },
-            never: { $sum: { $cond: [{ $ifNull: ['$lastActiveAt', false] }, 0, 1] } },
-          },
-        },
-      ]),
-      User.find({ lastActiveAt: { $ne: null } })
-        .select('name phone role lastActiveAt lastLogin')
-        .populate('shop', 'name')
-        .sort({ lastActiveAt: -1 })
-        .limit(8)
-        .lean(),
-      Product.aggregate([
-        {
-          $group: {
-            _id: null,
-            total: { $sum: 1 },
-            deleted: { $sum: { $cond: [{ $eq: ['$isDeleted', true] }, 1, 0] } },
-            inactive: {
-              $sum: { $cond: [{ $and: [{ $ne: ['$isDeleted', true] }, { $eq: ['$isActive', false] }] }, 1, 0] },
+    const [buckets, recentUsers, productCounts, recentProducts, saleBuckets, recentSales, salesTotal] =
+      await Promise.all([
+        // Counts come from Mongo in one pass. Up to 5 minutes stale by design —
+        // a headline count does not justify reading every Redis key on the
+        // platform, and the per-user list below is exact where it matters.
+        User.aggregate([
+          {
+            $group: {
+              _id: null,
+              total: { $sum: 1 },
+              online: { $sum: { $cond: [{ $gte: ['$lastActiveAt', since(5)] }, 1, 0] } },
+              today: { $sum: { $cond: [{ $gte: ['$lastActiveAt', since(60 * 24)] }, 1, 0] } },
+              week: { $sum: { $cond: [{ $gte: ['$lastActiveAt', since(60 * 24 * 7)] }, 1, 0] } },
+              never: { $sum: { $cond: [{ $ifNull: ['$lastActiveAt', false] }, 0, 1] } },
             },
-            addedToday: { $sum: { $cond: [{ $gte: ['$createdAt', since(60 * 24)] }, 1, 0] } },
-            addedWeek: { $sum: { $cond: [{ $gte: ['$createdAt', since(60 * 24 * 7)] }, 1, 0] } },
           },
-        },
-      ]),
-      // Most recently touched, not most recently created — "what changed" is
-      // the question a console asks. `createdBy` answers who put it there.
-      Product.find({})
-        .select('name code sellingPrice stock isDeleted isActive createdAt updatedAt')
-        .populate('shop', 'name')
-        .populate('createdBy', 'name role')
-        .sort({ updatedAt: -1 })
-        .limit(8)
-        .lean(),
-    ]);
+        ]),
+        User.find({ lastActiveAt: { $ne: null } })
+          .select('name phone role lastActiveAt lastLogin')
+          .populate('shop', 'name')
+          .sort({ lastActiveAt: -1 })
+          .limit(8)
+          .lean(),
+        Product.aggregate([
+          {
+            $group: {
+              _id: null,
+              total: { $sum: 1 },
+              deleted: { $sum: { $cond: [{ $eq: ['$isDeleted', true] }, 1, 0] } },
+              inactive: {
+                $sum: { $cond: [{ $and: [{ $ne: ['$isDeleted', true] }, { $eq: ['$isActive', false] }] }, 1, 0] },
+              },
+              // BD calendar day, matching the sales figures below rather than
+              // the rolling 24h this used to be. The dashboard shows "added
+              // today" next to "sales today"; the two words have to mean the
+              // same span or the screen is quietly lying about one of them.
+              addedToday: { $sum: { $cond: [{ $gte: ['$createdAt', bdTodayStart] }, 1, 0] } },
+              addedWeek: { $sum: { $cond: [{ $gte: ['$createdAt', salesWindowStart] }, 1, 0] } },
+            },
+          },
+        ]),
+        // Newest first, not most-recently-touched. This feed answers "what has
+        // been uploaded", and sorting by `updatedAt` let a five-month-old
+        // product whose stock ticked down a minute ago outrank a genuine new
+        // upload — so the panel that claimed to show new products routinely
+        // showed none. `updatedAt` is still returned so the UI can mark a row
+        // that has been edited since it was created.
+        Product.find({})
+          .select('name code sellingPrice stock unit isDeleted isActive createdAt updatedAt')
+          .populate('shop', 'name')
+          .populate('branch', 'name')
+          .populate('createdBy', 'name role')
+          .sort({ createdAt: -1 })
+          .limit(8)
+          .lean(),
+        // One pass over the last 7 days of sales yields both windows. Bounding
+        // the $match at 7 days is what keeps this off a full collection scan:
+        // Sale is one of the three collections that actually grows.
+        Sale.aggregate([
+          { $match: { createdAt: { $gte: salesWindowStart } } },
+          {
+            $group: {
+              _id: null,
+              weekCount: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 0, 1] } },
+              weekRevenue: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 0, '$total'] } },
+              weekCancelled: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] } },
+              todayCount: {
+                $sum: {
+                  $cond: [
+                    { $and: [{ $gte: ['$createdAt', bdTodayStart] }, { $ne: ['$status', 'cancelled'] }] },
+                    1,
+                    0,
+                  ],
+                },
+              },
+              todayRevenue: {
+                $sum: {
+                  $cond: [
+                    { $and: [{ $gte: ['$createdAt', bdTodayStart] }, { $ne: ['$status', 'cancelled'] }] },
+                    '$total',
+                    0,
+                  ],
+                },
+              },
+              todayDue: {
+                $sum: {
+                  $cond: [
+                    { $and: [{ $gte: ['$createdAt', bdTodayStart] }, { $ne: ['$status', 'cancelled'] }] },
+                    '$due',
+                    0,
+                  ],
+                },
+              },
+              todayCancelled: {
+                $sum: {
+                  $cond: [
+                    { $and: [{ $gte: ['$createdAt', bdTodayStart] }, { $eq: ['$status', 'cancelled'] }] },
+                    1,
+                    0,
+                  ],
+                },
+              },
+            },
+          },
+        ]),
+        // `items` is deliberately not selected: a sale carries its whole line
+        // array, and eight of them would be the heaviest thing on the endpoint
+        // for a number the panel does not show.
+        Sale.find({})
+          .select('invoiceNo total paid due status paymentMethod customerName isOnline channel createdAt')
+          .populate('shop', 'name')
+          .populate('branch', 'name')
+          .populate('customer', 'name phone')
+          .populate('createdBy', 'name role')
+          .sort({ createdAt: -1 })
+          .limit(8)
+          .lean(),
+        // Metadata read, not a scan. "Sales ever recorded" is a scale figure,
+        // not an accounting one, so an estimate is the honest cost/benefit.
+        Sale.estimatedDocumentCount(),
+      ]);
 
     // Sharpen the listed users with live Redis values — 8 keys, one MGET.
     const liveMap = await userActivityService.getMultipleLastActive(recentUsers.map((u) => u._id));
@@ -1821,6 +1916,7 @@ class AdminService {
 
     const u = buckets[0] || {};
     const p = productCounts[0] || {};
+    const s = saleBuckets[0] || {};
 
     return {
       users: {
@@ -1843,6 +1939,28 @@ class AdminService {
           inactive: p.inactive || 0,
           addedToday: p.addedToday || 0,
           addedWeek: p.addedWeek || 0,
+        },
+      },
+      sales: {
+        recent: recentSales,
+        counts: {
+          // `total` is an estimate; every other figure here is exact.
+          total: salesTotal || 0,
+          todayCount: s.todayCount || 0,
+          todayRevenue: s.todayRevenue || 0,
+          todayDue: s.todayDue || 0,
+          todayCancelled: s.todayCancelled || 0,
+          weekCount: s.weekCount || 0,
+          weekRevenue: s.weekRevenue || 0,
+          weekCancelled: s.weekCancelled || 0,
+        },
+        // The UI labels its own windows, but it should not have to hardcode
+        // where they start — a reader comparing this against a shop's daily
+        // summary needs to know which midnight we used.
+        windows: {
+          todayStart: bdTodayStart,
+          weekStart: salesWindowStart,
+          timezone: 'Asia/Dhaka',
         },
       },
       generatedAt: new Date(),

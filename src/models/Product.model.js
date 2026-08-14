@@ -656,6 +656,10 @@ productSchema.index({ shop: 1, trackBatches: 1, 'batches.expiryDate': 1 }, { spa
 // the availability recompute both ask it. Sparse: only combo products carry the
 // array at all.
 productSchema.index({ shop: 1, 'comboItems.product': 1 }, { sparse: true });
+// Cross-shop, admin-only — same reasoning as the bare {createdAt} index on
+// Sale. The console's recent-uploads feed and GET /api/admin/products carry no
+// shop predicate, so none of the compound indexes above can serve them.
+productSchema.index({ createdAt: -1 });
 // Note: Text search removed for scalability - use regex or external search (Elasticsearch) for large datasets
 
 /*

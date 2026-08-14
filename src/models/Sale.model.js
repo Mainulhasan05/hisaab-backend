@@ -370,6 +370,14 @@ saleSchema.index({ shop: 1, createdAt: -1 }); // Single-branch listing, recent s
 saleSchema.index({ shop: 1, due: 1 }); // Dues listing/sort
 saleSchema.index({ shop: 1, total: -1 }); // Sort by amount (whitelisted sort field)
 saleSchema.index({ shop: 1, createdBy: 1, createdAt: -1 }); // Staff attribution filter + staff sales report
+// Cross-shop, admin-only. Every index above is shop-prefixed, which is correct
+// for the shop app — but the operator console has no shop predicate by
+// definition: the dashboard's recent-sales feed and GET /api/admin/sales both
+// sort the whole collection by date. Without this they are a COLLSCAN plus an
+// in-memory sort, which is fine at 10k documents and is not at 10M.
+// Never used by a shop-scoped query: the planner prefers the compound indexes
+// there because they satisfy the equality on `shop` as well as the sort.
+saleSchema.index({ createdAt: -1 });
 
 // Calculate totals before saving
 saleSchema.pre('save', function(next) {
