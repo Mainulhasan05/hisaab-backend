@@ -75,6 +75,10 @@ const variant = Joi.object({
 const comboItem = Joi.object({
   _id: commonSchemas.objectId.optional(),
   product: commonSchemas.objectId.required(),
+  // 'choose' = the cashier picks a variant at the till. The pairing rule
+  // (a 'choose' row may not also name a variant) is enforced in the service,
+  // which knows whether the component has variants at all.
+  variantMode: Joi.string().valid('fixed', 'choose'),
   variantId: commonSchemas.objectId.allow(null, ''),
   quantity: Joi.number().positive().max(SAFE_QUANTITY_MAX).required(),
 }).unknown(true); // display snapshots round-trip from the edit form

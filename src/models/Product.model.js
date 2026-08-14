@@ -258,9 +258,36 @@ const comboItemSchema = new mongoose.Schema({
     ref: 'Product',
     required: [true, 'কম্বোর পণ্য নির্বাচন করুন']
   },
-  // Required when the component product `hasVariants` — enforced in
-  // product.service._validateComboItems, where the component document is in
-  // hand. Null means "the product itself".
+  /**
+   * WHICH sellable thing this slot draws from.
+   *
+   * 'fixed'  — `variantId` names one variant (or the product itself, when it
+   *            has none). The till cannot substitute: a combo priced for the
+   *            400ml shampoo must not go out with the 200ml.
+   * 'choose' — every ACTIVE variant of the component is eligible and the
+   *            cashier picks one while billing. `variantId` is null.
+   *
+   * 'choose' is what stops a 6-variant shirt from needing 6 separate combo
+   * products. A customer picks a colour at the counter, not the shopkeeper at
+   * build time — so the choice belongs at the till.
+   *
+   * The mode is EXPLICIT rather than inferred from `variantId: null`, and that
+   * matters: a component that GREW variants after the combo was built also has
+   * no variantId, and its product-level stock stops meaning anything the moment
+   * variants appear. Such a row stays 'fixed' and still fails loudly at sale
+   * time (see sale.service.js) instead of silently deducting from an arbitrary
+   * variant. Default 'fixed' so a payload that omits the field keeps the
+   * variant it named.
+   */
+  variantMode: {
+    type: String,
+    enum: ['fixed', 'choose'],
+    default: 'fixed'
+  },
+  // Set only when `variantMode === 'fixed'` and the component has variants —
+  // enforced in product.service._validateComboItems, where the component
+  // document is in hand. Null means "the product itself", or, under 'choose',
+  // "decided at the till".
   variantId: {
     type: mongoose.Schema.Types.ObjectId,
     default: null

@@ -128,8 +128,16 @@ const saleItemSchema = new mongoose.Schema({
   comboComponents: {
     type: [{
       product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
+      // Which slot of the combo definition this row served. Traceability only
+      // — nothing restores through it, so a slot deleted from the combo later
+      // leaves this sale entirely intact. Absent on lines sold before the
+      // cashier could choose a variant.
+      comboItemId: { type: mongoose.Schema.Types.ObjectId, default: null },
       productName: { type: String, required: true },
       productCode: { type: String },
+      // The variant AS SOLD. Under a 'choose' slot this is what the cashier
+      // picked at the till, which is the only record of it — the combo
+      // definition never knew.
       variantId: { type: mongoose.Schema.Types.ObjectId, default: null },
       variantSku: { type: String },
       variantAttributes: { type: mongoose.Schema.Types.Mixed },

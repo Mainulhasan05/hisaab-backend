@@ -34,13 +34,17 @@ function sanitizeProductDoc(doc, allowCost) {
   if (!allowCost) {
     delete obj.buyingPrice;
     // Derived component cost of a combo — same confidential figure as
-    // `buyingPrice`, computed instead of stored. The per-row figure the
-    // decorator attaches is stripped for the same reason.
+    // `buyingPrice`, computed instead of stored. `comboCostMin` is the other
+    // end of the range a 'choose' slot creates and is exactly as revealing.
+    // The per-row figures the decorator attaches are stripped for the same
+    // reason.
     delete obj.comboCost;
+    delete obj.comboCostMin;
     if (Array.isArray(obj.comboItems)) {
       obj.comboItems = obj.comboItems.map((c) => {
         const cObj = typeof c.toObject === 'function' ? c.toObject() : { ...c };
         delete cObj.buyingPrice;
+        delete cObj.buyingPriceMin;
         return cObj;
       });
     }
@@ -174,7 +178,7 @@ const PROFIT_KEYS = new Set([
 ]);
 const COST_KEYS = new Set([
   'buyingPrice', 'unitCost', 'totalCost', 'totalBuyingValue', 'inventoryValue',
-  'comboCost',
+  'comboCost', 'comboCostMin', 'buyingPriceMin',
 ]);
 
 function isPlainObject(val) {

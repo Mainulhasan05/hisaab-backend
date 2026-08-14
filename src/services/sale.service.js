@@ -29,7 +29,7 @@ const { resolveLineQuantity, unitPriceFor } = require('../utils/packaging.util')
 const { priceTierFor, sellingPriceFor, hasWholesalePrice } = require('../utils/pricing.util');
 const { deductBatches, restoreBatches, batchWriteOp } = require('../utils/batch.util');
 const { hasFeature } = require('../utils/features.util');
-const { isCombo, findComponentVariant } = require('../utils/combo.util');
+const { isCombo, findComponentVariant, isChooseSlot } = require('../utils/combo.util');
 
 // "Today" in Bangladesh, from the shared definition in `bdTime.util`. This was
 // a fourth private copy of the same offset arithmetic; the copies are what let
@@ -472,6 +472,27 @@ class SaleService {
         const comboQty = item.quantity;
         const comboUnitPrice = sellingPriceFor(product, priceTier);
 
+        // What the cashier picked for each 'choose' slot, keyed by the slot's
+        // own _id — NOT by product id, because two slots may name the same
+        // product ("১টা কিনলে ১টা ফ্রি" with two different colours).
+        //
+        // The price does not move with the pick: the combo is sold for what it
+        // was priced at, whichever variant goes out. Only the COST follows the
+        // variant, which is what keeps the line's profit honest.
+        const selections = new Map();
+        for (const sel of (item.comboSelections || [])) {
+          if (!sel || !sel.comboItemId) continue;
+          selections.set(String(sel.comboItemId), sel);
+        }
+        // Which selections a slot actually claimed. Anything left over aimed at
+        // a PINNED slot or at nothing at all — both are refused below rather
+        // than dropped, because a client that thinks it substituted a variant
+        // must not be told the sale went through as it asked.
+        const usedSelections = new Set();
+        // Units of one shelf (product, or product+variant) already claimed by
+        // an earlier slot of THIS combo line — see the check in the loop below.
+        const pendingPerShelf = new Map();
+
         // First pass: resolve and validate every component against the
         // IN-MEMORY stock, which already reflects earlier lines of this sale.
         const resolvedComponents = [];
@@ -494,7 +515,28 @@ class SaleService {
           }
 
           let variant = null;
-          if (ci.variantId) {
+          if (isChooseSlot(ci)) {
+            // The slot the cashier had to answer. No fallback to "the first
+            // variant": guessing here would ring up a colour nobody chose and
+            // take it off the wrong shelf.
+            const sel = selections.get(String(ci._id));
+            usedSelections.add(String(ci._id));
+            if (!sel || !sel.variantId) {
+              throw new AppError(
+                `Combo "${product.name}": choose which "${comp.name}" the customer is taking`,
+                `"${product.name}" কম্বোর "${comp.name}" এর কোনটি দিচ্ছেন তা নির্বাচন করুন`,
+                400
+              );
+            }
+            variant = findComponentVariant(comp, sel.variantId);
+            if (!variant || variant.isActive === false) {
+              throw new AppError(
+                `Combo "${product.name}": that variant of "${comp.name}" is not available`,
+                `"${product.name}" কম্বোর "${comp.name}" এর ওই ভ্যারিয়েন্টটি পাওয়া যায়নি`,
+                400
+              );
+            }
+          } else if (ci.variantId) {
             variant = findComponentVariant(comp, ci.variantId);
             if (!variant) {
               throw new AppError(
@@ -516,14 +558,31 @@ class SaleService {
 
           const compStkUnit = storageUnit(comp);
           const required = quantize(comboQty * ci.quantity, compStkUnit);
-          const availableStock = variant ? (variant.stock || 0) : (comp.stock || 0);
+
+          // Two slots of one combo may land on the SAME shelf — either two
+          // 'choose' slots the cashier answered with one colour, or a 'choose'
+          // slot picking what a 'fixed' slot already pinned. Each slot must be
+          // checked against what the EARLIER slots of this line already spoke
+          // for, or two 3-unit slots both pass against a stock of 5 and the
+          // only thing standing between the shop and a negative shelf is the
+          // database's $gte guard — which fires a 409 blaming a phantom
+          // concurrent sale instead of telling the cashier what is short.
+          //
+          // Before 'choose' existed this could not happen: duplicate
+          // (product, variant) rows were rejected at build time.
+          const stockKey = `${comp._id}:${variant ? variant._id : ''}`;
+          const spokenFor = pendingPerShelf.get(stockKey) || 0;
+          const onShelf = variant ? (variant.stock || 0) : (comp.stock || 0);
+          const availableStock = onShelf - spokenFor;
           if (availableStock < required) {
+            const what = variant && variant.sku ? `${comp.name} (${variant.sku})` : comp.name;
             throw new AppError(
-              `Insufficient stock for "${comp.name}" in combo "${product.name}". Available: ${availableStock}, needed: ${required}`,
-              `"${product.name}" কম্বোর "${comp.name}" এর পর্যাপ্ত স্টক নেই। আছে: ${availableStock}, দরকার: ${required}`,
+              `Insufficient stock for "${what}" in combo "${product.name}". Available: ${availableStock}, needed: ${required}`,
+              `"${product.name}" কম্বোর "${what}" এর পর্যাপ্ত স্টক নেই। আছে: ${availableStock}, দরকার: ${required}`,
               400
             );
           }
+          pendingPerShelf.set(stockKey, spokenFor + required);
 
           const compBuying = variant
             ? (variant.buyingPrice ?? comp.buyingPrice ?? 0)
@@ -531,6 +590,22 @@ class SaleService {
           const compRetail = variant ? (variant.sellingPrice || 0) : (comp.sellingPrice || 0);
           retailSum += compRetail * ci.quantity;
           resolvedComponents.push({ ci, comp, variant, required, compStkUnit, compBuying, compRetail });
+        }
+
+        // A selection nobody claimed means the client believes it changed
+        // something this combo does not let it change — most likely an attempt
+        // to substitute a PINNED variant, which is the one thing pinning is
+        // for. Refuse rather than ignore: silently selling the pinned variant
+        // after being asked for another is how a shop discovers, at stock-take,
+        // that the till and the shelf disagree.
+        for (const key of selections.keys()) {
+          if (!usedSelections.has(key)) {
+            throw new AppError(
+              `Combo "${product.name}": that component's variant is fixed and cannot be changed at the till`,
+              `"${product.name}" কম্বোর ওই পণ্যের ভ্যারিয়েন্ট নির্দিষ্ট করা আছে — বিলের সময় বদলানো যাবে না`,
+              400
+            );
+          }
         }
 
         // Second pass: deduct in memory, queue the guarded ops and the ledger.
@@ -608,6 +683,11 @@ class SaleService {
 
           comboComponents.push({
             product: comp._id,
+            // Which SLOT of the combo definition this row served. Traceability
+            // only — cancel and return restore from the frozen quantities
+            // below and never look the slot up, which is what keeps them
+            // working after the combo is edited or deleted.
+            comboItemId: ci._id,
             productName: comp.name,
             productCode: comp.code,
             variantId: variant ? variant._id : null,

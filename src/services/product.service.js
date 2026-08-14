@@ -22,7 +22,10 @@ const mediaService = require('./media.service');
 const { KEYS, getTTL } = require('../config/cacheKeys');
 const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.util');
 const { capBatchesToStock } = require('../utils/batch.util');
-const { isCombo, assertNotCombo, findComponentVariant, computeComboAvailability } = require('../utils/combo.util');
+const {
+  isCombo, assertNotCombo, findComponentVariant, computeComboAvailability,
+  isChooseSlot, eligibleVariants,
+} = require('../utils/combo.util');
 
 // Escape user input before embedding it in a $regex (prevents regex injection/ReDoS)
 const escapeRegex = (str) => String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -407,6 +410,7 @@ class ProductService {
           comboItems: product.comboItems || [],
           comboAvailability: product.comboAvailability ?? 0,
           comboCost: product.comboCost,
+          comboCostMin: product.comboCostMin,
           comboBroken: product.comboBroken || null,
         } : {}),
         variants: (product.variants || [])
@@ -725,9 +729,10 @@ class ProductService {
    * Everything Joi cannot see is decided here, with the component documents in
    * hand: existence in THIS shop and branch, not deleted, not deactivated, not
    * itself a combo (no nesting — a chain of combos makes availability and
-   * deduction order undecidable and buys the shopkeeper nothing), variantId
-   * present exactly when the component has variants, quantity legal for the
-   * component's unit, and no duplicate (product, variant) pair.
+   * deduction order undecidable and buys the shopkeeper nothing), the variant
+   * mode legal for the component (see `variantMode` on `comboItemSchema`),
+   * quantity legal for the component's unit, and no duplicate FIXED
+   * (product, variant) pair — 'choose' rows are slots and may repeat.
    *
    * The returned rows carry DISPLAY snapshots (name/code/sku/unit) refreshed
    * from the live component — the sale path freezes its own copy at checkout.
@@ -782,21 +787,46 @@ class ProductService {
         );
       }
 
+      // Which sellable thing this slot draws from. A component WITHOUT variants
+      // is always 'fixed' on the product itself — 'choose' there would mean
+      // "pick one of nothing" — so the mode is forced rather than trusted.
       const rawVariantId = item.variantId || null;
+      const wantsChoose = item.variantMode === 'choose';
+      let variantMode = 'fixed';
       let variant = null;
+
       if (comp.hasVariants) {
-        if (!rawVariantId) {
-          throw new AppError(
-            `"${comp.name}" has variants — pick one for the combo`,
-            `"${comp.name}" এর ভ্যারিয়েন্ট আছে — কোনটি কম্বোতে যাবে তা নির্বাচন করুন`, 400
-          );
-        }
-        variant = findComponentVariant(comp, rawVariantId);
-        if (!variant || variant.isActive === false) {
-          throw new AppError(
-            `Variant not found on "${comp.name}"`,
-            `"${comp.name}" এর ভ্যারিয়েন্টটি পাওয়া যায়নি`, 404
-          );
+        if (wantsChoose) {
+          // Every active variant is eligible; the till picks. Refusing a
+          // variantId here rather than ignoring it keeps the stored row honest
+          // about what it means.
+          if (rawVariantId) {
+            throw new AppError(
+              `"${comp.name}": a slot cannot both fix a variant and leave it to the till`,
+              `"${comp.name}": একই সাথে ভ্যারিয়েন্ট বেঁধে দেওয়া আর বিলের সময় বাছাই — দুটো একসাথে হয় না`, 400
+            );
+          }
+          if (!(comp.variants || []).some((v) => v.isActive !== false)) {
+            throw new AppError(
+              `"${comp.name}" has no active variant to choose from`,
+              `"${comp.name}" এর কোনো সচল ভ্যারিয়েন্ট নেই — বিলের সময় বাছার কিছু থাকবে না`, 400
+            );
+          }
+          variantMode = 'choose';
+        } else {
+          if (!rawVariantId) {
+            throw new AppError(
+              `"${comp.name}" has variants — pick one, or let the till choose`,
+              `"${comp.name}" এর ভ্যারিয়েন্ট আছে — একটি বেছে দিন, অথবা বিলের সময় বাছাই করতে দিন`, 400
+            );
+          }
+          variant = findComponentVariant(comp, rawVariantId);
+          if (!variant || variant.isActive === false) {
+            throw new AppError(
+              `Variant not found on "${comp.name}"`,
+              `"${comp.name}" এর ভ্যারিয়েন্টটি পাওয়া যায়নি`, 404
+            );
+          }
         }
       }
 
@@ -806,17 +836,31 @@ class ProductService {
         label: comp.name,
       });
 
-      const key = `${comp._id}:${variant ? variant._id : ''}`;
-      if (seen.has(key)) {
-        throw new AppError(
-          `"${comp.name}" appears twice in the combo — merge the quantities into one row`,
-          `"${comp.name}" কম্বোতে দুইবার আছে — পরিমাণ এক লাইনে লিখুন`, 400
-        );
+      // Two rows naming the SAME fixed thing are a data-entry slip — the
+      // quantities belong on one row. Two 'choose' rows of one product are not:
+      // they are independent SLOTS, which is how "১টা কিনলে ১টা ফ্রি, কাস্টমার
+      // দুইটা আলাদা রঙ নিতে পারবে" is expressed. Each slot gets its own pick at
+      // the till, so they are deliberately exempt from the duplicate rule.
+      //
+      // The alternative — one row of quantity 2 split across two variants —
+      // is not on offer, and the reason is arithmetic: `salesReturn.service`
+      // restores `quantityPerCombo × returnedQty`, so a split row makes
+      // `quantityPerCombo` fractional and returning one combo would try to put
+      // back half a shirt.
+      if (variantMode === 'fixed') {
+        const key = `${comp._id}:${variant ? variant._id : ''}`;
+        if (seen.has(key)) {
+          throw new AppError(
+            `"${comp.name}" appears twice in the combo — merge the quantities into one row`,
+            `"${comp.name}" কম্বোতে দুইবার আছে — পরিমাণ এক লাইনে লিখুন`, 400
+          );
+        }
+        seen.add(key);
       }
-      seen.add(key);
 
       rows.push({
         product: comp._id,
+        variantMode,
         variantId: variant ? variant._id : null,
         productName: comp.name,
         productCode: comp.code,
@@ -848,14 +892,15 @@ class ProductService {
       combos.flatMap((c) => c.comboItems.map((ci) => String(ci.product)))
     )];
     const components = await Product.find({ _id: { $in: compIds } })
-      .select('stock hasVariants variants._id variants.stock variants.buyingPrice variants.sellingPrice variants.isActive buyingPrice sellingPrice isActive isDeleted')
+      .select('stock hasVariants variants._id variants.sku variants.attributes variants.stock variants.buyingPrice variants.sellingPrice variants.isActive buyingPrice sellingPrice isActive isDeleted')
       .lean();
     const compMap = new Map(components.map((c) => [String(c._id), c]));
 
     for (const combo of combos) {
-      const { available, cost, broken } = computeComboAvailability(combo, compMap);
+      const { available, cost, costMin, broken } = computeComboAvailability(combo, compMap);
       combo.comboAvailability = available;
       combo.comboCost = cost;
+      combo.comboCostMin = costMin;
       combo.comboBroken = broken;
 
       // Per-row LIVE display figures for the builder and the POS breakdown —
@@ -864,12 +909,48 @@ class ProductService {
       for (const ci of combo.comboItems) {
         const comp = compMap.get(String(ci.product));
         if (!comp) continue;
+
+        if (isChooseSlot(ci)) {
+          // The till has not picked yet, so there is no single price to show.
+          // The headline figures are the WORST case for the shop (priciest to
+          // buy, dearest to give away) — see the cost note in combo.util.js —
+          // and `variants` is what the POS picker renders.
+          const variants = eligibleVariants(comp);
+          const buyings = variants.map((v) => v.buyingPrice ?? comp.buyingPrice ?? 0);
+          const sellings = variants.map((v) => v.sellingPrice || 0);
+          ci.sellingPrice = sellings.length ? Math.max(...sellings) : 0;
+          ci.buyingPrice = buyings.length ? Math.max(...buyings) : 0;
+          ci.buyingPriceMin = buyings.length ? Math.min(...buyings) : 0;
+          ci.stock = variants.reduce((sum, v) => sum + (v.stock || 0), 0);
+          ci.variantCount = variants.length;
+          ci.variants = variants.map((v) => ({
+            _id: v._id,
+            sku: v.sku,
+            attributes: v.attributes,
+            sellingPrice: v.sellingPrice || 0,
+            stock: v.stock || 0,
+          }));
+          continue;
+        }
+
         const variant = ci.variantId ? findComponentVariant(comp, ci.variantId) : null;
         ci.sellingPrice = variant ? (variant.sellingPrice || 0) : (comp.sellingPrice || 0);
         ci.buyingPrice = variant
           ? (variant.buyingPrice ?? comp.buyingPrice ?? 0)
           : (comp.buyingPrice || 0);
         ci.stock = variant ? (variant.stock || 0) : (comp.stock || 0);
+        // A pinned row still ships the component's other variants, so the
+        // builder can offer "সব ভ্যারিয়েন্ট চলবে" on a combo that was built
+        // back when pinning was the only option.
+        if (comp.hasVariants) {
+          ci.variants = eligibleVariants(comp).map((v) => ({
+            _id: v._id,
+            sku: v.sku,
+            attributes: v.attributes,
+            sellingPrice: v.sellingPrice || 0,
+            stock: v.stock || 0,
+          }));
+        }
       }
     }
     return products;

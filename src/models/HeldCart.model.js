@@ -11,6 +11,27 @@ const heldCartItemSchema = new mongoose.Schema({
   variantId: { type: mongoose.Schema.Types.ObjectId },
   variantSku: { type: String },
   variantAttributes: { type: mongoose.Schema.Types.Mixed },
+  // ── Combo lines ─────────────────────────────────────────────────────────────
+  //
+  // A combo whose components leave the variant to the till carries the
+  // cashier's picks. They MUST be stored: this schema is strict, so without
+  // these fields a parked combo line would come back with its picks silently
+  // gone — and the cashier who parked "লাল জামা" would be handed a cart that
+  // either refuses to check out or, worse, is no longer the cart they parked.
+  //
+  // Nothing else about a held line changes: it is still one row, and the
+  // expansion into component stock still happens server-side at sale time.
+  itemType: { type: String, enum: ['standard', 'combo'], default: 'standard' },
+  comboSelections: {
+    type: [{
+      comboItemId: { type: mongoose.Schema.Types.ObjectId, required: true },
+      variantId: { type: mongoose.Schema.Types.ObjectId, required: true },
+      // Display only, so a resumed cart renders without re-reading the product.
+      variantSku: { type: String },
+      variantAttributes: { type: mongoose.Schema.Types.Mixed },
+    }],
+    default: undefined
+  },
   // 0-exclusive, not `min: 1` — a held cart may contain 0.25 kg. Held carts
   // store the quantity in the PRODUCT'S OWN UNIT, never a pack count, so a
   // resumed cart cannot be misread if anything about packaging changed while it
