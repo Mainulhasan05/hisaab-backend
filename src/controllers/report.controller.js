@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const reportService = require('../services/report.service');
 const customerService = require('../services/customer.service');
 const ApiResponse = require('../utils/response.util');
@@ -104,7 +105,18 @@ exports.getSalesByDate = asyncHandler(async (req, res) => {
       statusCode: 400,
     });
   }
-  const report = await reportService.getSalesByDate(req.shop._id, date, req.branchId);
+  // A malformed staffId is rejected rather than ignored: silently dropping it
+  // would answer "what did Ravi sell today" with the whole shop's day.
+  const { staffId } = req.query;
+  if (staffId && !mongoose.Types.ObjectId.isValid(staffId)) {
+    return ApiResponse.error(res, {
+      message: 'Invalid staff id',
+      messageBn: 'কর্মচারী সঠিক নয়',
+      statusCode: 400,
+    });
+  }
+
+  const report = await reportService.getSalesByDate(req.shop._id, date, req.branchId, { staffId });
   return ApiResponse.success(res, {
     data: sanitizeReport(report, req),
     message: 'Sales for date retrieved successfully',

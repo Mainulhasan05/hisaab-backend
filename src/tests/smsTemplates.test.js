@@ -21,6 +21,9 @@ const {
   buildPaymentReceipt,
   buildDueReminder,
   buildOtp,
+  buildShopSignature,
+  hasShopSignature,
+  appendShopSignature,
 } = require('../utils/smsTemplates.util');
 const { countSms } = require('../utils/smsCounter.util');
 
@@ -134,6 +137,77 @@ describe('SMS templates (mirrored in hisaab-frontend/lib/sms/templates.js)', () 
   describe('buildOtp', () => {
     it('renders the exact OTP body', () => {
       expect(buildOtp('123456')).toBe('Your Hisaab OTP: 123456\nValid for 5 minutes');
+    });
+  });
+
+  /**
+   * The sign-off every message ends on.
+   *
+   * These rules decide whether a shopkeeper's free-text campaign carries one
+   * shop name, two, or none — and the segment count, and therefore the bill,
+   * moves with that answer. Mirrored in `hisaab-frontend/lib/sms/templates.js`.
+   */
+  describe('appendShopSignature', () => {
+    it('appends the sign-off on its own line', () => {
+      expect(appendShopSignature('Eid offer 20% off', 'Rahim Store')).toBe(
+        'Eid offer 20% off\n- Rahim Store'
+      );
+    });
+
+    it('leaves a body that already signs off alone', () => {
+      // Every built template ends this way. A second sign-off would be ~14
+      // wasted characters out of a 160-character segment.
+      const reminder = buildDueReminder({
+        customerName: 'Rahim',
+        due: 1500,
+        shopName: 'Rahim Store',
+      });
+      expect(appendShopSignature(reminder, 'Rahim Store')).toBe(reminder);
+    });
+
+    it('is idempotent — the composer and the service both run it', () => {
+      const once = appendShopSignature('Eid offer', 'Rahim Store');
+      expect(appendShopSignature(once, 'Rahim Store')).toBe(once);
+    });
+
+    it('matches a hand-typed sign-off regardless of case', () => {
+      expect(appendShopSignature('Eid offer - rahim store', 'Rahim Store')).toBe(
+        'Eid offer - rahim store'
+      );
+    });
+
+    it('still signs a message that only mentions the shop mid-sentence', () => {
+      expect(appendShopSignature('Rahim Store is closed Friday', 'Rahim Store')).toBe(
+        'Rahim Store is closed Friday\n- Rahim Store'
+      );
+    });
+
+    it('trims trailing whitespace so the sign-off never floats on a blank line', () => {
+      expect(appendShopSignature('Eid offer\n\n  ', 'Rahim Store')).toBe(
+        'Eid offer\n- Rahim Store'
+      );
+    });
+
+    it('falls back to the product name rather than signing with a bare dash', () => {
+      expect(appendShopSignature('Eid offer', '')).toBe('Eid offer\n- Hisaab');
+      expect(buildShopSignature(null)).toBe('- Hisaab');
+    });
+
+    it('signs an empty draft with just the sign-off', () => {
+      expect(appendShopSignature('', 'Rahim Store')).toBe('- Rahim Store');
+    });
+
+    it('reports whether a body is already signed', () => {
+      expect(hasShopSignature('Eid offer - Rahim Store', 'Rahim Store')).toBe(true);
+      expect(hasShopSignature('Rahim Store is closed', 'Rahim Store')).toBe(false);
+    });
+
+    it('counts the sign-off into the segment budget', () => {
+      // Why the service signs BEFORE counting: 155 characters is one segment,
+      // the same message signed is two, and the shop pays for two.
+      const draft = 'A'.repeat(155);
+      expect(countSms(draft).segments).toBe(1);
+      expect(countSms(appendShopSignature(draft, 'Rahim Store')).segments).toBe(2);
     });
   });
 });

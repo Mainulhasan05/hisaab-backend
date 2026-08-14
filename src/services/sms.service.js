@@ -18,7 +18,10 @@ const {
   buildPaymentReceipt,
   buildDueReminder,
   buildOtp,
+  appendShopSignature,
 } = require('../utils/smsTemplates.util');
+const { normalizeRecipients, chunk, MAX_SKIPPED_STORED } = require('../utils/smsRecipients.util');
+const { isPersonalized, personalizeMessage } = require('../utils/smsPersonalize.util');
 
 // MimSMS API Configuration
 const MIMSMS = {
@@ -29,7 +32,83 @@ const MIMSMS = {
   BALANCE: '/balanceCheck'
 };
 
+/* ── Bulk sending shape ───────────────────────────────────────────────────────
+ *
+ * MimSMS takes bulk recipients as one comma-delimited string. Handing it a
+ * shop's entire customer book in a single call is a ~70KB field against a
+ * gateway that slows under load, behind a 10s client timeout — and it is
+ * all-or-nothing: one hiccup fails every recipient at once, and a timeout
+ * leaves the shop unable to tell whether the messages went. Batching turns that
+ * into a failure of one hundred, with the rest still delivered and the log
+ * saying exactly which hundred.
+ *
+ * `SYNC_LIMIT` is the line between "answer with the result" and "answer with a
+ * receipt". A send small enough to finish inside one request should — the
+ * shopkeeper gets a real confirmation instead of a progress bar to babysit.
+ * Above it, the HTTP request would outlive proxy and browser timeouts, so the
+ * response carries a campaign id and the work continues behind it.
+ */
+const BULK = {
+  BATCH_SIZE: Number(process.env.SMS_BULK_BATCH_SIZE) || 100,
+  BATCH_DELAY_MS: Number(process.env.SMS_BULK_BATCH_DELAY_MS) || 250,
+  SYNC_LIMIT: Number(process.env.SMS_BULK_SYNC_LIMIT) || 100,
+  // One retry, not three. A gateway that just refused a hundred numbers is
+  // usually down rather than flaky, and hammering it delays the batches behind.
+  BATCH_RETRIES: Number(process.env.SMS_BULK_BATCH_RETRIES) || 1,
+  RETRY_DELAY_MS: Number(process.env.SMS_BULK_RETRY_DELAY_MS) || 1000,
+  // The controller's own guard for a single message. Repeated here because the
+  // campaign path builds bodies the controller never saw — a personalised one
+  // grows by whatever the longest customer name is.
+  MAX_SEGMENTS: Number(process.env.SMS_MAX_SEGMENTS) || 10,
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 class SMSService {
+  /**
+   * The name every message this shop sends signs off with.
+   *
+   * Read from the shop rather than taken from the caller on purpose: the
+   * sign-off is not a field a request gets to fill in. A client that could
+   * choose it could send a message signed as somebody else's shop.
+   */
+  async getShopName(shopId) {
+    const Shop = require('../models/Shop.model');
+    try {
+      const shop = await Shop.findById(shopId).select('name').lean();
+      return shop?.name || '';
+    } catch (err) {
+      logger.error(`SMS: Failed to read shop name for ${shopId}: ${err.message}`);
+      return '';
+    }
+  }
+
+  /**
+   * Take `cost` segments out of the shop's balance, or refuse.
+   *
+   * Every paid send goes through here. It reserves BEFORE the gateway call, so
+   * two concurrent campaigns cannot both spend the same last hundred segments —
+   * see `SMSQuota.reserve` for why the old read-check-save could.
+   *
+   * @returns {Promise<number>} the balance left after the reservation
+   */
+  async reserveQuota(shopId, cost) {
+    const quota = await SMSQuota.getOrCreate(shopId);
+
+    if (!quota.isEnabled) {
+      throw new Error('SMS service is not enabled for this shop');
+    }
+
+    const reserved = await SMSQuota.reserve(shopId, cost);
+    if (!reserved) {
+      throw new Error(
+        `Insufficient SMS quota. Need ${cost}, have ${quota.remainingQuota}`
+      );
+    }
+
+    return reserved.remainingQuota;
+  }
+
   /**
    * Send OTP (no quota check for registration)
    */
@@ -65,14 +144,22 @@ class SMSService {
    * Send single SMS
    */
   async sendSingle(shopId, userId, phone, message, customerId = null, req = null, options = {}) {
-    // Calculate segment cost
-    const smsInfo = countSms(message);
+    // Sign it off with the shop's name. Idempotent, so the templated messages
+    // that already end in "- Shop Name" are untouched; a free-text one written
+    // on the SMS page gets the tail it needs to not read as spam.
+    //
+    // This happens BEFORE the segment count, because the sign-off is part of
+    // what the shop is billed for. Counting the draft and sending the signed
+    // version is how a one-segment message becomes a two-segment invoice.
+    const shopName = options.shopName ?? (await this.getShopName(shopId));
+    const body = appendShopSignature(message, shopName);
+
+    const smsInfo = countSms(body);
     const segmentCost = smsInfo.segments || 1;
-    // Check quota
-    const quota = await SMSQuota.getOrCreate(shopId);
-    if (quota.remainingQuota < segmentCost) {
-      throw new Error(`Insufficient SMS quota. Need ${segmentCost}, have ${quota.remainingQuota}`);
-    }
+
+    // Reserve up front — see reserveQuota. Refunded below if the send fails, so
+    // a gateway outage never quietly eats a shop's balance.
+    await this.reserveQuota(shopId, segmentCost);
 
     const formattedPhone = formatPhone(phone);
 
@@ -83,7 +170,7 @@ class SMSService {
         MobileNumber: formattedPhone,
         SenderName: process.env.MIMSMS_SENDER_ID,
         TransactionType: 'T',
-        Message: message
+        Message: body
       });
 
       // Log SMS
@@ -95,7 +182,7 @@ class SMSService {
           customer: customerId,
           status: SMS_STATUS.SENT
         }],
-        message,
+        message: body,
         type: SMS_TYPES.SINGLE,
         transactionId: response.data?.TransactionId,
         cost: segmentCost,
@@ -107,20 +194,24 @@ class SMSService {
         sale: options.saleId || null
       });
 
-      // Deduct quota (segment-aware)
-      await quota.deductQuota(segmentCost);
-
       logger.info(`SMS sent to ${formattedPhone} for shop ${shopId}`);
       return { success: true, smsLog, response: response.data };
     } catch (error) {
+      // The shop paid for a message that never left. Give it back before
+      // anything else — a throw on the way out must not strand the reservation.
+      await SMSQuota.refund(shopId, segmentCost).catch((refundErr) =>
+        logger.error(`SMS: quota refund failed for shop ${shopId}: ${refundErr.message}`)
+      );
+
       // Log failed attempt
       await SMSLog.create({
         shop: shopId,
         branch: req ? requireBranch(req) : null,
         recipients: [{ phone: formattedPhone, customer: customerId, status: SMS_STATUS.FAILED }],
-        message,
+        message: body,
         type: SMS_TYPES.SINGLE,
         status: SMS_STATUS.FAILED,
+        failedCount: 1,
         errorMessage: error.message,
         sentBy: userId
       });
@@ -130,167 +221,524 @@ class SMSService {
     }
   }
 
+  /* ═══════════════════════════════════════════════════════════════════════════
+   * BULK CAMPAIGNS
+   *
+   * One entry point behind both "the same message to everyone" (bulk) and "a
+   * different message each" (dynamic), because everything except the shape of
+   * the gateway payload is identical between them: clean the list, sign every
+   * body with the shop's name, price it, reserve the balance, send in batches,
+   * refund what never left, and keep a progress record the dashboard can watch.
+   *
+   * What this replaced sent every recipient in a single call and logged the
+   * whole campaign `sent` on one 200 or `failed` on one error. At forty
+   * recipients that is fine. At four thousand it is a 70KB request against a
+   * 10s timeout where a single hiccup marks four thousand customers failed,
+   * bills the shop for all of them, and leaves nobody able to say which — if
+   * any — actually arrived.
+   * ═══════════════════════════════════════════════════════════════════════════ */
+
   /**
-   * Send bulk SMS (same message to multiple recipients)
+   * Run a campaign.
+   *
+   * @param {string|ObjectId} shopId
+   * @param {string|ObjectId} userId
+   * @param {object}  options
+   * @param {Array}   options.recipients   `[{ phone, customerId, customerName, message? }]`
+   * @param {string}  [options.message]    One body for everyone (bulk sends).
+   * @param {boolean} [options.personalized=false] Each recipient carries its own
+   *        `message` instead (dynamic sends).
+   * @param {string}  [options.audience='manual'] Recorded on the log for history.
+   * @param {'T'|'P'} [options.transactionType]  Transactional or promotional.
+   * @param {boolean} [options.forceSync=false]  Finish before returning, however
+   *        large. Used by callers that have no way to poll for progress.
+   * @param {object}  [req] For branch scoping. Read now, not later — the worker
+   *        outlives the request.
+   *
+   * @returns {Promise<object>} For a small send, the finished result. For a
+   *          large one, `{ queued: true, campaignId }` and the work continues.
    */
-  async sendBulk(shopId, userId, recipients, message, req = null) {
-    const count = recipients.length;
+  async sendCampaign(shopId, userId, options, req = null) {
+    const {
+      recipients = [],
+      message = '',
+      personalized = false,
+      audience = 'manual',
+      transactionType = personalized ? 'T' : 'P',
+      forceSync = false,
+    } = options;
 
-    // Calculate segment-aware cost: segments per message × recipient count
-    const smsInfo = countSms(message);
-    const totalCost = (smsInfo.segments || 1) * count;
+    const shopName = options.shopName ?? (await this.getShopName(shopId));
+    const branch = req ? requireBranch(req) : null;
 
-    // Check quota
-    const quota = await SMSQuota.getOrCreate(shopId);
-    if (quota.remainingQuota < totalCost) {
-      throw new Error(`Insufficient SMS quota. Need ${totalCost} (${smsInfo.segments} segments × ${count} recipients), have ${quota.remainingQuota}`);
+    // 1. Clean the list before anything is priced or reserved. Dropping a bad
+    //    number after the quota is taken means charging for it.
+    const { valid, skipped, skippedCount } = normalizeRecipients(recipients, {
+      requireMessage: personalized,
+    });
+
+    if (valid.length === 0) {
+      logger.warn(`SMS campaign for shop ${shopId} had no usable recipients (${skippedCount} skipped)`);
+      return {
+        success: false,
+        reason: 'no_valid_recipients',
+        sentCount: 0,
+        failedCount: 0,
+        skippedCount,
+        skipped: skipped.slice(0, MAX_SKIPPED_STORED),
+      };
     }
 
-    // Format all phone numbers
-    const formattedRecipients = recipients.map(r => ({
-      ...r,
-      phone: formatPhone(r.phone)
-    }));
+    // 2. Sign every body. `appendShopSignature` is idempotent, so a template
+    //    that already ends in "- Shop Name" is left exactly as it is.
+    const sharedBody = personalized ? '' : appendShopSignature(message, shopName);
+    const targets = personalized
+      ? valid.map((r) => ({ ...r, message: appendShopSignature(r.message, shopName) }))
+      : valid;
 
-    const phoneNumbers = formattedRecipients.map(r => r.phone).join(',');
-
-    try {
-      const response = await smsHttp.post(MIMSMS.BASE_URL + MIMSMS.BULK, {
-        UserName: process.env.MIMSMS_USERNAME,
-        Apikey: process.env.MIMSMS_API_KEY,
-        MobileNumber: phoneNumbers,
-        SenderName: process.env.MIMSMS_SENDER_ID,
-        TransactionType: 'P', // Promotional
-        Message: message
-      });
-
-      // Log SMS
-      const smsLog = await SMSLog.create({
-        shop: shopId,
-        branch: req ? requireBranch(req) : null,
-        recipients: formattedRecipients.map(r => ({
-          phone: r.phone,
-          customer: r.customerId,
-          customerName: r.customerName,
-          status: SMS_STATUS.SENT
-        })),
-        message,
-        type: SMS_TYPES.BULK,
-        transactionId: response.data?.TransactionId,
-        cost: totalCost,
-        status: SMS_STATUS.SENT,
-        sentCount: count,
-        apiResponse: response.data,
-        sentBy: userId
-      });
-
-      // Deduct quota (segment-aware)
-      await quota.deductQuota(totalCost);
-
-      logger.info(`Bulk SMS sent to ${count} recipients for shop ${shopId}`);
-      return { success: true, smsLog, response: response.data };
-    } catch (error) {
-      await SMSLog.create({
-        shop: shopId,
-        branch: req ? requireBranch(req) : null,
-        recipients: formattedRecipients.map(r => ({
-          phone: r.phone,
-          customer: r.customerId,
-          status: SMS_STATUS.FAILED
-        })),
-        message,
-        type: SMS_TYPES.BULK,
-        status: SMS_STATUS.FAILED,
-        failedCount: count,
-        errorMessage: error.message,
-        sentBy: userId
-      });
-
-      logger.error(`Failed to send bulk SMS: ${error.message}`);
-      throw error;
+    // 3. Price it — after signing, so the quote covers what actually goes out.
+    let totalCost = 0;
+    let maxSegments = 0;
+    if (personalized) {
+      for (const r of targets) {
+        const info = countSms(r.message);
+        const segments = info.segments || 1;
+        totalCost += segments;
+        if (segments > maxSegments) maxSegments = segments;
+      }
+    } else {
+      maxSegments = countSms(sharedBody).segments || 1;
+      totalCost = maxSegments * targets.length;
     }
+
+    // A body this long is almost always a mistake — a pasted paragraph, or a
+    // stray Bangla character that dropped the budget from 160 characters to 70.
+    // Catching it here costs one refusal; not catching it costs the whole
+    // campaign multiplied by the recipient count.
+    if (maxSegments > BULK.MAX_SEGMENTS) {
+      throw new Error(
+        `Message is too long: ${maxSegments} segments, maximum ${BULK.MAX_SEGMENTS}`
+      );
+    }
+
+    // 4. Reserve the whole cost up front. Deducting per batch would let a
+    //    campaign start, spend half the balance and stop halfway — with no way
+    //    to have warned the shopkeeper that it would.
+    await this.reserveQuota(shopId, totalCost);
+
+    const batches = chunk(targets, BULK.BATCH_SIZE);
+
+    // 5. The log is written BEFORE the first gateway call, not after the last.
+    //    A crash mid-campaign then leaves a record that says what was attempted
+    //    and how far it got, instead of leaving no trace of a spent balance.
+    const smsLog = await SMSLog.create({
+      shop: shopId,
+      branch,
+      recipients: targets.map((r) => ({
+        phone: r.phone,
+        customer: r.customerId,
+        customerName: r.customerName,
+        message: personalized ? r.message : undefined,
+        status: SMS_STATUS.PENDING,
+      })),
+      // Dynamic sends have no single body; the per-recipient ones are on the
+      // recipients. Storing the first as a sample beats the old placeholder
+      // string "Dynamic SMS - Multiple personalized messages", which told a
+      // shopkeeper reading their history nothing about what they had sent.
+      message: personalized ? targets[0].message : sharedBody,
+      type: personalized ? SMS_TYPES.DYNAMIC : SMS_TYPES.BULK,
+      audience,
+      cost: totalCost,
+      status: SMS_STATUS.PENDING,
+      sentCount: 0,
+      failedCount: 0,
+      skippedCount,
+      skipped: skipped.slice(0, MAX_SKIPPED_STORED),
+      sentBy: userId,
+      progress: {
+        total: targets.length,
+        processed: 0,
+        batches: batches.length,
+        batchesDone: 0,
+        startedAt: new Date(),
+      },
+    });
+
+    const runOptions = {
+      logId: smsLog._id,
+      shopId,
+      batches,
+      sharedBody,
+      personalized,
+      transactionType,
+      totalCost,
+    };
+
+    // 6. Small enough to finish inside the request? Then finish it, and hand
+    //    back a real answer rather than a progress bar to babysit.
+    if (forceSync || targets.length <= BULK.SYNC_LIMIT) {
+      const summary = await this.runCampaign(runOptions);
+      return {
+        success: summary.sentCount > 0,
+        queued: false,
+        campaignId: smsLog._id,
+        smsLog: await SMSLog.findById(smsLog._id).lean(),
+        skippedCount,
+        ...summary,
+      };
+    }
+
+    // 7. Too big for one request. `setImmediate` matches how this service
+    //    already backgrounds sale and payment receipts. It is in-process, so a
+    //    restart mid-campaign abandons the remaining batches — the log's
+    //    `progress` is what makes that visible rather than silent, and moving
+    //    to a durable queue is the next step when shops send at this scale
+    //    regularly.
+    setImmediate(() => {
+      this.runCampaign(runOptions).catch((err) =>
+        logger.error(`SMS campaign ${smsLog._id} crashed: ${err.message}`)
+      );
+    });
+
+    logger.info(
+      `SMS campaign ${smsLog._id} queued: ${targets.length} recipients, ` +
+      `${batches.length} batches, ${totalCost} segments reserved`
+    );
+
+    return {
+      success: true,
+      queued: true,
+      campaignId: smsLog._id,
+      totalRecipients: targets.length,
+      batches: batches.length,
+      estimatedCost: totalCost,
+      skippedCount,
+      sentCount: 0,
+      failedCount: 0,
+    };
   }
 
   /**
-   * Send dynamic SMS (personalized messages)
+   * Push one batch at the gateway, with a single retry.
+   *
+   * Never throws: a batch that cannot be sent is a fact about that batch, not a
+   * reason to abandon the thirty-nine after it.
    */
-  async sendDynamic(shopId, userId, recipients, req = null) {
-    const count = recipients.length;
-
-    // Calculate total segment cost across all personalized messages
-    const totalCost = recipients.reduce((sum, r) => {
-      const info = countSms(r.message);
-      return sum + (info.segments || 1);
-    }, 0);
-
-    // Check quota
-    const quota = await SMSQuota.getOrCreate(shopId);
-    if (quota.remainingQuota < totalCost) {
-      throw new Error(`Insufficient SMS quota. Need ${totalCost} segments for ${count} recipients, have ${quota.remainingQuota}`);
+  async sendBatch(batch, { sharedBody, personalized, transactionType }) {
+    // Mirrors the guard in `sendOTP`. Without it there is no way to exercise a
+    // four-thousand-recipient campaign in development except by sending four
+    // thousand real messages.
+    if (process.env.SKIP_SMS === 'true') {
+      logger.info(`[SKIP_SMS] Pretending to send batch of ${batch.length}`);
+      return { ok: true, response: { simulated: true, count: batch.length } };
     }
 
-    // Prepare message data for MimSMS
-    const messageData = recipients.map(r => ({
-      MobileNumber: formatPhone(r.phone),
-      Message: r.message
+    const payload = personalized
+      ? {
+          UserName: process.env.MIMSMS_USERNAME,
+          Apikey: process.env.MIMSMS_API_KEY,
+          SenderName: process.env.MIMSMS_SENDER_ID,
+          TransactionType: transactionType,
+          MessageData: batch.map((r) => ({ MobileNumber: r.phone, Message: r.message })),
+        }
+      : {
+          UserName: process.env.MIMSMS_USERNAME,
+          Apikey: process.env.MIMSMS_API_KEY,
+          MobileNumber: batch.map((r) => r.phone).join(','),
+          SenderName: process.env.MIMSMS_SENDER_ID,
+          TransactionType: transactionType,
+          Message: sharedBody,
+        };
+
+    const url = MIMSMS.BASE_URL + (personalized ? MIMSMS.DYNAMIC : MIMSMS.BULK);
+
+    let lastError;
+    for (let attempt = 0; attempt <= BULK.BATCH_RETRIES; attempt++) {
+      try {
+        const response = await smsHttp.post(url, payload);
+        return { ok: true, response: response.data };
+      } catch (error) {
+        lastError = error;
+        if (attempt < BULK.BATCH_RETRIES) {
+          await sleep(BULK.RETRY_DELAY_MS * (attempt + 1));
+        }
+      }
+    }
+
+    return { ok: false, error: lastError };
+  }
+
+  /**
+   * Walk the batches, recording the outcome of each as it lands.
+   *
+   * The log is updated per batch rather than once at the end for two reasons:
+   * the dashboard's progress bar has nothing to read otherwise, and a process
+   * that dies at batch thirty of forty leaves thirty batches' worth of truth
+   * behind instead of a document still claiming `pending`.
+   *
+   * Only the batch's own slice of `recipients` is written each time — a
+   * positional `$set` rather than a rewrite of the whole array, which on a
+   * five-thousand-recipient campaign would mean re-serialising ~600KB fifty
+   * times over.
+   */
+  async runCampaign({ logId, shopId, batches, sharedBody, personalized, transactionType, totalCost }) {
+    let offset = 0;
+    let sentCount = 0;
+    let failedCount = 0;
+    let refundSegments = 0;
+    let transactionId = null;
+    let lastResponse = null;
+    let lastError = null;
+
+    for (let index = 0; index < batches.length; index++) {
+      const batch = batches[index];
+      const result = await this.sendBatch(batch, { sharedBody, personalized, transactionType });
+
+      const status = result.ok ? SMS_STATUS.SENT : SMS_STATUS.FAILED;
+      const failedReason = result.ok ? null : (result.error?.message || 'Gateway error');
+
+      const set = {};
+      batch.forEach((recipient, i) => {
+        const position = offset + i;
+        set[`recipients.${position}.status`] = status;
+        if (failedReason) set[`recipients.${position}.failedReason`] = failedReason;
+      });
+
+      if (result.ok) {
+        sentCount += batch.length;
+        lastResponse = result.response;
+        if (!transactionId && result.response?.TransactionId) {
+          transactionId = result.response.TransactionId;
+        }
+      } else {
+        failedCount += batch.length;
+        lastError = failedReason;
+        // Give back exactly what this batch was priced at, not a flat one per
+        // recipient — a two-segment message to a hundred people cost two hundred.
+        refundSegments += personalized
+          ? batch.reduce((sum, r) => sum + (countSms(r.message).segments || 1), 0)
+          : (countSms(sharedBody).segments || 1) * batch.length;
+      }
+
+      offset += batch.length;
+
+      await SMSLog.updateOne(
+        { _id: logId },
+        {
+          $set: {
+            ...set,
+            status: SMS_STATUS.PENDING,
+            sentCount,
+            failedCount,
+            'progress.processed': offset,
+            'progress.batchesDone': index + 1,
+          },
+        }
+      ).catch((err) => logger.error(`SMS campaign ${logId} progress write failed: ${err.message}`));
+
+      // Space the calls out. A gateway handed forty back-to-back batches is a
+      // gateway that starts rate-limiting halfway through the campaign.
+      if (index < batches.length - 1) {
+        await sleep(BULK.BATCH_DELAY_MS);
+      }
+    }
+
+    const finalStatus =
+      failedCount === 0 ? SMS_STATUS.SENT
+        : sentCount === 0 ? SMS_STATUS.FAILED
+        : SMS_STATUS.PARTIAL;
+
+    if (refundSegments > 0) {
+      await SMSQuota.refund(shopId, refundSegments).catch((err) =>
+        logger.error(`SMS campaign ${logId} refund failed: ${err.message}`)
+      );
+    }
+
+    await SMSLog.updateOne(
+      { _id: logId },
+      {
+        $set: {
+          status: finalStatus,
+          // Bill for what went, not for what was reserved.
+          cost: Math.max(0, totalCost - refundSegments),
+          transactionId,
+          apiResponse: lastResponse,
+          errorMessage: lastError,
+          'progress.completedAt': new Date(),
+        },
+      }
+    );
+
+    logger.info(
+      `SMS campaign ${logId} finished: ${sentCount} sent, ${failedCount} failed, ` +
+      `${refundSegments} segments refunded`
+    );
+
+    return {
+      status: finalStatus,
+      sentCount,
+      failedCount,
+      refundedSegments: refundSegments,
+      cost: Math.max(0, totalCost - refundSegments),
+    };
+  }
+
+  /**
+   * Send bulk SMS (same message to multiple recipients).
+   *
+   * Kept as the name every existing caller already uses; the batching, the
+   * sign-off and the refunds all live in `sendCampaign` now.
+   */
+  async sendBulk(shopId, userId, recipients, message, req = null, options = {}) {
+    return this.sendCampaign(
+      shopId,
+      userId,
+      { recipients, message, personalized: false, transactionType: 'P', ...options },
+      req
+    );
+  }
+
+  /**
+   * Send dynamic SMS (a personalised body per recipient).
+   */
+  async sendDynamic(shopId, userId, recipients, req = null, options = {}) {
+    return this.sendCampaign(
+      shopId,
+      userId,
+      { recipients, personalized: true, transactionType: 'T', ...options },
+      req
+    );
+  }
+
+  /**
+   * Progress of a campaign, for the dashboard to poll.
+   *
+   * Scoped to the shop rather than looked up by id alone — a campaign id is a
+   * guessable ObjectId, and this endpoint returns customer phone numbers.
+   */
+  async getCampaign(shopId, campaignId) {
+    const log = await SMSLog.findOne({ _id: campaignId, shop: shopId }).lean();
+    if (!log) return null;
+
+    const progress = log.progress || {};
+    const total = progress.total || log.recipients?.length || 0;
+    const processed = progress.processed || 0;
+
+    return {
+      campaignId: log._id,
+      status: log.status,
+      type: log.type,
+      audience: log.audience,
+      message: log.message,
+      total,
+      processed,
+      percent: total > 0 ? Math.round((processed / total) * 100) : 0,
+      sentCount: log.sentCount || 0,
+      failedCount: log.failedCount || 0,
+      skippedCount: log.skippedCount || 0,
+      skipped: log.skipped || [],
+      cost: log.cost || 0,
+      batches: progress.batches || 0,
+      batchesDone: progress.batchesDone || 0,
+      // A campaign is done when the worker stamped it done. Inferring it from
+      // `processed === total` would read the last batch's progress write as
+      // completion a moment before the refund and final status land.
+      isComplete: Boolean(progress.completedAt),
+      startedAt: progress.startedAt || log.createdAt,
+      completedAt: progress.completedAt || null,
+      errorMessage: log.errorMessage || null,
+    };
+  }
+
+  /**
+   * Who a campaign would go to.
+   *
+   * The audience is resolved on the SERVER, from an audience *name*, rather
+   * than the dashboard downloading every customer and posting back a list of
+   * phone numbers. Three reasons, in order of how much they matter:
+   *
+   *   1. Correctness. Under separate books a customer's due is a per-branch
+   *      figure held in `CustomerBalance`. The client's copy of `totalDue` is
+   *      the shop-wide total, so a "শুধু বাকিদার" campaign built client-side
+   *      texts people who owe another branch — and quotes them that branch's
+   *      number.
+   *   2. Trust. A client that names its own recipients can name anyone.
+   *   3. Scale. A shop with eight thousand customers should not have to load
+   *      eight thousand records into a phone browser to text them.
+   *
+   * NEVER branch-scope the customer query itself: `Customer` has no `branch`
+   * field, so `branch: <id>` matches zero documents and the campaign silently
+   * sends nothing (FEATURE_AUDIT.md H-7). Branch scoping belongs on the dues.
+   */
+  async resolveAudience(shopId, audience, customerIds = [], req = null) {
+    const Customer = require('../models/Customer.model');
+    const CustomerBalance = require('../models/CustomerBalance.model');
+
+    const filter = { shop: shopId, isActive: true };
+    if (audience === 'selected') {
+      if (!customerIds.length) return [];
+      filter._id = { $in: customerIds };
+    }
+
+    const customers = await Customer.find(filter)
+      .select('name phone totalDue')
+      .lean();
+
+    const branchScoped = isBranchCustomerScope(req);
+
+    // Under separate books the amount in the message must be what the customer
+    // owes THIS branch — the shop-wide figure would both overstate the debt and
+    // disclose another branch's business.
+    let dueByCustomer = null;
+    if (branchScoped) {
+      const rows = await CustomerBalance.find({
+        shop: shopId,
+        branch: req.branchId,
+        customer: { $in: customers.map((c) => c._id) },
+      })
+        .select('customer totalDue')
+        .lean();
+      dueByCustomer = new Map(rows.map((r) => [String(r.customer), r.totalDue]));
+    }
+
+    const withDue = customers.map((customer) => ({
+      phone: customer.phone,
+      customerId: customer._id,
+      customerName: customer.name,
+      name: customer.name,
+      due: branchScoped
+        ? (dueByCustomer.get(String(customer._id)) || 0)
+        : (customer.totalDue || 0),
     }));
 
-    try {
-      const response = await smsHttp.post(MIMSMS.BASE_URL + MIMSMS.DYNAMIC, {
-        UserName: process.env.MIMSMS_USERNAME,
-        Apikey: process.env.MIMSMS_API_KEY,
-        SenderName: process.env.MIMSMS_SENDER_ID,
-        TransactionType: 'T',
-        MessageData: messageData
-      });
-
-      // Log SMS
-      const smsLog = await SMSLog.create({
-        shop: shopId,
-        branch: req ? requireBranch(req) : null,
-        recipients: recipients.map(r => ({
-          phone: formatPhone(r.phone),
-          customer: r.customerId,
-          customerName: r.customerName,
-          message: r.message,
-          status: SMS_STATUS.SENT
-        })),
-        message: 'Dynamic SMS - Multiple personalized messages',
-        type: SMS_TYPES.DYNAMIC,
-        transactionId: response.data?.TransactionId,
-        cost: totalCost,
-        status: SMS_STATUS.SENT,
-        sentCount: count,
-        apiResponse: response.data,
-        sentBy: userId
-      });
-
-      // Deduct quota (segment-aware)
-      await quota.deductQuota(totalCost);
-
-      logger.info(`Dynamic SMS sent to ${count} recipients for shop ${shopId}`);
-      return { success: true, smsLog, response: response.data };
-    } catch (error) {
-      await SMSLog.create({
-        shop: shopId,
-        branch: req ? requireBranch(req) : null,
-        recipients: recipients.map(r => ({
-          phone: formatPhone(r.phone),
-          customer: r.customerId,
-          message: r.message,
-          status: SMS_STATUS.FAILED
-        })),
-        message: 'Dynamic SMS - Failed',
-        type: SMS_TYPES.DYNAMIC,
-        status: SMS_STATUS.FAILED,
-        failedCount: count,
-        errorMessage: error.message,
-        sentBy: userId
-      });
-
-      logger.error(`Failed to send dynamic SMS: ${error.message}`);
-      throw error;
+    if (audience === 'due') {
+      return withDue.filter((r) => r.due > 0);
     }
+
+    return withDue;
+  }
+
+  /**
+   * How many customers each audience holds, and how many carry a usable number.
+   *
+   * The composer needs the second figure to quote an honest cost: "সব কাস্টমার
+   * — ৮২০ জন" next to a send that reaches 780 of them is a quote that is wrong
+   * by forty segments, and the shopkeeper only finds out afterwards.
+   */
+  async getAudienceCounts(shopId, req = null) {
+    // One pass, filtered twice. Asking `resolveAudience` for 'all' and then for
+    // 'due' would read the whole customer book — and, on a branch-scoped shop,
+    // the whole balance collection — a second time to answer a question the
+    // first pass already contains.
+    const all = await this.resolveAudience(shopId, 'all', [], req);
+    const due = all.filter((r) => r.due > 0);
+
+    const reachable = (list) => normalizeRecipients(list).valid.length;
+
+    return {
+      all: { total: all.length, reachable: reachable(all) },
+      due: { total: due.length, reachable: reachable(due) },
+    };
   }
 
   /**
@@ -347,14 +795,51 @@ class SMSService {
    */
   async sendBulkSMS(shopId, userId, data, req = null) {
     const { recipients, message } = data;
-    return this.sendBulk(shopId, userId, recipients, message, req);
+    return this.sendBulk(shopId, userId, recipients, message, req, { audience: 'manual' });
   }
 
   /**
    * Send dynamic SMS (wrapper for controller)
    */
   async sendDynamicSMS(shopId, userId, recipients, req = null) {
-    return this.sendDynamic(shopId, userId, recipients, req);
+    return this.sendDynamic(shopId, userId, recipients, req, { audience: 'manual' });
+  }
+
+  /**
+   * Launch a campaign from an audience name and a template.
+   *
+   * This is what the SMS page posts: a body with `{placeholders}` in it and the
+   * word "all" or "due" — not a list of phone numbers. Everything between those
+   * two facts and the gateway happens here and in `sendCampaign`, on the server,
+   * where the branch-scoped dues live and where the shop's sign-off cannot be
+   * left off.
+   */
+  async createCampaign(shopId, userId, { message, audience = 'all', customerIds = [] }, req = null) {
+    const shopName = await this.getShopName(shopId);
+    const contacts = await this.resolveAudience(shopId, audience, customerIds, req);
+
+    // One body for everyone, or one each? `{shop_name}` alone does not make it
+    // personal — see isPersonalized — so a plain promo still goes out as a
+    // single cheap bulk call rather than as N addressed sends.
+    const personalized = isPersonalized(message);
+
+    const recipients = personalized
+      ? contacts.map((c) => ({ ...c, message: personalizeMessage(message, c, shopName) }))
+      : contacts;
+
+    return this.sendCampaign(
+      shopId,
+      userId,
+      {
+        recipients,
+        message: personalized ? '' : personalizeMessage(message, {}, shopName),
+        personalized,
+        audience,
+        shopName,
+        transactionType: personalized ? 'T' : 'P',
+      },
+      req
+    );
   }
 
   /**
@@ -418,7 +903,10 @@ class SMSService {
       }),
     }));
 
-    return this.sendDynamic(shopId, userId, recipients, req);
+    return this.sendDynamic(shopId, userId, recipients, req, {
+      audience: 'due',
+      shopName: shop?.name || '',
+    });
   }
 
   /**
@@ -548,10 +1036,13 @@ class SMSService {
           shopName: shop.name,
         });
 
-        // Send SMS with invoice metadata
+        // Send SMS with invoice metadata. The shop name rides along because it
+        // is already in hand — `sendSingle` would otherwise re-read the same
+        // document to sign a body that `buildSaleReceipt` has already signed.
         const sendResult = await this.sendSingle(shopId, userId, customerPhone, message, saleData.customerId, null, {
           invoiceNumber: invoiceNo,
-          saleId: saleDoc?._id || null
+          saleId: saleDoc?._id || null,
+          shopName: shop.name
         });
 
         // Mark Sale document as smsSent: true
@@ -605,7 +1096,9 @@ class SMSService {
           shopName: shop.name,
         });
 
-        await this.sendSingle(shopId, userId, customer.phone, message, customer._id);
+        await this.sendSingle(shopId, userId, customer.phone, message, customer._id, null, {
+          shopName: shop.name,
+        });
         logger.info(`SMS: Payment receipt sent to ${customer.phone}`);
 
       } catch (error) {
@@ -682,7 +1175,11 @@ class SMSService {
         id: 'custom',
         name: 'Custom Message',
         nameEn: 'Custom Message',
-        template: `Dear Customer, thank you for shopping with us! - ${shopName}`,
+        // No sign-off written in. Every message gets one appended on the way
+        // out (`appendShopSignature`), so writing it here too would have the
+        // composer show a tail the shopkeeper cannot delete — and deleting it
+        // would change nothing, which is worse than not offering the handle.
+        template: 'Dear Customer, thank you for shopping with us!',
         variables: ['shop_name'],
       },
     ];

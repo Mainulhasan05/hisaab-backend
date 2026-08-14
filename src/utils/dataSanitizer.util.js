@@ -153,10 +153,24 @@ function sanitizePurchases(data, req) {
   return stripKeysDeep(JSON.parse(JSON.stringify(data)), PURCHASE_MONEY_KEYS);
 }
 
-// Keys stripped when the user lacks the corresponding permission
+// Keys stripped when the user lacks the corresponding permission.
+//
+// This is a denylist over field NAMES, so a profit figure escapes it the moment
+// a report gives it a name that isn't listed. `netEarnings` (profit − expenses,
+// returned by the daily summary and the date-wise report) did exactly that: it
+// shipped to anyone with plain `reports.view`, and because those same payloads
+// carry the expense total beside it, `profit = netEarnings + expenses` put the
+// figure back together exactly — a full bypass of `view_profit`.
+//
+// Any new field derived from profit must be added here, whatever it is called.
 const PROFIT_KEYS = new Set([
   'profit', 'totalProfit', 'todayProfit', 'profitLoss', 'grossProfit',
   'netProfit', 'profitMargin', 'profitReduction', 'cogs',
+  // Derived: profit minus expenses. Named nothing like "profit", leaks all of it.
+  'netEarnings',
+  // The returns summary's own name for `profitReduction` — how much profit the
+  // day's returns gave back.
+  'totalProfitLoss', 'returnsLoss',
 ]);
 const COST_KEYS = new Set([
   'buyingPrice', 'unitCost', 'totalCost', 'totalBuyingValue', 'inventoryValue',

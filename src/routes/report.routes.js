@@ -11,7 +11,12 @@ router.get('/sales', rbac('reports', 'view'), reportController.getSalesReport);
 router.get('/products', rbac('reports', 'view'), reportController.getProductReport);
 router.get('/customers', rbac('reports', 'view'), reportController.getCustomerReport);
 router.get('/profit-loss', rbac('reports', 'view_profit'), reportController.getProfitLoss);
-router.get('/daily-summary', rbac('reports', 'view'), reportController.getDailySummary);
+// `view_profit`, matching the capability registry on the client. The payload is
+// the day's profit picture — net earnings plus the figures it decomposes into —
+// so the route is gated on the profit permission rather than plain report
+// access. `sanitizeReport` below is still applied: the route decides who may
+// ask, the sanitiser decides what comes back.
+router.get('/daily-summary', rbac('reports', 'view_profit'), reportController.getDailySummary);
 router.get('/staff', rbac('reports', 'view'), reportController.getStaffReport);
 router.get('/staff-detailed', rbac('reports', 'view'), reportController.getDetailedStaffReport);
 router.get('/date-wise', rbac('reports', 'view'), reportController.getDateWiseSummary);

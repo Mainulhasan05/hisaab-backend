@@ -126,6 +126,61 @@ smsQuotaSchema.methods.refundQuota = async function(count) {
   return this.remainingQuota;
 };
 
+/**
+ * Static: Reserve quota atomically.
+ *
+ * `deductQuota` above reads the document, checks `remainingQuota`, then saves —
+ * three steps with a gap in the middle. Two campaigns launched at once (or a
+ * campaign and a till receipt) both read the same balance, both decide they can
+ * afford it, and the shop sends more SMS than it paid for. Harmless for a
+ * single receipt; a real hole once one request can commit thousands of
+ * segments.
+ *
+ * This puts the check and the decrement in one `findOneAndUpdate`, so the
+ * balance guard is evaluated by the database under the document lock. A `null`
+ * return means "could not afford it" — there is no partial reservation.
+ *
+ * Bulk sends reserve the whole estimated cost UP FRONT and refund what the
+ * gateway rejects. The alternative — deducting per batch as it lands — lets a
+ * campaign start, spend half a shop's balance, and stop halfway with no way to
+ * tell the shopkeeper in advance that it would.
+ */
+smsQuotaSchema.statics.reserve = async function(shopId, count = 1) {
+  if (count <= 0) return null;
+
+  return this.findOneAndUpdate(
+    { shop: shopId, isEnabled: true, remainingQuota: { $gte: count } },
+    {
+      $inc: { usedQuota: count, remainingQuota: -count },
+      $set: { lastUsedAt: new Date() },
+    },
+    { new: true }
+  );
+};
+
+/**
+ * Static: Return unspent quota.
+ *
+ * Counterpart to `reserve` — used when a batch the shop already paid for never
+ * reached the gateway. Clamped so a double refund cannot mint quota: `usedQuota`
+ * floors at zero and `remainingQuota` is recomputed from it in the same update.
+ */
+smsQuotaSchema.statics.refund = async function(shopId, count = 1) {
+  if (count <= 0) return null;
+
+  const quota = await this.findOne({ shop: shopId });
+  if (!quota) return null;
+
+  const refundable = Math.min(count, quota.usedQuota);
+  if (refundable <= 0) return quota;
+
+  return this.findOneAndUpdate(
+    { shop: shopId },
+    { $inc: { usedQuota: -refundable, remainingQuota: refundable } },
+    { new: true }
+  );
+};
+
 // Static: Get or create quota for shop
 smsQuotaSchema.statics.getOrCreate = async function(shopId) {
   let quota = await this.findOne({ shop: shopId });

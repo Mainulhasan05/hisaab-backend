@@ -95,6 +95,59 @@ const buildDueReminder = ({ customerName, due, shopName }) =>
  */
 const buildOtp = (otp) => `Your Hisaab OTP: ${otp}\nValid for 5 minutes`;
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * The shop's sign-off
+ *
+ * Every message this app sends on a shop's behalf ends with the shop's name.
+ * Not as a nicety — an SMS arrives from a numeric short code with no sender
+ * name a customer recognises, so a message that does not say who it is from
+ * reads as spam and gets ignored, or worse, answered by a call to the wrong
+ * number.
+ *
+ * The builders above bake it into their bodies. Free-text campaigns written on
+ * the SMS page do not, so `appendShopSignature` puts it there. It is applied on
+ * the SERVER, immediately before the segment count and the gateway call, which
+ * makes it the one thing a caller cannot forget or strip: the dashboard, the
+ * API and any future automation all pass through the same door.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** `- Shop Name`, the exact tail every message ends on. */
+const buildShopSignature = (shopName) => `- ${gsmSafeShopName(shopName)}`;
+
+/**
+ * Does this message already sign off with the shop's name?
+ *
+ * Checked on the tail rather than anywhere in the body, because a due reminder
+ * that happens to MENTION the shop mid-sentence still needs the sign-off, while
+ * one built by `buildDueReminder` — which already ends in `- Shop Name` — must
+ * not get a second one. Case-insensitive and dash-optional so a shopkeeper who
+ * typed the sign-off by hand isn't charged for a duplicate.
+ */
+const hasShopSignature = (message, shopName) => {
+  const name = gsmSafeShopName(shopName).trim().toLowerCase();
+  if (!name) return false;
+  const tail = String(message || '').trimEnd().toLowerCase();
+  return tail.endsWith(name);
+};
+
+/**
+ * Append the shop's sign-off unless it is already there.
+ *
+ * Idempotent by design: running it twice on the same message changes nothing,
+ * which matters because the campaign engine appends before counting segments
+ * and the preview appends before rendering, and both may run over a template
+ * that already carries the sign-off.
+ */
+const appendShopSignature = (message, shopName) => {
+  const body = String(message || '').replace(/\s+$/, '');
+  const signature = buildShopSignature(shopName);
+
+  if (!body) return signature;
+  if (hasShopSignature(body, shopName)) return body;
+
+  return `${body}\n${signature}`;
+};
+
 module.exports = {
   formatSmsAmount,
   gsmSafeShopName,
@@ -102,4 +155,7 @@ module.exports = {
   buildPaymentReceipt,
   buildDueReminder,
   buildOtp,
+  buildShopSignature,
+  hasShopSignature,
+  appendShopSignature,
 };

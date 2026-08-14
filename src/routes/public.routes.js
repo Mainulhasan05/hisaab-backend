@@ -1,7 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const publicStorefrontController = require('../controllers/publicStorefront.controller');
+const publicOrderController = require('../controllers/publicOrder.controller');
 const { storefrontLimiter } = require('../middleware/rateLimiter.middleware');
+const { orderAbuseGuard } = require('../middleware/orderAbuse.middleware');
+const idempotency = require('../middleware/idempotency.middleware');
 const { validate, Joi } = require('../middleware/validate.middleware');
 
 /**
@@ -99,6 +102,86 @@ router.get(
   '/storefront/:slug/sitemap',
   validate(slugParam, 'params'),
   publicStorefrontController.getSitemap
+);
+
+/**
+ * ── CHECKOUT — THE ONE WRITE ON THIS ROUTER ─────────────────────────────────
+ *
+ * The header above says every verb here is a GET, and that when checkout
+ * arrived it would be "an unauthenticated POST — a genuinely different risk
+ * with a different set of mitigations". This is that route, and this is that
+ * set, in the order a request meets them:
+ *
+ *   1. `storefrontLimiter`  — the router-wide read budget, already applied.
+ *   2. `orderAbuseGuard`    — per-IP order ceiling (5/min) plus escalating,
+ *                             randomised blocks up to 15 minutes for clients
+ *                             that keep earning strikes.
+ *   3. `idempotency`        — collapses the double-tap on a flaky connection.
+ *                             NON-BLOCKING by design, which is why the unique
+ *                             sparse index on {shop, meta.idempotencyKey} is
+ *                             the actual guarantee. See Order.model.js.
+ *   4. `validate`           — the body is shaped before it reaches a service.
+ *
+ * Prices are absent from the schema on purpose: `unknown(false)` means a client
+ * that tries to send one is refused outright rather than having it ignored.
+ * Everything about money is derived server-side in `order.service`.
+ */
+const checkoutBody = Joi.object({
+  customer: Joi.object({
+    name: Joi.string().trim().min(2).max(120).required()
+      .messages({ 'string.empty': 'নাম দিন', 'any.required': 'নাম দিন' }),
+    // Shape only. `phone.util.isValidPhone` decides what is a real Bangladeshi
+    // mobile number, once, in the service — a second opinion here would be a
+    // second implementation to keep in step.
+    phone: Joi.string().trim().min(10).max(20).required()
+      .messages({ 'string.empty': 'মোবাইল নম্বর দিন', 'any.required': 'মোবাইল নম্বর দিন' }),
+    address: Joi.string().trim().max(500).allow('').default(''),
+    note: Joi.string().trim().max(500).allow('').default(''),
+  }).required(),
+
+  items: Joi.array().items(
+    Joi.object({
+      productId: Joi.string().trim().pattern(/^[0-9a-fA-F]{24}$/).required()
+        .messages({ 'string.pattern.base': 'পণ্য সঠিক নয়' }),
+      variantSku: Joi.string().trim().max(60).allow(null, ''),
+      // The per-line cap stops one request asking for ten thousand of
+      // something; `resolveLines` caps the number of lines.
+      quantity: Joi.number().integer().min(1).max(999).required(),
+    }).unknown(false)
+  ).min(1).max(50).required(),
+
+  zoneKey: Joi.string().trim().max(40).allow(null, ''),
+  pickup: Joi.boolean().default(false),
+}).unknown(false);
+
+router.post(
+  '/storefront/:slug/orders',
+  orderAbuseGuard(),
+  idempotency({ ttlSeconds: 24 * 60 * 60, lockTtlSeconds: 60 }),
+  validate(slugParam, 'params'),
+  validate(checkoutBody, 'body'),
+  publicOrderController.placeOrder
+);
+
+/**
+ * Order tracking. A GET, so it needs none of the write mitigations — but it is
+ * addressed by order number AND phone together, because the number alone is
+ * sequential and the record behind it is a name and a home address. See the
+ * controller.
+ */
+router.get(
+  '/storefront/:slug/orders/:orderNo',
+  validate(
+    slugParam.keys({
+      orderNo: Joi.string().trim().uppercase().max(30).pattern(/^[A-Z0-9-]+$/).required(),
+    }),
+    'params'
+  ),
+  validate(
+    Joi.object({ phone: Joi.string().trim().min(10).max(20).required() }).unknown(false),
+    'query'
+  ),
+  publicOrderController.trackOrder
 );
 
 module.exports = router;

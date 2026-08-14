@@ -254,6 +254,81 @@ customerBalanceSchema.statics.settleDue = async function ({ shop, customer, pref
   return applied;
 };
 
+/**
+ * Take `amount` of pre-software debt back off the branch books.
+ *
+ * The mirror of `settleDue`, for the other way debt leaves a customer: an owner
+ * correcting a খাতা figure they typed wrong. It exists because the obvious
+ * implementation — `applyDelta` on whichever branch the owner happens to be
+ * standing in — is wrong, and wrong *silently*:
+ *
+ *   Opening due of ৳3,835 is typed at আক্কেলপুর. The owner notices from
+ *   নয়াগোলা and corrects it. `applyDelta` puts −৳3,835 on নয়াগোলা and leaves
+ *   আক্কেলপুর at +৳3,835. Shop-wide nets to zero, so `Customer.totalDue` is
+ *   right and the Σ invariant holds — `recalc-customer-balances.js` reports a
+ *   clean book. Meanwhile one branch's dashboard is overstated by ৳3,835 and
+ *   the other shows a negative due it can never explain.
+ *
+ * So a reduction is ALLOCATED, never dumped: each row gives up at most what it
+ * actually holds, current branch first (fix your own book), then oldest debt.
+ * No row can go negative, and because Σ min(openingᵢ, dueᵢ) ≤ min(Σ openingᵢ,
+ * Σ dueᵢ), the total taken can never exceed the shop-wide floor either — the
+ * per-branch cap is strictly the tighter of the two.
+ *
+ * @param {boolean} branchOnly  under separate books, a reduction may only touch
+ *   the branch making it. Same rule `collectDuePayment` already enforces for
+ *   cash: one branch must not write down another branch's receivable.
+ * @returns {number|null} magnitude actually removed, or null when the customer
+ *   has no rows at all — a caller-visible difference, see `_applyDueAdjustment`.
+ */
+customerBalanceSchema.statics.reduceOpening = async function (
+  { shop, customer, preferBranch, amount, branchOnly = false },
+  session = null
+) {
+  if (!shop || !customer || !preferBranch || !(amount > 0)) return null;
+
+  const sessionOpt = session ? { session } : {};
+  const rows = await this.find(
+    { shop, customer, ...(branchOnly ? { branch: preferBranch } : {}) },
+    null,
+    sessionOpt
+  ).sort({ lastPurchase: 1, createdAt: 1 });
+
+  // No row anywhere: history that predates Phase 7, or a book the backfill has
+  // not reached. There is nothing to allocate against and inventing a negative
+  // row would be worse than the drift, so say so and let the caller fall back.
+  if (rows.length === 0) return null;
+
+  rows.sort((a, b) => {
+    const aPref = String(a.branch) === String(preferBranch);
+    const bPref = String(b.branch) === String(preferBranch);
+    return aPref === bPref ? 0 : (aPref ? -1 : 1);
+  });
+
+  const round = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+  let remaining = amount;
+  let applied = 0;
+
+  for (const row of rows) {
+    if (remaining <= 0) break;
+    // Capped by the due as well as the opening: a branch whose debt has since
+    // been paid down holds no opening debt to give back, however large its
+    // `openingDue` field still reads.
+    const capacity = Math.min(row.openingDue || 0, row.totalDue || 0);
+    if (capacity <= 0) continue;
+
+    const take = Math.min(remaining, capacity);
+    row.openingDue = round(row.openingDue - take);
+    row.totalDue = round(row.totalDue - take);
+    await row.save(sessionOpt);
+
+    remaining = round(remaining - take);
+    applied = round(applied + take);
+  }
+
+  return applied;
+};
+
 /** One customer's balance at one branch, or a zero row if they have none there. */
 customerBalanceSchema.statics.getBalance = async function ({ shop, customer, branch }) {
   if (!shop || !customer || !branch) return null;

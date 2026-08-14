@@ -2,6 +2,7 @@ const smsService = require('../services/sms.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 const { validateSms, countSms } = require('../utils/smsCounter.util');
+const { appendShopSignature } = require('../utils/smsTemplates.util');
 
 // Get SMS quota
 exports.getQuota = asyncHandler(async (req, res) => {
@@ -17,9 +18,13 @@ exports.getQuota = asyncHandler(async (req, res) => {
 exports.sendSMS = asyncHandler(async (req, res) => {
   const { type, message } = req.body;
 
-  // Server-side SMS segment validation (never trust frontend)
+  // Server-side SMS segment validation (never trust frontend).
+  //
+  // Validated WITH the shop's sign-off attached, because that is the message
+  // the shop will be billed for. Checking the draft and sending the signed
+  // version is how a message that passed at ten segments goes out at eleven.
   if (message) {
-    const validation = validateSms(message, 10);
+    const validation = validateSms(appendShopSignature(message, req.shop?.name), 10);
     if (!validation.valid) {
       return ApiResponse.badRequest(res, {
         message: `Message exceeds segment limit: ${validation.info.segments} segments`,
@@ -51,6 +56,114 @@ exports.sendSMS = asyncHandler(async (req, res) => {
     data: result,
     message: 'SMS sent successfully',
     messageBn: 'এসএমএস সফলভাবে পাঠানো হয়েছে',
+  });
+});
+
+/**
+ * How many customers each audience holds — and how many are actually reachable.
+ *
+ * The composer calls this instead of downloading the customer book to count it
+ * locally. It is also the only place the two figures can honestly differ: a
+ * shop with 820 customers of whom 40 have no usable number reaches 780, and a
+ * cost quoted against 820 is wrong before the send even starts.
+ */
+exports.getAudienceCounts = asyncHandler(async (req, res) => {
+  const counts = await smsService.getAudienceCounts(req.shop._id, req);
+
+  return ApiResponse.success(res, {
+    data: {
+      ...counts,
+      // The composer needs this to render the sign-off it cannot let the
+      // shopkeeper delete, and to price the message including it.
+      shopName: req.shop?.name || '',
+    },
+    message: 'Audience counts retrieved successfully',
+    messageBn: 'প্রাপকের সংখ্যা সফলভাবে লোড হয়েছে',
+  });
+});
+
+/**
+ * Launch a bulk campaign from an audience name and a template.
+ *
+ * The client posts `{ message, audience, customerIds }` — never a list of phone
+ * numbers. See `smsService.resolveAudience` for why that matters under separate
+ * books, and what a client-chosen recipient list would let a caller do.
+ */
+exports.sendCampaign = asyncHandler(async (req, res) => {
+  const { message, audience = 'all', customerIds = [] } = req.body;
+
+  if (!message || !message.trim()) {
+    return ApiResponse.badRequest(res, {
+      message: 'Message is required',
+      messageBn: 'মেসেজ লিখুন',
+    });
+  }
+
+  const allowed = ['all', 'due', 'selected'];
+  if (!allowed.includes(audience)) {
+    return ApiResponse.badRequest(res, {
+      message: `Invalid audience. Expected one of: ${allowed.join(', ')}`,
+      messageBn: 'অবৈধ প্রাপক নির্বাচন',
+    });
+  }
+
+  if (audience === 'selected' && (!Array.isArray(customerIds) || customerIds.length === 0)) {
+    return ApiResponse.badRequest(res, {
+      message: 'Select at least one customer',
+      messageBn: 'কমপক্ষে একজন কাস্টমার সিলেক্ট করুন',
+    });
+  }
+
+  // Segments are checked against the SIGNED body — the one that gets billed.
+  // The per-recipient bodies are checked again inside the service, where the
+  // longest customer name is known.
+  const validation = validateSms(appendShopSignature(message, req.shop?.name), 10);
+  if (!validation.valid) {
+    return ApiResponse.badRequest(res, {
+      message: `Message exceeds segment limit: ${validation.info.segments} segments`,
+      messageBn: validation.reason,
+    });
+  }
+
+  const result = await smsService.createCampaign(
+    req.shop._id,
+    req.user._id,
+    { message, audience, customerIds },
+    req
+  );
+
+  if (result.reason === 'no_valid_recipients') {
+    return ApiResponse.badRequest(res, {
+      data: result,
+      message: 'No recipient has a usable phone number',
+      messageBn: 'ব্যবহারযোগ্য মোবাইল নম্বরসহ কোনো প্রাপক পাওয়া যায়নি',
+    });
+  }
+
+  return ApiResponse.success(res, {
+    data: result,
+    // A queued campaign has not sent anything yet, and saying it has is how a
+    // shopkeeper closes the tab on a send that then dies at batch three.
+    message: result.queued ? 'Campaign started' : 'Campaign completed',
+    messageBn: result.queued ? 'ক্যাম্পেইন শুরু হয়েছে' : 'ক্যাম্পেইন সম্পন্ন হয়েছে',
+  });
+});
+
+/** Progress of a running campaign, for the dashboard to poll. */
+exports.getCampaign = asyncHandler(async (req, res) => {
+  const campaign = await smsService.getCampaign(req.shop._id, req.params.id);
+
+  if (!campaign) {
+    return ApiResponse.badRequest(res, {
+      message: 'Campaign not found',
+      messageBn: 'ক্যাম্পেইন পাওয়া যায়নি',
+    });
+  }
+
+  return ApiResponse.success(res, {
+    data: campaign,
+    message: 'Campaign status retrieved successfully',
+    messageBn: 'ক্যাম্পেইনের অবস্থা লোড হয়েছে',
   });
 });
 

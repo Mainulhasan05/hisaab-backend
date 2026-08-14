@@ -35,7 +35,18 @@ function buildDateMatch(startDate, endDate) {
   const match = {};
 
   if (startDate) {
-    match.$gte = new Date(startDate);
+    // Same reasoning as `endDate` below, at the other end of the range. A
+    // date-only string is a Bangladesh calendar day, and `new Date('2026-08-01')`
+    // is UTC midnight — 6 AM in Dhaka. Left unconverted, every report starting
+    // on a date-only string silently dropped whatever the shop sold between
+    // midnight and 6 AM on its first day, while the last day was expanded
+    // correctly. A day-by-day table then failed to sum to its own total.
+    const trimmed = typeof startDate === 'string' ? startDate.trim() : startDate;
+    if (typeof trimmed === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      match.$gte = getBangladeshDayRange(trimmed).startOfDay;
+    } else {
+      match.$gte = new Date(startDate);
+    }
   }
 
   if (endDate) {

@@ -36,6 +36,11 @@ const stubCustomerFind = (docs = []) => {
   };
   jest.spyOn(Customer, 'find').mockReturnValue(chain);
   jest.spyOn(Customer, 'countDocuments').mockResolvedValue(docs.length);
+  // The shop-wide list also totals the whole filtered set for its stat cards,
+  // which is a second query rather than a sum of `docs` — see SUMMARY_GROUP.
+  jest.spyOn(Customer, 'aggregate').mockResolvedValue([
+    { totalDue: docs.reduce((s, d) => s + (d.totalDue || 0), 0), totalPurchases: 0, customersWithDue: 0 },
+  ]);
   return chain;
 };
 
@@ -208,6 +213,16 @@ describe('the due list', () => {
 });
 
 describe('due aging', () => {
+  // Aging is Sale.due + DueAdjustment.amount − due collections, and the third
+  // term is a third query. Nothing collected in these cases, so it is stubbed
+  // empty; `dueAgingNetsCollections.test.js` covers what it does when it is not.
+  beforeEach(() => {
+    jest.spyOn(Payment, 'aggregate').mockResolvedValue([]);
+    jest.spyOn(Customer, 'find').mockReturnValue({
+      select: () => ({ lean: async () => [] }),
+    });
+  });
+
   it('filters by branch only under separate books', async () => {
     const agg = jest.spyOn(Sale, 'aggregate').mockResolvedValue([]);
     const adjAgg = jest.spyOn(DueAdjustment, 'aggregate').mockResolvedValue([]);
@@ -234,9 +249,17 @@ describe('due aging', () => {
     jest.spyOn(DueAdjustment, 'aggregate').mockResolvedValue([
       { _id: CUSTOMER, totalDue: 5000, due0to30: 5000, due31to60: 0, due60plus: 0, oldestDue: new Date() },
     ]);
-    jest.spyOn(Customer, 'find').mockReturnValue({
-      select: () => ({ lean: async () => [{ _id: CUSTOMER, name: 'করিম', phone: '01711223344' }] }),
-    });
+    // Two different `Customer.find` calls run in this path — the name lookup for
+    // adjustment-only rows, and the deleted-customer filter — so the stub has to
+    // answer them separately. Returning করিম to both would have the report
+    // conclude they were deleted and drop the row it is here to prove exists.
+    jest.spyOn(Customer, 'find').mockImplementation((filter) => ({
+      select: () => ({
+        lean: async () => (filter?.isActive === false
+          ? []
+          : [{ _id: CUSTOMER, name: 'করিম', phone: '01711223344' }]),
+      }),
+    }));
 
     const { customers, summary } = await customerService.getDueAging(SHOP, shared());
 

@@ -113,13 +113,26 @@ const FEATURES = Object.freeze({
     bn: 'অনলাইন অর্ডার',
     en: 'Online orders',
     description:
-      'Cart and checkout on the public storefront, and the order worklist in ' +
-      'the /online panel. Off = the storefront is a catalogue with call and ' +
-      'WhatsApp buttons instead of a cart, which is the finished product for ' +
-      'a shop that does not run a parcel operation. Existing orders are kept.',
+      'Buy-now checkout on the public storefront, paid cash on delivery. Off = ' +
+      'the storefront is a catalogue with call and WhatsApp buttons instead of ' +
+      'a buy button, which is the finished product for a shop that does not ' +
+      'run a parcel operation. Existing orders are kept.',
     requires: ['storefront'],
-    // NOT SHIPPABLE YET — see `unavailable` below.
-    unavailable: 'Checkout is not built yet (ECOMMERCE_PLAN.md §13, P2).',
+    /**
+     * The `unavailable` gate is LIFTED — checkout exists. It read "Checkout is
+     * not built yet" and refused to switch on at all.
+     *
+     * What a shop gets today: customers can place COD orders, and every order
+     * sits at `pending` having touched nothing — no stock movement, no Sale, no
+     * customer due (invariant I-9, see Order.model.js). Orders arriving is
+     * therefore safe on its own.
+     *
+     * What is NOT here yet is the shop-side worklist that confirms them, so
+     * until it lands a shop with this on should expect to read its orders and
+     * ring the customer rather than press a button. That is a smaller gap than
+     * it sounds — it is how these shops already work — but it is the reason to
+     * switch this on deliberately, per shop, rather than for everyone.
+     */
   },
   combos: {
     bn: 'কম্বো অফার',

@@ -82,6 +82,46 @@ const smsLogSchema = new mongoose.Schema({
   errorMessage: {
     type: String
   },
+
+  /* ── Bulk campaign bookkeeping ────────────────────────────────────────────
+     A send to four thousand customers cannot be one gateway call and cannot
+     finish inside one HTTP request, so it runs in batches after the response
+     has already gone back. These fields are what the dashboard polls to draw
+     the progress bar — without them a shopkeeper who launched a big campaign
+     has no way to tell "still going" from "silently died". */
+
+  /** Which audience produced this send: all | due | selected | manual | auto. */
+  audience: {
+    type: String,
+    trim: true
+  },
+
+  /** Recipients dropped before sending — unusable or duplicate numbers. */
+  skippedCount: {
+    type: Number,
+    default: 0
+  },
+
+  /**
+   * Why they were dropped. Capped when written (see the service): a shop with
+   * ten thousand bad numbers must not turn one log into a ten-thousand-entry
+   * document, and the first fifty are enough to diagnose the pattern.
+   */
+  skipped: [{
+    _id: false,
+    phone: String,
+    customerName: String,
+    reason: String
+  }],
+
+  progress: {
+    total: { type: Number, default: 0 },
+    processed: { type: Number, default: 0 },
+    batches: { type: Number, default: 0 },
+    batchesDone: { type: Number, default: 0 },
+    startedAt: Date,
+    completedAt: Date
+  },
   scheduledAt: {
     type: Date
   },

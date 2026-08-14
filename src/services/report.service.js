@@ -156,9 +156,10 @@ class ReportService {
     // together collapses that to roughly a single round trip.
     const [
       todaySalesResult,
+      // Carries the customer COUNT too, so the tile and the due beside it can no
+      // longer be counted over two different populations.
       customerDueResult,
       lowStockCount,
-      totalCustomers,
       totalProducts,
       recentSales,
       topProducts,
@@ -187,12 +188,26 @@ class ReportService {
         },
       ]),
 
-      // Total due across customers. Shop-wide unless this shop keeps separate
-      // books per branch, in which case only what is owed to THIS branch.
+      // Total due across customers, and how many there are. Shop-wide unless
+      // this shop keeps separate books per branch, in which case only what is
+      // owed to THIS branch.
       //
       // An owner in All-Branches has no branch to scope to, and the sum across
       // every branch is precisely the shop-wide rollup — so the aggregate view
       // falls through to the same query in both modes, with no special case.
+      //
+      // ── Both arms must ask the SAME question ────────────────────────────────
+      //
+      // The branch arm used to read `CustomerBalance` raw while the shop-wide
+      // arm filtered `isActive: true`. Deleted customers therefore counted at
+      // branch level and vanished at shop level, so the branch tiles did not add
+      // up to the All-Branches tile and there was no figure on the page that
+      // explained the gap. One real shop: আক্কেলপুর ৳14,980,592 + নয়াগোলা
+      // ৳639,015 = ৳15,619,607 against an All-Branches ৳15,513,302 — the
+      // ৳106,305 difference being five soft-deleted customers, one of whom still
+      // owed ৳106,305 of it. The join below is what keeps the two arms
+      // answerable to each other; `_applyDueAdjustment` now refuses to create
+      // that state in the first place.
       scopedCustomers
         ? CustomerBalance.aggregate([
           {
@@ -201,18 +216,28 @@ class ReportService {
               branch: new mongoose.Types.ObjectId(branchId),
             },
           },
-          { $group: { _id: null, totalDue: { $sum: '$totalDue' } } },
+          {
+            $lookup: {
+              from: 'customers',
+              localField: 'customer',
+              foreignField: '_id',
+              // Only the flag is needed, and the branch's due list can run to
+              // thousands of rows — pulling whole customer documents through the
+              // join to read one boolean is the expensive way to do this.
+              pipeline: [{ $project: { isActive: 1 } }],
+              as: 'c',
+            },
+          },
+          { $unwind: '$c' },
+          { $match: { 'c.isActive': true } },
+          { $group: { _id: null, totalDue: { $sum: '$totalDue' }, count: { $sum: 1 } } },
         ])
         : Customer.aggregate([
           { $match: { shop: new mongoose.Types.ObjectId(shopId), isActive: true } },
-          { $group: { _id: null, totalDue: { $sum: '$totalDue' } } },
+          { $group: { _id: null, totalDue: { $sum: '$totalDue' }, count: { $sum: 1 } } },
         ]),
 
       this._lowStockCount(shopId, branchId),
-
-      scopedCustomers
-        ? CustomerBalance.countDocuments({ shop: shopId, branch: branchId })
-        : Customer.countDocuments({ shop: shopId, isActive: true }),
 
       Product.countDocuments(productScope(shopId, branchId, { isActive: true })),
 
@@ -296,6 +321,7 @@ class ReportService {
 
     const todaySales = todaySalesResult[0] || { totalSales: 0, totalPaid: 0, totalDue: 0, totalProfit: 0, count: 0 };
     const totalDue = customerDueResult[0]?.totalDue || 0;
+    const totalCustomers = customerDueResult[0]?.count || 0;
 
     const branchBreakdown = activeBranches.map((branch) => {
       const stats = salesByBranch.find((x) => x._id && x._id.toString() === branch._id.toString()) || {
@@ -1406,28 +1432,35 @@ class ReportService {
     };
   }
 
-  // Get all sales for a specific date (drill-down)
-  async getSalesByDate(shopId, dateStr, branchId = null) {
+  /**
+   * Get all sales for a specific date (drill-down).
+   *
+   * `options.staffId` narrows the day to one salesperson, which is what the
+   * staff report drills into. Expenses are deliberately left out of that view:
+   * an expense belongs to the shop, not to whoever happened to be at the till,
+   * so attributing the day's rent to one employee would make their "আসল আয়"
+   * a number that means nothing. When the day is staff-scoped the expense
+   * totals come back as zero and the caller shows sales figures only.
+   */
+  async getSalesByDate(shopId, dateStr, branchId = null, options = {}) {
     const { startOfDay, endOfDay } = getBangladeshDayRange(dateStr);
+    const staffId = options.staffId ? new mongoose.Types.ObjectId(options.staffId) : null;
 
-    const [sales, summary, expenseTotal] = await Promise.all([
-      Sale.find({
-        ...this._baseMatch(shopId, branchId),
-        createdAt: { $gte: startOfDay, $lte: endOfDay },
-      })
+    const dayMatch = {
+      ...this._baseMatch(shopId, branchId),
+      createdAt: { $gte: startOfDay, $lte: endOfDay },
+    };
+    if (staffId) dayMatch.createdBy = staffId;
+
+    const [sales, summary, expenseTotal, staff] = await Promise.all([
+      Sale.find(dayMatch)
         .populate('customer', 'name phone')
         .populate('createdBy', 'name')
         .sort({ createdAt: -1 })
         .lean(),
 
       Sale.aggregate([
-        {
-          $match: {
-            ...this._baseMatch(shopId, branchId),
-            status: { $ne: 'cancelled' },
-            createdAt: { $gte: startOfDay, $lte: endOfDay },
-          },
-        },
+        { $match: { ...dayMatch, status: { $ne: 'cancelled' } } },
         {
           $group: {
             _id: null,
@@ -1440,22 +1473,41 @@ class ReportService {
         },
       ]),
 
-      Expense.aggregate([
-        {
-          $match: {
-            ...this._baseMatch(shopId, branchId),
-            date: { $gte: startOfDay, $lte: endOfDay },
-          },
-        },
-        {
-          $group: {
-            _id: null,
-            total: { $sum: '$amount' },
-            count: { $sum: 1 },
-          },
-        },
-      ]),
+      staffId
+        ? Promise.resolve([])
+        : Expense.aggregate([
+            {
+              $match: {
+                ...this._baseMatch(shopId, branchId),
+                date: { $gte: startOfDay, $lte: endOfDay },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                total: { $sum: '$amount' },
+                count: { $sum: 1 },
+              },
+            },
+          ]),
+
+      // Scoped to the shop, so one shop cannot drill into another's staff by
+      // guessing an id — the sale match already enforces it, but the identity
+      // echoed back in the response must be held to the same rule.
+      staffId
+        ? User.findOne({ _id: staffId, shop: shopId }).select('name phone isOwner role').populate('role', 'name').lean()
+        : Promise.resolve(null),
     ]);
+
+    if (staffId && !staff) {
+      const err = new Error('Staff member not found');
+      err.statusCode = 404;
+      err.messageBn = 'কর্মচারী পাওয়া যায়নি';
+      // Operational, so the production error handler sends the Bengali sentence
+      // above rather than the generic "কিছু একটা সমস্যা হয়েছে".
+      err.isOperational = true;
+      throw err;
+    }
 
     const summaryData = summary[0] || {
       totalSales: 0,
@@ -1468,6 +1520,15 @@ class ReportService {
 
     return {
       date: dateStr,
+      staff: staff
+        ? {
+            staffId: String(staff._id),
+            name: staff.name,
+            phone: staff.phone || null,
+            roleName: staff.isOwner ? 'Owner' : staff.role?.name || null,
+            isOwner: staff.isOwner === true,
+          }
+        : null,
       sales,
       summary: {
         ...summaryData,

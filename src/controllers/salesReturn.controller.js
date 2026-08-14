@@ -1,6 +1,7 @@
 const salesReturnService = require('../services/salesReturn.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
+const { sanitizeReport } = require('../utils/dataSanitizer.util');
 
 // Create sales return
 exports.createReturn = asyncHandler(async (req, res) => {
@@ -43,6 +44,11 @@ exports.getReturns = asyncHandler(async (req, res) => {
   const result = await salesReturnService.getReturns(req.shop._id, options);
   return ApiResponse.paginated(res, {
     ...result,
+    // Every return document carries `profitReduction`. The route asks for
+    // `sales.view`, so a cashier lists them — and would read off the profit
+    // given back on every row. Nothing on the client consumes the field; the
+    // server computes it when the return is created.
+    data: sanitizeReport(result.data, req),
     message: 'Returns retrieved successfully',
     messageBn: 'ফেরত তালিকা সফলভাবে লোড হয়েছে',
   });
@@ -56,7 +62,7 @@ exports.getReturn = asyncHandler(async (req, res) => {
     req
   );
   return ApiResponse.success(res, {
-    data: salesReturn,
+    data: sanitizeReport(salesReturn, req),
     message: 'Return retrieved successfully',
     messageBn: 'ফেরত সফলভাবে লোড হয়েছে',
   });
@@ -70,7 +76,7 @@ exports.getReturnsBySale = asyncHandler(async (req, res) => {
     req
   );
   return ApiResponse.success(res, {
-    data: returns,
+    data: sanitizeReport(returns, req),
     message: 'Sale returns retrieved successfully',
     messageBn: 'বিক্রয়ের ফেরত তালিকা সফলভাবে লোড হয়েছে',
   });
@@ -84,7 +90,12 @@ exports.getReturnableItems = asyncHandler(async (req, res) => {
     req
   );
   return ApiResponse.success(res, {
-    data: result,
+    // The rows carry each line's `buyingPrice` — the cost figure
+    // `products.view_cost` exists to withhold, and the return modal never reads
+    // it. `sanitizeReport` strips cost and profit keys independently, so a
+    // cashier who may see profit but not cost (or the reverse) still gets the
+    // half they are entitled to.
+    data: sanitizeReport(result, req),
     message: 'Returnable items retrieved successfully',
     messageBn: 'ফেরতযোগ্য আইটেম সফলভাবে লোড হয়েছে',
   });
@@ -105,7 +116,11 @@ exports.getReturnsSummary = asyncHandler(async (req, res) => {
     }
   );
   return ApiResponse.success(res, {
-    data: summary,
+    // `totalProfitLoss` is how much profit the day's returns handed back — the
+    // same confidential figure `sales.profit` is, reached by another name. The
+    // route only asks for `sales.view`, which a cashier holds, so the payload
+    // has to go through the same strip every report response does.
+    data: sanitizeReport(summary, req),
     message: 'Returns summary retrieved successfully',
     messageBn: 'ফেরত সারাংশ সফলভাবে লোড হয়েছে',
   });

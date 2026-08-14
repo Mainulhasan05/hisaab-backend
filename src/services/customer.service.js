@@ -72,6 +72,45 @@ const resolveBranchName = (customer, row) => {
   };
 };
 
+/**
+ * The stat cards above the customer list, computed server-side.
+ *
+ * ── Why this exists ──────────────────────────────────────────────────────────
+ *
+ * The page used to build these by `reduce`-ing the rows it had been handed:
+ *
+ *     const totalDue = customerList.reduce((s, c) => s + (c.totalDue || 0), 0)
+ *
+ * which is the current PAGE — twenty rows. A shop with 127 customers in debt saw
+ * "মোট বাকি ৳৭,৮৮,৯৪৭" against a real book of ৳১,৪৮,৭১,০৮২, and the figure moved
+ * every time they re-sorted, because a different twenty were on screen. The same
+ * shop's smaller branch showed a correct total — it had 15 debtors, so the whole
+ * book fitted on one page and the bug was invisible there. Two branches, same
+ * screen, one right and one wrong: unfixable from the client, because the client
+ * has never seen the other 107 rows.
+ *
+ * So the total is computed where the filter is applied, next to the `$count`
+ * that was already being trusted for `pagination.total`.
+ */
+const SUMMARY_GROUP = {
+  $group: {
+    _id: null,
+    totalDue: { $sum: { $ifNull: ['$totalDue', 0] } },
+    totalPurchases: { $sum: { $ifNull: ['$totalPurchases', 0] } },
+    customersWithDue: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$totalDue', 0] }, 0] }, 1, 0] } },
+  },
+};
+
+/** Zero-fill the summary so the client never has to guard on an empty result. */
+const normalizeSummary = (row) => ({
+  totalDue: round2(row?.totalDue),
+  totalPurchases: round2(row?.totalPurchases),
+  customersWithDue: row?.customersWithDue || 0,
+});
+
+/** Two-decimal money rounding, for arithmetic on figures already validated. */
+const round2 = (n) => Math.round(((n || 0) + Number.EPSILON) * 100) / 100;
+
 /** Money never travels as a string. Rejects NaN/Infinity/negative-zero noise. */
 const toAmount = (value) => {
   const n = Number(value);
@@ -171,6 +210,9 @@ class CustomerService {
           // reads, not by a label it never sees.
           data: [{ $sort: { [sortField]: direction } }, { $skip: skip }, { $limit: parseInt(limit) }],
           count: [{ $count: 'total' }],
+          // The stat cards, over the WHOLE filtered set rather than the page.
+          // See `_listSummary` for why this cannot be left to the client.
+          totals: [SUMMARY_GROUP],
         },
       },
     ]);
@@ -179,6 +221,7 @@ class CustomerService {
 
     return {
       data: result?.data || [],
+      summary: normalizeSummary(result?.totals?.[0]),
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -223,17 +266,29 @@ class CustomerService {
     const sortField = ['createdAt', 'name', 'totalDue', 'totalPurchases', 'lastPurchase'].includes(sortBy) ? sortBy : 'createdAt';
     const sort = { [sortField]: sortOrder === 'asc' ? 1 : -1 };
 
-    const [customers, total] = await Promise.all([
+    const [customers, total, totals] = await Promise.all([
       Customer.find(query)
         .sort(sort)
         .skip(skip)
         .limit(parseInt(limit))
         .lean(),
       Customer.countDocuments(query),
+      // Same figures the branch-scoped path returns from its $facet, so both
+      // modes hand the page an identical `summary` and it never has to know
+      // which one it is in.
+      //
+      // `shop` is cast explicitly: `find` would coerce a string id off the
+      // query, the aggregation framework will not, and a silently unmatched
+      // $match here reads as "this shop is owed ৳0" rather than as an error.
+      Customer.aggregate([
+        { $match: { ...query, shop: new mongoose.Types.ObjectId(shopId) } },
+        SUMMARY_GROUP,
+      ]),
     ]);
 
     return {
       data: customers,
+      summary: normalizeSummary(totals[0]),
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -369,13 +424,61 @@ class CustomerService {
         throw new AppError('কাস্টমার পাওয়া যায়নি', 'Customer not found', 404);
       }
 
+      // Debt cannot be written onto a deleted customer.
+      //
+      // `deleteCustomer` refuses to soft-delete anyone who still owes money, so
+      // the pair (isActive: false, totalDue > 0) should be unreachable — and it
+      // was reached anyway, from the other side: delete the customer at ৳0, then
+      // add the opening due back on a page still open behind you. One shop ended
+      // up with ৳106,305 owed by a customer their all-branches dashboard could
+      // not see (it filters `isActive`) while the branch dashboard counted it,
+      // which is precisely the kind of split that makes the two screens
+      // irreconcilable. Guarding only the delete side left the door open.
+      if (customer.isActive === false && amount > 0) {
+        throw new AppError(
+          'ডিলিট করা কাস্টমারের বাকি যোগ করা যাবে না — আগে কাস্টমার ফিরিয়ে আনুন',
+          'Cannot add due to a deleted customer — restore them first',
+          400
+        );
+      }
+
       // A reduction can only take away debt that is actually there. Without
       // this an owner correcting ৳500 on a customer who owes ৳200 would leave
       // `openingDue` at −৳300 while `totalDue` clamped at 0 — the two rollups
       // permanently disagreeing, which the recalc script would then report
       // forever as unexplained drift.
-      const floor = -Math.min(customer.openingDue || 0, customer.totalDue || 0);
-      const applied = Math.max(amount, floor);
+      const shopFloor = -Math.min(customer.openingDue || 0, customer.totalDue || 0);
+
+      // A reduction in a multi-branch shop is allocated across the branches that
+      // actually hold the debt rather than charged to the one the owner is
+      // standing in — see `CustomerBalance.reduceOpening` for what that prevents.
+      // `applied` is then whatever the branch books could really give up, so the
+      // shop-wide rollup below moves by exactly the same figure and the Σ
+      // invariant survives a partial allocation.
+      let applied;
+      let allocated = false;
+
+      if (branchId && amount < 0) {
+        const removed = await CustomerBalance.reduceOpening({
+          shop: shopId,
+          customer: customerId,
+          preferBranch: branchId,
+          amount: -amount,
+          branchOnly: isBranchCustomerScope(req),
+        }, session);
+
+        if (removed === null) {
+          // No branch rows at all — pre-Phase-7 history. Fall back to the
+          // shop-wide floor and let `applyDelta` below create the row, which is
+          // what keeps Σ tracking `Customer` rather than drifting further.
+          applied = Math.max(amount, shopFloor);
+        } else {
+          applied = -removed;
+          allocated = true;
+        }
+      } else {
+        applied = Math.max(amount, shopFloor);
+      }
 
       if (applied === 0) {
         return { customer, adjustment: null, applied: 0 };
@@ -398,13 +501,19 @@ class CustomerService {
 
       // Same arithmetic per branch. A no-op for single-branch shops, where
       // branchId is null — exactly like every other call site.
-      await CustomerBalance.applyDelta({
-        shop: shopId,
-        customer: customerId,
-        branch: branchId,
-        opening: applied,
-        due: applied,
-      }, session);
+      //
+      // Skipped when `reduceOpening` already wrote the rows: it has spread the
+      // reduction across the branches holding the debt, and repeating it here
+      // would take the money off twice.
+      if (!allocated) {
+        await CustomerBalance.applyDelta({
+          shop: shopId,
+          customer: customerId,
+          branch: branchId,
+          opening: applied,
+          due: applied,
+        }, session);
+      }
 
       await AuditLog.log({
         shop: shopId,
@@ -444,7 +553,25 @@ class CustomerService {
       throw new AppError('কাস্টমার পাওয়া যায়নি', 'Customer not found', 404);
     }
 
-    const delta = toAmount(target - (customer.openingDue || 0));
+    // The delta is measured against the figure the owner was LOOKING AT.
+    //
+    // Under separate books `getCustomerById` returns the branch's `openingDue`,
+    // so the form shows — and the owner corrects — a branch figure, while this
+    // subtracted the shop-wide one. A customer holding ৳5,000 at নয়াগোলা and
+    // ৳15,000 shop-wide, restated to ৳5,000 from নয়াগোলা, produced a delta of
+    // −৳10,000 against a branch that held ৳5,000: the "no change" case computed
+    // as a ৳10,000 write-down. That is where crossed and negative branch rows
+    // come from, and capping the reduction per-branch only stops it corrupting
+    // the other branch — it does not make this subtraction correct.
+    let current = customer.openingDue || 0;
+    if (isBranchCustomerScope(req)) {
+      const row = await CustomerBalance.findOne({
+        shop: shopId, customer: customerId, branch: req.branchId,
+      }).lean();
+      current = row?.openingDue || 0;
+    }
+
+    const delta = toAmount(target - current);
     if (delta === 0) {
       return { customer, adjustment: null, applied: 0 };
     }
@@ -1095,7 +1222,9 @@ class CustomerService {
   async getCustomersWithDue(shopId, options = {}, req = null) {
     const { limit = 50, minDue = 0 } = options;
 
-    const customers = isBranchCustomerScope(req)
+    const branchScoped = isBranchCustomerScope(req);
+
+    const customers = branchScoped
       ? await this._topBranchBalances(shopId, req.branchId, {
         sortField: 'totalDue',
         limit,
@@ -1110,13 +1239,44 @@ class CustomerService {
         .limit(limit)
         .lean();
 
-    const totalDue = customers.reduce((sum, c) => sum + c.totalDue, 0);
+    // The same page-local-sum bug the customer list had, one endpoint over:
+    // `customers` is the top `limit` (50 by default), so summing it described
+    // the fifty largest debtors while claiming to be the whole book. The
+    // summary is now counted over everything that matches, and only the ROWS
+    // stay capped.
+    const totals = branchScoped
+      ? await CustomerBalance.aggregate([
+        {
+          $match: {
+            shop: new mongoose.Types.ObjectId(shopId),
+            branch: new mongoose.Types.ObjectId(req.branchId),
+            totalDue: { $gt: Number(minDue) },
+          },
+        },
+        { $lookup: { from: 'customers', localField: 'customer', foreignField: '_id', as: 'c' } },
+        { $unwind: '$c' },
+        { $match: { 'c.isActive': true } },
+        { $group: { _id: null, totalDue: { $sum: '$totalDue' }, count: { $sum: 1 } } },
+      ])
+      : await Customer.aggregate([
+        {
+          $match: {
+            shop: new mongoose.Types.ObjectId(shopId),
+            isActive: true,
+            totalDue: { $gt: Number(minDue) },
+          },
+        },
+        { $group: { _id: null, totalDue: { $sum: '$totalDue' }, count: { $sum: 1 } } },
+      ]);
 
     return {
       customers,
       summary: {
-        count: customers.length,
-        totalDue,
+        // How many debtors exist, not how many were returned. `customers.length`
+        // is still available to a caller that wants the size of the slice.
+        count: totals[0]?.count || 0,
+        totalDue: round2(totals[0]?.totalDue),
+        returned: customers.length,
       },
     };
   }
@@ -1476,6 +1636,82 @@ class CustomerService {
 
       result.length = 0;
       result.push(...[...byCustomer.values()].sort((x, y) => y.totalDue - x.totalDue));
+    }
+
+    // ── Money already collected ──────────────────────────────────────────────
+    //
+    // `collectDuePayment` reduces `Customer.totalDue` and the branch rows, but
+    // it is not tied to an invoice and so never touches `Sale.due`. This report
+    // is built from `Sale.due` plus `DueAdjustment.amount`, which means every
+    // ৳ collected against a due stayed in the aging buckets forever: a shop that
+    // invoiced ৳50,000 and collected ৳50,000 read ৳0 on every other screen and
+    // ৳50,000 here, aging into the red bucket. Two screens, same question,
+    // opposite answers — and this is the screen a shop chases customers from.
+    //
+    // Applied oldest-bucket-first, the same order `CustomerBalance.settleDue`
+    // allocates cash in, so what the aging shows outstanding is what the ledger
+    // actually still holds against that customer.
+    const payMatch = {
+      shop: new mongoose.Types.ObjectId(shopId),
+      type: 'due_collection',
+      customer: { $ne: null },
+    };
+    if (isBranchCustomerScope(req)) {
+      payMatch.branch = new mongoose.Types.ObjectId(req.branchId);
+    }
+
+    const collected = await Payment.aggregate([
+      { $match: payMatch },
+      { $group: { _id: '$customer', paid: { $sum: '$amount' } } },
+      { $match: { paid: { $gt: 0 } } },
+    ]);
+
+    if (collected.length > 0) {
+      const paidById = new Map(collected.map((p) => [String(p._id), p.paid]));
+      for (const row of result) {
+        let remaining = paidById.get(String(row._id)) || 0;
+        if (remaining <= 0) continue;
+
+        for (const bucket of ['due60plus', 'due31to60', 'due0to30']) {
+          if (remaining <= 0) break;
+          const take = Math.min(remaining, row[bucket] || 0);
+          row[bucket] = round2((row[bucket] || 0) - take);
+          remaining = round2(remaining - take);
+        }
+        // Never below zero: an over-collection is a credit, and this report
+        // answers "what is still owed", not "what is the net position".
+        row.totalDue = round2(Math.max(0, row.due0to30 + row.due31to60 + row.due60plus));
+      }
+    }
+
+    // A customer settled in full is no longer aging — leaving them at ৳0 would
+    // pad the list with rows a shop has nothing to chase on.
+    const aged = result.filter((c) => c.totalDue > 0);
+    result.length = 0;
+    result.push(...aged.sort((x, y) => y.totalDue - x.totalDue));
+
+    // ── Deleted customers ────────────────────────────────────────────────────
+    //
+    // Same population every other due screen counts (the dashboard tile, the
+    // list, `getCustomersWithDue`). Without this the aging total is the one
+    // figure on the page that still includes soft-deleted customers, and a shop
+    // reconciling it against the dashboard finds a gap with nothing to explain
+    // it.
+    const ids = result.map((c) => c._id).filter(Boolean);
+    if (ids.length > 0) {
+      // Queried for the DELETED ones, not the live ones, so the filter below can
+      // drop only what it positively knows to be deleted. A walk-in sale groups
+      // under `_id: null` and has no customer document to look up; inverting
+      // this ("keep what came back active") would silently drop that debt.
+      const removed = await Customer.find({ _id: { $in: ids }, isActive: false })
+        .select('_id').lean();
+
+      if (removed.length > 0) {
+        const removedIds = new Set(removed.map((c) => String(c._id)));
+        const visible = result.filter((c) => !removedIds.has(String(c._id)));
+        result.length = 0;
+        result.push(...visible);
+      }
     }
 
     // Summary totals

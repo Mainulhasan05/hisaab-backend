@@ -563,7 +563,7 @@ class PublicStorefrontService {
       blocks: published.blocks || {},
       nav: published.nav || [],
       seo: published.seo || {},
-      delivery: this._publicDelivery(storefront),
+      delivery: this._publicDelivery(storefront, shop),
       categories,
       featured,
       newArrivals,
@@ -747,7 +747,7 @@ class PublicStorefrontService {
       theme: { ...(template.themeDefaults || {}), ...(storefront.published?.theme || {}) },
       blocks: storefront.published?.blocks || {},
       nav: storefront.published?.nav || [],
-      delivery: this._publicDelivery(storefront),
+      delivery: this._publicDelivery(storefront, shop),
       product: this.toPublicProduct(product, { full: true }),
       related,
     };
@@ -817,7 +817,7 @@ class PublicStorefrontService {
    * checkout that does not exist yet would be withholding it for nothing.
    * Inactive zones are dropped so a shop can retire one without deleting it.
    */
-  _publicDelivery(storefront) {
+  _publicDelivery(storefront, shop) {
     const zones = (storefront.delivery?.zones || [])
       .filter((z) => z.isActive !== false)
       .map((z) => ({
@@ -828,7 +828,26 @@ class PublicStorefrontService {
         etaDaysMin: Number(z.etaDaysMin) || 0,
         etaDaysMax: Number(z.etaDaysMax) || 0,
       }));
-    return { zones, pickupEnabled: storefront.delivery?.pickupEnabled === true };
+
+    return {
+      zones,
+      pickupEnabled: storefront.delivery?.pickupEnabled === true,
+      /**
+       * Whether this shop takes orders, as opposed to merely showing prices.
+       *
+       * `storefront` gets a shop a website; `onlineOrders` gets it a checkout.
+       * A shop with the first and not the second is a catalogue with call and
+       * WhatsApp buttons, which §13 calls the finished product for a shop that
+       * does not run a parcel operation — so this is a legitimate public fact
+       * and not something to hide.
+       *
+       * The templates read it to decide between a "এখনই কিনুন" button and a
+       * contact CTA. The checkout endpoint enforces it independently; this flag
+       * only decides what is OFFERED, never what is allowed, because a flag
+       * that travelled to a browser is a flag that can be edited there.
+       */
+      ordersEnabled: shopHasFeature(shop, 'onlineOrders'),
+    };
   }
 }
 
