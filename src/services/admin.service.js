@@ -1327,6 +1327,11 @@ class AdminService {
       SMSLog.find(query)
         .populate('shop', 'name')
         .populate('sentBy', 'name phone')
+        // Platform broadcasts carry no `shop` and no `sentBy` — the operator is
+        // an Admin, and pushing an Admin id through a `User` ref populates as
+        // null. Without this the log page shows every broadcast as sent by
+        // nobody, from nowhere, and indistinguishable from a system OTP.
+        .populate('sentByAdmin', 'name')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(parseInt(limit))

@@ -11,6 +11,7 @@ const billingService = require('../services/billing.service');
 const PlatformSetting = require('../models/PlatformSetting.model');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
+const { AppError } = require('../middleware/error.middleware');
 
 /** Who did it, in the shape the service and the ledger both store. */
 const actorOf = (req) => ({ kind: 'admin', id: req.admin?._id, name: req.admin?.name });
@@ -197,11 +198,65 @@ exports.getPlatformSettings = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * Clean an incoming tier ladder.
+ *
+ * Validated here rather than left to the schema because the failure modes are
+ * shapes Mongoose would happily store: a tier with a blank price casts to 0 and
+ * becomes a free pack, and two tiers at the same quantity render as duplicate
+ * tiles the operator cannot tell apart. Sorted ascending on the way in so the
+ * panel never has to sort a list that is supposed to be a ladder.
+ */
+const normalizeSmsTiers = (tiers) => {
+  if (!Array.isArray(tiers)) {
+    throw new AppError('SMS tiers must be a list', 'এসএমএস প্যাকেজ তালিকা সঠিক নয়', 400);
+  }
+
+  const seen = new Set();
+  const clean = tiers.map((tier, index) => {
+    const quantity = Number(tier?.quantity);
+    const price = Number(tier?.price);
+
+    if (!Number.isFinite(quantity) || quantity < 1) {
+      throw new AppError(
+        `Tier ${index + 1}: quantity must be at least 1`,
+        `${index + 1} নম্বর প্যাকেজের পরিমাণ সঠিক নয়`,
+        400
+      );
+    }
+    if (!Number.isFinite(price) || price < 0) {
+      throw new AppError(
+        `Tier ${index + 1}: price must be zero or more`,
+        `${index + 1} নম্বর প্যাকেজের দাম সঠিক নয়`,
+        400
+      );
+    }
+    if (seen.has(quantity)) {
+      throw new AppError(
+        `Two tiers both offer ${quantity} SMS`,
+        `${quantity}টি এসএমএসের প্যাকেজ দুইবার আছে`,
+        400
+      );
+    }
+    seen.add(quantity);
+
+    return {
+      quantity,
+      price,
+      label: tier?.label?.trim() || `${quantity} এসএমএস`,
+      badge: tier?.badge?.trim() || undefined,
+    };
+  });
+
+  return clean.sort((a, b) => a.quantity - b.quantity);
+};
+
 exports.updatePlatformSettings = asyncHandler(async (req, res) => {
   const allowed = [
     'defaultTrialDays',
     'defaultMonthlyPrice',
     'defaultSmsUnitPrice',
+    'platformSmsCost',
     'warningDays',
     'smsTiers',
     'supportPhone',
@@ -211,6 +266,17 @@ exports.updatePlatformSettings = asyncHandler(async (req, res) => {
   for (const key of allowed) {
     if (req.body[key] !== undefined) patch[key] = req.body[key];
   }
+
+  if (patch.smsTiers !== undefined) {
+    patch.smsTiers = normalizeSmsTiers(patch.smsTiers);
+  }
+  // Clearing the cost is meaningful — it is the difference between "we sell at
+  // cost" and "nobody has told this system what a message costs". An empty
+  // string from the form has to reach the model as null, not as 0.
+  if (patch.platformSmsCost === '' || patch.platformSmsCost === null) {
+    patch.platformSmsCost = null;
+  }
+
   patch.updatedBy = req.admin?._id;
 
   const data = await PlatformSetting.findOneAndUpdate({ key: 'platform' }, patch, {

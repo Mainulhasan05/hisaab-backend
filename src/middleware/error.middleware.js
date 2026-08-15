@@ -94,10 +94,50 @@ const sendErrorDev = (err, res) => {
     // `data.messageBn`, so burying it in the debug blob meant the Bengali was
     // missing in development too — the same bug the production path had.
     messageBn: err.messageBn || null,
+    // The same passthrough fields production sends, for the same reason the
+    // Bengali one is here: a client branches on `code` (MEDIA_IN_USE,
+    // PLATFORM_MEDIA_QUOTA_EXCEEDED, WRONG_BRANCH, BRANCH_REQUIRED …), and
+    // sending them in production but not development meant every one of those
+    // branches was dead on a developer's machine and only came alive after
+    // deploy. `error: err` below does not cover it: `lib/axios.js` reads
+    // `data.code`, not `data.error.code`.
+    ...passthroughFields(err),
     error: err,
     stack: err.stack,
     timestamp: new Date().toISOString()
   });
+};
+
+/**
+ * The structured extras an `AppError` may carry beyond its two messages.
+ *
+ * These are the contract between a service that refuses something and the
+ * screen that has to explain the refusal — "used by WHAT", "which branch",
+ * "how full". Every one of them is opt-in: a plain `AppError` adds nothing.
+ */
+const passthroughFields = (err) => {
+  const out = {};
+
+  if (err.code) out.code = err.code;
+  if (err.phone) out.phone = err.phone;
+  // WRONG_BRANCH carries the branch a record actually belongs to, so the
+  // client can name it and offer a one-click switch instead of a bare 404.
+  if (err.branch) out.branch = err.branch;
+
+  // MEDIA_IN_USE and FOLDER_NOT_EMPTY exist to answer "used by WHAT" — the
+  // whole reason `PlatformMedia.refs` stores owners rather than a counter.
+  // Both services build that list and hang it on the error; dropping it here
+  // left the client able to render only the generic refusal, and the admin
+  // hunting through every page they had ever built.
+  if (err.usedBy) out.usedBy = err.usedBy;
+  if (err.files) out.files = err.files;
+
+  // The quota errors carry the numbers their message interpolates, so a client
+  // can render a meter rather than re-parsing the sentence.
+  if (err.quotaMb !== undefined) out.quotaMb = err.quotaMb;
+  if (err.usedBytes !== undefined) out.usedBytes = err.usedBytes;
+
+  return out;
 };
 
 /**
@@ -122,12 +162,9 @@ const sendErrorProd = (err, res) => {
 
     if (err.messageBn) response.messageBn = err.messageBn;
 
-    // Pass through custom error codes and data for frontend handling
-    if (err.code) response.code = err.code;
-    if (err.phone) response.phone = err.phone;
-    // WRONG_BRANCH carries the branch a record actually belongs to, so the
-    // client can name it and offer a one-click switch instead of a bare 404.
-    if (err.branch) response.branch = err.branch;
+    // Shared with `sendErrorDev` so the two responses cannot drift — a client
+    // branch that works in development must work in production and vice versa.
+    Object.assign(response, passthroughFields(err));
 
     return res.status(err.statusCode).json(response);
   }

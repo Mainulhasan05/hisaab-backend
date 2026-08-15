@@ -59,7 +59,12 @@ const APPLY = process.argv.includes('--apply');
 const shopArgIdx = process.argv.indexOf('--shop');
 const SHOP_ARG = shopArgIdx !== -1 ? process.argv[shopArgIdx + 1] : null;
 
-const round = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+// The same rounding the live write paths use. A repair script that rounds
+// differently from the code it repairs manufactures its own drift — and with
+// --apply it writes that drift into the book. `Number.EPSILON` is an ABSOLUTE
+// 2.2e-16, so the form this replaces stopped nudging above ~2 and rounded
+// ~0.8% of paisa-boundary values the other way. See utils/quantity.util.js.
+const { quantizeMoney: round } = require('../src/utils/quantity.util');
 
 async function main() {
   await mongoose.connect(process.env.MONGODB_URI, {

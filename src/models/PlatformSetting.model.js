@@ -13,10 +13,21 @@
 const mongoose = require('mongoose');
 const { TRIAL_PERIOD_DAYS, SUBSCRIPTION_PRICE, SUBSCRIPTION_WARNING_DAYS } = require('../config/constants');
 
+/**
+ * One SMS pack, as offered in the allocation sheet.
+ *
+ * `price` is the pack's OWN price, not `quantity × defaultSmsUnitPrice`. That
+ * distinction is the whole point of the tier list: a ladder where every rung
+ * works out to the same per-SMS rate is a quantity picker, not a price list,
+ * and the "Best value" badge on its top rung is decoration. The admin panel
+ * prints the derived ৳/SMS on every tile so a flat ladder is visible as one.
+ *
+ * A shop with a negotiated `billing.smsUnitPrice` is quoted `quantity × its own
+ * rate` instead — a bargained rate wins over the list price, which is the same
+ * rule `Shop.billing` has with every other figure here.
+ */
 const smsTierSchema = new mongoose.Schema({
   quantity: { type: Number, required: true, min: 1 },
-  // Price at the platform's standard rate. A shop with a negotiated
-  // `billing.smsUnitPrice` sees quantity × its own rate instead.
   price: { type: Number, required: true, min: 0 },
   label: { type: String },
   badge: { type: String },
@@ -38,15 +49,40 @@ const platformSettingSchema = new mongoose.Schema({
   // How many days before expiry the shop starts seeing the banner.
   warningDays: { type: Number, default: SUBSCRIPTION_WARNING_DAYS, min: 0 },
 
+  /**
+   * What one SMS costs the PLATFORM at the gateway, in taka.
+   *
+   * Not a price — a cost. It exists so the allocation sheet can show the margin
+   * on a top-up before it is recorded, and refuse quietly-below-cost deals. It
+   * was previously nowhere in the system, so every negotiated rate was agreed
+   * against a number held in the operator's head.
+   *
+   * `null` means "not told yet", which the panel renders as an explicit prompt
+   * rather than as a 100% margin. A `0` default would have been the lie.
+   */
+  platformSmsCost: { type: Number, default: null, min: 0 },
+
+  /**
+   * The list price ladder.
+   *
+   * Every rung here works out to a LOWER ৳/SMS than the one above it — that is
+   * what makes it a ladder rather than a quantity picker. The previous default
+   * priced 250, 500, 1000, 2500 and 5000 at exactly ৳0.40 each, which made the
+   * "Best value" badge on the top rung untrue and gave a shop no reason to buy
+   * more than the smallest pack that covered the month.
+   *
+   * ৳0.40 stays the anchor at 1000 so `defaultSmsUnitPrice` and this list agree
+   * about what "the standard rate" means.
+   */
   smsTiers: {
     type: [smsTierSchema],
     default: () => ([
-      { quantity: 100, price: 50, label: '১০০ এসএমএস' },
-      { quantity: 250, price: 100, label: '২৫০ এসএমএস', badge: 'Popular' },
-      { quantity: 500, price: 200, label: '৫০০ এসএমএস' },
-      { quantity: 1000, price: 400, label: '১০০০ এসএমএস', badge: 'Best value' },
-      { quantity: 2500, price: 1000, label: '২৫০০ এসএমএস' },
-      { quantity: 5000, price: 2000, label: '৫০০০ এসএমএস' },
+      { quantity: 100, price: 55, label: '১০০ এসএমএস' },
+      { quantity: 250, price: 120, label: '২৫০ এসএমএস', badge: 'Popular' },
+      { quantity: 500, price: 220, label: '৫০০ এসএমএস' },
+      { quantity: 1000, price: 400, label: '১০০০ এসএমএস' },
+      { quantity: 2500, price: 900, label: '২৫০০ এসএমএস' },
+      { quantity: 5000, price: 1650, label: '৫০০০ এসএমএস', badge: 'Best value' },
     ]),
   },
 

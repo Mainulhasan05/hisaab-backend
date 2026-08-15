@@ -76,6 +76,7 @@ const logger = require('../utils/logger.util');
 // decides rendition sizes, or a shop's thumbnails and the admin library's
 // thumbnails drift apart for no nameable reason.
 const imagePipeline = require('../utils/imagePipeline.util');
+const uploadReadiness = require('../utils/uploadReadiness.util');
 
 const { RENDITIONS, MAX_PIXELS, CONTENT_TYPE } = imagePipeline;
 
@@ -92,8 +93,12 @@ const RECLAIM_BATCH = 200;
 class MediaService {
   /** Whether an upload can even be attempted right now. */
   async isReady() {
-    if (!imagePipeline.isAvailable()) return false;
-    return storageService.isConfigured();
+    return uploadReadiness.isUploadReady();
+  }
+
+  /** Why an upload would be refused, or null. See `uploadReadiness.util`. */
+  async readinessBlocker() {
+    return uploadReadiness.uploadBlocker();
   }
 
   // ── Upload ────────────────────────────────────────────────────────────────

@@ -38,10 +38,24 @@ const DELETION_DISABLED = 'DELETION_DISABLED';
  * destructive route added later is blocked before anyone has to remember this
  * rule. Adding an entry is a deliberate, reviewable act.
  *
- * Both entries are non-destructive despite the verb:
+ * Every entry is non-destructive despite the verb:
  *   - branch "delete" flips `isActive` after an impact check; the branch and
  *     all of its history stay.
  *   - a cache key is derived data that rebuilds on the next read.
+ *   - a media file is DETACHED: `platformMedia.service.remove` refuses while
+ *     anything references it, then sets `orphanedAt` and returns. No object
+ *     leaves R2 until the grace period expires and the reclamation sweep runs,
+ *     which is what makes "I removed the wrong file" recoverable for a week.
+ *     Hard delete stays forbidden platform-wide (STORAGE_HANDOFF.md §৪.৪).
+ *   - a media folder is organisational only. `mediaFolder.service.remove`
+ *     refuses with FOLDER_NOT_EMPTY while any file inside is referenced, and
+ *     moves the surviving files up to the parent; no file is ever deleted with
+ *     its folder (MediaFolder.model.js I-19).
+ *
+ * The two media entries were missing until 2026-08-15, which did not make the
+ * gallery safer — it made its remove buttons return 403 with no route-level
+ * explanation, while the services behind them were already written to be the
+ * soft alternative this file asks for.
  *
  * Matched against `req.path` (no query string, no /api prefix stripping — the
  * patterns below are anchored on the full mounted path).
@@ -49,6 +63,10 @@ const DELETION_DISABLED = 'DELETION_DISABLED';
 const ADMIN_DELETE_ALLOWLIST = [
   /^\/api\/admin\/shops\/[^/]+\/branches\/[^/]+$/,
   /^\/api\/admin\/cache\/keys\/.+$/,
+  // Anchored on a 24-hex ObjectId rather than [^/]+ so this cannot widen to
+  // some future /api/admin/media/<word> route that does mean it.
+  /^\/api\/admin\/media\/[0-9a-fA-F]{24}$/,
+  /^\/api\/admin\/media\/folders\/[0-9a-fA-F]{24}$/,
 ];
 
 /**

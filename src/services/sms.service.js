@@ -418,6 +418,217 @@ class SMSService {
     };
   }
 
+  /* ═══════════════════════════════════════════════════════════════════════════
+   * PLATFORM BROADCASTS
+   *
+   * The operator texting the shopkeepers, rather than a shopkeeper texting
+   * their customers. Same gateway, same batching, same progress record — and
+   * three deliberate differences, each of which is a bug if it is forgotten:
+   *
+   *   1. NO QUOTA. `SMSQuota` is a shop's prepaid balance, bought with their
+   *      money. Charging an expiry notice or a feature announcement to it bills
+   *      the shop for the platform's own messaging. Worse, quota starts
+   *      `isEnabled: false`, so a quota-gated broadcast would silently skip
+   *      every shop that has never bought credits — which is exactly the set
+   *      most likely to need chasing.
+   *   2. THE PLATFORM SIGNS IT. `appendShopSignature` with the shop's name
+   *      would sign an announcement as the shop that received it.
+   *   3. `shop: null` ON THE LOG. These sends belong to no tenant. `SMSLog.shop`
+   *      has always been nullable, so this needs no migration — but it does mean
+   *      the shop-facing history must never widen its filter to include them.
+   * ═══════════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Run a broadcast on the platform's own account.
+   *
+   * @param {object}  options
+   * @param {Array}   options.recipients  `[{ phone, name, shopId, message? }]`
+   * @param {string}  [options.message]   One body for everyone.
+   * @param {boolean} [options.personalized=false] Each recipient carries its own.
+   * @param {string}  options.senderName  What the message signs off as.
+   * @param {string}  [options.audience]  Recorded on the log for history.
+   * @param {'T'|'P'} [options.transactionType='T']
+   * @param {object}  [options.admin]     `{ id, name }` — who pressed send.
+   *
+   * @returns {Promise<object>} Finished result for a small send, or
+   *          `{ queued: true, campaignId }` with the work continuing behind it.
+   */
+  async sendPlatformCampaign(options = {}) {
+    const {
+      recipients = [],
+      message = '',
+      personalized = false,
+      senderName = 'Hisaab',
+      audience = 'platform_manual',
+      transactionType = 'T',
+      admin = null,
+      forceSync = false,
+    } = options;
+
+    const { valid, skipped, skippedCount } = normalizeRecipients(recipients, {
+      requireMessage: personalized,
+    });
+
+    if (valid.length === 0) {
+      return {
+        success: false,
+        reason: 'no_valid_recipients',
+        sentCount: 0,
+        failedCount: 0,
+        skippedCount,
+        skipped: skipped.slice(0, MAX_SKIPPED_STORED),
+      };
+    }
+
+    const sharedBody = personalized ? '' : appendShopSignature(message, senderName);
+    const targets = personalized
+      ? valid.map((r) => ({ ...r, message: appendShopSignature(r.message, senderName) }))
+      : valid;
+
+    // Priced for reporting only — nothing is reserved, because the platform is
+    // billed by MimSMS directly rather than out of a balance held here. The
+    // figure still matters: it is what the operator is told a broadcast will
+    // cost before they confirm it, and what the log records afterwards.
+    let totalCost = 0;
+    let maxSegments = 0;
+    if (personalized) {
+      for (const r of targets) {
+        const segments = countSms(r.message).segments || 1;
+        totalCost += segments;
+        if (segments > maxSegments) maxSegments = segments;
+      }
+    } else {
+      maxSegments = countSms(sharedBody).segments || 1;
+      totalCost = maxSegments * targets.length;
+    }
+
+    // The same ceiling a shop's campaign gets, for the same reason — except the
+    // blast radius here is every shopkeeper on the platform at once.
+    if (maxSegments > BULK.MAX_SEGMENTS) {
+      throw new Error(
+        `Message is too long: ${maxSegments} segments, maximum ${BULK.MAX_SEGMENTS}`
+      );
+    }
+
+    const batches = chunk(targets, BULK.BATCH_SIZE);
+
+    const smsLog = await SMSLog.create({
+      shop: null,
+      branch: null,
+      recipients: targets.map((r) => ({
+        phone: r.phone,
+        customerName: r.customerName || r.name,
+        message: personalized ? r.message : undefined,
+        status: SMS_STATUS.PENDING,
+      })),
+      message: personalized ? targets[0].message : sharedBody,
+      type: personalized ? SMS_TYPES.DYNAMIC : SMS_TYPES.BULK,
+      audience,
+      cost: totalCost,
+      status: SMS_STATUS.PENDING,
+      sentCount: 0,
+      failedCount: 0,
+      skippedCount,
+      skipped: skipped.slice(0, MAX_SKIPPED_STORED),
+      // NOT `sentBy`. That field refs `User`, and an Admin id put through it
+      // populates as null — the SMS log page would show every broadcast as sent
+      // by nobody.
+      sentByAdmin: admin?.id || null,
+      senderName,
+      progress: {
+        total: targets.length,
+        processed: 0,
+        batches: batches.length,
+        batchesDone: 0,
+        startedAt: new Date(),
+      },
+    });
+
+    const runOptions = {
+      logId: smsLog._id,
+      shopId: null,
+      batches,
+      sharedBody,
+      personalized,
+      transactionType,
+      totalCost,
+    };
+
+    if (forceSync || targets.length <= BULK.SYNC_LIMIT) {
+      const summary = await this.runCampaign(runOptions);
+      return {
+        success: summary.sentCount > 0,
+        queued: false,
+        campaignId: smsLog._id,
+        skippedCount,
+        skipped: skipped.slice(0, MAX_SKIPPED_STORED),
+        ...summary,
+      };
+    }
+
+    setImmediate(() => {
+      this.runCampaign(runOptions).catch((err) =>
+        logger.error(`Platform broadcast ${smsLog._id} crashed: ${err.message}`)
+      );
+    });
+
+    logger.info(
+      `Platform broadcast ${smsLog._id} queued: ${targets.length} recipients, ` +
+      `${batches.length} batches, ~${totalCost} segments`
+    );
+
+    return {
+      success: true,
+      queued: true,
+      campaignId: smsLog._id,
+      totalRecipients: targets.length,
+      batches: batches.length,
+      estimatedCost: totalCost,
+      skippedCount,
+      skipped: skipped.slice(0, MAX_SKIPPED_STORED),
+      sentCount: 0,
+      failedCount: 0,
+    };
+  }
+
+  /**
+   * Progress of a platform broadcast.
+   *
+   * Deliberately separate from `getCampaign`, which scopes by shop. A broadcast
+   * has no shop to scope to, so this one is reachable only from behind the
+   * admin guard — which is why it must never be mounted on the shop router.
+   */
+  async getPlatformCampaign(campaignId) {
+    const log = await SMSLog.findOne({ _id: campaignId, shop: null }).lean();
+    if (!log) return null;
+
+    const progress = log.progress || {};
+    const total = progress.total || log.recipients?.length || 0;
+    const processed = progress.processed || 0;
+
+    return {
+      campaignId: log._id,
+      status: log.status,
+      audience: log.audience,
+      message: log.message,
+      senderName: log.senderName,
+      total,
+      processed,
+      percent: total > 0 ? Math.round((processed / total) * 100) : 0,
+      sentCount: log.sentCount || 0,
+      failedCount: log.failedCount || 0,
+      skippedCount: log.skippedCount || 0,
+      skipped: log.skipped || [],
+      cost: log.cost || 0,
+      batches: progress.batches || 0,
+      batchesDone: progress.batchesDone || 0,
+      isComplete: Boolean(progress.completedAt),
+      startedAt: progress.startedAt || log.createdAt,
+      completedAt: progress.completedAt || null,
+      errorMessage: log.errorMessage || null,
+    };
+  }
+
   /**
    * Push one batch at the gateway, with a single retry.
    *
@@ -548,7 +759,12 @@ class SMSService {
         : sentCount === 0 ? SMS_STATUS.FAILED
         : SMS_STATUS.PARTIAL;
 
-    if (refundSegments > 0) {
+    // `shopId` is null for a platform broadcast, which was never charged to a
+    // quota in the first place — there is nothing to give back, and calling
+    // refund with a null shop would scan the collection for a document that
+    // cannot exist. The segment total is still reported so the operator sees
+    // what the failed batches would have cost.
+    if (shopId && refundSegments > 0) {
       await SMSQuota.refund(shopId, refundSegments).catch((err) =>
         logger.error(`SMS campaign ${logId} refund failed: ${err.message}`)
       );

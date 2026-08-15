@@ -60,7 +60,21 @@ const REPAIR_CUSTOMERS = process.argv.includes('--repair-customers');
 const shopArgIdx = process.argv.indexOf('--shop');
 const SHOP_ARG = shopArgIdx !== -1 ? process.argv[shopArgIdx + 1] : null;
 
-const round = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+/**
+ * The SAME rounding the live write paths use — `Customer.deriveDue`,
+ * `CustomerBalance.settleDue` and `customer.service.round2` all resolve here.
+ *
+ * This script's whole value is being a second opinion computed from source
+ * documents. A second opinion that rounds differently from the code it is
+ * checking manufactures its own disagreements: this file used to carry its own
+ * `Math.round((n + Number.EPSILON) * 100) / 100`, and `Number.EPSILON` is an
+ * ABSOLUTE 2.2e-16, so above ~2 it stops nudging and rounds ~0.8% of
+ * paisa-boundary values the other way (2.135 -> 2.13 against 2.14).
+ *
+ * With `--apply` that was worse than a false report: it WROTE the divergent
+ * figure into the book it had just been asked to repair.
+ */
+const { quantizeMoney: round } = require('../src/utils/quantity.util');
 
 /**
  * Rebuild one shop's (customer, branch) figures from source documents.

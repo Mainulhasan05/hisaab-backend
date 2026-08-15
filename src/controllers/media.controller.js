@@ -3,6 +3,7 @@ const ApiResponse = require('../utils/response.util');
 const mediaService = require('../services/media.service');
 const Shop = require('../models/Shop.model');
 const { AppError } = require('../middleware/error.middleware');
+const { assertUploadReady } = require('../utils/uploadReadiness.util');
 const { storageState, platformStorageSettings } = require('../utils/storageQuota.util');
 
 /**
@@ -19,13 +20,9 @@ const { storageState, platformStorageSettings } = require('../utils/storageQuota
  * simultaneous canvas encodes, and that is how the tab dies.
  */
 exports.uploadMedia = asyncHandler(async (req, res) => {
-  if (!(await mediaService.isReady())) {
-    throw new AppError(
-      'Image storage is not configured on this server',
-      'সার্ভারে ছবি সংরক্ষণ সুবিধা এখনো প্রস্তুত নয়',
-      503
-    );
-  }
+  // Throws a 503 that NAMES the missing precondition and logs it — see
+  // `uploadReadiness.util`.
+  await assertUploadReady('shop media');
 
   const file = req.file || (Array.isArray(req.files) ? req.files[0] : null);
   if (!file) {

@@ -12,6 +12,7 @@ const asyncHandler = require('../utils/asyncHandler.util');
 const ApiResponse = require('../utils/response.util');
 const platformMediaService = require('../services/platformMedia.service');
 const mediaFolderService = require('../services/mediaFolder.service');
+const { assertUploadReady } = require('../utils/uploadReadiness.util');
 const { AppError } = require('../middleware/error.middleware');
 
 // ── Files ───────────────────────────────────────────────────────────────────
@@ -61,13 +62,10 @@ exports.usage = asyncHandler(async (req, res) => {
 });
 
 exports.upload = asyncHandler(async (req, res) => {
-  if (!(await platformMediaService.isReady())) {
-    throw new AppError(
-      'Image storage is not configured on this server',
-      'সার্ভারে ছবি সংরক্ষণ সুবিধা এখনো প্রস্তুত নয়',
-      503
-    );
-  }
+  // Throws a 503 that NAMES the missing precondition and logs it. The old
+  // version threw one sentence for three unrelated causes, which made a 503
+  // here impossible to act on from either the response or the log.
+  await assertUploadReady('platform library');
 
   const file = req.file || (Array.isArray(req.files) ? req.files[0] : null);
   if (!file) {

@@ -5,8 +5,10 @@ const adminStorageController = require('../controllers/adminStorage.controller')
 const adminStorefrontController = require('../controllers/adminStorefront.controller');
 const adminMediaController = require('../controllers/adminMedia.controller');
 const billingController = require('../controllers/billing.controller');
+const platformSmsController = require('../controllers/platformSms.controller');
 const { protect, adminOnly } = require('../middleware/auth.middleware');
 const { upload, handleUploadError } = require('../middleware/upload.middleware');
+const { smsLimiter } = require('../middleware/rateLimiter.middleware');
 
 // Public admin routes
 router.post('/login', adminController.login);
@@ -205,11 +207,33 @@ router.patch('/settings/platform', billingController.updatePlatformSettings);
 router.get('/payments', billingController.listPayments);
 router.post('/payments', billingController.recordPayment);
 
-// SMS
+// SMS — selling credits to shops, and reading what everyone sent.
 router.post('/sms/allocate', billingController.allocateSms);
 router.get('/sms/logs', adminController.getSMSLogs);
 router.get('/sms/allocations', adminController.getSMSAllocations);
 router.get('/sms/stats', adminController.getSMSStats);
+// The platform's own float at the gateway. Credits are sold against it, so it
+// belongs next to the allocation route rather than buried in the broadcast set.
+router.get('/sms/gateway-balance', platformSmsController.getGatewayBalance);
+
+// ── Broadcasts: the platform texting the shopkeepers ──────────────────────
+//
+// Audiences are resolved server-side from a NAME (`expiring`, `low_sms`, …) and
+// never from a client-supplied phone list — a client that names its own
+// recipients can text anyone from the platform's masked sender ID, at the
+// platform's expense. `manual` is the narrow exception and is capped in the
+// service. See platformSms.service.js for the full reasoning.
+//
+// `preview` sits outside `smsLimiter`: it only reads, and the composer calls it
+// on every edit of the message body. `send` sits inside it — ten broadcasts a
+// minute is already far more than anyone should be firing at the whole tenant
+// base. Progress polling is outside for the same reason the shop-side campaign
+// route is (see sms.routes.js).
+router.get('/sms/audiences', platformSmsController.getAudiences);
+router.post('/sms/broadcast/preview', platformSmsController.previewBroadcast);
+router.post('/sms/broadcast', smsLimiter, platformSmsController.sendBroadcast);
+router.get('/sms/broadcast/history', platformSmsController.getBroadcastHistory);
+router.get('/sms/broadcast/:id', platformSmsController.getBroadcast);
 
 // Telegram — read-only. Retention is the collection's 90-day TTL index, not a
 // clear button: hard deletion from the admin panel is disabled platform-wide.

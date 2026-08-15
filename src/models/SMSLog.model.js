@@ -139,6 +139,33 @@ const smsLogSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     default: null
+  },
+
+  /**
+   * Who sent it when the sender was the PLATFORM, not a shop.
+   *
+   * A separate field rather than a wider `sentBy`, because `sentBy` refs `User`
+   * and an `Admin` id pushed through it populates as null — the SMS log page
+   * would render every broadcast as sent by nobody. Exactly one of the two is
+   * ever set: `sentBy` for a shop's own send, this for an operator broadcast.
+   */
+  sentByAdmin: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Admin',
+    default: null
+  },
+
+  /**
+   * The sign-off this message actually went out under.
+   *
+   * Shop sends are signed with the shop's name, which the log already implies
+   * through `shop`. A broadcast is signed with the platform's, and that string
+   * is configurable — recording it means a log read a year later shows the name
+   * the shopkeeper saw, not the name the setting holds today.
+   */
+  senderName: {
+    type: String,
+    trim: true
   }
 }, {
   timestamps: true,
@@ -151,6 +178,9 @@ smsLogSchema.index({ shop: 1, createdAt: -1 }); // Main listing
 smsLogSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Branch-filtered listing
 smsLogSchema.index({ shop: 1, invoiceNumber: 1 }, { sparse: true }); // Duplicate SMS prevention for invoices
 smsLogSchema.index({ transactionId: 1 }, { sparse: true }); // Webhook status updates
+// Platform broadcasts: `shop` is null, so the two indexes above cannot serve
+// the operator's "what have we sent the shopkeepers" listing.
+smsLogSchema.index({ sentByAdmin: 1, createdAt: -1 }, { sparse: true });
 
 // TTL Index - Auto-delete logs older than 60 days
 smsLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 60 * 24 * 60 * 60 }); // 60 days

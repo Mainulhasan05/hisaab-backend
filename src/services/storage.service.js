@@ -66,14 +66,49 @@ class StorageService {
   // ── Configuration ─────────────────────────────────────────────────────────
 
   /**
+   * WHY the pool cannot accept an upload, or null when it can.
+   *
+   * The two halves fail for completely different reasons and are fixed in
+   * completely different places — a missing env var is a deploy problem, an
+   * empty pool is an admin-panel problem — so they are reported separately.
+   * `isConfigured()` collapsing them into one `false` is what made a 503 on
+   * upload an unanswerable question: nothing in the response, and nothing in
+   * the log, said which of the two it was.
+   *
+   * @returns {Promise<{code: string, detail: string}|null>}
+   */
+  async configurationBlocker() {
+    if (!crypto.isConfigured()) {
+      return {
+        code: 'STORAGE_ENC_KEY_MISSING',
+        detail:
+          'STORAGE_ENC_KEY is not set (or is not 64 hex characters) in this ' +
+          'process. Note it is read from the environment at request time, so a ' +
+          'server started before the key was added to .env will report this ' +
+          'until it is restarted.',
+      };
+    }
+
+    const count = await R2Account.countDocuments({ isActive: true, status: 'active' });
+    if (count === 0) {
+      return {
+        code: 'NO_ACTIVE_R2_ACCOUNT',
+        detail:
+          'No R2 account is both isActive and status "active". Add or re-enable ' +
+          'one under Admin → Storage.',
+      };
+    }
+
+    return null;
+  }
+
+  /**
    * Whether the pool can accept an upload at all.
    * Both halves matter: accounts with no encryption key are unusable, and an
    * encryption key with no accounts has nowhere to put anything.
    */
   async isConfigured() {
-    if (!crypto.isConfigured()) return false;
-    const count = await R2Account.countDocuments({ isActive: true, status: 'active' });
-    return count > 0;
+    return (await this.configurationBlocker()) === null;
   }
 
   /** The allocation strategy, defaulting safely when settings are unreachable. */

@@ -37,6 +37,13 @@ module.exports = {
   // dedupe index or the `refs.page` lookup the I-18 reconciler runs.
   MediaFolder: require('./MediaFolder.model'),
   PlatformMedia: require('./PlatformMedia.model'),
+  // Seasonal landing pages. Sealed off from the ledger by design: a LandingOrder
+  // never becomes a Sale and never creates a Customer (LANDING_PAGE_PLAN.md
+  // I-17). Registered here or `sync-indexes` never ships the unique slug, the
+  // per-shop order-number index or the counter's TTL to production.
+  LandingPage: require('./LandingPage.model'),
+  LandingOrder: require('./LandingOrder.model'),
+  LandingOrderCounter: require('./LandingOrderCounter.model'),
   // The online storefront. `StorefrontTemplate` is the platform-owned catalogue
   // of designs; `Storefront` is one shop's site, granted a subset of them.
   // Neither is read by any pre-existing query — see ECOMMERCE_PLAN.md I-8.

@@ -35,6 +35,7 @@ const PlatformMedia = require('../models/PlatformMedia.model');
 const PlatformSetting = require('../models/PlatformSetting.model');
 const storageService = require('./storage.service');
 const imagePipeline = require('../utils/imagePipeline.util');
+const uploadReadiness = require('../utils/uploadReadiness.util');
 const { AppError } = require('../middleware/error.middleware');
 const {
   MB,
@@ -109,8 +110,12 @@ class PlatformMediaService {
   // ── Readiness ─────────────────────────────────────────────────────────────
 
   async isReady() {
-    if (!imagePipeline.isAvailable()) return false;
-    return storageService.isConfigured();
+    return uploadReadiness.isUploadReady();
+  }
+
+  /** Why an upload would be refused, or null. See `uploadReadiness.util`. */
+  async readinessBlocker() {
+    return uploadReadiness.uploadBlocker();
   }
 
   /**
