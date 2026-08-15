@@ -13,7 +13,7 @@ const landingOrderService = require('../services/landingOrder.service');
 const LandingPage = require('../models/LandingPage.model');
 const Shop = require('../models/Shop.model');
 const { resolveLandingPage } = require('../utils/landingPageState.util');
-const { parseContract, validateContract, hasBlockingIssues } = require('../utils/landingContract.util');
+const { hasBlockingIssues } = require('../utils/landingContract.util');
 const { AppError } = require('../middleware/error.middleware');
 
 /** Every page across the platform — the admin's renewal worklist. */
@@ -73,8 +73,9 @@ exports.create = asyncHandler(async (req, res) => {
  */
 exports.detail = asyncHandler(async (req, res) => {
   const page = await landingPageService.getById(req.params.id);
-  const parsed = parseContract(page.html || '');
-  const issues = validateContract(parsed, page);
+  // The same list `publish` gates on — including the missing expiry date, which
+  // the HTML contract cannot see.
+  const issues = landingPageService.publishIssues(page);
 
   return ApiResponse.success(res, {
     data: {

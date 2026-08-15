@@ -75,6 +75,30 @@ describe('_assertPublishable', () => {
       .rejects.toThrow(/expiry date/i);
   });
 
+  /**
+   * The refusal and the report the author reads must be the same list.
+   *
+   * They were not: `publishIssues` said "ready to publish" on a page with no
+   * expiry, the publish button stayed enabled, and the 422 that came back named
+   * a requirement no screen had ever mentioned.
+   */
+  test('a missing expiry is a reported blocker, not just a refusal', async () => {
+    const issues = service.publishIssues(fakePage({ expiresAt: null }));
+    expect(issues.map((i) => i.code)).toContain('NO_EXPIRY');
+    expect(issues.find((i) => i.code === 'NO_EXPIRY').severity).toBe('error');
+
+    // And it rides on the error, so the editor can list it after a failed publish.
+    try {
+      await service._assertPublishable(fakePage({ expiresAt: null }));
+      throw new Error('should have refused');
+    } catch (err) {
+      expect(err.issues.map((i) => i.code)).toContain('NO_EXPIRY');
+    }
+
+    // A complete page reports nothing blocking — the gate has not become a wall.
+    expect(service.publishIssues(fakePage()).filter((i) => i.severity === 'error')).toEqual([]);
+  });
+
   test('a page whose offers were emptied is refused', async () => {
     await expect(service._assertPublishable(fakePage({ offers: [] })))
       .rejects.toMatchObject({ code: 'CONTRACT_INVALID' });

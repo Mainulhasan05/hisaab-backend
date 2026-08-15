@@ -3,10 +3,19 @@ const { SLOT_KEYS } = require('../models/StorefrontTemplate.model');
 const Storefront = require('../models/Storefront.model');
 const Shop = require('../models/Shop.model');
 const AuditLog = require('../models/AuditLog.model');
+const PlatformMedia = require('../models/PlatformMedia.model');
 const cacheService = require('./cache.service');
+const platformMediaService = require('./platformMedia.service');
+const logger = require('../utils/logger.util');
 const { AppError } = require('../middleware/error.middleware');
 const { invalidateShopAuthCache } = require('../utils/authCache.util');
 const { FEATURE_KEYS } = require("../utils/features.util");
+
+/** This service's name in the media library's consumer registry. */
+const OWNER_TYPE = 'storefrontTemplate';
+
+/** The URL columns a library file can be addressed by. */
+const URL_FIELDS = Object.freeze(['url', 'mediumUrl', 'thumbUrl']);
 
 /**
  * The PLATFORM's side of the storefront: the template catalogue, which shops
@@ -23,6 +32,95 @@ const { FEATURE_KEYS } = require("../utils/features.util");
  * `Storefront.published`, and nothing there writes `allowedTemplates`.
  */
 class AdminStorefrontService {
+  // ══ MEDIA LIBRARY ════════════════════════════════════════════════════════
+
+  /**
+   * Register with the media library.
+   *
+   * A template's `thumbnail` may now be picked from the library rather than
+   * pasted, and a reference the library does not know about is one the
+   * reclamation sweep will delete: the tile in every shop's template gallery
+   * would break, with nothing in the console to say why. The arrow points one
+   * way (MEDIA_GALLERY_PLAN.md §4.3), so this is a call we make.
+   */
+  registerAsMediaConsumer() {
+    platformMediaService.registerConsumer({
+      ownerType: OWNER_TYPE,
+      label: 'স্টোরফ্রন্ট টেমপ্লেট',
+
+      resolve: async (ownerIds) => {
+        const templates = await StorefrontTemplate.find({ _id: { $in: ownerIds } })
+          .select('name nameBn key status')
+          .lean();
+
+        return templates.map((t) => ({
+          id: String(t._id),
+          label: t.nameBn || t.name || t.key,
+          href: '/admin-hq-x7k9m2p4/storefront/templates',
+          // A published template is on every shop's gallery right now.
+          isLive: t.status === 'published',
+        }));
+      },
+
+      /**
+       * The I-18 backstop. Asked before any file is deleted.
+       *
+       * Re-derived from the stored URLs rather than from `refs`, so a bug in
+       * `_syncThumbnailRef` cannot cost the catalogue its images. Retired
+       * templates count: they keep rendering for every shop already on one.
+       */
+      confirmInUse: async (mediaIds) => {
+        const media = await PlatformMedia.find({ _id: { $in: mediaIds.map(String) } })
+          .select('url thumbUrl mediumUrl')
+          .lean();
+        if (media.length === 0) return [];
+
+        const templates = await StorefrontTemplate.find()
+          .select('thumbnail previewUrl')
+          .lean();
+
+        const inUse = [];
+        for (const item of media) {
+          const urls = URL_FIELDS.map((f) => item[f]).filter(Boolean);
+          const used = templates.some((t) =>
+            urls.some((u) => u === t.thumbnail || u === t.previewUrl));
+          if (used) inUse.push(String(item._id));
+        }
+        return inUse;
+      },
+    });
+  }
+
+  /**
+   * Point the library at whichever file this template's thumbnail names.
+   *
+   * By URL, because that is what the field stores — the picker hands the admin
+   * a URL and a pasted one has to work identically. A URL matching nothing in
+   * the library is a bundled wireframe or someone else's image, and is not our
+   * reference to hold.
+   */
+  async _syncThumbnailRef(template) {
+    const urls = [template.thumbnail, template.previewUrl].filter(Boolean);
+
+    try {
+      const found = urls.length
+        ? await PlatformMedia.find({ $or: URL_FIELDS.map((f) => ({ [f]: { $in: urls } })) })
+          .select('_id').lean()
+        : [];
+
+      await platformMediaService.setOwnerRefs(
+        OWNER_TYPE,
+        template._id,
+        found.map((m) => ({ mediaId: m._id, key: 'thumbnail' })),
+        { origin: 'explicit' }
+      );
+    } catch (err) {
+      // The `confirmInUse` backstop above already covers reclamation. A save
+      // that 500s over bookkeeping is an admin who cannot save their work.
+      logger.error(`Storefront template ${template._id}: media ref sync failed: ${err.message}`);
+    }
+  }
+
   // ══ TEMPLATE CATALOGUE ═══════════════════════════════════════════════════
 
   /** Every template, whatever its status. The admin's list, not the shop's. */
@@ -85,6 +183,8 @@ class AdminStorefrontService {
       updatedBy: adminId,
     });
 
+    await this._syncThumbnailRef(template);
+
     await AuditLog.create({
       admin: adminId,
       action: 'storefront_template_created',
@@ -123,6 +223,10 @@ class AdminStorefrontService {
     Object.assign(template, this._pickTemplateFields(payload));
     template.updatedBy = adminId;
     await template.save();
+
+    // After the save, so a thumbnail swap releases the old file's reference in
+    // the same pass that claims the new one.
+    await this._syncThumbnailRef(template);
 
     return template.toObject();
   }

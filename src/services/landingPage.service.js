@@ -301,9 +301,42 @@ class LandingPageService {
     if (!parsed) parsed = parseContract(page.html || '');
     await this._syncMediaRefs(page, parsed);
 
-    const issues = validateContract(parsed, page);
+    const issues = this.publishIssues(page, parsed);
 
     return { page, issues, canPublish: !hasBlockingIssues(issues), sanitizeNotes };
+  }
+
+  /**
+   * Everything standing between this page and a public URL.
+   *
+   * The contract's issues PLUS the ones the HTML cannot express. Today that is
+   * the expiry date, and it lives here rather than in `landingContract.util`
+   * because that module reads markup and a date is not markup.
+   *
+   * ONE list, used by the report and by the gate. They were two: the report
+   * said "ready to publish" while `publish` refused for a missing expiry the
+   * report never mentioned, and the only way to discover the real reason was
+   * the network tab.
+   *
+   * @param {Object} page    a LandingPage document
+   * @param {Object} [parsed]  from `parseContract`; re-parsed from the page if omitted
+   */
+  publishIssues(page, parsed = null) {
+    const contract = parsed || parseContract(page.html || '');
+    const issues = validateContract(contract, page);
+
+    if (!page.expiresAt) {
+      issues.push({
+        severity: 'error',
+        code: 'NO_EXPIRY',
+        message: 'A live page needs an expiry date',
+        // Names the tab. "Set an expiry date" with no map is how an admin ends
+        // up pressing publish a second time to see whether it took.
+        messageBn: 'পেজ চালু করার আগে "মেয়াদ" ট্যাবে মেয়াদ শেষের তারিখ দিন',
+      });
+    }
+
+    return issues;
   }
 
   /**
@@ -344,25 +377,22 @@ class LandingPageService {
    */
   async _assertPublishable(page) {
     const parsed = parseContract(page.html || '');
-    const issues = validateContract(parsed, page);
+    const issues = this.publishIssues(page, parsed);
 
     if (hasBlockingIssues(issues)) {
+      // Every blocker at once, including the missing expiry — the refusal and
+      // the report the author has been reading are now the same list.
+      const blockers = issues.filter((i) => i.severity === 'error');
       const error = new AppError(
-        'This page cannot take an order yet',
-        'এই পেজটি এখনো অর্ডার নিতে পারবে না — নিচের সমস্যাগুলো ঠিক করুন',
+        blockers.length === 1 ? blockers[0].message : 'This page cannot take an order yet',
+        blockers.length === 1
+          ? blockers[0].messageBn
+          : 'এই পেজটি এখনো অর্ডার নিতে পারবে না — নিচের সমস্যাগুলো ঠিক করুন',
         422
       );
       error.code = 'CONTRACT_INVALID';
       error.issues = issues;
       throw error;
-    }
-
-    if (!page.expiresAt) {
-      throw new AppError(
-        'A live page needs an expiry date',
-        'পেজ চালু করার আগে মেয়াদ শেষের তারিখ দিন',
-        422
-      );
     }
 
     await this._assertVideoServable(page);

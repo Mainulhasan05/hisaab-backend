@@ -21,7 +21,7 @@ const { createSmsWorker, closeQueue } = require('./config/queue.config');
 require('./models/Role.model');
 
 /**
- * Landing pages announce themselves to the media library.
+ * Every consumer announces itself to the media library.
  *
  * The library keeps no list of its consumers — the dependency points one way
  * (MEDIA_GALLERY_PLAN.md §4.3), so registration is a call the consumer makes.
@@ -32,6 +32,7 @@ require('./models/Role.model');
  * ad-funded page and report success.
  */
 require('./services/landingPage.service').registerAsMediaConsumer();
+require('./services/adminStorefront.service').registerAsMediaConsumer();
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (err) => {

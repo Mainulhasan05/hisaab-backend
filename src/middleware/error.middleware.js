@@ -137,6 +137,11 @@ const passthroughFields = (err) => {
   if (err.quotaMb !== undefined) out.quotaMb = err.quotaMb;
   if (err.usedBytes !== undefined) out.usedBytes = err.usedBytes;
 
+  // CONTRACT_INVALID carries every reason a landing page was refused. Dropping
+  // it here meant a publish that failed on four things said only "this page
+  // cannot take an order yet", and the author had to guess which four.
+  if (err.issues) out.issues = err.issues;
+
   return out;
 };
 
