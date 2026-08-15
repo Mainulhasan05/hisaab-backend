@@ -43,6 +43,22 @@ const logger = require('../utils/logger.util');
  * nothing wrong.
  */
 exports.placeOrder = asyncHandler(async (req, res) => {
+  // ── The honeypot, checked before any database work ─────────────────────────
+  //
+  // A non-empty `website` field was filled by something that reads HTML rather
+  // than rendering it — the real form keeps this input invisible and empty.
+  // Refused with the same generic message as any bad body (naming the field
+  // would hand the bot its fix), and the strike is the real consequence: a
+  // form-stuffing bot earns its block on the first attempt.
+  if (String(req.body.website || '').trim()) {
+    markSuspicious(req, 'honeypot field filled').catch(() => {});
+    return ApiResponse.error(res, {
+      message: 'Order could not be placed',
+      messageBn: 'অর্ডারটি জমা দেওয়া যায়নি। আবার চেষ্টা করুন।',
+      statusCode: 400,
+    });
+  }
+
   // Resolves the shop, or throws the same indistinguishable 404 every other
   // public route throws. A checkout against a paused or lapsed shop is refused
   // by the same gate that hides its catalogue.
@@ -85,8 +101,10 @@ exports.placeOrder = asyncHandler(async (req, res) => {
       },
     });
   } catch (err) {
-    // 409 is a race, not an attack — see the header.
-    if (err?.statusCode >= 400 && err.statusCode < 500 && err.statusCode !== 409) {
+    // 409 is a race, not an attack; 429 is the per-phone daily ceiling, which a
+    // large family on one number can hit honestly — see order.service. Neither
+    // earns a strike.
+    if (err?.statusCode >= 400 && err.statusCode < 500 && err.statusCode !== 409 && err.statusCode !== 429) {
       markSuspicious(req, `rejected checkout: ${err.message}`).catch(() => {});
     }
     throw err;

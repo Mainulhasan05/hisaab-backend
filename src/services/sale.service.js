@@ -287,7 +287,28 @@ class SaleService {
   }
 
   // Create new sale
-  async createSale(shopId, userId, saleData, req) {
+  /**
+   * @param {object} internalOptions NOT derived from any request body — only
+   *   internal callers may pass it. `unitPriceOverrides` is a Map of
+   *   `"<productId>"` or `"<productId>:<variantId>"` → price, used by
+   *   `orderService.confirmOrder` so the Sale bills exactly what the online
+   *   order QUOTED (the storefront's `onlinePrice ?? sellingPrice`), not what
+   *   the POS would charge today. The controllers never forward anything from
+   *   `req.body` into this argument; doing so would reopen the client-priced
+   *   sale that I-10 / §15.2 exist to prevent.
+   */
+  async createSale(shopId, userId, saleData, req, internalOptions = {}) {
+    const unitPriceOverrides = internalOptions.unitPriceOverrides instanceof Map
+      ? internalOptions.unitPriceOverrides
+      : null;
+    // The quoted price wins over every pricing rule, including wholesale —
+    // an online order is billed at what the customer was shown.
+    const overrideFor = (productId, variantId = null) => {
+      if (!unitPriceOverrides) return null;
+      const key = variantId ? `${productId}:${variantId}` : String(productId);
+      const value = unitPriceOverrides.get(key);
+      return Number.isFinite(value) && value >= 0 ? value : null;
+    };
     return await runInTransaction(async (session) => {
       const sessionOpt = session ? { session } : {};
       const {
@@ -772,6 +793,13 @@ class SaleService {
         // retail price — never to the parent product's. See pricing.util.
         unitPrice = sellingPriceFor(variant, priceTier);
         lineWholesale = priceTier === 'wholesale' && hasWholesalePrice(variant);
+        {
+          const quoted = overrideFor(product._id, variant._id);
+          if (quoted !== null) {
+            unitPrice = quoted;
+            lineWholesale = false;
+          }
+        }
         buyingPrice = variant.buyingPrice || product.buyingPrice || 0;
         variantInfo = {
           variantId: variant._id,
@@ -840,6 +868,13 @@ class SaleService {
 
         unitPrice = sellingPriceFor(product, priceTier);
         lineWholesale = priceTier === 'wholesale' && hasWholesalePrice(product);
+        {
+          const quoted = overrideFor(product._id);
+          if (quoted !== null) {
+            unitPrice = quoted;
+            lineWholesale = false;
+          }
+        }
         buyingPrice = product.buyingPrice || 0;
 
         const previousStock = product.stock;

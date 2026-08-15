@@ -36,6 +36,11 @@ module.exports = {
   // Neither is read by any pre-existing query — see ECOMMERCE_PLAN.md I-8.
   StorefrontTemplate: require('./StorefrontTemplate.model'),
   Storefront: require('./Storefront.model'),
+  // Online orders — the ledger-adjacent worklist (I-9: an Order is not a Sale).
+  // Registered here or `sync-indexes` never ships the worklist index and the
+  // unique idempotency backstop to production (autoIndex is off there).
+  Order: require('./Order.model'),
+  OrderCounter: require('./OrderCounter.model'),
   TelegramLink: require('./TelegramLink.model'),
   TelegramLinkToken: require('./TelegramLinkToken.model'),
   NotificationLog: require('./NotificationLog.model')

@@ -33,6 +33,7 @@ const mediaRoutes = require('./media.routes');
 const userRoutes = require('./user.routes');
 const telegramRoutes = require('./telegram.routes');
 const storefrontRoutes = require('./storefront.routes');
+const orderRoutes = require('./order.routes');
 const publicRoutes = require('./public.routes');
 
 // Mount routes
@@ -76,6 +77,11 @@ router.use('/telegram', telegramRoutes);
 // are a separate, unauthenticated router and do not live here — see
 // ECOMMERCE_PLAN.md §13 for why that surface is treated as its own workstream.
 router.use('/storefront', storefrontRoutes);
+// The merchant order worklist. `/online-orders`, not `/orders`, so the name
+// says which side of the trust boundary it serves — `/public/.../orders` is
+// where strangers write, this is where staff read and act. Gated end-to-end on
+// `features.onlineOrders` inside the router itself.
+router.use('/online-orders', orderRoutes);
 
 /**
  * The public storefront reads — mounted LAST, and mounted here rather than in

@@ -6,6 +6,91 @@ const Shop = require('../models/Shop.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 
+/** Hard ceiling on zones per shop — a zone table is not a district gazetteer. */
+const MAX_ZONES = 20;
+/** A delivery charge above this is a typo, not a price. */
+const MAX_CHARGE = 100000;
+
+/**
+ * Validate and normalise a shop-submitted delivery-zone table.
+ *
+ * The settings PATCH replaces the array wholesale (the UI edits the table as a
+ * whole), so this is the one gate everything in it passes through. What it
+ * refuses, and why it matters that it refuses rather than coerces:
+ *
+ *   - a zone with no name — renders as a blank radio button at checkout;
+ *   - a non-finite or negative charge — `resolveDelivery` would happily
+ *     snapshot `NaN` onto an order's money fields;
+ *   - duplicate keys — `resolveDelivery` matches by key, so two zones sharing
+ *     one key means the customer picks one and is charged the other;
+ *   - an empty table with pickup also off is allowed to SAVE (a shop may pause
+ *     deliveries), but checkout already refuses it with its own message.
+ *
+ * Keys are preserved when present (orders snapshot `zoneKey`; a stable key is
+ * what lets "এই এলাকার অর্ডার" stay queryable) and derived when absent, so the
+ * UI can add a row without inventing slugs client-side.
+ */
+function normalizeZones(rawZones) {
+  if (!Array.isArray(rawZones)) {
+    throw new AppError('zones must be an array', 'ডেলিভারি এলাকা সঠিক নয়', 400);
+  }
+  if (rawZones.length > MAX_ZONES) {
+    throw new AppError(
+      `At most ${MAX_ZONES} delivery zones`,
+      `সর্বোচ্চ ${MAX_ZONES}টি ডেলিভারি এলাকা রাখা যাবে`,
+      400
+    );
+  }
+
+  const seen = new Set();
+  return rawZones.map((raw, index) => {
+    const name = String(raw?.name || raw?.nameBn || '').trim();
+    const nameBn = String(raw?.nameBn || '').trim();
+    if (!name) {
+      throw new AppError('Every zone needs a name', 'প্রতিটি এলাকার নাম দিন', 400);
+    }
+    if (name.length > 60 || nameBn.length > 60) {
+      throw new AppError('Zone name too long', 'এলাকার নাম ৬০ অক্ষরের মধ্যে দিন', 400);
+    }
+
+    const charge = Number(raw?.charge);
+    if (!Number.isFinite(charge) || charge < 0 || charge > MAX_CHARGE) {
+      throw new AppError('Invalid delivery charge', `"${name}" এর ডেলিভারি চার্জ সঠিক নয়`, 400);
+    }
+    const freeAbove = Number(raw?.freeAbove) || 0;
+    if (freeAbove < 0 || freeAbove > 10000000) {
+      throw new AppError('Invalid free-delivery threshold', `"${name}" এর ফ্রি ডেলিভারি সীমা সঠিক নয়`, 400);
+    }
+
+    const etaDaysMin = Math.min(60, Math.max(0, parseInt(raw?.etaDaysMin, 10) || 0));
+    const etaDaysMax = Math.min(60, Math.max(etaDaysMin, parseInt(raw?.etaDaysMax, 10) || etaDaysMin));
+
+    // Keep a stored key; derive one for a new row. ASCII-slugged from the
+    // English name when it has one, positional otherwise (Bengali-only names
+    // slug to nothing).
+    let key = String(raw?.key || '').trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+    if (!key) {
+      key = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
+        || `zone-${index + 1}`;
+    }
+    let unique = key;
+    let n = 2;
+    while (seen.has(unique)) unique = `${key}-${n++}`;
+    seen.add(unique);
+
+    return {
+      key: unique.slice(0, 40),
+      name,
+      nameBn: nameBn || undefined,
+      charge: Math.round(charge * 100) / 100,
+      freeAbove: Math.round(freeAbove * 100) / 100,
+      etaDaysMin,
+      etaDaysMax,
+      isActive: raw?.isActive !== false,
+    };
+  });
+}
+
 /**
  * Storefront management — the shop's side of the online panel.
  *
@@ -407,10 +492,7 @@ class StorefrontService {
 
     if ('delivery' in patch && patch.delivery) {
       if ('zones' in patch.delivery) {
-        if (!Array.isArray(patch.delivery.zones)) {
-          throw new AppError('zones must be an array', 'ডেলিভারি এলাকা সঠিক নয়', 400);
-        }
-        storefront.delivery.zones = patch.delivery.zones;
+        storefront.delivery.zones = normalizeZones(patch.delivery.zones);
       }
       if ('pickupEnabled' in patch.delivery) {
         storefront.delivery.pickupEnabled = patch.delivery.pickupEnabled === true;
@@ -459,3 +541,6 @@ class StorefrontService {
 }
 
 module.exports = new StorefrontService();
+// The zone gate, exported for tests — it is the one function between a
+// shop-typed settings form and the money fields checkout snapshots.
+module.exports.normalizeZones = normalizeZones;

@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const cacheService = require('../services/cache.service');
 const ApiResponse = require('../utils/response.util');
 const logger = require('../utils/logger.util');
@@ -38,7 +39,24 @@ function idempotency(options = {}) {
     // `toString` covers a bare ObjectId (the shape a platform admin gets).
     const shopScope = req.shop?._id || req.shop || req.user?.shop?._id || req.user?.shop;
     const shopId = shopScope ? String(shopScope) : 'global';
-    const lockKey = `idempotency:${shopId}:${req.method}:${req.baseUrl}${req.path}:${idempotencyKey}`;
+
+    // ── Unauthenticated requests: bind the key to the BODY ───────────────────
+    //
+    // On the public checkout there is no `req.shop`, so every key on one
+    // storefront path shares the 'global' scope — and the cached response is a
+    // customer's name, phone and address. A client-chosen key alone must not be
+    // the whole address of that cache entry: anyone replaying a guessed key
+    // within the TTL would read someone else's order back.
+    //
+    // Folding a hash of the body into the key closes that: the same double-tap
+    // (same body) still collapses to one cached response, while a different
+    // customer's request with the same key simply misses the cache and is
+    // processed normally — where the DB unique index judges it on its own
+    // merits. Authenticated routes keep their shop scope and skip this.
+    const bodyScope = !shopScope && req.body
+      ? `:${crypto.createHash('sha256').update(JSON.stringify(req.body)).digest('hex').slice(0, 16)}`
+      : '';
+    const lockKey = `idempotency:${shopId}:${req.method}:${req.baseUrl}${req.path}:${idempotencyKey}${bodyScope}`;
     let isCompleted = false;
 
     try {

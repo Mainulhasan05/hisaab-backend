@@ -2272,10 +2272,14 @@ class AdminService {
     // 2. Backfill BEFORE flipping the flag. The flag used to be set first, so
     // an interrupted backfill left the shop live with half its rows untagged
     // and therefore invisible in any branch-selected view (M-6).
-    // HeldCart was missing from this list entirely (M-5).
+    // HeldCart was missing from this list entirely (M-5). Order was added with
+    // the online-order worklist (AGENT_WORKFLOW.md §9 item 4): without it,
+    // every order taken before a shop went multi-branch would vanish from any
+    // branch-selected worklist the moment the flag flipped.
+    const Order = require('../models/Order.model');
     const branchScopedModels = [
       Sale, Purchase, Expense, CashRegister, StockTransaction,
-      Payment, SalesReturn, SMSLog, AuditLog, HeldCart
+      Payment, SalesReturn, SMSLog, AuditLog, HeldCart, Order
     ];
 
     // Batched so a large history never builds one unbounded write, and so a

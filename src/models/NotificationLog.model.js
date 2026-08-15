@@ -15,7 +15,7 @@ const mongoose = require('mongoose');
  */
 
 const NOTIFICATION_CHANNELS = ['telegram'];
-const NOTIFICATION_EVENTS = ['daily_summary', 'link_success', 'unlink_notice', 'system'];
+const NOTIFICATION_EVENTS = ['daily_summary', 'link_success', 'unlink_notice', 'system', 'order_placed'];
 const NOTIFICATION_STATUS = ['sent', 'failed', 'blocked'];
 
 const notificationLogSchema = new mongoose.Schema(

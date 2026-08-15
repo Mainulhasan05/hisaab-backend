@@ -3,7 +3,7 @@ const router = express.Router();
 const publicStorefrontController = require('../controllers/publicStorefront.controller');
 const publicOrderController = require('../controllers/publicOrder.controller');
 const { storefrontLimiter } = require('../middleware/rateLimiter.middleware');
-const { orderAbuseGuard } = require('../middleware/orderAbuse.middleware');
+const { orderAbuseGuard, markSuspicious } = require('../middleware/orderAbuse.middleware');
 const idempotency = require('../middleware/idempotency.middleware');
 const { validate, Joi } = require('../middleware/validate.middleware');
 
@@ -127,6 +127,19 @@ router.get(
  * Everything about money is derived server-side in `order.service`.
  */
 const checkoutBody = Joi.object({
+  /**
+   * THE HONEYPOT. The real checkout renders this input invisible and empty
+   * (`CheckoutForm.js` — off-screen, `tabIndex={-1}`, `autoComplete="off"`,
+   * `aria-hidden`), so a human can never fill it. A scraped-form bot fills
+   * every field it finds. The controller refuses a non-empty value with the
+   * same generic 400 as any other bad body — telling a bot which field gave it
+   * away is a free retry — and records an abuse strike.
+   *
+   * Named `website` because autofillers skip it (it is not an address/identity
+   * field) while naive bots see a plausible text input and stuff it.
+   */
+  website: Joi.string().allow('').max(200).default(''),
+
   customer: Joi.object({
     name: Joi.string().trim().min(2).max(120).required()
       .messages({ 'string.empty': 'নাম দিন', 'any.required': 'নাম দিন' }),
@@ -154,12 +167,30 @@ const checkoutBody = Joi.object({
   pickup: Joi.boolean().default(false),
 }).unknown(false);
 
+/**
+ * A validator rejection on THIS route is itself a signal. The controller's own
+ * header explains why: the real checkout page cannot produce a malformed body,
+ * so whoever did is probing. The plain `validate()` responds before the
+ * controller's strike logic can run — this wrapper counts the strike first,
+ * then lets `validate()` answer exactly as it would have.
+ */
+const strikeOnInvalid = (schema, property) => {
+  const inner = validate(schema, property);
+  return (req, res, next) => {
+    const { error } = schema.validate(req[property], { abortEarly: false, stripUnknown: true });
+    if (error) {
+      markSuspicious(req, `malformed checkout ${property}`).catch(() => {});
+    }
+    return inner(req, res, next);
+  };
+};
+
 router.post(
   '/storefront/:slug/orders',
   orderAbuseGuard(),
   idempotency({ ttlSeconds: 24 * 60 * 60, lockTtlSeconds: 60 }),
   validate(slugParam, 'params'),
-  validate(checkoutBody, 'body'),
+  strikeOnInvalid(checkoutBody, 'body'),
   publicOrderController.placeOrder
 );
 

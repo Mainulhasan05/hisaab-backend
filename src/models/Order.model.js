@@ -239,9 +239,18 @@ const orderSchema = new mongoose.Schema({
       trim: true,
       index: true,
     },
+    /**
+     * Required only for delivery. A pickup order has no address by definition —
+     * `order.service.placeOrder` writes '' for it, and an unconditional
+     * `required` here rejected '' with a 422, which broke EVERY pickup checkout
+     * while the delivery path worked — the classic half-tested branch.
+     */
     address: {
       type: String,
-      required: [true, 'ঠিকানা দিন'],
+      required: [
+        function () { return this.delivery?.isPickup !== true; },
+        'ঠিকানা দিন',
+      ],
       trim: true,
       maxlength: [500, 'ঠিকানা ৫০০ অক্ষরের বেশি হতে পারবে না'],
     },

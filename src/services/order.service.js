@@ -1,11 +1,43 @@
+const mongoose = require('mongoose');
 const Order = require('../models/Order.model');
 const OrderCounter = require('../models/OrderCounter.model');
 const Product = require('../models/Product.model');
+const Storefront = require('../models/Storefront.model');
 const publicStorefrontService = require('./publicStorefront.service');
 const { AppError } = require('../middleware/error.middleware');
 const { getBangladeshTodayStr, getBangladeshTodayRange } = require('../utils/bdTime.util');
 const { quantizeMoney } = require('../utils/quantity.util');
 const { normalizePhone, isValidPhone } = require('../utils/phone.util');
+const { branchFilter, branchMatch, isActiveBranch, wrongBranchError } = require('../utils/branchScope.util');
+const logger = require('../utils/logger.util');
+
+/**
+ * Per-phone daily ceiling on storefront orders, per shop.
+ *
+ * The IP guard (`orderAbuse.middleware`) is blind in both directions behind
+ * Bangladeshi CGNAT: one address is a whole neighbourhood, and one abuser has a
+ * new address every reconnect. The phone number is the identity a COD order
+ * cannot function without, so it is the second axis — a stranger can rotate
+ * IPs, but every junk order still has to name a phone, and the same phone
+ * naming ten unconfirmed parcels a day is not a customer. The
+ * `{shop, 'customer.phone', createdAt}` index was built for exactly this read.
+ */
+const PHONE_DAILY_MAX = Number(process.env.ORDER_PHONE_DAILY_MAX) || 10;
+
+/**
+ * Which statuses each forward transition may leave from.
+ *
+ * `confirmed` is absent on purpose — it is not a status update, it is
+ * `confirmOrder`, the one door into the ledger (I-9). Fulfilment steps may be
+ * skipped forward (a shop that hands the parcel to the courier without ever
+ * pressing "packed" is normal), but never backward, and `delivered` is
+ * terminal: undoing money is `cancelOrder`/returns, not a status edit.
+ */
+const FORWARD_TRANSITIONS = Object.freeze({
+  packed: ['confirmed'],
+  shipped: ['confirmed', 'packed'],
+  delivered: ['confirmed', 'packed', 'shipped'],
+});
 
 /**
  * Orders — the shared core.
@@ -294,7 +326,7 @@ class OrderService {
    * carries its own date so a shopkeeper reading it in a Telegram notification
    * knows when it arrived without opening anything.
    */
-  async nextOrderNo(shopId) {
+  async nextOrderNo(shopId, prefix = 'ORD') {
     const today = getBangladeshTodayStr();
     const seq = await OrderCounter.nextSeq(shopId, today, async () => {
       // Seeds only on the first order of the day, so a shop that starts using
@@ -306,7 +338,12 @@ class OrderService {
       });
     });
 
-    return `ORD-${today.slice(2).replace(/-/g, '')}-${String(seq).padStart(4, '0')}`;
+    // The shop's own prefix (`Storefront.orderPrefix`, settable in settings).
+    // Sanitised to the same alphabet the tracking route accepts
+    // (`/^[A-Z0-9-]+$/`) — a prefix with a stray character would make every
+    // order number fail the public tracking page's params validation.
+    const cleaned = String(prefix || 'ORD').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8) || 'ORD';
+    return `${cleaned}-${today.slice(2).replace(/-/g, '')}-${String(seq).padStart(4, '0')}`;
   }
 
   /**
@@ -342,13 +379,36 @@ class OrderService {
       throw new AppError('Address is required', 'ঠিকানা দিন', 400);
     }
 
+    // ── The per-phone ceiling, storefront orders only ────────────────────────
+    //
+    // Staff typing in Facebook orders are not spamming themselves, so manual
+    // entry is exempt. Thrown as a 429, which the public controller does NOT
+    // count as an abuse strike — deliberately: a family sharing one phone and
+    // one shop exists, and their eleventh genuine order of the day is over-use,
+    // not probing. The shopkeeper still has the earlier ten in the worklist.
+    if (source === 'storefront') {
+      const { startOfDay, endOfDay } = getBangladeshTodayRange();
+      const todayCount = await Order.countDocuments({
+        shop: shopId,
+        'customer.phone': phone,
+        createdAt: { $gte: startOfDay, $lte: endOfDay },
+      });
+      if (todayCount >= PHONE_DAILY_MAX) {
+        throw new AppError(
+          'Too many orders from this number today',
+          'এই নম্বর থেকে আজ অনেকগুলো অর্ডার হয়েছে — দোকানে সরাসরি ফোন করুন',
+          429
+        );
+      }
+    }
+
     const { lines, subtotal } = await this.resolveLines(shopId, { items, onlineOnly });
 
     let delivery = this.resolveDelivery(storefront, zoneKey, { pickup });
     delivery = this.applyFreeDelivery(storefront, delivery, subtotal);
 
     const total = quantizeMoney(subtotal + delivery.charge);
-    const orderNo = await this.nextOrderNo(shopId);
+    const orderNo = await this.nextOrderNo(shopId, storefront?.orderPrefix);
 
     const order = await Order.create({
       shop: shopId,
@@ -378,7 +438,555 @@ class OrderService {
       },
     });
 
+    // Fire-and-forget, like the SMS receipt in `createSale`: a stats counter or
+    // a Telegram hiccup must never fail an order that is already written.
+    this._afterPlacement(shop, storefront, order).catch((err) =>
+      logger.error(`[Order] post-placement hooks failed for ${order.orderNo}: ${err.message}`)
+    );
+
     return order;
+  }
+
+  /**
+   * What happens AFTER the order document exists: the storefront's own
+   * counters, and the owner's Telegram ping.
+   *
+   * `stats.totalOrders`/`lastOrderAt` move at placement — they answer "is this
+   * storefront being used", which the admin oversight list sorts by.
+   * `stats.totalRevenue` moves at CONFIRM, not here: an unconfirmed order is
+   * not revenue, and counting it would make the admin list report money that
+   * 20–40% COD cancellation rates will take back.
+   */
+  async _afterPlacement(shop, storefront, order) {
+    if (storefront?._id) {
+      await Storefront.updateOne(
+        { _id: storefront._id },
+        { $inc: { 'stats.totalOrders': 1 }, $set: { 'stats.lastOrderAt': new Date() } }
+      ).catch((err) => logger.warn(`[Order] stats update failed: ${err.message}`));
+    }
+
+    // Telegram: free, instant, defaults ON — but only for storefront orders.
+    // A staff member typing in a manual order does not need to be told about
+    // the order they are looking at.
+    if (order.source !== 'storefront') return;
+    if (storefront && storefront.notifications?.telegram === false) return;
+
+    try {
+      // Lazy: telegram.service boots an HTTP client and this module is loaded
+      // by the public routes on every worker.
+      const telegramService = require('./telegram.service');
+      const TelegramLink = require('../models/TelegramLink.model');
+      const { escapeHtml } = require('../utils/telegramFormat.util');
+
+      const links = await TelegramLink.find({ shop: order.shop, isActive: true }).lean();
+      if (!links.length) return;
+
+      const where = order.delivery?.isPickup
+        ? 'পিকআপ — দোকান থেকে নেবেন'
+        : (order.delivery?.zoneName || order.customer.address || '');
+      const text =
+        `🛒 <b>নতুন অর্ডার!</b>  <code>${escapeHtml(order.orderNo)}</code>\n\n` +
+        `👤 ${escapeHtml(order.customer.name)}  (${escapeHtml(order.customer.phone)})\n` +
+        `📍 ${escapeHtml(where)}\n` +
+        `🧾 ${order.items.length}টি পণ্য — মোট <b>৳${order.total}</b>\n\n` +
+        `অনলাইন প্যানেল → অর্ডার থেকে নিশ্চিত করুন।`;
+
+      for (const link of links) {
+        // Sequential, not Promise.all: safeSend already retries with backoff,
+        // and a shop has a handful of links at most.
+        await telegramService.safeSend(link.telegramChatId, text, {
+          eventType: 'order_placed',
+          shopId: order.shop,
+          userId: link.user,
+        });
+      }
+    } catch (err) {
+      logger.warn(`[Order] Telegram notify failed for ${order.orderNo}: ${err.message}`);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // The merchant side — the worklist, the detail screen and the lifecycle.
+  // Every method here takes `req` because every read is branch-scoped through
+  // the sanctioned helpers (I-2) and every consequential write needs the
+  // acting user. These are called only from authenticated, RBAC'd routes.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * The worklist. `{shop, status, createdAt:-1}` is the index this rides.
+   *
+   * Oldest-first for pending — the plan's own §7.2 rule: the order that has
+   * waited longest is the one to deal with next. Everything else newest-first,
+   * because "what just happened" is the question the other tabs answer.
+   */
+  async listOrders(req, { status, q, page = 1, limit = 20 } = {}) {
+    const filter = branchFilter(req, { shop: req.shop._id });
+
+    if (status && Order.ORDER_STATUSES.includes(status)) {
+      filter.status = status;
+    }
+    if (q && String(q).trim()) {
+      const term = String(q).trim();
+      const phone = normalizePhone(term);
+      // An order number or a phone — the two things a shopkeeper actually has
+      // in hand when a customer calls. Never a free regex over names on an
+      // unindexed field.
+      filter.$or = [
+        { orderNo: term.toUpperCase() },
+        ...(phone ? [{ 'customer.phone': phone }] : []),
+      ];
+    }
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const perPage = Math.min(50, Math.max(1, parseInt(limit, 10) || 20));
+    const sort = filter.status === 'pending' ? { createdAt: 1 } : { createdAt: -1 };
+
+    const [orders, total] = await Promise.all([
+      Order.find(filter)
+        .sort(sort)
+        .skip((pageNum - 1) * perPage)
+        .limit(perPage)
+        .lean(),
+      Order.countDocuments(filter),
+    ]);
+
+    return {
+      orders: orders.map((o) => this.toMerchantOrder(o)),
+      pagination: {
+        page: pageNum,
+        limit: perPage,
+        total,
+        pages: Math.ceil(total / perPage) || 1,
+      },
+    };
+  }
+
+  /**
+   * Order counts per status — the tab badges and the dashboard's pending tile.
+   * `branchMatch`, not `branchFilter`: this is an aggregation and $match does
+   * not cast (I-3).
+   */
+  async countsByStatus(req) {
+    const rows = await Order.aggregate([
+      { $match: branchMatch(req, { shop: req.shop._id }) },
+      { $group: { _id: '$status', count: { $sum: 1 } } },
+    ]);
+
+    const counts = Object.fromEntries(Order.ORDER_STATUSES.map((s) => [s, 0]));
+    for (const row of rows) {
+      if (row._id in counts) counts[row._id] = row.count;
+    }
+    counts.all = rows.reduce((sum, r) => sum + r.count, 0);
+    return counts;
+  }
+
+  /**
+   * The overview screen's numbers, in one round trip: status counts, today's
+   * activity, and the most recent handful of orders.
+   *
+   * "Revenue" here is deliberately CONFIRMED money only — the total of today's
+   * orders that have a Sale behind them. Pending totals are wishes, and a
+   * dashboard that adds wishes to revenue teaches the shopkeeper to distrust
+   * every number on it.
+   */
+  async summary(req) {
+    const { startOfDay, endOfDay } = getBangladeshTodayRange();
+    const todayRange = { $gte: startOfDay, $lte: endOfDay };
+
+    const [counts, todayRows, recent] = await Promise.all([
+      this.countsByStatus(req),
+      Order.aggregate([
+        { $match: branchMatch(req, { shop: req.shop._id, createdAt: todayRange }) },
+        {
+          $group: {
+            _id: null,
+            placed: { $sum: 1 },
+            confirmedRevenue: {
+              $sum: {
+                $cond: [
+                  { $in: ['$status', ['confirmed', 'packed', 'shipped', 'delivered']] },
+                  '$total',
+                  0,
+                ],
+              },
+            },
+          },
+        },
+      ]),
+      Order.find(branchFilter(req, { shop: req.shop._id }))
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .lean(),
+    ]);
+
+    return {
+      counts,
+      today: {
+        placed: todayRows[0]?.placed || 0,
+        confirmedRevenue: quantizeMoney(todayRows[0]?.confirmedRevenue || 0),
+      },
+      recent: recent.map((o) => this.toMerchantOrder(o)),
+    };
+  }
+
+  /** One order, branch-scoped, or a helpful wrong-branch error for owners. */
+  async getById(req, orderId) {
+    const order = await Order.findOne(
+      branchFilter(req, { _id: orderId, shop: req.shop._id })
+    ).lean();
+
+    if (!order) {
+      // Same shape sale.service uses: an owner with a branch selected gets told
+      // which branch the record lives in; staff get a bare 404.
+      const elsewhere = await Order.findOne({ _id: orderId, shop: req.shop._id })
+        .populate('branch', 'name code')
+        .lean();
+      if (elsewhere?.branch) {
+        const err = wrongBranchError(req, elsewhere.branch);
+        if (err) throw err;
+      }
+      throw new AppError('Order not found', 'অর্ডারটি পাওয়া যায়নি', 404);
+    }
+
+    return this.toMerchantOrder(order);
+  }
+
+  /**
+   * A fulfilment step: packed / shipped / delivered. Moves NO money — the money
+   * moved at confirm. Guarded atomically: the status filter in the update means
+   * two staff pressing two buttons at once resolve to one winner, and the loser
+   * is told the order has moved rather than silently rewriting history.
+   */
+  async updateStatus(req, orderId, nextStatus, { userId, note = null } = {}) {
+    const allowedFrom = FORWARD_TRANSITIONS[nextStatus];
+    if (!allowedFrom) {
+      throw new AppError('Invalid status', 'এই অবস্থায় নেওয়া যাবে না', 400);
+    }
+
+    const set = { status: nextStatus };
+    if (nextStatus === 'delivered') set.deliveredAt = new Date();
+
+    const order = await Order.findOneAndUpdate(
+      branchFilter(req, { _id: orderId, shop: req.shop._id, status: { $in: allowedFrom } }),
+      {
+        $set: set,
+        $push: {
+          statusHistory: {
+            status: nextStatus,
+            at: new Date(),
+            by: userId || null,
+            ...(note ? { note: String(note).slice(0, 300) } : {}),
+          },
+        },
+      },
+      { new: true }
+    ).lean();
+
+    if (!order) {
+      // Either it does not exist in this scope, or it is not in a state this
+      // transition may leave from. Look once more to say which.
+      const current = await Order.findOne(
+        branchFilter(req, { _id: orderId, shop: req.shop._id })
+      ).select('status').lean();
+      if (!current) {
+        throw new AppError('Order not found', 'অর্ডারটি পাওয়া যায়নি', 404);
+      }
+      if (current.status === 'pending') {
+        throw new AppError(
+          'Confirm the order first',
+          'আগে অর্ডারটি নিশ্চিত করুন — তারপর প্যাক/পাঠানো যাবে',
+          400
+        );
+      }
+      throw new AppError(
+        `Cannot move a ${current.status} order to ${nextStatus}`,
+        'অর্ডারটির অবস্থা ইতিমধ্যে বদলে গেছে — পাতাটি রিফ্রেশ করুন',
+        409
+      );
+    }
+
+    return this.toMerchantOrder(order);
+  }
+
+  /**
+   * CONFIRM — the one door into the ledger (I-9).
+   *
+   * The exact sequence matters and is worth stating:
+   *
+   *   1. CLAIM the order atomically (`pending` → `confirmed`, sale still null).
+   *      Two staff confirming at once resolve here: one claims, one gets a 409.
+   *   2. Run `saleService.createSale` — the EXISTING path, transactional, with
+   *      its atomic stock guard, customer create/link, CustomerBalance, audit.
+   *      Prices are handed in as trusted overrides so the Sale bills what the
+   *      order quoted, not today's shelf price (see createSale's note).
+   *   3. Stamp `order.sale` — set exactly once.
+   *
+   *   If step 2 throws (usually 409 "পর্যাপ্ত স্টক নেই"), the claim is rolled
+   *   back and the order returns to `pending` with nothing consumed. A crash
+   *   between 2 and 3 leaves a confirmed order with `sale: null` and the Sale
+   *   already booked — visible (the detail screen shows the mismatch) and
+   *   fixable, which beats the reverse ordering where a crash books a Sale
+   *   nobody can find from the worklist at all.
+   */
+  async confirmOrder(req, orderId, userId) {
+    const shopId = req.shop._id;
+
+    // Read first for the branch guard and the line mapping — the atomic claim
+    // below is what actually decides the race.
+    const existing = await Order.findOne({ _id: orderId, shop: shopId }).lean();
+    if (!existing) {
+      throw new AppError('Order not found', 'অর্ডারটি পাওয়া যায়নি', 404);
+    }
+    if (existing.status !== 'pending') {
+      throw new AppError(
+        `Order is already ${existing.status}`,
+        existing.status === 'cancelled'
+          ? 'অর্ডারটি বাতিল করা হয়েছে'
+          : 'অর্ডারটি ইতিমধ্যে নিশ্চিত করা হয়েছে',
+        409
+      );
+    }
+
+    // The sale must land in the branch that will fulfil it. For a single-branch
+    // shop everything here is null and nothing happens. For a multi-branch
+    // shop, `createSale` writes into the ACTIVE branch (`requireBranch`), so an
+    // order pinned to a branch may only be confirmed with that branch active.
+    if (existing.branch && !isActiveBranch(req, existing.branch)) {
+      const branchDoc = await mongoose.model('Branch')
+        .findById(existing.branch).select('name code').lean();
+      const err = wrongBranchError(req, branchDoc);
+      throw err || new AppError('Order belongs to another branch', 'অর্ডারটি অন্য শাখার', 404);
+    }
+
+    // Map order lines to createSale's shape: variantSku (what the storefront
+    // publishes) → variantId (what the POS path addresses). One query.
+    const productIds = [...new Set(existing.items.map((i) => String(i.product)))];
+    const products = await Product.find({ _id: { $in: productIds }, shop: shopId })
+      .select('variants.sku variants._id')
+      .lean();
+    const skuToId = new Map();
+    for (const p of products) {
+      for (const v of p.variants || []) {
+        skuToId.set(`${p._id}:${v.sku}`, v._id);
+      }
+    }
+
+    const saleItems = [];
+    const unitPriceOverrides = new Map();
+    for (const line of existing.items) {
+      const productId = String(line.product);
+      let variantId = null;
+      if (line.variantSku) {
+        variantId = skuToId.get(`${productId}:${line.variantSku}`);
+        if (!variantId) {
+          throw new AppError(
+            `Variant no longer exists for "${line.name}"`,
+            `"${line.name}" এর অপশনটি আর নেই — অর্ডারটি বাতিল করে নতুন করে নিন`,
+            409
+          );
+        }
+      }
+      saleItems.push({ productId, variantId, quantity: line.quantity });
+      unitPriceOverrides.set(
+        variantId ? `${productId}:${variantId}` : productId,
+        line.unitPrice
+      );
+    }
+
+    // 1. Claim.
+    const claimStamp = { status: 'confirmed', at: new Date(), by: userId || null };
+    const claimed = await Order.findOneAndUpdate(
+      { _id: orderId, shop: shopId, status: 'pending' },
+      {
+        $set: { status: 'confirmed', confirmedAt: claimStamp.at, confirmedBy: userId || null },
+        $push: { statusHistory: claimStamp },
+      },
+      { new: true }
+    );
+    if (!claimed) {
+      throw new AppError('Order was just handled by someone else', 'অর্ডারটি এইমাত্র অন্য কেউ প্রসেস করেছে', 409);
+    }
+
+    // 2. The Sale. Lazy require: sale.service is heavy and order placement (the
+    // hot public path through this module) never needs it.
+    const saleService = require('./sale.service');
+    let sale;
+    try {
+      sale = await saleService.createSale(
+        shopId,
+        userId,
+        {
+          items: saleItems,
+          customerName: existing.customer.name,
+          customerPhone: existing.customer.phone,
+          paid: 0,
+          isOnline: true,
+          channel: existing.source === 'storefront' ? 'website' : 'other',
+          deliveryCharge: existing.deliveryCharge || 0,
+          shippingAddress: existing.delivery?.isPickup
+            ? 'পিকআপ'
+            : existing.customer.address,
+          notes: [existing.customer.note, existing.sourceNote, `অনলাইন অর্ডার ${existing.orderNo}`]
+            .filter(Boolean)
+            .join(' · '),
+        },
+        req,
+        { unitPriceOverrides }
+      );
+    } catch (err) {
+      // Roll the claim back — the order returns to the worklist untouched.
+      await Order.updateOne(
+        { _id: orderId, shop: shopId, status: 'confirmed', sale: null },
+        {
+          $set: { status: 'pending', confirmedAt: null, confirmedBy: null },
+          $pop: { statusHistory: 1 },
+        }
+      ).catch((revertErr) =>
+        logger.error(`[Order] confirm rollback failed for ${existing.orderNo}: ${revertErr.message}`)
+      );
+      throw err;
+    }
+
+    // 3. Stamp the link. Set exactly once, never rewritten.
+    const order = await Order.findOneAndUpdate(
+      { _id: orderId, shop: shopId, sale: null },
+      { $set: { sale: sale._id } },
+      { new: true }
+    ).lean();
+
+    // Confirmed revenue is the storefront stat that means money.
+    Storefront.updateOne(
+      { shop: shopId },
+      { $inc: { 'stats.totalRevenue': existing.total } }
+    ).catch(() => {});
+
+    logger.info(`[Order] ${existing.orderNo} confirmed → sale ${sale.invoiceNo}`);
+    return { order: this.toMerchantOrder(order), sale: { _id: sale._id, invoiceNo: sale.invoiceNo } };
+  }
+
+  /**
+   * Cancel.
+   *
+   * Before confirm this is free — the order touched nothing (I-9), so
+   * cancelling is a status write and nothing else. After confirm there is a
+   * Sale, and the ONLY sanctioned unwind is `saleService.cancelSale`, which
+   * restores stock, reverses the customer's due and audits both sides.
+   * A delivered order is past cancelling — that is a sales return.
+   */
+  async cancelOrder(req, orderId, userId, reason = '') {
+    const existing = await Order.findOne(
+      branchFilter(req, { _id: orderId, shop: req.shop._id })
+    ).lean();
+    if (!existing) {
+      throw new AppError('Order not found', 'অর্ডারটি পাওয়া যায়নি', 404);
+    }
+    if (existing.status === 'cancelled') {
+      throw new AppError('Already cancelled', 'অর্ডারটি আগেই বাতিল হয়েছে', 409);
+    }
+    if (existing.status === 'delivered') {
+      throw new AppError(
+        'A delivered order is returned, not cancelled',
+        'ডেলিভারি হয়ে যাওয়া অর্ডার বাতিল নয় — রিটার্ন করুন',
+        400
+      );
+    }
+
+    // Unwind the books first. If this throws, the order stays as it was —
+    // an order marked cancelled with a live Sale behind it would be a lie in
+    // the one place the shopkeeper checks.
+    if (existing.sale) {
+      const saleService = require('./sale.service');
+      await saleService.cancelSale(
+        req.shop._id,
+        userId,
+        existing.sale,
+        reason || `অনলাইন অর্ডার ${existing.orderNo} বাতিল`,
+        req.branchId || null
+      );
+    }
+
+    const order = await Order.findOneAndUpdate(
+      { _id: orderId, shop: req.shop._id, status: existing.status },
+      {
+        $set: {
+          status: 'cancelled',
+          cancelledAt: new Date(),
+          cancelledBy: userId || null,
+          cancelReason: String(reason || '').slice(0, 500),
+        },
+        $push: {
+          statusHistory: { status: 'cancelled', at: new Date(), by: userId || null },
+        },
+      },
+      { new: true }
+    ).lean();
+
+    if (!order) {
+      throw new AppError(
+        'Order state changed — refresh and retry',
+        'অর্ডারটির অবস্থা বদলে গেছে — রিফ্রেশ করে আবার চেষ্টা করুন',
+        409
+      );
+    }
+
+    return this.toMerchantOrder(order);
+  }
+
+  /**
+   * The merchant's view of an order.
+   *
+   * Same allowlist discipline as `toPublicOrder`, one level up in trust: the
+   * caller is authenticated staff, so they get the lifecycle, the history and
+   * the forensics — but still NOT `items[].buyingPrice`. Cost is `sales.view`
+   * territory once a Sale exists; a cashier working the parcel desk does not
+   * need every margin in the catalogue on a screen that faces the shop floor.
+   */
+  toMerchantOrder(order) {
+    if (!order) return null;
+    return {
+      _id: order._id,
+      orderNo: order.orderNo,
+      status: order.status,
+      source: order.source,
+      sourceNote: order.sourceNote || null,
+      branch: order.branch || null,
+      customer: {
+        name: order.customer?.name,
+        phone: order.customer?.phone,
+        address: order.customer?.address,
+        note: order.customer?.note || null,
+      },
+      items: (order.items || []).map((i) => ({
+        product: i.product,
+        variantSku: i.variantSku || null,
+        name: i.name,
+        code: i.code || null,
+        variantLabel: i.variantLabel || null,
+        unit: i.unit || null,
+        image: i.image || null,
+        quantity: i.quantity,
+        unitPrice: i.unitPrice,
+        compareAtPrice: i.compareAtPrice ?? null,
+        lineTotal: i.lineTotal,
+      })),
+      delivery: order.delivery || null,
+      subtotal: order.subtotal,
+      deliveryCharge: order.deliveryCharge,
+      total: order.total,
+      paymentMethod: order.paymentMethod,
+      sale: order.sale || null,
+      confirmedAt: order.confirmedAt || null,
+      cancelledAt: order.cancelledAt || null,
+      cancelReason: order.cancelReason || null,
+      deliveredAt: order.deliveredAt || null,
+      statusHistory: order.statusHistory || [],
+      meta: {
+        ip: order.meta?.ip || null,
+        userAgent: order.meta?.userAgent || null,
+      },
+      createdAt: order.createdAt,
+      updatedAt: order.updatedAt,
+    };
   }
 
   /**
