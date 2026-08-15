@@ -93,6 +93,33 @@ const saleItemSchema = new mongoose.Schema({
     type: Number,
     min: [0, 'মূল্য ০ এর কম হতে পারবে না']
   },
+  /**
+   * The rate the cashier and the customer AGREED on this line, per base unit,
+   * when it is not the list rate. Absent on every ordinary line — and on every
+   * line written before `features.lineDiscount` existed.
+   *
+   * DISPLAY-ONLY. Nothing sums it, nothing prices from it. `unitPrice` above is
+   * still the list/tier rate and `discount` below is still the concession in
+   * taka, so profit, subtotal, returns, reports and every export stay unaware
+   * this field exists. Same rule as `packUnitPrice` — and the same reason: a
+   * second meaning for `unitPrice` would need every reader changed at once.
+   *
+   * Stored rather than re-derived as `unitPrice - discount / quantity` because
+   * that division does not round-trip once a paisa rate meets a fractional
+   * quantity — ordinary with `features.packaging`. 750 g agreed at ৳৯০.৫০ off a
+   * ৳১০০ list is a ৳7.125 concession, quantized to ৳7.13 like every other money
+   * figure here, and divided back out that reads ৳৯০.৪৯. Printing a rate the
+   * customer never agreed to, on the invoice they are holding, is what this
+   * prevents.
+   *
+   * Derived and gated ONLY by `utils/lineDiscount.util.resolveLineRate`. Never
+   * write it from anywhere else — it and `discount` must agree, and one writer
+   * is what guarantees they do.
+   */
+  agreedUnitPrice: {
+    type: Number,
+    min: [0, 'মূল্য ০ এর কম হতে পারবে না']
+  },
   buyingPrice: {
     type: Number,
     min: [0, 'ক্রয় মূল্য ০ এর কম হতে পারবে না']

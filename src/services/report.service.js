@@ -725,6 +725,33 @@ class ReportService {
             // before the resolved amount was stored; those are overwhelmingly
             // `fixed`, where the two fields agree by definition.
             totalDiscount: { $sum: { $ifNull: ['$discountAmount', '$discount'] } },
+            // ── Per-LINE discounts, which nothing used to count ───────────────
+            //
+            // `discountAmount` above is the INVOICE-level discount only. From
+            // the moment `features.lineDiscount` shipped, a shop could knock
+            // ৳10 a kilo off individual items all month and "মোট ছাড়" would
+            // report ৳0 — the exact figure an owner switches the capability on
+            // to watch.
+            //
+            // Reported as its OWN number rather than merged into the one above.
+            // "I gave ৳2,000 off whole bills" and "I gave ৳8,000 off individual
+            // items" are different management problems: the first is a policy,
+            // the second is usually one member of staff.
+            //
+            // `$reduce`, not `$sum: '$items.discount'` — the latter is a valid
+            // expression on an array field but silently yields 0 for documents
+            // whose `items` is missing, and `$ifNull` on each line is what
+            // keeps a pre-feature sale item (no `discount` key at all) from
+            // turning the whole sum into null.
+            totalLineDiscount: {
+              $sum: {
+                $reduce: {
+                  input: { $ifNull: ['$items', []] },
+                  initialValue: 0,
+                  in: { $add: ['$$value', { $ifNull: ['$$this.discount', 0] }] },
+                },
+              },
+            },
             totalItems: { $sum: { $size: '$items' } },
             count: { $sum: 1 },
           },
@@ -905,6 +932,11 @@ class ReportService {
         paid: sales.totalPaid,
         due: sales.totalDue,
         discount: sales.totalDiscount,
+        // The invoice-level figure above and the per-line one here stay apart
+        // on purpose — see the aggregation. A caller wanting "total given
+        // away" adds them; one wanting to know WHERE it went cannot un-merge
+        // them.
+        lineDiscount: sales.totalLineDiscount,
         items: sales.totalItems,
         count: sales.count,
         byMethod: salesByMethod,
@@ -1114,6 +1146,33 @@ class ReportService {
             // before the resolved amount was stored; those are overwhelmingly
             // `fixed`, where the two fields agree by definition.
             totalDiscount: { $sum: { $ifNull: ['$discountAmount', '$discount'] } },
+            // ── Per-LINE discounts, which nothing used to count ───────────────
+            //
+            // `discountAmount` above is the INVOICE-level discount only. From
+            // the moment `features.lineDiscount` shipped, a shop could knock
+            // ৳10 a kilo off individual items all month and "মোট ছাড়" would
+            // report ৳0 — the exact figure an owner switches the capability on
+            // to watch.
+            //
+            // Reported as its OWN number rather than merged into the one above.
+            // "I gave ৳2,000 off whole bills" and "I gave ৳8,000 off individual
+            // items" are different management problems: the first is a policy,
+            // the second is usually one member of staff.
+            //
+            // `$reduce`, not `$sum: '$items.discount'` — the latter is a valid
+            // expression on an array field but silently yields 0 for documents
+            // whose `items` is missing, and `$ifNull` on each line is what
+            // keeps a pre-feature sale item (no `discount` key at all) from
+            // turning the whole sum into null.
+            totalLineDiscount: {
+              $sum: {
+                $reduce: {
+                  input: { $ifNull: ['$items', []] },
+                  initialValue: 0,
+                  in: { $add: ['$$value', { $ifNull: ['$$this.discount', 0] }] },
+                },
+              },
+            },
             // Needed to strip pass-through money out of the COGS derivation
             // below. Neither is refunded by a return, so both stay whole even on
             // a fully-returned invoice — which is exactly why subtracting them
@@ -1323,6 +1382,7 @@ class ReportService {
         paid: sales.totalPaid,
         due: sales.totalDue,
         discount: sales.totalDiscount,
+        lineDiscount: sales.totalLineDiscount,
         count: sales.count,
         profit: sales.totalProfit,
       },

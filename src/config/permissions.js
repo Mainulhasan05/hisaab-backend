@@ -7,7 +7,17 @@
 const MODULES = {
   products:      { key: 'products',      label: 'পণ্য',              labelEn: 'Products',        actions: ['view', 'create', 'update', 'delete', 'view_cost'] },
   categories:    { key: 'categories',    label: 'ক্যাটাগরি',          labelEn: 'Categories',      actions: ['view', 'create', 'update', 'delete'] },
-  sales:         { key: 'sales',         label: 'বিক্রয়',            labelEn: 'Sales',           actions: ['view', 'create', 'update', 'delete', 'view_profit'] },
+  // `discount` is per-LINE negotiated pricing (`features.lineDiscount`), and it
+  // is deliberately NOT implied by `create`. Ringing up a sale at the shelf
+  // price and knocking ৳10 a kilo off it are different acts of authority — the
+  // second is spending the shop's margin, and an owner wants to choose who may.
+  //
+  // It is also the one permission that cannot be enforced at the door: the
+  // endpoint stays open to anyone with `sales.create`, and the check happens
+  // per item inside `createSale` via `permission.middleware.hasPermission`.
+  // Inert unless `features.lineDiscount` is on, the way `storefront`'s actions
+  // are inert without that capability.
+  sales:         { key: 'sales',         label: 'বিক্রয়',            labelEn: 'Sales',           actions: ['view', 'create', 'update', 'delete', 'view_profit', 'discount'] },
   customers:     { key: 'customers',     label: 'কাস্টমার',          labelEn: 'Customers',       actions: ['view', 'create', 'update', 'delete'] },
   // A purchase record IS cost data (unit prices, invoice totals, dues), so
   // `view` alone only reveals *that* a purchase happened — supplier, date,
@@ -68,6 +78,7 @@ const ACTION_LABELS = {
   view_cost:     { label: 'ক্রয়মূল্য দেখা', labelEn: 'View cost' },
   view_profit:   { label: 'লাভ দেখা',       labelEn: 'View profit' },
   manual_adjust: { label: 'স্টক সমন্বয়',    labelEn: 'Adjust stock' },
+  discount:      { label: 'ছাড় দেওয়া',      labelEn: 'Give discount' },
   cancel:        { label: 'বাতিল',           labelEn: 'Cancel' },
   publish:       { label: 'প্রকাশ',          labelEn: 'Publish' },
 };

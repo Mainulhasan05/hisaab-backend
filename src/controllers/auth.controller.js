@@ -299,6 +299,57 @@ const updateShopSettings = asyncHandler(async (req, res) => {
     }
   }
 
+  // ── The per-line discount cap ──────────────────────────────────────────────
+  //
+  // NOT in `allowedSettings` above, because it needs three things that list
+  // cannot express.
+  //
+  // 1. IT IS OWNER-ONLY. `rbac('settings', 'update')` can be granted to a
+  //    manager, and a manager who can raise the discount ceiling can raise
+  //    their own — which is the same escalation `resolveWholesaleFlag` exists
+  //    to prevent for `isWholesale`.
+  //
+  // 2. IT IS CAPABILITY-GATED. Storing a cap for a shop that cannot give line
+  //    discounts is a setting that does nothing, which is a support ticket
+  //    waiting to happen.
+  //
+  // 3. `null` IS A REAL VALUE. Every other key here is "absent means leave it
+  //    alone"; this one additionally needs "explicitly cleared means no cap".
+  //    An empty box on the form must therefore reach the database as `null`,
+  //    not be skipped — while an ABSENT key still means untouched, which is
+  //    what keeps the form reversible when the capability is switched off
+  //    (AGENT_WORKFLOW.md I-7).
+  if ('maxLineDiscountPercent' in req.body) {
+    const { hasFeature } = require('../utils/features.util');
+    const raw = req.body.maxLineDiscountPercent;
+
+    if (!hasFeature(req, 'lineDiscount')) {
+      return ApiResponse.forbidden(res, {
+        message: 'Per-item discount is not enabled for this shop',
+        messageBn: 'এই দোকানে পণ্যভিত্তিক ছাড় সুবিধা চালু নেই',
+      });
+    }
+    if (!req.user?.isOwner && !req.isAdmin) {
+      return ApiResponse.forbidden(res, {
+        message: 'Only the shop owner can set the discount limit',
+        messageBn: 'শুধুমাত্র দোকান মালিক ছাড়ের সীমা ঠিক করতে পারবেন',
+      });
+    }
+
+    if (raw === null || raw === '') {
+      updates['settings.maxLineDiscountPercent'] = null;
+    } else {
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 0 || n > 100) {
+        return ApiResponse.badRequest(res, {
+          message: 'Discount limit must be between 0 and 100',
+          messageBn: 'ছাড়ের সীমা ০ থেকে ১০০ এর মধ্যে দিন',
+        });
+      }
+      updates['settings.maxLineDiscountPercent'] = n;
+    }
+  }
+
   if (Object.keys(updates).length === 0) {
     return ApiResponse.badRequest(res, {
       message: 'No valid settings provided',

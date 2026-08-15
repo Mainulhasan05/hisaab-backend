@@ -33,6 +33,7 @@ const {
   toMoney,
 } = require('../utils/invoiceMath.util');
 const { priceTierFor, sellingPriceFor, hasWholesalePrice } = require('../utils/pricing.util');
+const { resolveLineRate } = require('../utils/lineDiscount.util');
 const { deductBatches, restoreBatches, batchWriteOp } = require('../utils/batch.util');
 const { hasFeature } = require('../utils/features.util');
 const { isCombo, findComponentVariant, isChooseSlot } = require('../utils/combo.util');
@@ -740,7 +741,35 @@ class SaleService {
           });
         }
 
-        const comboItemDiscount = item.discount || 0;
+        // Coerced, bounded, and open to a negotiated rate — exactly as the
+        // standard branch does. See the long block comment there; the only
+        // difference here is which figures play the parts.
+        //
+        // The list rate is the COMBO's own price, and the cost floor is the
+        // per-combo component cost that was just summed. A combo bargained
+        // below what its components cost is the same loss as a plain line
+        // bargained below its buying price, and the same owner-only rule
+        // applies.
+        //
+        // A confirmed online order never reaches here with an override — combos
+        // are not sold through checkout — but the guard is written the same way
+        // so the two branches cannot drift.
+        const comboLineValue = quantizeMoney(comboUnitPrice * comboQty);
+        const comboQuoted = overrideFor(product._id) !== null;
+        const comboRate = comboQuoted
+          ? { agreedUnitPrice: undefined, discount: 0 }
+          : resolveLineRate({
+            raw: item.agreedUnitPrice,
+            listUnitPrice: comboUnitPrice,
+            quantity: comboQty,
+            buyingPrice: quantizeMoney(comboBuying),
+            shop: req?.shop,
+            req,
+            productName: product.name,
+          });
+        const comboItemDiscount = comboRate.agreedUnitPrice !== undefined
+          ? Math.min(comboRate.discount, comboLineValue)
+          : Math.min(toMoney(item.discount), comboLineValue);
         const comboItemTotal = quantizeMoney((comboUnitPrice * comboQty) - comboItemDiscount);
 
         processedItems.push({
@@ -753,6 +782,7 @@ class SaleService {
           unit: line.unit,
           saleUnit: 'base',
           unitPrice: comboUnitPrice,
+          agreedUnitPrice: comboRate.agreedUnitPrice,
           buyingPrice: quantizeMoney(comboBuying),
           discount: comboItemDiscount,
           total: comboItemTotal,
@@ -999,7 +1029,60 @@ class SaleService {
         stockTransactions[stockTransactions.length - 1].unitPrice = unitPrice;
       }
 
-      const itemDiscount = item.discount || 0;
+      // ── The line discount, coerced and bounded ──────────────────────────────
+      //
+      // `item.discount || 0` used to land here straight off the wire. There is
+      // no Joi schema on the sale routes, so a client holding `sales.create`
+      // could post any number it liked — and a discount larger than the line
+      // drove `itemTotal` negative, which dragged `subtotal` down, which
+      // understated `total`, `profit` and the customer's ledger together. The
+      // schema's `min: 0` catches a negative; it does not catch a ৳50,000
+      // discount on a ৳500 line, which is not negative.
+      //
+      // `toMoney` is the same last-line-of-defence coercion every other money
+      // figure on this invoice goes through (`''`, `'abc'`, `NaN`, `Infinity`
+      // and negatives all read as 0), and the bound is the line's own value —
+      // the per-line equivalent of `discountAmountFor` clamping the invoice
+      // discount to the subtotal. A line can be given away; it cannot be given
+      // away twice.
+      //
+      // ── A negotiated rate replaces all of that ────────────────────────────
+      //
+      // `features.lineDiscount` lets the cashier type a RATE instead: "৳১০০
+      // each, but ৳৯০ for you". `resolveLineRate` derives the concession from
+      // it and owns every gate — the capability, the `sales.discount`
+      // permission, the below-cost floor and the shop's own cap. When it
+      // answers, its answer WINS: the client's `discount` is ignored entirely,
+      // because a payload that can name both could name a rate of ৳৯০ and a
+      // discount of ৳৯০০ and be believed about the second.
+      //
+      // THE POSITION OF THIS BLOCK IS LOAD-BEARING. It sits after the pack
+      // block above so that `unitPrice` is already the final per-base-unit list
+      // rate — tier resolved, pack rate applied. A negotiated rate therefore
+      // REPLACES the wholesale and pack rates rather than compounding with
+      // them, which is the same call the pack block makes about wholesale three
+      // comments up: stacking two discounts the shopkeeper meant to give once
+      // is how a carton leaves at a price nobody quoted.
+      //
+      // `unitPriceOverrides` (a confirmed online order) is checked first and
+      // skips this entirely — that sale is billed at what the customer was
+      // shown on the website, and a till-side negotiation has no meaning there.
+      const lineValue = quantizeMoney(unitPrice * item.quantity);
+      const quotedLine = overrideFor(product._id, item.variantId || null) !== null;
+      const rate = quotedLine
+        ? { agreedUnitPrice: undefined, discount: 0 }
+        : resolveLineRate({
+          raw: item.agreedUnitPrice,
+          listUnitPrice: unitPrice,
+          quantity: item.quantity,
+          buyingPrice,
+          shop: req?.shop,
+          req,
+          productName: product.name,
+        });
+      const itemDiscount = rate.agreedUnitPrice !== undefined
+        ? Math.min(rate.discount, lineValue)
+        : Math.min(toMoney(item.discount), lineValue);
       // Rounded to paisa: with a fractional quantity `unitPrice x quantity` no
       // longer lands on a whole taka (70 x 0.333 = 23.310000000000002), and an
       // unrounded line total propagates into subtotal, profit and the invoice.
@@ -1023,6 +1106,9 @@ class SaleService {
         packQuantity: line.packQuantity || undefined,
         unitPrice,
         packUnitPrice: packUnitPrice || undefined,
+        // Display-only, and written ONLY from `resolveLineRate` — see the field
+        // note on `saleItemSchema`. Absent on every ordinary line.
+        agreedUnitPrice: rate.agreedUnitPrice,
         buyingPrice,
         discount: itemDiscount,
         total: itemTotal,
@@ -1308,6 +1394,63 @@ class SaleService {
         },
       },
     }).catch((err) => logger.error(`Audit log (sale_create) failed: ${err.message}`));
+
+    // ── A separate entry for every negotiated line ────────────────────────────
+    //
+    // Deliberately NOT folded into the `sale_create` summary above. That entry
+    // answers "what was sold"; this one answers "who gave away the shop's
+    // margin, on what, and how much" — which is the question the whole
+    // capability is switched on to be able to ask, and the reason
+    // `sales.discount` is a permission of its own.
+    //
+    // Written unconditionally rather than above some threshold: these are rare
+    // events by construction (a line has to be individually bargained to
+    // produce one), and a threshold would hide precisely the pattern worth
+    // catching — a cashier taking ৳20 off every third invoice.
+    //
+    // Fire-and-forget and outside the transaction, exactly like the entry
+    // above. An audit write that could roll a sale back would be a checkout
+    // that fails because the logging did.
+    const negotiatedLines = processedItems.filter((i) => i.agreedUnitPrice !== undefined);
+    if (negotiatedLines.length > 0) {
+      AuditLog.create({
+        shop: shopId,
+        user: userId,
+        action: 'sale_line_discount',
+        actionBn: 'পণ্যভিত্তিক ছাড়',
+        description:
+          `Line discounts on ${sale.invoiceNo}: ` +
+          negotiatedLines
+            .map((i) => `${i.productName} ৳${i.unitPrice}→৳${i.agreedUnitPrice} (−৳${i.discount})`)
+            .join('; '),
+        descriptionBn:
+          `${sale.invoiceNo} — পণ্যভিত্তিক ছাড়: ` +
+          negotiatedLines
+            .map((i) => `${i.productName} ৳${i.unitPrice}→৳${i.agreedUnitPrice} (−৳${i.discount})`)
+            .join('; '),
+        entity: {
+          type: 'sale',
+          id: sale._id,
+          name: sale.invoiceNo,
+        },
+        changes: {
+          after: {
+            invoiceNo: sale.invoiceNo,
+            lines: negotiatedLines.map((i) => ({
+              product: i.product,
+              productName: i.productName,
+              listUnitPrice: i.unitPrice,
+              agreedUnitPrice: i.agreedUnitPrice,
+              quantity: i.quantity,
+              discount: i.discount,
+            })),
+            totalLineDiscount: quantizeMoney(
+              negotiatedLines.reduce((sum, i) => sum + (Number(i.discount) || 0), 0)
+            ),
+          },
+        },
+      }).catch((err) => logger.error(`Audit log (sale_line_discount) failed: ${err.message}`));
+    }
 
     // Send SMS receipt (non-blocking - runs in background)
     // This doesn't wait for SMS to be sent, returns immediately

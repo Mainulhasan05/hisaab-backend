@@ -38,7 +38,17 @@ const heldCartItemSchema = new mongoose.Schema({
   // was parked. See AGENT_WORKFLOW.md I-6.
   quantity: { type: Number, required: true, min: 0.001 },
   unitPrice: { type: Number, required: true, min: 0 },
-  discount: { type: Number, default: 0 }
+  discount: { type: Number, default: 0 },
+  // The rate the cashier negotiated before parking the cart
+  // (`features.lineDiscount`). Carried so a resumed cart shows the number that
+  // was typed rather than one re-derived by division — the same reason
+  // `Sale.items[].agreedUnitPrice` is stored; see the field note there.
+  //
+  // Held carts are a DRAFT: none of the gates run here, because nothing has
+  // been sold. `createSale` re-resolves this line rate from scratch at
+  // checkout, so a cart parked before the capability was switched off simply
+  // fails to check out at the negotiated price — it does not sneak past.
+  agreedUnitPrice: { type: Number, min: 0 }
 }, { _id: true });
 
 const heldCartSchema = new mongoose.Schema({

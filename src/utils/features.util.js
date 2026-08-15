@@ -144,6 +144,18 @@ const FEATURES = Object.freeze({
       'form and combo products stop being sellable; existing combos and their ' +
       'sale history are kept, so the switch is reversible.',
   },
+  lineDiscount: {
+    bn: 'পণ্যভিত্তিক ছাড়',
+    en: 'Per-item discount',
+    description:
+      'Lets a cashier agree a different rate on a single line at the till — ' +
+      '"৳১০০ each, but ৳৯০ for you" — and prints both on the invoice. Bounded ' +
+      'by the shop\'s own cap (settings.maxLineDiscountPercent) and by the ' +
+      'separate `sales.discount` permission, so the owner still chooses which ' +
+      'staff may use it; selling below cost is owner-only. Off = no rate ' +
+      'control in the POS and a posted line rate is refused. Existing sales ' +
+      'keep theirs, so the switch is reversible.',
+  },
 });
 
 /**

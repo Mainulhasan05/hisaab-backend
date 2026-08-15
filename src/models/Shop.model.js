@@ -199,6 +199,23 @@ const shopSchema = new mongoose.Schema({
       type: [String],
       default: ['size', 'color']
     },
+    /**
+     * Hard ceiling on a single line's discount, as a percent off the list rate.
+     * Only consulted when `features.lineDiscount` is on.
+     *
+     * `null` (the default) = no cap, which is every shop that has never set
+     * one. A percent rather than a taka figure so one number stays meaningful
+     * across a ৳১০ pen and a ৳১০,০০০ বস্তা.
+     *
+     * Owner-set, not admin-set — the admin sells the capability, the owner
+     * decides how far their own staff may go with it.
+     */
+    maxLineDiscountPercent: {
+      type: Number,
+      default: null,
+      min: 0,
+      max: 100
+    },
     // SMS settings
     smsSettings: {
       autoSendOnSale: {
@@ -333,6 +350,20 @@ const shopSchema = new mongoose.Schema({
     // and existing combos stop being sellable — their documents and every
     // sale/ledger row are kept, so the switch is reversible.
     combos: {
+      type: Boolean,
+      default: false
+    },
+    // Per-line negotiated pricing at the till — "৳১০০ each, but ৳৯০ for you".
+    // The cashier types a RATE and the server derives the concession; see
+    // utils/lineDiscount.util.js for why both are stored. Bounded by
+    // `settings.maxLineDiscountPercent` below and by the `sales.discount`
+    // permission, which are three separate axes on purpose: the platform sells
+    // the capability, the owner says who may use it, and the cap is the leash.
+    //
+    // Off = no rate control in the POS and a posted `agreedUnitPrice` is
+    // refused. Sales that already carry one keep it, so the switch is
+    // reversible.
+    lineDiscount: {
       type: Boolean,
       default: false
     }
