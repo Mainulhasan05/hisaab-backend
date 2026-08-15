@@ -2,9 +2,9 @@
  * MediaFolder — one drawer in the platform's admin media library.
  *
  * PLATFORM-OWNED, ADMIN-ONLY. No shop creates, reads, edits or sees one. See
- * MEDIA_GALLERY_PLAN.md §2.2 and I-20: this library exists so an admin
- * authoring a landing page can keep one campaign's files together, and it has
- * no shop-facing surface in this phase or any later one.
+ * MEDIA_GALLERY_PLAN.md §2.2 and I-20: the library is a standalone admin tool
+ * with no shop-facing surface in this phase or any later one, and folders are
+ * how an admin keeps one piece of work's files together.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * A FOLDER IS METADATA. IT IS NOT PART OF THE OBJECT KEY. (I-19)
@@ -17,8 +17,8 @@
  * Encoding the folder into the key instead would make every move a server-side
  * copy plus a delete plus a URL rewrite. That is three operations that can
  * half-fail, and the half-failure worth naming is: the copy succeeds, the URL
- * rewrite does not, and a LIVE landing page — one currently being paid for with
- * ad money — is left pointing at an object that is about to be deleted.
+ * rewrite does not, and whatever was referencing the file in production is left
+ * pointing at an object that is about to be deleted.
  *
  * R2_STORAGE_PLAN.md §৭.৪ already took this trade once, accepting denormalised
  * URLs and a once-a-year rewrite script rather than a per-request join. Taking

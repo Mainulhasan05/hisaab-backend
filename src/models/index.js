@@ -47,6 +47,14 @@ module.exports = {
   // unique idempotency backstop to production (autoIndex is off there).
   Order: require('./Order.model'),
   OrderCounter: require('./OrderCounter.model'),
+  // The two sequence counters, registered for the same reason OrderCounter is:
+  // each carries a unique key index and a 30-day TTL, and `sync-indexes` only
+  // ships indexes for models listed here. Without registration the unique index
+  // that makes the counter safe under concurrency never reaches production,
+  // where autoIndex is off — which would leave the race these models exist to
+  // remove still open, silently.
+  InvoiceCounter: require('./InvoiceCounter.model'),
+  ReturnCounter: require('./ReturnCounter.model'),
   TelegramLink: require('./TelegramLink.model'),
   TelegramLinkToken: require('./TelegramLinkToken.model'),
   NotificationLog: require('./NotificationLog.model')

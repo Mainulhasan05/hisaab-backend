@@ -21,6 +21,7 @@ const PlatformSetting = require('../models/PlatformSetting.model');
 const R2Account = require('../models/R2Account.model');
 const mediaService = require('../services/media.service');
 const storageService = require('../services/storage.service');
+const platformMediaService = require('../services/platformMedia.service');
 const productService = require('../services/product.service');
 
 const id = () => new mongoose.Types.ObjectId();
@@ -587,21 +588,64 @@ describe('storage maintenance job', () => {
 
   const NOTHING = { scanned: 0, deleted: 0, skipped: 0, failed: 0, bytes: 0 };
 
-  /** The four routines the cycle drives, each independently overridable. */
-  const stub = ({ released = 0, rolled = 0, staged = NOTHING, orphaned = NOTHING } = {}) => {
+  // The platform media library is a second tenant of the same pool with its own
+  // two sweeps (MEDIA_GALLERY_PLAN.md §7). Its results ride on the same object.
+  const PLATFORM_NOTHING = { ...NOTHING, protected: 0 };
+
+  /** The six routines the cycle drives, each independently overridable. */
+  const stub = ({
+    released = 0,
+    rolled = 0,
+    staged = NOTHING,
+    orphaned = NOTHING,
+    platformStaged = PLATFORM_NOTHING,
+    platformOrphaned = PLATFORM_NOTHING,
+  } = {}) => {
     const settle = (v) => (v instanceof Error ? Promise.reject(v) : Promise.resolve(v));
     jest.spyOn(storageService, 'releaseStaleReservations').mockImplementation(() => settle(released));
     jest.spyOn(storageService, 'rollMonthlyOps').mockImplementation(() => settle(rolled));
     jest.spyOn(mediaService, 'sweepStagedMedia').mockImplementation(() => settle(staged));
     jest.spyOn(mediaService, 'sweepOrphanedMedia').mockImplementation(() => settle(orphaned));
+    jest.spyOn(platformMediaService, 'sweepStaged').mockImplementation(() => settle(platformStaged));
+    jest.spyOn(platformMediaService, 'sweepOrphaned').mockImplementation(() => settle(platformOrphaned));
   };
 
   it('runs every repair and reports what it fixed', async () => {
     const staged = { ...NOTHING, scanned: 4, deleted: 4, bytes: 900 };
     const orphaned = { ...NOTHING, scanned: 1, deleted: 1, bytes: 100 };
-    stub({ released: 2, rolled: 5, staged, orphaned });
+    const platformStaged = { ...PLATFORM_NOTHING, scanned: 2, deleted: 2, bytes: 300 };
+    stub({ released: 2, rolled: 5, staged, orphaned, platformStaged });
 
-    expect(await runMaintenanceCycle()).toEqual({ released: 2, rolled: 5, staged, orphaned });
+    expect(await runMaintenanceCycle()).toEqual({
+      released: 2,
+      rolled: 5,
+      staged,
+      orphaned,
+      platformStaged,
+      platformOrphaned: PLATFORM_NOTHING,
+    });
+  });
+
+  it('a failing platform sweep does not cost the shop sweeps their pass', async () => {
+    // The two tenants share a bucket and nothing else. Wiring them into one
+    // try block would let a bug in the admin library stop every shop's
+    // reclamation — which is the half that keeps shops under their quota.
+    const staged = { ...NOTHING, scanned: 3, deleted: 3, bytes: 700 };
+    stub({ staged, platformStaged: new Error('library sweep exploded') });
+
+    const result = await runMaintenanceCycle();
+    expect(result.staged).toEqual(staged);
+    expect(result.platformStaged).toBeNull();
+    expect(result.platformOrphaned).toEqual(PLATFORM_NOTHING);
+  });
+
+  it('and a failing shop sweep does not cost the platform one', async () => {
+    const platformOrphaned = { ...PLATFORM_NOTHING, scanned: 1, deleted: 1, bytes: 50 };
+    stub({ staged: new Error('R2 unreachable'), platformOrphaned });
+
+    const result = await runMaintenanceCycle();
+    expect(result.staged).toBeNull();
+    expect(result.platformOrphaned).toEqual(platformOrphaned);
   });
 
   it('still sweeps reservations when the month roll fails, and never throws', async () => {

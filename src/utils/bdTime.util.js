@@ -13,6 +13,24 @@
 // correct here in a way it would not be for most timezones.
 const BD_OFFSET_MS = 6 * 60 * 60 * 1000;
 
+/**
+ * The same offset in the form MongoDB's date operators want.
+ *
+ * `$dateToString`, `$dateTrunc` and friends default to **UTC** when `timezone`
+ * is omitted — silently, with no error. An aggregation that bounds `createdAt`
+ * with `getBangladeshDayRange` (BD-aligned) and then groups with a bare
+ * `$dateToString` (UTC-aligned) is therefore internally inconsistent: every sale
+ * rung between 00:00 and 05:59 Dhaka lands in the PREVIOUS day's bucket, and a
+ * month report grows a spurious row for the last day of the month before it.
+ *
+ * That is the same six-hour error the functions below exist to prevent on the
+ * JS side, so the constant lives here rather than in each service — a report
+ * that forgets it does not fail, it just quietly reports the wrong day.
+ *
+ * NEVER omit `timezone` on a date operator that buckets by calendar period.
+ */
+const BD_TZ = '+06:00';
+
 /** Current date in Bangladesh as "YYYY-MM-DD". */
 function getBangladeshTodayStr() {
   const bdNow = new Date(Date.now() + BD_OFFSET_MS);
@@ -147,6 +165,7 @@ function addBangladeshDays(from, days) {
 
 module.exports = {
   BD_OFFSET_MS,
+  BD_TZ,
   getBangladeshTodayStr,
   getBangladeshDayRange,
   getBangladeshTodayRange,

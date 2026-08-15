@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { normalizePhone } = require('../utils/phone.util');
+const { quantizeMoney } = require('../utils/quantity.util');
 
 const customerSchema = new mongoose.Schema({
   shop: {
@@ -130,18 +131,41 @@ customerSchema.virtual('hasDue').get(function() {
  * Mirrored by `CustomerBalance.recomputeDue` for the per-branch rows and by
  * `scripts/recalc-customer-balances.js`, which checks both against source
  * documents. See DueAdjustment.model.js for why the term exists at all.
+ *
+ * ── Why the result is quantized ─────────────────────────────────────────────
+ *
+ * `totalPurchases` and `totalPaid` are running sums of paisa-exact figures, but
+ * they accumulate DIFFERENT sequences — a customer buys once and pays in three
+ * instalments — so the two doubles drift apart even though every input was
+ * exact. Their difference then lands on 1e-13 rather than 0, and it GROWS: a
+ * simulated 100k credit transactions ended at 1.1e-6.
+ *
+ * That residue is not cosmetic. `totalDue: { $gt: 0 }` is the বাকি list
+ * (`getCustomersWithDue`, `customer.service.getCustomers`, the branch due
+ * summary), so a customer who owes nothing sits on it permanently and no
+ * payment can ever clear them — there is nothing left to pay.
+ *
+ * `invoiceMath.computeInvoiceTotals` quantizes the INVOICE's due for exactly
+ * this reason (see that file's header). This is the ledger half of the same
+ * fix; the two must round identically or the invoice and the customer's book
+ * disagree by a paisa, which is the drift both files exist to prevent.
  */
 customerSchema.statics.deriveDue = function(doc) {
-  return Math.max(
+  return quantizeMoney(Math.max(
     0,
     (doc?.totalPurchases || 0) + (doc?.openingDue || 0) - (doc?.totalPaid || 0)
-  );
+  ));
 };
+
+// The running sums are quantized on every write for the same reason `deriveDue`
+// quantizes its result: clamping the error per operation keeps it from
+// accumulating across a million of them. Same rule `quantity.util` applies to
+// stock — this is the money half.
 
 // Method: Add purchase
 customerSchema.methods.addPurchase = async function(amount, paid) {
-  this.totalPurchases += amount;
-  this.totalPaid += paid;
+  this.totalPurchases = quantizeMoney(this.totalPurchases + amount);
+  this.totalPaid = quantizeMoney(this.totalPaid + paid);
   this.totalDue = this.constructor.deriveDue(this);
   this.purchaseCount += 1;
   this.lastPurchase = new Date();
@@ -150,14 +174,14 @@ customerSchema.methods.addPurchase = async function(amount, paid) {
 
 // Method: Add payment
 customerSchema.methods.addPayment = async function(amount) {
-  this.totalPaid += amount;
+  this.totalPaid = quantizeMoney(this.totalPaid + amount);
   this.totalDue = this.constructor.deriveDue(this);
   await this.save();
 };
 
 // Method: Refund
 customerSchema.methods.refund = async function(amount) {
-  this.totalPurchases -= amount;
+  this.totalPurchases = quantizeMoney(this.totalPurchases - amount);
   this.totalDue = this.constructor.deriveDue(this);
   this.purchaseCount = Math.max(0, this.purchaseCount - 1);
   await this.save();

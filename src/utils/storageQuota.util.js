@@ -163,6 +163,110 @@ async function assertCanStore(shop, incomingBytes, settings = null) {
   return state;
 }
 
+/* ─────────────────────────────────────────────────────────────────────────────
+ * The platform's own tenant
+ *
+ * The admin media library (MEDIA_GALLERY_PLAN.md) stores bytes that belong to no
+ * shop. The rule it needs is the same rule — "may these bytes be stored" — so it
+ * lives here rather than in a second file that would eventually disagree with
+ * this one about what "full" means.
+ *
+ * What is deliberately NOT shared is the three-way error split above. A shop
+ * gets `STORAGE_DISABLED` vs `STORAGE_QUOTA_EXCEEDED` because those send a
+ * shopkeeper to two different places. The platform library has one audience —
+ * an admin who can raise the ceiling themselves — and exactly one failure.
+ * ────────────────────────────────────────────────────────────────────────────*/
+
+// Matches the PlatformSetting schema default. As above, a Mongo hiccup must not
+// silently hand the library unlimited space.
+const FALLBACK_PLATFORM_QUOTA_MB = 2048;
+const FALLBACK_PLATFORM_VIDEO_MAX_MB = 20;
+
+/**
+ * Platform library settings and counters, with safe fallbacks.
+ * Never throws — callers are on the upload path.
+ *
+ * @returns {Promise<{quotaMb, videoMaxMb, usedBytes, fileCount, warnPercent}>}
+ */
+async function platformMediaSettings() {
+  try {
+    const settings = await PlatformSetting.current();
+    return {
+      quotaMb: Number.isFinite(settings?.platformMediaQuotaMb)
+        ? settings.platformMediaQuotaMb
+        : FALLBACK_PLATFORM_QUOTA_MB,
+      videoMaxMb: Number.isFinite(settings?.platformVideoMaxMb)
+        ? settings.platformVideoMaxMb
+        : FALLBACK_PLATFORM_VIDEO_MAX_MB,
+      usedBytes: Math.max(0, settings?.platformMediaUsedBytes || 0),
+      fileCount: Math.max(0, settings?.platformMediaFileCount || 0),
+      warnPercent: Number.isFinite(settings?.storageWarnPercent)
+        ? settings.storageWarnPercent
+        : FALLBACK_WARN_PERCENT,
+    };
+  } catch (err) {
+    return {
+      quotaMb: FALLBACK_PLATFORM_QUOTA_MB,
+      videoMaxMb: FALLBACK_PLATFORM_VIDEO_MAX_MB,
+      usedBytes: 0,
+      fileCount: 0,
+      warnPercent: FALLBACK_WARN_PERCENT,
+    };
+  }
+}
+
+/**
+ * A renderable picture of the library's storage position — the platform-tenant
+ * counterpart of `storageState`, and the same shape so the admin storage screen
+ * can render both rows with one component.
+ */
+function platformMediaState(settings) {
+  const quotaMb = settings?.quotaMb ?? FALLBACK_PLATFORM_QUOTA_MB;
+  const warnPercent = settings?.warnPercent ?? FALLBACK_WARN_PERCENT;
+  const quotaBytes = quotaMb * MB;
+  const usedBytes = Math.max(0, settings?.usedBytes || 0);
+  const percent = quotaBytes > 0 ? (usedBytes / quotaBytes) * 100 : (usedBytes > 0 ? 100 : 0);
+
+  return {
+    quotaMb,
+    quotaBytes,
+    usedBytes,
+    fileCount: settings?.fileCount || 0,
+    availableBytes: Math.max(0, quotaBytes - usedBytes),
+    percent: Math.round(percent * 10) / 10,
+    warnPercent,
+    isWarning: percent >= warnPercent && percent < 100,
+    isOverQuota: usedBytes >= quotaBytes,
+  };
+}
+
+/**
+ * Pre-flight for a platform library upload. Throws, or returns the state.
+ *
+ * As on the shop side this is the cheap check, not the authority — the authority
+ * is the compare-and-swap in `platformMedia.service`, because this value can be
+ * stale by the time the bytes are ready.
+ */
+async function assertPlatformCanStore(incomingBytes, settings = null) {
+  const resolved = settings || await platformMediaSettings();
+  const state = platformMediaState(resolved);
+  const bytes = Number(incomingBytes) || 0;
+
+  if (state.usedBytes + bytes > state.quotaBytes) {
+    const error = new AppError(
+      `Platform media library is full (${state.quotaMb}MB)`,
+      `প্ল্যাটফর্ম গ্যালারির জায়গা শেষ (${state.quotaMb}MB) — অব্যবহৃত ফাইল মুছুন বা সীমা বাড়ান`,
+      413
+    );
+    error.code = 'PLATFORM_MEDIA_QUOTA_EXCEEDED';
+    error.quotaMb = state.quotaMb;
+    error.usedBytes = state.usedBytes;
+    throw error;
+  }
+
+  return state;
+}
+
 /** Human-readable size for admin copy and log lines. */
 function formatBytes(bytes) {
   const n = Number(bytes) || 0;
@@ -176,10 +280,16 @@ module.exports = {
   MB,
   FALLBACK_QUOTA_MB,
   FALLBACK_ORPHAN_GRACE_DAYS,
+  FALLBACK_PLATFORM_QUOTA_MB,
+  FALLBACK_PLATFORM_VIDEO_MAX_MB,
   platformStorageSettings,
   effectiveQuotaMb,
   storageEnabled,
   storageState,
   assertCanStore,
+  // The platform's own tenant — the admin media library.
+  platformMediaSettings,
+  platformMediaState,
+  assertPlatformCanStore,
   formatBytes,
 };

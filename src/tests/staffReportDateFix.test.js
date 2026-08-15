@@ -104,8 +104,12 @@ describe('ReportService Date Range & Staff Performance Fixes', () => {
 
       // Share of takings, and the series the chart/heatmap read.
       expect(res.staff[0].salesShare).toBe(100);
+      // `lineDiscount` joined the series so the day-by-day table and its CSV can
+      // carry the same figure the month total shows. The fixture row above has
+      // no such key, which is exactly the pre-feature shape — it must read 0,
+      // never undefined and never NaN.
       expect(res.trend).toEqual([
-        { staffId: mockUserId, date: '2026-08-05', netSales: 1500, profit: 300, saleCount: 2 }
+        { staffId: mockUserId, date: '2026-08-05', netSales: 1500, profit: 300, saleCount: 2, lineDiscount: 0 }
       ]);
       // The filter controls need the whole roster, not only those who sold.
       expect(res.roster).toHaveLength(1);

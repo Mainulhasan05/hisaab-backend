@@ -14,7 +14,9 @@ const {
 } = require('../utils/reportScope.util');
 
 // Every date bucket in this report is a Bangladesh calendar day, not a UTC one.
-const BD_TZ = '+06:00';
+// Imported rather than redeclared: report.service.js and audit.service.js bucket
+// on the same constant, and this file's day keys are compared against theirs.
+const { BD_TZ } = require('../utils/bdTime.util');
 
 // A month of a busy shop's item lines lands well inside this. `truncated` in the
 // response tells the caller when it did not, so the UI can say so out loud
@@ -322,6 +324,79 @@ class StaffReportService {
             saleCount: { $sum: 1 },
             totalItems: { $sum: { $size: { $ifNull: ['$items', []] } } },
             avgSale: { $avg: netSaleAmountExpr() },
+
+            // ── What this person gave away ───────────────────────────────────
+            //
+            // The report that makes `sales.discount` worth having as a separate
+            // permission. An owner grants it expecting it to be used
+            // occasionally, for real customers; what they cannot see without
+            // this is one cashier quietly taking ৳20 off every third bill.
+            //
+            // Two figures, kept apart for the same reason `report.service`
+            // keeps them apart: an invoice-level discount is usually a shop
+            // policy ("১০% off today"), while a per-LINE discount is one person
+            // deciding, at the counter, on their own authority. Merging them
+            // hides exactly the signal this exists to surface.
+            //
+            // `$reduce` rather than `$sum: '$items.discount'`: the latter is
+            // valid but reads as 0 when `items` is missing, and the per-line
+            // `$ifNull` is what stops a sale item written before the field
+            // existed turning the whole sum null.
+            totalLineDiscount: {
+              $sum: {
+                $reduce: {
+                  input: { $ifNull: ['$items', []] },
+                  initialValue: 0,
+                  in: { $add: ['$$value', { $ifNull: ['$$this.discount', 0] }] },
+                },
+              },
+            },
+            totalInvoiceDiscount: { $sum: { $ifNull: ['$discountAmount', 0] } },
+            lineDiscountedBillCount: {
+              $sum: {
+                $cond: [
+                  {
+                    $gt: [
+                      {
+                        $reduce: {
+                          input: { $ifNull: ['$items', []] },
+                          initialValue: 0,
+                          in: { $add: ['$$value', { $ifNull: ['$$this.discount', 0] }] },
+                        },
+                      },
+                      0,
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+            // The denominator for a rate: what the goods on these bills would
+            // have come to at list price, before any discount, tax, delivery or
+            // return. Deliberately NOT `totalSales` (which is net of returns and
+            // carries tax and delivery) — a "discount rate" has to be measured
+            // against the thing that was discounted, or a shop that charges
+            // delivery looks more generous than one that does not.
+            totalGrossMerchandise: {
+              $sum: {
+                $reduce: {
+                  input: { $ifNull: ['$items', []] },
+                  initialValue: 0,
+                  in: {
+                    $add: [
+                      '$$value',
+                      {
+                        $multiply: [
+                          { $ifNull: ['$$this.unitPrice', 0] },
+                          { $ifNull: ['$$this.quantity', 0] },
+                        ],
+                      },
+                    ],
+                  },
+                },
+              },
+            },
             lastSaleAt: { $max: '$createdAt' },
             firstSaleAt: { $min: '$createdAt' },
             activeDays: {
@@ -379,6 +454,24 @@ class StaffReportService {
             netSales: { $sum: netSaleAmountExpr() },
             profit: { $sum: '$profit' },
             saleCount: { $sum: 1 },
+            // Per DAY as well as per staff member, so the day-by-day table and
+            // its CSV can carry the same figure the month total shows. Without
+            // it an owner reads "৳৫,০০০ পণ্যভিত্তিক ছাড়" on screen, exports the
+            // report to check which days it happened on, and finds the column
+            // missing — which is the kind of gap that makes them distrust the
+            // number rather than the export.
+            //
+            // Same `$reduce` shape as the per-staff pipeline above; see the
+            // comment there for why it is not `$sum: '$items.discount'`.
+            lineDiscount: {
+              $sum: {
+                $reduce: {
+                  input: { $ifNull: ['$items', []] },
+                  initialValue: 0,
+                  in: { $add: ['$$value', { $ifNull: ['$$this.discount', 0] }] },
+                },
+              },
+            },
           },
         },
         { $sort: { '_id.date': 1 } },
@@ -431,6 +524,20 @@ class StaffReportService {
         returnsProcessedCount: ret?.returnsProcessedCount || 0,
         dueCollected: Math.round(due?.dueCollected || 0),
         dueCollectionCount: due?.dueCollectionCount || 0,
+        totalLineDiscount: Math.round(s?.totalLineDiscount || 0),
+        totalInvoiceDiscount: Math.round(s?.totalInvoiceDiscount || 0),
+        lineDiscountedBillCount: s?.lineDiscountedBillCount || 0,
+        /**
+         * Line discount as a percentage of what these bills would have come to
+         * at list price. THE comparable number: a cashier who gave away ৳5,000
+         * out of ৳500,000 and one who gave away ৳5,000 out of ৳50,000 are not
+         * doing the same thing, and the taka figure alone says they are.
+         *
+         * One decimal place, like `salesShare` below.
+         */
+        lineDiscountRate: s?.totalGrossMerchandise > 0
+          ? Math.round(((s.totalLineDiscount || 0) / s.totalGrossMerchandise) * 1000) / 10
+          : 0,
       };
     });
 
@@ -448,6 +555,9 @@ class StaffReportService {
         acc.dueCollectionCount += s.dueCollectionCount;
         acc.returnsProcessedAmount += s.returnsProcessedAmount;
         acc.returnsProcessedCount += s.returnsProcessedCount;
+        acc.totalLineDiscount += s.totalLineDiscount;
+        acc.totalInvoiceDiscount += s.totalInvoiceDiscount;
+        acc.lineDiscountedBillCount += s.lineDiscountedBillCount;
         return acc;
       },
       {
@@ -461,6 +571,9 @@ class StaffReportService {
         dueCollectionCount: 0,
         returnsProcessedAmount: 0,
         returnsProcessedCount: 0,
+        totalLineDiscount: 0,
+        totalInvoiceDiscount: 0,
+        lineDiscountedBillCount: 0,
       }
     );
     summary.staffCount = staff.length;
@@ -479,6 +592,7 @@ class StaffReportService {
       netSales: Math.round(r.netSales || 0),
       profit: Math.round(r.profit || 0),
       saleCount: r.saleCount || 0,
+      lineDiscount: Math.round(r.lineDiscount || 0),
     }));
 
     let previous = null;

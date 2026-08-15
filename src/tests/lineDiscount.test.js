@@ -490,3 +490,185 @@ describe('E. the capability is wired end to end', () => {
     expect(cart.items[0].agreedUnitPrice).toBe(90);
   });
 });
+
+/* ════════════════════════════════════════════════════════════════════════
+ * F. WHO GAVE IT AWAY — the staff report
+ * ════════════════════════════════════════════════════════════════════════
+ *
+ * REGRESSIONS. Nothing anywhere summed `items[].discount` before, so an owner
+ * who granted `sales.discount` had no way to see it being used. These fail
+ * against the old code, which reported neither figure.
+ *
+ * `Sale.aggregate` is mocked, so what is proven here is the DERIVATION and the
+ * pipeline SHAPE, not Mongo's evaluation of `$reduce` (§7.2). The shape
+ * assertion is the load-bearing half: it is what fails if someone later drops
+ * an accumulator, which would otherwise show up as a silent, permanent ৳0.
+ */
+describe('F. line discounts are attributed to the staff member who gave them', () => {
+  const reportService = require('../services/report.service');
+  const SalesReturn = require('../models/SalesReturn.model');
+  const Payment = require('../models/Payment.model');
+  const User = require('../models/User.model');
+
+  const SHOP = id().toString();
+  const RAVI = id().toString();
+  const KARIM = id().toString();
+
+  /** One row per staff member, as the per-staff `$group` would emit them. */
+  const rows = [
+    {
+      _id: RAVI,
+      totalSales: 500000, totalPaid: 500000, totalDue: 0, totalProfit: 60000,
+      saleCount: 100, avgSale: 5000, activeDays: ['2026-08-01'],
+      // ৳5,000 given away out of ৳500,000 of goods — 1%.
+      totalLineDiscount: 5000, totalInvoiceDiscount: 2000,
+      lineDiscountedBillCount: 4, totalGrossMerchandise: 500000,
+    },
+    {
+      _id: KARIM,
+      totalSales: 50000, totalPaid: 50000, totalDue: 0, totalProfit: 1000,
+      saleCount: 90, avgSale: 555, activeDays: ['2026-08-01'],
+      // The SAME ৳5,000, out of a tenth of the goods — 10%.
+      totalLineDiscount: 5000, totalInvoiceDiscount: 0,
+      lineDiscountedBillCount: 60, totalGrossMerchandise: 50000,
+    },
+  ];
+
+  let pipelines;
+
+  beforeEach(() => {
+    jest.restoreAllMocks();
+    pipelines = [];
+
+    jest.spyOn(Sale, 'aggregate').mockImplementation((pipeline) => {
+      pipelines.push(pipeline);
+      const groupId = pipeline.find((s) => s.$group)?.$group?._id;
+      // The day-by-day trend series groups by a compound _id; that is how the
+      // two Sale pipelines are told apart.
+      if (groupId && typeof groupId === 'object' && groupId.date) return Promise.resolve([]);
+      return Promise.resolve(rows);
+    });
+    jest.spyOn(SalesReturn, 'aggregate').mockResolvedValue([]);
+    jest.spyOn(Payment, 'aggregate').mockResolvedValue([]);
+    jest.spyOn(User, 'find').mockReturnValue({
+      select: () => ({
+        populate: () => ({
+          lean: () => Promise.resolve([
+            { _id: RAVI, name: 'রবি', isOwner: false, isActive: true, role: { name: 'Cashier' } },
+            { _id: KARIM, name: 'করিম', isOwner: false, isActive: true, role: { name: 'Cashier' } },
+          ]),
+        }),
+      }),
+    });
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('reports each staff member’s line discounts, apart from invoice-level ones', async () => {
+    const res = await reportService.getStaffReport(SHOP, {});
+    const ravi = res.staff.find((s) => s.staffId === RAVI);
+
+    expect(ravi.totalLineDiscount).toBe(5000);
+    // Kept separate: a shop-wide "১০% off today" is a policy, a per-line
+    // discount is one person's decision at the counter.
+    expect(ravi.totalInvoiceDiscount).toBe(2000);
+    expect(ravi.lineDiscountedBillCount).toBe(4);
+  });
+
+  /**
+   * THE POINT OF THE WHOLE REPORT. Both cashiers gave away exactly ৳5,000, so
+   * the taka figure says they are doing the same thing. They are not: one did
+   * it on four bills out of a hundred, the other on sixty out of ninety.
+   */
+  it('rates the discount against what was sold, not against the taka alone', async () => {
+    const res = await reportService.getStaffReport(SHOP, {});
+    const ravi = res.staff.find((s) => s.staffId === RAVI);
+    const karim = res.staff.find((s) => s.staffId === KARIM);
+
+    expect(ravi.totalLineDiscount).toBe(karim.totalLineDiscount);
+    expect(ravi.lineDiscountRate).toBe(1);
+    expect(karim.lineDiscountRate).toBe(10);
+  });
+
+  it('totals both figures across the shop', async () => {
+    const res = await reportService.getStaffReport(SHOP, {});
+    expect(res.summary.totalLineDiscount).toBe(10000);
+    expect(res.summary.totalInvoiceDiscount).toBe(2000);
+    expect(res.summary.lineDiscountedBillCount).toBe(64);
+  });
+
+  it('a shop that has never given one reports 0, not null and not NaN', async () => {
+    Sale.aggregate.mockImplementation((pipeline) => {
+      const groupId = pipeline.find((s) => s.$group)?.$group?._id;
+      if (groupId && typeof groupId === 'object' && groupId.date) return Promise.resolve([]);
+      // A pre-feature row: none of the new accumulators present at all.
+      return Promise.resolve([{ _id: RAVI, totalSales: 1000, saleCount: 1, activeDays: [] }]);
+    });
+
+    const res = await reportService.getStaffReport(SHOP, {});
+    expect(res.staff[0].totalLineDiscount).toBe(0);
+    expect(res.staff[0].lineDiscountRate).toBe(0);
+    expect(res.summary.totalLineDiscount).toBe(0);
+    expect(Number.isNaN(res.staff[0].lineDiscountRate)).toBe(false);
+  });
+
+  /**
+   * The shape guard. Without it, deleting an accumulator during an unrelated
+   * refactor reports ৳0 forever — a wrong number that looks exactly like a
+   * shop that has been well behaved.
+   */
+  /**
+   * The day-by-day series feeds the on-screen table AND its CSV/print export.
+   * Without `lineDiscount` on it, an owner reads "৳৫,০০০ পণ্যভিত্তিক ছাড়" in the
+   * month total, downloads the report to find out which days it happened on,
+   * and gets a spreadsheet with no such column — at which point they distrust
+   * the ৳৫,০০০ rather than the export.
+   */
+  it('carries the discount on the day-by-day series, not only in the month total', async () => {
+    Sale.aggregate.mockImplementation((pipeline) => {
+      const groupId = pipeline.find((s) => s.$group)?.$group?._id;
+      if (groupId && typeof groupId === 'object' && groupId.date) {
+        return Promise.resolve([
+          { _id: { staffId: RAVI, date: '2026-08-01' }, netSales: 9000, profit: 900, saleCount: 3, lineDiscount: 1000 },
+          // A day with no discount, and a PRE-FEATURE day with no key at all.
+          { _id: { staffId: RAVI, date: '2026-08-02' }, netSales: 4000, profit: 400, saleCount: 2, lineDiscount: 0 },
+          { _id: { staffId: RAVI, date: '2026-08-03' }, netSales: 4000, profit: 400, saleCount: 2 },
+        ]);
+      }
+      return Promise.resolve(rows);
+    });
+
+    const res = await reportService.getStaffReport(SHOP, {});
+    expect(res.trend.map((t) => t.lineDiscount)).toEqual([1000, 0, 0]);
+    expect(res.trend.every((t) => Number.isFinite(t.lineDiscount))).toBe(true);
+  });
+
+  it('the day-by-day pipeline asks for it too, so screen and CSV cannot drift', async () => {
+    await reportService.getStaffReport(SHOP, {});
+
+    const perDay = pipelines.find((p) => {
+      const gid = p.find((s) => s.$group)?.$group?._id;
+      return gid && typeof gid === 'object' && gid.date;
+    });
+    expect(perDay).toBeDefined();
+    expect(perDay.find((s) => s.$group).$group).toHaveProperty('lineDiscount');
+  });
+
+  it('the per-staff pipeline still asks Mongo for all four figures', async () => {
+    await reportService.getStaffReport(SHOP, {});
+
+    const perStaff = pipelines.find((p) => p.find((s) => s.$group)?.$group?._id === '$createdBy');
+    expect(perStaff).toBeDefined();
+
+    const group = perStaff.find((s) => s.$group).$group;
+    for (const key of [
+      'totalLineDiscount',
+      'totalInvoiceDiscount',
+      'lineDiscountedBillCount',
+      'totalGrossMerchandise',
+    ]) {
+      expect(group).toHaveProperty(key);
+    }
+  });
+});
+

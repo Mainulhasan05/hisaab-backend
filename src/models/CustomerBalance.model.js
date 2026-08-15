@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 // For `deriveDue` only — the shared due formula. Not a cycle: Customer does not
 // know this collection exists.
 const Customer = require('./Customer.model');
+const { quantizeMoney } = require('../utils/quantity.util');
 
 /**
  * Per-branch customer ledger (Phase 7).
@@ -233,14 +234,19 @@ customerBalanceSchema.statics.settleDue = async function ({ shop, customer, pref
   const applied = [];
   let remaining = amount;
 
+  // Quantized per step, like `Customer.addPayment` on the shop-wide side. An
+  // unrounded `totalDue -= take` leaves the same 1e-13 residue that keeps a
+  // settled customer on the branch বাকি list forever — `getBranchDueSummary`
+  // and the branch customer list both filter on `totalDue: { $gt: 0 }`.
   for (const row of rows) {
     if (remaining <= 0) break;
-    const take = Math.min(remaining, row.totalDue);
-    row.totalPaid += take;
-    row.totalDue -= take;
+    const take = quantizeMoney(Math.min(remaining, row.totalDue));
+    if (take <= 0) continue;
+    row.totalPaid = quantizeMoney(row.totalPaid + take);
+    row.totalDue = quantizeMoney(row.totalDue - take);
     await row.save(sessionOpt);
     applied.push({ branch: row.branch, amount: take });
-    remaining -= take;
+    remaining = quantizeMoney(remaining - take);
   }
 
   if (remaining > 0) {
@@ -305,7 +311,12 @@ customerBalanceSchema.statics.reduceOpening = async function (
     return aPref === bPref ? 0 : (aPref ? -1 : 1);
   });
 
-  const round = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+  // `quantizeMoney`, not a local `Math.round((n + Number.EPSILON) * 100) / 100`.
+  // `Number.EPSILON` is an ABSOLUTE 2.2e-16, so adding it is a no-op above ~2
+  // and the helper rounded ~0.8% of paisa-boundary values down where the rest of
+  // the codebase rounds them up (2.135 -> 2.13 against 2.14). These two figures
+  // are persisted, so that one-paisa disagreement went into the book.
+  // `quantity.util.js` explains why the nudge has to be proportional.
   let remaining = amount;
   let applied = 0;
 
@@ -317,13 +328,14 @@ customerBalanceSchema.statics.reduceOpening = async function (
     const capacity = Math.min(row.openingDue || 0, row.totalDue || 0);
     if (capacity <= 0) continue;
 
-    const take = Math.min(remaining, capacity);
-    row.openingDue = round(row.openingDue - take);
-    row.totalDue = round(row.totalDue - take);
+    const take = quantizeMoney(Math.min(remaining, capacity));
+    if (take <= 0) continue;
+    row.openingDue = quantizeMoney(row.openingDue - take);
+    row.totalDue = quantizeMoney(row.totalDue - take);
     await row.save(sessionOpt);
 
-    remaining = round(remaining - take);
-    applied = round(applied + take);
+    remaining = quantizeMoney(remaining - take);
+    applied = quantizeMoney(applied + take);
   }
 
   return applied;

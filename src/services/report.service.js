@@ -54,7 +54,7 @@ function productScope(shopId, branchId, extra = {}) {
 // third in the codebase (sale.service.js still has one). Two constants that
 // must agree and don't is how a report ends up disagreeing with the dashboard
 // about which day a sale landed on.
-const { BD_OFFSET_MS, getBangladeshTodayStr, getBangladeshDayRange } = require('../utils/bdTime.util');
+const { BD_OFFSET_MS, BD_TZ, getBangladeshTodayStr, getBangladeshDayRange } = require('../utils/bdTime.util');
 
 class ReportService {
   /**
@@ -285,7 +285,10 @@ class ReportService {
         },
         {
           $group: {
-            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+            // `timezone` is not optional here — see BD_TZ in bdTime.util.js.
+            // Without it these buckets are UTC days while the window above is a
+            // BD day, so a sale rung at 01:00 Dhaka joins yesterday's bar.
+            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: BD_TZ } },
             sales: { $sum: netSaleAmountExpr() },
             orders: { $sum: 1 },
           },
@@ -400,7 +403,12 @@ class ReportService {
         dateFormat = '%Y-%m-%d';
         break;
       case 'week':
-        dateFormat = '%Y-W%V';
+        // `%G`, not `%Y`. `%V` is the ISO-8601 week number, whose year is the
+        // ISO WEEK-year (`%G`) and not the calendar year — the two disagree at
+        // 82 of the next 100 year boundaries. Pairing `%V` with `%Y` labelled
+        // 31 Dec 2029 as "2029-W01", which sorts to the top of the year and
+        // merges with the real January week whenever a range spans both.
+        dateFormat = '%G-W%V';
         break;
       case 'month':
         dateFormat = '%Y-%m';
@@ -418,7 +426,7 @@ class ReportService {
             {
               $group: {
                 _id: {
-                  $dateToString: { format: dateFormat, date: '$createdAt' },
+                  $dateToString: { format: dateFormat, date: '$createdAt', timezone: BD_TZ },
                 },
                 totalSales: { $sum: netSaleAmountExpr() },
                 totalPaid: { $sum: '$paid' },
@@ -1270,7 +1278,7 @@ class ReportService {
         {
           $group: {
             _id: {
-              $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
+              $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: BD_TZ },
             },
             revenue: { $sum: netSaleAmountExpr() },
             profit: { $sum: '$profit' },
@@ -1291,7 +1299,10 @@ class ReportService {
         {
           $group: {
             _id: {
-              $dateToString: { format: '%Y-%m-%d', date: '$date' },
+              // Must stay in step with the sales bucket above — the P&L chart
+              // joins the two series on this key, so a UTC expense day against a
+              // BD sales day would misalign cost from revenue by six hours.
+              $dateToString: { format: '%Y-%m-%d', date: '$date', timezone: BD_TZ },
             },
             expense: { $sum: '$amount' },
           },
@@ -1447,7 +1458,7 @@ class ReportService {
               $dateToString: {
                 format: '%Y-%m-%d',
                 date: '$createdAt',
-                timezone: '+06:00',
+                timezone: BD_TZ,
               },
             },
             totalSales: { $sum: netSaleAmountExpr() },
@@ -1473,7 +1484,7 @@ class ReportService {
               $dateToString: {
                 format: '%Y-%m-%d',
                 date: '$date',
-                timezone: '+06:00',
+                timezone: BD_TZ,
               },
             },
             totalExpenses: { $sum: '$amount' },

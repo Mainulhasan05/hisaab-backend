@@ -3,8 +3,18 @@
  *
  * PLATFORM-OWNED, ADMIN-ONLY, in both directions (MEDIA_GALLERY_PLAN.md I-20).
  * No shop uploads into this collection, no shop browses it, and no shop-facing
- * route may return one of these documents. What a shop sees is the RENDERED
- * landing page, which is a public URL — never the library behind it.
+ * route may return one of these documents.
+ *
+ * ── THIS COLLECTION HAS NO CONSUMERS, AND THAT IS THE POINT ─────────────────
+ *
+ * The library is a standalone admin tool. It stores files, tracks bytes, and
+ * answers "what is using this" — nothing here knows or may learn what a
+ * consuming feature is. Consumers attach and detach through the generic
+ * reference API in `platformMedia.service` and register their own `ownerType`;
+ * see `mediaRefSchema` below.
+ *
+ * If a name from some other feature ever appears in this file, the dependency
+ * has been inverted and the fix is in that feature, not here.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * WHY THIS IS NOT `ShopMedia` WITH `shop: null`
@@ -20,8 +30,8 @@
  * platform file per hash — and the second upload of a different image that
  * happened to collide, or more realistically any upload after a hash-scheme
  * change, would not error. It would silently return the existing document, and
- * an admin would find a landing page showing the wrong photo weeks later with
- * nothing in any log to explain it.
+ * whatever pointed at it would render the wrong photo weeks later, with nothing
+ * in any log to explain it.
  *
  * ── WHO PAYS FOR THE BYTES ──────────────────────────────────────────────────
  *
@@ -29,12 +39,12 @@
  * else — allocation goes through the same `storage.service` path, and there must
  * never be a second accounting path — but against NO `Shop.storage` quota.
  *
- * That is correct rather than convenient. Under paid setup the platform authored
- * the page (LANDING_PAGE_PLAN.md D1); charging a trader's 100MB quota for photos
- * they did not upload and cannot see would produce a storage-full error on a
- * product photo they DO care about, caused by a file they have never heard of.
- * It also unlocks the real win: dedupe is platform-wide here, so one mango photo
- * serves ten mango campaigns for ten different shops and is stored once.
+ * That is correct rather than convenient. These files are uploaded by admins,
+ * for platform purposes, and a shop cannot see or manage them; charging a shop's
+ * 100MB quota for them would produce a storage-full error on a product photo the
+ * shop DOES care about, caused by a file it has never heard of. It also unlocks
+ * the real win: dedupe is platform-wide here, with no shop dimension, so one
+ * photo used in twenty places is stored exactly once.
  *
  * The accounting consequence is handled in the admin storage screen, which must
  * show platform usage as its own line — otherwise it appears as an unexplained
@@ -54,15 +64,20 @@ const MEDIA_KINDS = Object.freeze(['image', 'video']);
 const MEDIA_STATUS = Object.freeze(['staged', 'active', 'broken']);
 
 /**
- * What may hold a reference to a file.
+ * How a reference came to exist.
  *
- *   landingPage — a marked slot in `LandingPage.assets`. Attached explicitly.
- *   landingHtml — a URL found inside `LandingPage.html` by the save-time scan.
- *                 See the note on `refs` for why this second kind has to exist.
- *   poster      — a video record points at this image as its poster. Held so a
- *                 poster is never reclaimed while its video survives.
+ *   explicit — a consumer attached this file deliberately: a picker selection,
+ *              a slot assignment, a field on a document.
+ *   scanned  — a consumer found this file's URL inside content it stores, by
+ *              scanning that content on save.
+ *
+ * The distinction is generic, not specific to any one consumer: any feature that
+ * lets an author paste a URL into free-form content needs both, because a scan
+ * must be able to replace the whole scanned set for one owner without touching
+ * what that owner attached explicitly. Collapsing the two would make each pass
+ * delete the other's references.
  */
-const REF_KINDS = Object.freeze(['landingPage', 'landingHtml', 'poster']);
+const REF_ORIGINS = Object.freeze(['explicit', 'scanned']);
 
 /**
  * One thing that points at this file.
@@ -73,7 +88,7 @@ const REF_KINDS = Object.freeze(['landingPage', 'landingHtml', 'poster']);
  * delete button needs a different question answered: "WHAT is using this", by
  * name, with a link — and that cannot be reconstructed from a counter. In a
  * shop-side gallery that question is rare; in an admin library where one file is
- * deliberately shared across many campaigns it is asked every single time.
+ * deliberately shared across many owners it is asked every single time.
  *
  * This does NOT contradict the rule ShopMedia's header states. What was rejected
  * there was a second field restating the SAME fact — an `orphaned` state beside
@@ -83,11 +98,25 @@ const REF_KINDS = Object.freeze(['landingPage', 'landingHtml', 'poster']);
  * is one writer, not one field.
  */
 const mediaRefSchema = new mongoose.Schema({
-  kind: { type: String, enum: REF_KINDS, required: true },
-  // The LandingPage, or the PlatformMedia video for a `poster` ref.
-  page: { type: mongoose.Schema.Types.ObjectId, required: true },
-  // Which slot, for `landingPage` refs. Null for the other kinds.
+  /**
+   * Which KIND of thing points at this file — a collection name, effectively.
+   *
+   * A free string, NOT an enum, and that is deliberate. This library is a
+   * standalone admin feature; it must not carry a list of its consumers, or
+   * every new consumer becomes a schema change to a collection that has nothing
+   * to do with it. Valid values are validated in `platformMedia.service` against
+   * a registry consumers add themselves to — the same shape `features.util.js`
+   * uses for capabilities.
+   */
+  ownerType: { type: String, required: true, trim: true, maxlength: 40 },
+
+  /** The document of that type. */
+  ownerId: { type: mongoose.Schema.Types.ObjectId, required: true },
+
+  /** Which field or slot on the owner, when it has more than one. */
   key: { type: String, trim: true, default: null },
+
+  origin: { type: String, enum: REF_ORIGINS, default: 'explicit' },
 }, { _id: false });
 
 const platformMediaSchema = new mongoose.Schema({
@@ -173,8 +202,8 @@ const platformMediaSchema = new mongoose.Schema({
    * MANDATORY for a video, enforced in the service rather than here because a
    * poster is uploaded as a second request and the video document exists
    * between the two. Without one the browser shows a black rectangle until
-   * enough has buffered, which on the 3G connection this traffic arrives over is
-   * the entire above-the-fold experience of a page bought with ad money.
+   * enough has buffered, which on a slow connection is the whole of what a
+   * viewer sees.
    */
   posterMedia: {
     type: mongoose.Schema.Types.ObjectId,
@@ -191,9 +220,9 @@ const platformMediaSchema = new mongoose.Schema({
   /**
    * Written into the rendered `<img alt="...">`.
    *
-   * Stored on the file rather than on the landing page slot because the same
+   * Stored on the file rather than on the referencing slot because the same
    * photo means the same thing wherever it is used, and asking an author to
-   * retype it per page is how it ends up empty on every page.
+   * retype it per use is how it ends up empty everywhere.
    */
   altText: { type: String, trim: true, maxlength: 300, default: null },
 
@@ -231,11 +260,15 @@ const platformMediaSchema = new mongoose.Schema({
 platformMediaSchema.index({ folder: 1, createdAt: -1 });
 
 /**
- * The reverse lookup the I-18 reconciler runs on every landing-page save:
- * "which files does this page currently reference", so the difference against
- * the page's new HTML can be attached and detached in one pass.
+ * The reverse lookup every consumer runs when it saves: "which files does this
+ * owner currently reference", so the difference against what it now references
+ * can be attached and detached in one pass.
+ *
+ * Indexed on `ownerId` alone rather than `{ ownerType, ownerId }` — the id is an
+ * ObjectId and already selective enough that adding the type in front buys
+ * nothing, and the service filters by type on the returned rows.
  */
-platformMediaSchema.index({ 'refs.page': 1 });
+platformMediaSchema.index({ 'refs.ownerId': 1 });
 
 // The two reclamation sweeps, same shape as ShopMedia's.
 platformMediaSchema.index({ status: 1, createdAt: 1 });       // staged past 48h
@@ -253,15 +286,15 @@ platformMediaSchema.methods.allKeys = function allKeys() {
  * Is this file safe to reclaim?
  *
  * `refCount === 0` is NOT sufficient on its own, and that is the whole of I-18.
- * An admin may paste an R2 URL straight into a landing page's HTML, where no
- * attach ever happens; the save-time scan is what turns that into a
- * `landingHtml` ref. A parser can have bugs, so the sweep ALSO re-checks live
- * page references before deleting anything — this method is the cheap half of
- * that guard, not the whole of it.
+ * A consumer that stores free-form authored content can reference a file by URL
+ * alone, with no attach ever happening; such a consumer is obliged to scan its
+ * content on save and register `scanned` refs. A scanner can have bugs, so the
+ * sweep ALSO asks every registered consumer to confirm before deleting — this
+ * method is the cheap half of that guard, not the whole of it.
  *
- * The failure being prevented: a page goes live, nothing holds a reference, the
- * grace period passes, the sweep deletes the object, and a campaign currently
- * spending ad money loses its hero image with nothing reporting it.
+ * The failure being prevented: something goes live, nothing holds a reference,
+ * the grace period passes, the sweep deletes the object, and a page in
+ * production loses its image with nothing reporting it.
  */
 platformMediaSchema.methods.isReclaimable = function isReclaimable() {
   return this.refCount === 0 && this.refs.length === 0 && this.status !== 'broken';
@@ -297,4 +330,4 @@ const PlatformMedia = mongoose.model('PlatformMedia', platformMediaSchema);
 module.exports = PlatformMedia;
 module.exports.MEDIA_KINDS = MEDIA_KINDS;
 module.exports.MEDIA_STATUS = MEDIA_STATUS;
-module.exports.REF_KINDS = REF_KINDS;
+module.exports.REF_ORIGINS = REF_ORIGINS;

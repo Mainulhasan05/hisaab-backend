@@ -37,6 +37,9 @@ const {
   platformStorageSettings,
   storageState,
   formatBytes,
+  // The platform's own tenant — the admin media library.
+  platformMediaSettings,
+  platformMediaState,
 } = require('../utils/storageQuota.util');
 const logger = require('../utils/logger.util');
 
@@ -302,17 +305,34 @@ class AdminStorageService {
    * overcommit you did not know about is how a pool fills up on a Tuesday.
    */
   async getSummary() {
-    const [pool, settings, allocation] = await Promise.all([
+    const [pool, settings, allocation, platformMedia] = await Promise.all([
       storageService.getPoolSummary(),
       platformStorageSettings(),
       this._allocationTotals(),
+      platformMediaSettings(),
     ]);
 
     const allocatedBytes = (allocation.overriddenQuotaMb * MB)
       + (allocation.inheritingShops * settings.defaultQuotaMb * MB);
 
-    const overcommitPercent = pool.usableCapacityBytes > 0
-      ? (allocatedBytes / pool.usableCapacityBytes) * 100
+    /**
+     * The platform's OWN tenant — the admin media library
+     * (MEDIA_GALLERY_PLAN.md §5.3). Its bytes are in `pool.usedBytes` like
+     * everything else, but they belong to no shop, so without this they appear
+     * as an unexplained gap between "sum of shops" and "account used".
+     *
+     * More importantly, the library holds a RESERVED ceiling
+     * (`platformMediaQuotaMb`) that the shop pool may not have. Comparing shop
+     * allocation against the full usable capacity would count space the library
+     * is entitled to as available to shops, and the overcommit figure — which
+     * exists precisely because someone will rely on it — would overstate how
+     * much room is left.
+     */
+    const platformState = platformMediaState(platformMedia);
+    const shopCapacityBytes = Math.max(0, pool.usableCapacityBytes - platformState.quotaBytes);
+
+    const overcommitPercent = shopCapacityBytes > 0
+      ? (allocatedBytes / shopCapacityBytes) * 100
       : 0;
 
     return {
@@ -323,6 +343,9 @@ class AdminStorageService {
         overriddenShops: allocation.overriddenShops,
         allocatedBytes,
         defaultQuotaMb: settings.defaultQuotaMb,
+        // What is left for shops once the library's reservation is set aside.
+        // Reported so the ratio below can be checked rather than trusted.
+        shopCapacityBytes,
         overcommitPercent: Math.round(overcommitPercent * 10) / 10,
         // Thresholds live here, not in the component, so the API and the UI
         // cannot drift apart about what counts as alarming.
@@ -330,6 +353,7 @@ class AdminStorageService {
           : overcommitPercent >= 150 ? 'warn'
             : 'ok',
       },
+      platformMedia: platformState,
       media: await this._mediaHealth(),
       strategy: await storageService.getStrategy(),
     };

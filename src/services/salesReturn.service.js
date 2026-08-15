@@ -649,9 +649,9 @@ class SalesReturnService {
       // Reduce customer's totalPurchases → recalc due
       const customer = await Customer.findById(sale.customer).session(session || null);
       if (customer) {
-        customer.totalPurchases -= totalRefundAmount;
-        // Shared formula — carries the `openingDue` term. See the note at the
-        // cash-refund branch above.
+        customer.totalPurchases = quantizeMoney(customer.totalPurchases - totalRefundAmount);
+        // Shared formula — carries the `openingDue` term, and quantizes. See the
+        // note at the cash-refund branch above.
         customer.totalDue = Customer.deriveDue(customer);
         await customer.save(sessionOpt);
       }

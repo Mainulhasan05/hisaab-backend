@@ -235,24 +235,41 @@ salesReturnSchema.virtual('itemCount').get(function() {
   return this.items.reduce((sum, item) => sum + item.quantity, 0);
 });
 
-// Static: Generate return number RET-YYYYMMDD-0001
+/**
+ * Generate a return number, `RET<YYYYMMDD><seq>`.
+ *
+ * Backed by an atomic per-(shop, day) counter — see ReturnCounter.model.js for
+ * the race, the timezone bug and the 9,999-per-day overflow this replaces, and
+ * for how it seeds itself so a shop switching over mid-day continues its
+ * sequence rather than restarting at 0001.
+ *
+ * The day is the BANGLADESH calendar day, matching the sale's invoice number.
+ * It used to come off the server clock, which on a UTC host put every return
+ * made before 6am Dhaka on the previous date.
+ *
+ * `padStart(4)` is a minimum width, not a cap: past 9,999 the number simply
+ * grows to five digits and stays unique, where the old `slice(-4)` parse wrapped
+ * back to 0001 and collided.
+ */
 salesReturnSchema.statics.generateReturnNo = async function(shopId) {
-  const today = new Date();
-  const dateStr = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
-  const prefix = `RET${dateStr}`;
+  // Required here rather than at module top to keep model load order free of
+  // cycles — the same reason Purchase.generateInvoiceNo does it.
+  const ReturnCounter = require('./ReturnCounter.model');
+  const { getBangladeshTodayStr, getBangladeshDayRange } = require('../utils/bdTime.util');
 
-  const lastReturn = await this.findOne({
+  const dateStr = getBangladeshTodayStr();
+  const prefix = `RET${dateStr.replace(/-/g, '')}`;
+
+  // Only consulted the first time this shop returns anything on a given day.
+  const { startOfDay, endOfDay } = getBangladeshDayRange(dateStr);
+  const countExisting = () => this.countDocuments({
     shop: shopId,
-    returnNo: { $regex: `^${prefix}` }
-  }).sort({ returnNo: -1 });
+    createdAt: { $gte: startOfDay, $lte: endOfDay },
+  });
 
-  let sequence = 1;
-  if (lastReturn) {
-    const lastSeq = parseInt(lastReturn.returnNo.slice(-4));
-    sequence = lastSeq + 1;
-  }
+  const seq = await ReturnCounter.nextSeq(shopId, dateStr, countExisting);
 
-  return `${prefix}${String(sequence).padStart(4, '0')}`;
+  return `${prefix}${String(seq).padStart(4, '0')}`;
 };
 
 // Static: Get returns summary for date range

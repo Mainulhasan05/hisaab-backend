@@ -12,6 +12,7 @@ const { runInTransaction } = require('../utils/transaction.util');
 const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.util');
 const { resolveWholesaleFlag } = require('../utils/pricing.util');
 const { toMoney } = require('../utils/invoiceMath.util');
+const { quantizeMoney } = require('../utils/quantity.util');
 const mongoose = require('mongoose');
 
 /** Escape user input before it reaches $regex — raw input is a ReDoS vector. */
@@ -109,8 +110,19 @@ const normalizeSummary = (row) => ({
   customersWithDue: row?.customersWithDue || 0,
 });
 
-/** Two-decimal money rounding, for arithmetic on figures already validated. */
-const round2 = (n) => Math.round(((n || 0) + Number.EPSILON) * 100) / 100;
+/**
+ * Two-decimal money rounding, for arithmetic on figures already validated.
+ *
+ * Delegates to `quantizeMoney` rather than doing its own
+ * `Math.round((n + Number.EPSILON) * 100) / 100`. That form looks equivalent and
+ * is not: `Number.EPSILON` is an ABSOLUTE 2.2e-16, so adding it stops mattering
+ * above ~2 and the helper rounded ~0.8% of paisa-boundary values the other way
+ * from the rest of the codebase (2.135 -> 2.13 against 2.14). A due total that
+ * disagrees by a paisa with the invoice it came from is the drift
+ * `invoiceMath.util.js` exists to prevent. See `quantity.util.js` for why the
+ * nudge has to be proportional to the value.
+ */
+const round2 = (n) => quantizeMoney(n || 0);
 
 /** Money never travels as a string. Rejects NaN/Infinity/negative-zero noise. */
 const toAmount = (value) => {
@@ -485,8 +497,12 @@ class CustomerService {
         return { customer, adjustment: null, applied: 0 };
       }
 
-      customer.openingDue = (customer.openingDue || 0) + applied;
-      customer.totalDue = (customer.totalDue || 0) + applied;
+      // Quantized so the shop-wide rollup rounds exactly as the branch rows did
+      // in `reduceOpening` — the Σ invariant is an equality, and two sides that
+      // round differently break it by a paisa the recalc script then reports as
+      // unexplained drift forever.
+      customer.openingDue = quantizeMoney((customer.openingDue || 0) + applied);
+      customer.totalDue = quantizeMoney((customer.totalDue || 0) + applied);
       await customer.save(sessionOpt);
 
       const [adjustment] = await DueAdjustment.create([{
@@ -951,8 +967,13 @@ class CustomerService {
 
     // Update customer balance — the shop-wide rollup is maintained in both
     // modes, so the flag stays a read-path switch with nothing to migrate.
-    customer.totalPaid += amount;
-    customer.totalDue -= amount;
+    //
+    // Quantized per write, mirroring `CustomerBalance.settleDue` below and
+    // `Customer.addPayment`. Unrounded, a customer who pays their book off in
+    // instalments settles at 1e-13 rather than 0 and never leaves the বাকি list
+    // (`totalDue: { $gt: 0 }`), with nothing left to pay that could clear them.
+    customer.totalPaid = quantizeMoney(customer.totalPaid + amount);
+    customer.totalDue = quantizeMoney(customer.totalDue - amount);
     await customer.save(sessionOpt);
 
     // A due collection is not tied to an invoice, so it is allocated to the
@@ -979,7 +1000,7 @@ class CustomerService {
         name: customer.name,
       },
       changes: {
-        before: { totalDue: customer.totalDue + amount },
+        before: { totalDue: quantizeMoney(customer.totalDue + amount) },
         after: { totalDue: customer.totalDue },
       },
       req,

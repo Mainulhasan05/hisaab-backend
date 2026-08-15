@@ -69,8 +69,29 @@ describe('no destructive route is mounted on the admin surface', () => {
 
   it('the only DELETE left on /api/admin are non-destructive', () => {
     // Branch "delete" flips isActive; cache keys are derived data that rebuilds.
+    //
+    // The two /media ones are deliberate additions, and each earns its place:
+    //
+    //   DELETE /media/:id        does NOT erase anything. It detaches the file
+    //                            and stamps `orphanedAt`; the bytes go only
+    //                            after the grace period, via the reclamation
+    //                            sweep. Same shape as the branch route above —
+    //                            a state change spelled as a DELETE — and it is
+    //                            what makes "I removed the wrong file"
+    //                            recoverable for a week. Hard delete stays
+    //                            forbidden (STORAGE_HANDOFF.md §৪.৪).
+    //   DELETE /media/folders/:id erases MediaFolder documents, and that is the
+    //                            honest description. A folder is pure
+    //                            organisation — a name and a parent, no
+    //                            history, no money, no tenant data — and the
+    //                            files inside it are MOVED to the parent, never
+    //                            deleted. Soft-deleting an empty container
+    //                            would add an archived state to every listing
+    //                            query to protect nothing.
     expect(adminPaths.filter((p) => p.startsWith('DELETE')).sort()).toEqual([
       'DELETE /cache/keys/:key(*)',
+      'DELETE /media/:id',
+      'DELETE /media/folders/:id',
       'DELETE /shops/:id/branches/:branchId',
     ]);
   });

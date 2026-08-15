@@ -1,6 +1,7 @@
 const AuditLog = require('../models/AuditLog.model');
 const mongoose = require('mongoose');
 const { branchFilter, branchMatch } = require('../utils/branchScope.util');
+const { BD_TZ } = require('../utils/bdTime.util');
 
 class AuditService {
   // Get audit logs with filtering and pagination
@@ -150,7 +151,10 @@ class AuditService {
       {
         $group: {
           _id: {
-            $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
+            // BD days, like every other date bucket on the platform — an
+            // activity spike at 2am Dhaka belongs to that morning, not the
+            // evening before. See BD_TZ in bdTime.util.js.
+            $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: BD_TZ },
           },
           count: { $sum: 1 },
         },

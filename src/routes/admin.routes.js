@@ -3,8 +3,10 @@ const router = express.Router();
 const adminController = require('../controllers/admin.controller');
 const adminStorageController = require('../controllers/adminStorage.controller');
 const adminStorefrontController = require('../controllers/adminStorefront.controller');
+const adminMediaController = require('../controllers/adminMedia.controller');
 const billingController = require('../controllers/billing.controller');
 const { protect, adminOnly } = require('../middleware/auth.middleware');
+const { upload, handleUploadError } = require('../middleware/upload.middleware');
 
 // Public admin routes
 router.post('/login', adminController.login);
@@ -109,6 +111,39 @@ router.get('/storage/shops', adminStorageController.listShopStorage);
 router.get('/shops/:id/storage', adminStorageController.getShopStorage);
 router.patch('/shops/:id/storage', adminStorageController.setShopStorage);
 router.post('/shops/:id/storage/recalculate', adminStorageController.recalculateShopStorage);
+
+// ── Platform media library (admin-only gallery) ───────────────────────────
+//
+// A second tenant of the same R2 pool: files the PLATFORM owns, charged to no
+// shop and visible on no shop-facing surface (MEDIA_GALLERY_PLAN.md I-20).
+// There is deliberately no counterpart of these routes outside /api/admin.
+//
+// ORDER MATTERS. `/media/folders` and `/media/usage` are declared before
+// `/media/:id`, or Express matches the parameterised route first and every
+// folder call arrives as a lookup for a file whose id is the string "folders".
+router.get('/media/folders', adminMediaController.listFolders);
+router.post('/media/folders', adminMediaController.createFolder);
+router.patch('/media/folders/:id', adminMediaController.updateFolder);
+router.patch('/media/folders/:id/move', adminMediaController.moveFolder);
+router.delete('/media/folders/:id', adminMediaController.removeFolder);
+
+router.get('/media/usage', adminMediaController.usage);
+router.post('/media/recalculate', adminMediaController.recalculate);
+
+router.get('/media', adminMediaController.list);
+// `handleUploadError` sits between multer and the controller so an oversized
+// file or a wrong field name is a 400 that names the problem, not a bare 500.
+router.post(
+  '/media',
+  upload.single('image'),
+  handleUploadError,
+  adminMediaController.upload
+);
+router.get('/media/:id', adminMediaController.detail);
+router.patch('/media/:id', adminMediaController.update);
+// Detaches and starts the grace clock; it does not delete bytes. Hard delete is
+// forbidden platform-wide — STORAGE_HANDOFF.md §৪.৪.
+router.delete('/media/:id', adminMediaController.remove);
 
 // ── Online storefront (template catalogue + oversight) ────────────────────
 //
