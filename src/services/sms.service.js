@@ -32,6 +32,76 @@ const MIMSMS = {
   BALANCE: '/balanceCheck'
 };
 
+/* ── TransactionType is a property of the ENDPOINT, not of the message ────────
+ *
+ * Determined empirically against this account (each endpoint probed with an
+ * undeliverable number, so only the validator answered):
+ *
+ *   /SMS        accepts T, P and D
+ *   /OneToMany  accepts T only      — P and D return "Invalid TransactionType"
+ *   /DSMS       accepts D only      — T and P return "Invalid TransactionType"
+ *
+ * This code previously sent 'P' on bulk and 'T' on dynamic, so BOTH campaign
+ * endpoints were refused by the gateway on every call they ever made. Nobody
+ * noticed because `sendBatch` read only the HTTP status: MimSMS answers a
+ * refusal with HTTP 200 and the verdict in the body, so every rejected campaign
+ * was recorded `sent`, billed to the shop, and never refunded. See
+ * `readGatewayVerdict` below — that is the other half of this fix.
+ *
+ * The consequence for callers: a promotional bulk send cannot be routed as
+ * promotional, because the gateway does not offer that on /OneToMany for this
+ * account. The caller's intent is still recorded on the log; it just cannot
+ * change the wire value. Override per endpoint if the account is later
+ * provisioned differently.
+ */
+const TRANSACTION_TYPE = {
+  single: process.env.MIMSMS_TXN_TYPE_SINGLE || 'T',
+  bulk: process.env.MIMSMS_TXN_TYPE_BULK || 'T',
+  dynamic: process.env.MIMSMS_TXN_TYPE_DYNAMIC || 'D',
+};
+
+/**
+ * Did the gateway actually accept this?
+ *
+ * MimSMS returns HTTP 200 for refusals — an invalid number, a bad
+ * TransactionType and a flat-out rejection all arrive as a 200 whose body says
+ * `{ status: "Failed", responseResult: "..." }`. Treating the HTTP status as
+ * the answer is why a campaign that reached nobody reported itself sent.
+ *
+ * Unknown shapes are treated as ACCEPTED rather than refused, deliberately: a
+ * future gateway change that adds a field must not turn every successful send
+ * into a false failure. Explicit refusals are what this reads, and anything it
+ * cannot classify is logged so the silence is visible.
+ */
+function readGatewayVerdict(data) {
+  if (!data || typeof data !== 'object') {
+    return { accepted: true, reason: null };
+  }
+
+  // The simulated response from SKIP_SMS, which carries no verdict.
+  if (data.simulated) return { accepted: true, reason: null };
+
+  const status = String(data.status ?? data.Status ?? '').trim().toLowerCase();
+  const code = String(data.statusCode ?? data.StatusCode ?? '').trim();
+  const detail = data.responseResult ?? data.ResponseResult ?? data.message ?? null;
+
+  if (status === 'success' || code === '200') {
+    return { accepted: true, reason: null };
+  }
+
+  if (status === 'failed' || status === 'error' || (code && code !== '200')) {
+    return {
+      accepted: false,
+      reason: detail ? `Gateway refused: ${detail}` : `Gateway refused (status ${code || status})`,
+    };
+  }
+
+  if (status || code) {
+    logger.warn(`SMS: unrecognised gateway verdict ${JSON.stringify({ status, code })} — treating as accepted`);
+  }
+  return { accepted: true, reason: null };
+}
+
 /* ── Bulk sending shape ───────────────────────────────────────────────────────
  *
  * MimSMS takes bulk recipients as one comma-delimited string. Handing it a
@@ -169,9 +239,20 @@ class SMSService {
         Apikey: process.env.MIMSMS_API_KEY,
         MobileNumber: formattedPhone,
         SenderName: process.env.MIMSMS_SENDER_ID,
-        TransactionType: 'T',
+        TransactionType: TRANSACTION_TYPE.single,
         Message: body
       });
+
+      // Same trap as the campaign path: MimSMS refuses with HTTP 200 and the
+      // verdict in the body. Without this a receipt the gateway rejected — a
+      // dead number, an exhausted gateway float — is logged `sent` and charged
+      // to the shop, with the refund below never running.
+      const verdict = readGatewayVerdict(response.data);
+      if (!verdict.accepted) {
+        const refusal = new Error(verdict.reason);
+        refusal.gatewayResponse = response.data;
+        throw refusal;
+      }
 
       // Log SMS
       const smsLog = await SMSLog.create({
@@ -213,6 +294,9 @@ class SMSService {
         status: SMS_STATUS.FAILED,
         failedCount: 1,
         errorMessage: error.message,
+        // Present when the gateway refused rather than the request failing —
+        // it is the only record of what it objected to.
+        apiResponse: error.gatewayResponse || null,
         sentBy: userId
       });
 
@@ -388,22 +472,18 @@ class SMSService {
       };
     }
 
-    // 7. Too big for one request. `setImmediate` matches how this service
-    //    already backgrounds sale and payment receipts. It is in-process, so a
-    //    restart mid-campaign abandons the remaining batches — the log's
-    //    `progress` is what makes that visible rather than silent, and moving
-    //    to a durable queue is the next step when shops send at this scale
-    //    regularly.
-    setImmediate(() => {
-      this.runCampaign(runOptions).catch((err) =>
-        logger.error(`SMS campaign ${smsLog._id} crashed: ${err.message}`)
-      );
+    // 7. Too big for one request — hand it to the durable queue.
+    //
+    //    This used to be `setImmediate`, which ran the batches in-process after
+    //    the response. Under PM2 that is not a rare-crash risk, it is EVERY
+    //    DEPLOY: `pm2 reload` stops workers gracefully, and an in-flight
+    //    campaign dies with them, leaving the log stuck at `pending` forever
+    //    with the shop's quota already spent.
+    await this.enqueueCampaign(runOptions, {
+      logId: smsLog._id,
+      shopId,
+      reservedSegments: totalCost,
     });
-
-    logger.info(
-      `SMS campaign ${smsLog._id} queued: ${targets.length} recipients, ` +
-      `${batches.length} batches, ${totalCost} segments reserved`
-    );
 
     return {
       success: true,
@@ -566,16 +646,14 @@ class SMSService {
       };
     }
 
-    setImmediate(() => {
-      this.runCampaign(runOptions).catch((err) =>
-        logger.error(`Platform broadcast ${smsLog._id} crashed: ${err.message}`)
-      );
+    // Durable, same as a shop campaign. Nothing is reserved here, so there is
+    // no quota to unwind if the queue refuses — but the log still has to say so
+    // rather than sit at `pending` forever, which `enqueueCampaign` handles.
+    await this.enqueueCampaign(runOptions, {
+      logId: smsLog._id,
+      shopId: null,
+      reservedSegments: 0,
     });
-
-    logger.info(
-      `Platform broadcast ${smsLog._id} queued: ${targets.length} recipients, ` +
-      `${batches.length} batches, ~${totalCost} segments`
-    );
 
     return {
       success: true,
@@ -629,6 +707,140 @@ class SMSService {
     };
   }
 
+  /* ═══════════════════════════════════════════════════════════════════════════
+   * DURABLE QUEUEING
+   *
+   * Everything above builds a campaign and writes its log. This is what makes
+   * the work survive the process that created it.
+   *
+   * The rule when Redis is unavailable is REFUSE, not fall back. A campaign
+   * that quietly reverts to `setImmediate` is one that quietly dies on the next
+   * `pm2 reload` — the exact failure the queue exists to remove, reintroduced
+   * as an untested path. So the reservation is returned, the log is marked
+   * failed, and the caller is told plainly. A shopkeeper who is told "try again
+   * in a minute" is better served than one whose campaign vanishes.
+   * ═══════════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Hand a prepared campaign to the queue.
+   *
+   * @param {object} runOptions   Exactly what `runCampaign` needs.
+   * @param {object} meta         `{ logId, shopId, reservedSegments }` — used to
+   *                              unwind cleanly if the queue will not take it.
+   */
+  async enqueueCampaign(runOptions, { logId, shopId, reservedSegments = 0 } = {}) {
+    const { isQueueEnabled, getSmsQueue } = require('../config/queue.config');
+
+    const queue = isQueueEnabled() ? getSmsQueue() : null;
+
+    if (!queue) {
+      // Give the money back before anything else, then make the log say what
+      // happened. A campaign that cannot start must not leave a shop paying for
+      // it, and must not leave a document stuck at `pending` forever.
+      if (shopId && reservedSegments > 0) {
+        await SMSQuota.refund(shopId, reservedSegments).catch((err) =>
+          logger.error(`SMS campaign ${logId} refund failed: ${err.message}`)
+        );
+      }
+      await SMSLog.updateOne(
+        { _id: logId },
+        {
+          $set: {
+            status: SMS_STATUS.FAILED,
+            cost: 0,
+            errorMessage: 'Queue unavailable — Redis is not reachable',
+            'progress.completedAt': new Date(),
+          },
+        }
+      ).catch(() => {});
+
+      logger.error(`SMS campaign ${logId} refused: queue unavailable`);
+      throw new Error(
+        'Cannot start a large campaign right now — the job queue is unavailable. Please try again shortly.'
+      );
+    }
+
+    // The job carries ONLY the log id. Everything else is rehydrated from the
+    // SMSLog when the worker picks it up, for three reasons:
+    //
+    //   · size — a 5,000-recipient campaign is ~600KB of recipient data, and
+    //     putting that in Redis (on shared hosting, alongside the cache) to
+    //     describe a document that already holds it is pure duplication;
+    //   · truth — a retry reads the log as it is NOW, so it cannot act on a
+    //     stale snapshot of a campaign that has since moved on;
+    //   · resumption — `progress.batchesDone` lives on the log, which is what
+    //     lets a retry continue instead of starting over.
+    //
+    // `jobId` is the log id too, so BullMQ dedupes for free: a double-submitted
+    // campaign cannot enqueue twice, because the second add finds the id taken.
+    const job = await queue.add('run-campaign', { logId: String(logId) }, {
+      jobId: String(logId),
+    });
+
+    logger.info(
+      `SMS campaign ${logId} enqueued as job ${job.id}: ` +
+      `${runOptions.batches.length} batches, ${runOptions.totalCost} segments`
+    );
+
+    return job;
+  }
+
+  /**
+   * The queue's processor. One job = one campaign.
+   *
+   * Rebuilds the run from the log, and — crucially — RESUMES rather than
+   * restarts. BullMQ retries on failure, and a worker killed at batch 30 of 40
+   * that restarted from batch 0 would re-send to the first 3,000 recipients.
+   * Re-sending is worse than not sending: the shop pays twice and the customer
+   * reads the same message twice.
+   */
+  async processCampaignJob({ logId }) {
+    const log = await SMSLog.findById(logId).lean();
+
+    if (!log) {
+      logger.warn(`SMS campaign job for ${logId} has no log — nothing to run`);
+      return { skipped: 'no_log' };
+    }
+
+    // A worker killed after the final write but before the job was acked gets
+    // its job redelivered. Re-sending an entire finished campaign because an
+    // ack was lost is the worst outcome a retry can have.
+    if (log.progress?.completedAt) {
+      logger.warn(`SMS campaign ${logId} already complete — refusing to re-send`);
+      return { skipped: 'already_complete' };
+    }
+
+    const personalized = log.type === SMS_TYPES.DYNAMIC;
+    const targets = (log.recipients || []).map((r) => ({
+      phone: r.phone,
+      customerName: r.customerName,
+      message: r.message,
+    }));
+
+    const batches = chunk(targets, BULK.BATCH_SIZE);
+    const startBatch = Math.min(log.progress?.batchesDone || 0, batches.length);
+
+    if (startBatch > 0) {
+      logger.info(
+        `SMS campaign ${logId} resuming at batch ${startBatch + 1} of ${batches.length}`
+      );
+    }
+
+    return this.runCampaign({
+      logId: log._id,
+      shopId: log.shop || null,
+      batches,
+      sharedBody: personalized ? '' : log.message,
+      personalized,
+      totalCost: log.cost || 0,
+      startBatch,
+      // Counts carry across a resume so the final tally covers the whole
+      // campaign, not just the batches this attempt happened to run.
+      sentCount: log.sentCount || 0,
+      failedCount: log.failedCount || 0,
+    });
+  }
+
   /**
    * Push one batch at the gateway, with a single retry.
    *
@@ -644,12 +856,18 @@ class SMSService {
       return { ok: true, response: { simulated: true, count: batch.length } };
     }
 
+    // The wire value is decided by the endpoint, not by the caller's intent —
+    // see TRANSACTION_TYPE. `transactionType` is still carried through the
+    // campaign so the log records what the send was FOR, but /OneToMany and
+    // /DSMS each accept exactly one value and refuse everything else.
+    const wireType = personalized ? TRANSACTION_TYPE.dynamic : TRANSACTION_TYPE.bulk;
+
     const payload = personalized
       ? {
           UserName: process.env.MIMSMS_USERNAME,
           Apikey: process.env.MIMSMS_API_KEY,
           SenderName: process.env.MIMSMS_SENDER_ID,
-          TransactionType: transactionType,
+          TransactionType: wireType,
           MessageData: batch.map((r) => ({ MobileNumber: r.phone, Message: r.message })),
         }
       : {
@@ -657,7 +875,7 @@ class SMSService {
           Apikey: process.env.MIMSMS_API_KEY,
           MobileNumber: batch.map((r) => r.phone).join(','),
           SenderName: process.env.MIMSMS_SENDER_ID,
-          TransactionType: transactionType,
+          TransactionType: wireType,
           Message: sharedBody,
         };
 
@@ -667,7 +885,21 @@ class SMSService {
     for (let attempt = 0; attempt <= BULK.BATCH_RETRIES; attempt++) {
       try {
         const response = await smsHttp.post(url, payload);
-        return { ok: true, response: response.data };
+
+        // A 200 is not an answer. MimSMS refuses with HTTP 200 and puts the
+        // verdict in the body, so this is where a rejected batch is caught —
+        // without it the batch is marked sent, the shop is billed for messages
+        // that reached nobody, and the refund path never runs.
+        const verdict = readGatewayVerdict(response.data);
+        if (verdict.accepted) {
+          return { ok: true, response: response.data };
+        }
+
+        lastError = new Error(verdict.reason);
+        // A refusal is a verdict, not a hiccup. Retrying an "Invalid
+        // TransactionType" or an "Invalid Mobile Number" returns the identical
+        // answer a second later and only delays the batches behind it.
+        return { ok: false, error: lastError, response: response.data };
       } catch (error) {
         lastError = error;
         if (attempt < BULK.BATCH_RETRIES) {
@@ -692,16 +924,37 @@ class SMSService {
    * five-thousand-recipient campaign would mean re-serialising ~600KB fifty
    * times over.
    */
-  async runCampaign({ logId, shopId, batches, sharedBody, personalized, transactionType, totalCost }) {
-    let offset = 0;
-    let sentCount = 0;
-    let failedCount = 0;
+  async runCampaign({
+    logId,
+    shopId,
+    batches,
+    sharedBody,
+    personalized,
+    transactionType,
+    totalCost,
+    // Resumption state. A retried job restarts at the first batch that never
+    // ran, carrying forward what the previous attempt already achieved — see
+    // `processCampaignJob`. Defaulted so a first run is unaffected.
+    startBatch = 0,
+    sentCount: initialSent = 0,
+    failedCount: initialFailed = 0,
+  }) {
+    // Where in the recipient array the starting batch begins. Derived from the
+    // batches themselves rather than assumed to be `startBatch × BATCH_SIZE`,
+    // because the final batch is short and an assumed stride would write the
+    // per-recipient statuses to the wrong positions on a resume.
+    let offset = batches
+      .slice(0, startBatch)
+      .reduce((sum, batch) => sum + batch.length, 0);
+
+    let sentCount = initialSent;
+    let failedCount = initialFailed;
     let refundSegments = 0;
     let transactionId = null;
     let lastResponse = null;
     let lastError = null;
 
-    for (let index = 0; index < batches.length; index++) {
+    for (let index = startBatch; index < batches.length; index++) {
       const batch = batches[index];
       const result = await this.sendBatch(batch, { sharedBody, personalized, transactionType });
 
@@ -724,6 +977,11 @@ class SMSService {
       } else {
         failedCount += batch.length;
         lastError = failedReason;
+        // Keep the refusal body too. It is the only place the gateway says WHY,
+        // and the admin log's "Raw gateway response" panel is what an operator
+        // reads when a campaign fails — showing the last SUCCESS there while
+        // the status says failed is how a wrong diagnosis starts.
+        if (result.response) lastResponse = result.response;
         // Give back exactly what this batch was priced at, not a flat one per
         // recipient — a two-segment message to a hundred people cost two hundred.
         refundSegments += personalized
@@ -1403,3 +1661,8 @@ class SMSService {
 }
 
 module.exports = new SMSService();
+// Exported for the tests that pin the gateway contract. `readGatewayVerdict` is
+// the difference between "the campaign reached nobody" and "the campaign
+// reported itself sent", so its behaviour is pinned rather than trusted.
+module.exports.readGatewayVerdict = readGatewayVerdict;
+module.exports.TRANSACTION_TYPE = TRANSACTION_TYPE;

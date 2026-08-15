@@ -134,6 +134,31 @@ const FEATURES = Object.freeze({
      * switch this on deliberately, per shop, rather than for everyone.
      */
   },
+  landingPages: {
+    bn: 'সিজন পেজ',
+    en: 'Landing pages',
+    description:
+      'Seasonal campaign pages built BY the platform and assigned to this shop, ' +
+      'each with its own public link and expiry date. The shop does not author ' +
+      'them; it works the orders they bring in, from a separate panel. Those ' +
+      'orders never enter the customer book or the sales ledger — see ' +
+      'LANDING_PAGE_PLAN.md I-17. Off = no panel and no nav entry; the pages ' +
+      'and their orders are kept, not deleted, so the switch is reversible.',
+    /**
+     * NO PREREQUISITES, and that is deliberate.
+     *
+     * Not `storefront`: a trader who wants one campaign page must not have to
+     * configure a catalogue website first. Not `productImages` or
+     * `onlineSelling`: an offer here is a name and a price, not a `Product`.
+     *
+     * And NOT `requiresStorage`. The images live in the platform's own media
+     * library, charged to the platform (MEDIA_GALLERY_PLAN.md §2.3) — if this
+     * were storage-backed, turning a shop's storage off would cascade this
+     * feature off and take a paid, live, ad-funded campaign down for a reason
+     * that has nothing to do with it.
+     */
+    requires: [],
+  },
   combos: {
     bn: 'কম্বো অফার',
     en: 'Combo offers',

@@ -22,6 +22,7 @@ const R2Account = require('../models/R2Account.model');
 const mediaService = require('../services/media.service');
 const storageService = require('../services/storage.service');
 const platformMediaService = require('../services/platformMedia.service');
+const landingPageService = require('../services/landingPage.service');
 const productService = require('../services/product.service');
 
 const id = () => new mongoose.Types.ObjectId();
@@ -592,6 +593,11 @@ describe('storage maintenance job', () => {
   // two sweeps (MEDIA_GALLERY_PLAN.md §7). Its results ride on the same object.
   const PLATFORM_NOTHING = { ...NOTHING, protected: 0 };
 
+  // Landing page expiry rides on this timer too — bookkeeping for the admin's
+  // renewal worklist, not the mechanism that closes a page (that resolves on
+  // read). See landingPageState.util.
+  const NO_EXPIRIES = { expired: 0 };
+
   /** The six routines the cycle drives, each independently overridable. */
   const stub = ({
     released = 0,
@@ -600,6 +606,7 @@ describe('storage maintenance job', () => {
     orphaned = NOTHING,
     platformStaged = PLATFORM_NOTHING,
     platformOrphaned = PLATFORM_NOTHING,
+    landingExpired = NO_EXPIRIES,
   } = {}) => {
     const settle = (v) => (v instanceof Error ? Promise.reject(v) : Promise.resolve(v));
     jest.spyOn(storageService, 'releaseStaleReservations').mockImplementation(() => settle(released));
@@ -608,6 +615,7 @@ describe('storage maintenance job', () => {
     jest.spyOn(mediaService, 'sweepOrphanedMedia').mockImplementation(() => settle(orphaned));
     jest.spyOn(platformMediaService, 'sweepStaged').mockImplementation(() => settle(platformStaged));
     jest.spyOn(platformMediaService, 'sweepOrphaned').mockImplementation(() => settle(platformOrphaned));
+    jest.spyOn(landingPageService, 'sweepExpired').mockImplementation(() => settle(landingExpired));
   };
 
   it('runs every repair and reports what it fixed', async () => {
@@ -623,6 +631,7 @@ describe('storage maintenance job', () => {
       orphaned,
       platformStaged,
       platformOrphaned: PLATFORM_NOTHING,
+      landingExpired: NO_EXPIRIES,
     });
   });
 

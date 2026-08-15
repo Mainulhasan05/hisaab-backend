@@ -14,9 +14,24 @@ const {
   stopStorageMaintenanceJob,
 } = require('./jobs/storageMaintenance.job');
 const telegramService = require('./services/telegram.service');
+const smsService = require('./services/sms.service');
+const { createSmsWorker, closeQueue } = require('./config/queue.config');
 
 // Register all models early so Mongoose can resolve populate refs
 require('./models/Role.model');
+
+/**
+ * Landing pages announce themselves to the media library.
+ *
+ * The library keeps no list of its consumers — the dependency points one way
+ * (MEDIA_GALLERY_PLAN.md §4.3), so registration is a call the consumer makes.
+ * It runs at require time, in EVERY worker rather than only the primary,
+ * because it is not a job: without it a request served by worker 3 would find
+ * an empty "যেখানে ব্যবহৃত" list and, worse, the I-18 `confirmInUse` backstop
+ * would not run — the reclamation sweep would then delete images off a live,
+ * ad-funded page and report success.
+ */
+require('./services/landingPage.service').registerAsMediaConsumer();
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
@@ -27,6 +42,7 @@ process.on('uncaughtException', (err) => {
 
 const PORT = process.env.PORT || 5000;
 let server = null;
+let smsWorker = null;
 
 // PM2 sets NODE_APP_INSTANCE per worker in cluster mode ('0', '1', …). When it
 // is absent the process was started directly, which is a single process and so
@@ -73,6 +89,33 @@ async function runSeeders() {
   }
 }
 
+/**
+ * Say at boot whether images can be uploaded.
+ *
+ * Storage is optional, so a deploy missing `STORAGE_ENC_KEY` or holding no
+ * active R2 account starts perfectly cleanly and serves every other route. The
+ * first sign of trouble is an admin getting a 503 on an image upload, possibly
+ * days later and a long way from the deploy that caused it. One line here turns
+ * that into something visible in the startup log.
+ *
+ * Never throws: this is a diagnostic, and a diagnostic must not be the reason a
+ * server fails to boot.
+ */
+async function reportStorageReadiness() {
+  try {
+    const { uploadBlocker } = require('./utils/uploadReadiness.util');
+    const blocker = await uploadBlocker();
+
+    if (blocker) {
+      logger.warn(`Image uploads are DISABLED — ${blocker.code}: ${blocker.detail}`);
+    } else {
+      logger.info('Image uploads ready — image pipeline and R2 pool are both configured');
+    }
+  } catch (err) {
+    logger.warn(`Could not determine image upload readiness: ${err.message}`);
+  }
+}
+
 async function start() {
   // Redis init runs in parallel with Mongo — it has an in-memory fallback and
   // must not delay startup, but the HTTP listener waits for Mongo: accepting
@@ -114,6 +157,7 @@ async function start() {
   // pointless write contention on every restart.
   if (isPrimaryWorker) {
     runSeeders().catch((err) => logger.warn('Seeding error:', err.message));
+    reportStorageReadiness();
   }
 
   // ── Background jobs: primary worker only ──────────────────────────────────
@@ -147,6 +191,20 @@ async function start() {
     // process permanently shrinks a bucket's usable capacity, and the symptom
     // is "uploads started failing" with nothing in the logs. See the job file.
     startStorageMaintenanceJob();
+
+    // ── SMS campaign worker ────────────────────────────────────────────────
+    //
+    // Primary worker only, like everything else in this block — but for a
+    // different reason. The others would duplicate WORK; this one would
+    // duplicate SENDS if it ran wrong. BullMQ's job lock already guarantees one
+    // consumer per job, so N workers would be safe rather than harmful; the
+    // real constraint is the SMS gateway. `runCampaign` paces its batches to
+    // stay under MimSMS's rate limit, and four workers draining four campaigns
+    // at once would defeat that pacing from outside the process that enforces
+    // it. One consumer, one pace.
+    //
+    // Raise SMS_QUEUE_CONCURRENCY only after confirming the gateway tolerates it.
+    smsWorker = createSmsWorker(async (job) => smsService.processCampaignJob(job.data));
   } else {
     logger.info(`Worker ${process.env.NODE_APP_INSTANCE}: background jobs run on the primary worker only`);
   }
@@ -169,11 +227,20 @@ async function shutdown(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
 
-  // Force-exit fallback: never hang longer than 10s on shutdown
+  // Force-exit fallback. Must stay UNDER PM2's `kill_timeout` (12s in
+  // ecosystem.config.js) or PM2 SIGKILLs us first and this never runs.
+  //
+  // The window matters more than it used to: draining the SMS worker waits for
+  // the batch in flight, and a batch can sit on the gateway for up to
+  // SMS_HTTP_TIMEOUT_MS (10s default). At the old 10s this process was
+  // force-killed at almost exactly the moment a slow batch would have returned,
+  // losing the progress write it was about to make. 11s leaves that write a
+  // moment to land while still beating PM2's axe.
+  const SHUTDOWN_GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS) || 11000;
   const forceExit = setTimeout(() => {
-    logger.error('Forced shutdown after 10s timeout');
+    logger.error(`Forced shutdown after ${SHUTDOWN_GRACE_MS}ms timeout`);
     process.exit(code || 1);
-  }, 10000);
+  }, SHUTDOWN_GRACE_MS);
   forceExit.unref();
 
   try {
@@ -181,6 +248,26 @@ async function shutdown(code = 0) {
     stopDigestJob();
     stopStorageMaintenanceJob();
     telegramService.shutdown();
+
+    // Close the worker BEFORE the HTTP server and before Mongo.
+    //
+    // `worker.close()` waits for the batch in flight to finish and then stops
+    // taking new jobs, so a `pm2 reload` no longer destroys a running campaign:
+    // whatever it was doing completes, the log records the progress, and the
+    // job returns to the queue for the next worker to resume from
+    // `progress.batchesDone`. This is the entire reason the campaign runner
+    // moved off `setImmediate` — under PM2, a reload is a routine event, and it
+    // used to lose the campaign silently.
+    //
+    // It has to happen before `mongoose.connection.close()` or the final
+    // progress write has no connection to land on.
+    if (smsWorker) {
+      logger.info('Waiting for the in-flight SMS batch to finish…');
+      await smsWorker.close();
+      logger.info('SMS worker stopped');
+    }
+    await closeQueue();
+
     if (server) {
       await new Promise((resolve) => server.close(resolve));
       logger.info('HTTP server closed');

@@ -4,6 +4,7 @@ const adminController = require('../controllers/admin.controller');
 const adminStorageController = require('../controllers/adminStorage.controller');
 const adminStorefrontController = require('../controllers/adminStorefront.controller');
 const adminMediaController = require('../controllers/adminMedia.controller');
+const adminLandingController = require('../controllers/adminLanding.controller');
 const billingController = require('../controllers/billing.controller');
 const platformSmsController = require('../controllers/platformSms.controller');
 const { protect, adminOnly } = require('../middleware/auth.middleware');
@@ -146,6 +147,23 @@ router.patch('/media/:id', adminMediaController.update);
 // Detaches and starts the grace clock; it does not delete bytes. Hard delete is
 // forbidden platform-wide — STORAGE_HANDOFF.md §৪.৪.
 router.delete('/media/:id', adminMediaController.remove);
+
+// ── Landing pages (সিজন পেজ) ──────────────────────────────────────────────
+//
+// The platform AUTHORS these and assigns them to a shop (D1/D11), so every verb
+// is admin-only and there is no shop-facing counterpart for authoring. The shop
+// gets its own routes for working the orders, gated on `features.landingPages`.
+router.get('/landing-pages', adminLandingController.list);
+router.post('/landing-pages', adminLandingController.create);
+router.get('/landing-pages/:id', adminLandingController.detail);
+// Save REPORTS contract problems; publish REFUSES them. An author working
+// through generated HTML has to be able to save an unfinished page.
+router.patch('/landing-pages/:id', adminLandingController.save);
+router.post('/landing-pages/:id/publish', adminLandingController.publish);
+router.patch('/landing-pages/:id/schedule', adminLandingController.schedule);
+router.post('/landing-pages/:id/renew', adminLandingController.renew);
+router.patch('/landing-pages/:id/pause', adminLandingController.setPause);
+router.get('/landing-pages/:id/orders', adminLandingController.orders);
 
 // ── Online storefront (template catalogue + oversight) ────────────────────
 //

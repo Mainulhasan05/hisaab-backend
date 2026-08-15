@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const publicStorefrontController = require('../controllers/publicStorefront.controller');
 const publicOrderController = require('../controllers/publicOrder.controller');
+const publicLandingController = require('../controllers/publicLanding.controller');
 const { storefrontLimiter } = require('../middleware/rateLimiter.middleware');
 const { orderAbuseGuard, markSuspicious } = require('../middleware/orderAbuse.middleware');
 const idempotency = require('../middleware/idempotency.middleware');
@@ -213,6 +214,66 @@ router.get(
     'query'
   ),
   publicOrderController.trackOrder
+);
+
+/* ── Landing pages (সিজন পেজ) ───────────────────────────────────────────────
+ *
+ * A second public surface, on the same trust boundary as the storefront above
+ * and with the same mitigations. It is kept as its own pair of routes rather
+ * than folded into `/storefront/*` because the two are different products: no
+ * cart, no catalogue, one page with an expiry date (LANDING_PAGE_PLAN.md §1).
+ *
+ * The GET answers for an EXPIRED page too — with `canOrder: false` — because the
+ * advertisement may still be running and a dead link is worse than an honest
+ * "this offer has ended" (I-14). Only the POST refuses, with a 410.
+ */
+const landingSlugParam = Joi.object({
+  slug: Joi.string().trim().lowercase().min(3).max(48).pattern(/^[a-z0-9][a-z0-9-]*$/).required(),
+});
+
+/**
+ * The submitted form.
+ *
+ * NO price, total or delivery charge is accepted — not "ignored if present",
+ * refused. `unknown(false)` means a body carrying one is a validation failure,
+ * which `strikeOnInvalid` turns into an abuse strike: a real form never sends
+ * them, so something that does is a script probing for a client-trusted total.
+ */
+const landingOrderBody = Joi.object({
+  customerName: Joi.string().trim().min(1).max(120).required(),
+  phone: Joi.string().trim().min(10).max(20).required(),
+  address: Joi.string().trim().min(1).max(500).required(),
+  note: Joi.string().trim().max(500).allow('', null),
+  quantity: Joi.alternatives(Joi.number().integer().min(1).max(99), Joi.string().max(4)),
+  offer: Joi.alternatives(Joi.string().trim().max(40), Joi.array().items(Joi.string().trim().max(40)).max(20)),
+  zone: Joi.string().trim().max(40),
+  items: Joi.array().max(20).items(Joi.object({
+    offer: Joi.string().trim().max(40).required(),
+    quantity: Joi.alternatives(Joi.number().integer().min(1).max(99), Joi.string().max(4)),
+  })),
+  attribution: Joi.object({
+    utmSource: Joi.string().trim().max(200).allow('', null),
+    utmMedium: Joi.string().trim().max(200).allow('', null),
+    utmCampaign: Joi.string().trim().max(200).allow('', null),
+    utmContent: Joi.string().trim().max(200).allow('', null),
+    fbclid: Joi.string().trim().max(200).allow('', null),
+    referrer: Joi.string().trim().max(500).allow('', null),
+  }).unknown(false),
+}).unknown(false);
+
+router.get(
+  '/landing/:slug',
+  validate(landingSlugParam, 'params'),
+  publicLandingController.getPage
+);
+
+router.post(
+  '/landing/:slug/orders',
+  orderAbuseGuard(),
+  idempotency({ ttlSeconds: 24 * 60 * 60, lockTtlSeconds: 60 }),
+  validate(landingSlugParam, 'params'),
+  strikeOnInvalid(landingOrderBody, 'body'),
+  publicLandingController.placeOrder
 );
 
 module.exports = router;

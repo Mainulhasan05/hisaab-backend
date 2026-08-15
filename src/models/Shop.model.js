@@ -344,6 +344,20 @@ const shopSchema = new mongoose.Schema({
       type: Boolean,
       default: false
     },
+    // Seasonal campaign pages the PLATFORM builds and assigns to this shop,
+    // each with its own public link and expiry date. Independent of
+    // `storefront` on purpose: a trader who wants one campaign page must not
+    // have to configure a catalogue website first.
+    //
+    // The orders these bring in live in their own collection and never enter
+    // the customer book or the sales ledger (LANDING_PAGE_PLAN.md I-17), which
+    // is why this flag gates a whole separate panel rather than adding anything
+    // to the shop's existing screens. Off = no panel, no nav entry; the pages
+    // and their orders are kept, so the switch is reversible.
+    landingPages: {
+      type: Boolean,
+      default: false
+    },
     // Combo/offer products: a sellable bundle of other products (buy-1-get-1,
     // gift packs) whose sale deducts each component's own stock. Off = the
     // product form has no combo option, `type: 'combo'` is refused on create,

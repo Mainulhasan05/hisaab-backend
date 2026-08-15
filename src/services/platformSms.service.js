@@ -346,6 +346,12 @@ class PlatformSmsService {
       })
     );
 
+    // Queue health rides along because the composer needs it to be honest: a
+    // large send is REFUSED when the queue is down, and the operator should
+    // learn that before writing the message, not after pressing send.
+    const { getQueueStats } = require('../config/queue.config');
+    const queue = await getQueueStats().catch(() => ({ available: false, counts: null }));
+
     return {
       audiences: AUDIENCES,
       counts: Object.fromEntries(entries),
@@ -353,6 +359,7 @@ class PlatformSmsService {
       senderName: this.senderName(),
       lowQuotaThreshold: LOW_QUOTA_THRESHOLD,
       maxManualRecipients: MAX_MANUAL_RECIPIENTS,
+      queue,
     };
   }
 
