@@ -138,13 +138,17 @@ class ProductService {
     // separate per-branch stock collection to overlay any more.
     const query = branchFilter(req, { shop: shopId, isDeleted: { $ne: true } });
 
-    // Search by name or code. Input is regex-escaped; each field carries a
-    // {shop, field} compound index so the $or branches run as shop-bounded
-    // index scans instead of full document scans.
+    // Search by name, code or barcode. Input is regex-escaped; each field
+    // carries a {shop, field} compound index so the $or branches run as
+    // shop-bounded index scans instead of full document scans.
     const searchRegex = search ? escapeRegex(search.trim()) : null;
     const searchOr = searchRegex ? [
       { name: { $regex: searchRegex, $options: 'i' } },
       { code: { $regex: searchRegex, $options: 'i' } },
+      // Top-level barcode too — the POS search box promises "নাম বা বারকোড",
+      // and a scanner typing into it must find the product the same way the
+      // dedicated /products/barcode/:code lookup would.
+      { barcode: { $regex: searchRegex, $options: 'i' } },
       { 'variants.sku': { $regex: searchRegex, $options: 'i' } },
       { 'variants.barcode': { $regex: searchRegex, $options: 'i' } },
     ] : null;
