@@ -1,5 +1,18 @@
 /**
- * Sanitise admin-authored landing page HTML.
+ * Sanitise admin-authored landing page HTML for INLINE rendering.
+ *
+ * ── NOT ON THE PUBLIC PATH ANY MORE ─────────────────────────────────────────
+ *
+ * `/p/<slug>` now serves the pasted document from its own URL and frames it with
+ * `sandbox` and no `allow-same-origin`, so the document runs in an opaque origin
+ * and its scripts are kept — see `landingDocument.util` for why that is both
+ * safe for us and necessary for the feature to work at all. The save path calls
+ * `prepareLandingDocument`, not this.
+ *
+ * This module stays because the policy it encodes is the right one for anything
+ * that renders landing HTML *inside one of our own documents*, and because that
+ * is an easy mistake to make later. If you are about to `dangerouslySetInnerHTML`
+ * a landing page, this — not the stored bytes — is what makes it safe.
  *
  * This is the largest new attack surface the platform has ever taken on: raw
  * HTML, possibly written by a language model, served from `hisaab.bd` to

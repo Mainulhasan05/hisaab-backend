@@ -89,7 +89,7 @@ const PREVIEW_LIMIT = 80;
  * hierarchy that matters is "which group am I inside" and "am I inside the
  * form", both of which a stack answers.
  *
- * @param {string} html  ALREADY SANITISED — see landingSanitize.util
+ * @param {string} html  as stored — a whole document or a fragment, either way
  * @returns {{
  *   manifest: Array,
  *   form: { present: boolean, fields: Object, roles: Object },

@@ -16,9 +16,11 @@
  * THE SAVE PIPELINE, IN ORDER, AND WHY
  * ─────────────────────────────────────────────────────────────────────────────
  *
- *   1. sanitise   — the stored bytes are safe, so no render path has to be
- *                   (I-15). Doing this last would mean the document is dangerous
- *                   between steps.
+ *   1. prepare    — the document is stored as pasted, minus `<base>`, and the
+ *                   hosts it reaches for are inventoried. It is NOT stripped of
+ *                   scripts: the public render path frames it in an opaque
+ *                   origin, which is what makes that safe. See
+ *                   `landingDocument.util` for the whole argument.
  *   2. parse      — derive the manifest the editor renders, and collect every
  *                   media URL the document points at.
  *   3. sync refs  — I-18. An admin can paste an R2 URL where no picker ever ran;
@@ -36,7 +38,7 @@ const LandingOrder = require('../models/LandingOrder.model');
 const R2Account = require('../models/R2Account.model');
 const PlatformMedia = require('../models/PlatformMedia.model');
 const platformMediaService = require('./platformMedia.service');
-const { sanitizeLandingHtml } = require('../utils/landingSanitize.util');
+const { prepareLandingDocument, describeExternalHosts } = require('../utils/landingDocument.util');
 const { parseContract, validateContract, hasBlockingIssues } = require('../utils/landingContract.util');
 const { resolveLandingPage, STATES } = require('../utils/landingPageState.util');
 const { endOfBangladeshDay } = require('../utils/bdTime.util');
@@ -261,7 +263,7 @@ class LandingPageService {
 
     if (html !== undefined) {
       const ownHosts = await this._ownHosts();
-      const result = sanitizeLandingHtml(html, { ownHosts });
+      const result = prepareLandingDocument(html, { ownHosts });
       sanitizeNotes = result.notes;
 
       // Keep the previous revision before overwriting. Not a publish workflow —
@@ -334,6 +336,42 @@ class LandingPageService {
         // up pressing publish a second time to see whether it took.
         messageBn: 'পেজ চালু করার আগে "মেয়াদ" ট্যাবে মেয়াদ শেষের তারিখ দিন',
       });
+    }
+
+    /**
+     * The document's off-origin hosts, as warnings — never as a refusal.
+     *
+     * A pasted design legitimately loads Tailwind, a font, an embedded video.
+     * Those hosts are now KEPT and executed inside the sandboxed frame, so the
+     * admin's only defence against an exfiltration snippet riding along in
+     * generated HTML is seeing the list before they publish. A host they do not
+     * recognise is the signal; refusing the page over `cdn.tailwindcss.com`
+     * would train them to ignore it.
+     */
+    const hosts = describeExternalHosts(page.html || '');
+    const warn = (code, en, bn) => issues.push({ severity: 'warn', code, message: en, messageBn: bn });
+
+    if (hosts.scripts.length) {
+      warn('EXTERNAL_SCRIPTS',
+        `This page runs code from: ${hosts.scripts.join(', ')}`,
+        `পেজটি এই সার্ভারগুলো থেকে কোড চালাবে: ${hosts.scripts.join(', ')}`);
+    }
+    if (hosts.styles.length) {
+      warn('EXTERNAL_STYLES',
+        `Stylesheets load from: ${hosts.styles.join(', ')}`,
+        `ডিজাইন আসছে: ${hosts.styles.join(', ')}`);
+    }
+    if (hosts.frames.length) {
+      warn('EXTERNAL_FRAMES',
+        `Embedded frames from: ${hosts.frames.join(', ')}`,
+        `এমবেড করা ফ্রেম: ${hosts.frames.join(', ')}`);
+    }
+    if (hosts.images.length) {
+      // Not about safety — about the day that other server goes down and takes
+      // the hero image of an ad-funded page with it.
+      warn('EXTERNAL_IMAGES',
+        `Images load from someone else's server: ${hosts.images.join(', ')}`,
+        `ছবি আসছে অন্যের সার্ভার থেকে: ${hosts.images.join(', ')} — মিডিয়া লাইব্রেরিতে তুলে নিন`);
     }
 
     return issues;

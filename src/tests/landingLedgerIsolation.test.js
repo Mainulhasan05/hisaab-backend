@@ -39,6 +39,7 @@ const LANDING_FILES = [
   'utils/landingPageState.util.js',
   'utils/landingContract.util.js',
   'utils/landingSanitize.util.js',
+  'utils/landingDocument.util.js',
 ];
 
 /**
