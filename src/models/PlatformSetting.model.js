@@ -98,6 +98,32 @@ const platformSettingSchema = new mongoose.Schema({
   // R2Account so allocation never has to write to two collections.
   storageRoundRobinCursor: { type: Number, default: 0 },
 
+  // ── Platform media library ────────────────────────────────────────────────
+  // The admin-only gallery behind landing page authoring. See
+  // MEDIA_GALLERY_PLAN.md §5 and §6.3. These bytes belong to no shop, so
+  // `defaultStorageQuotaMb` does not bound them and without a ceiling here the
+  // pool fills up without anyone having decided that it should.
+
+  /**
+   * The whole platform library's allowance, across every folder.
+   *
+   * A placeholder, honestly: the right number is a function of how many
+   * campaigns run at once and how heavy a page is, which is measurable after the
+   * first three and guesswork before them (MEDIA_GALLERY_PLAN.md §12.2). It is
+   * here rather than in code so raising it is a settings change, not a deploy.
+   */
+  platformMediaQuotaMb: { type: Number, default: 2048, min: 0 },
+
+  /**
+   * Per-video size cap. A PRODUCT decision, not a technical one.
+   *
+   * 20MB on a 3G phone is roughly a 40-second wait before anything plays. Past
+   * that it is not a slow landing page, it is a landing page that does not
+   * convert — bought with ad money. There is no transcoding on this stack
+   * (MEDIA_GALLERY_PLAN.md §6.1), so the cap is the only lever.
+   */
+  platformVideoMaxMb: { type: Number, default: 20, min: 1 },
+
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },
 }, {
   timestamps: true,

@@ -31,6 +31,12 @@ module.exports = {
   // One uploaded image. Carries the dedupe hash, the refCount that makes
   // reclamation possible, and the account+key that make URLs rebuildable.
   ShopMedia: require('./ShopMedia.model'),
+  // The platform's OWN media library — admin-only, never shop-facing, charged to
+  // no shop's quota. Backs landing page authoring; see MEDIA_GALLERY_PLAN.md
+  // I-20. Registered here or `sync-indexes` never ships the unique platform-wide
+  // dedupe index or the `refs.page` lookup the I-18 reconciler runs.
+  MediaFolder: require('./MediaFolder.model'),
+  PlatformMedia: require('./PlatformMedia.model'),
   // The online storefront. `StorefrontTemplate` is the platform-owned catalogue
   // of designs; `Storefront` is one shop's site, granted a subset of them.
   // Neither is read by any pre-existing query — see ECOMMERCE_PLAN.md I-8.
