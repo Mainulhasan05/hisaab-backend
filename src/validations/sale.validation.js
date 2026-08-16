@@ -176,6 +176,29 @@ const createSale = Joi.object({
   advancePaid: money,
   courierName: Joi.string().trim().max(100).allow('', null),
   shippingAddress: Joi.string().trim().max(500).allow('', null),
+
+  /**
+   * The day this sale actually happened, when it is not today.
+   *
+   * MUST be listed here or `stripUnknown` deletes it before `createSale` ever
+   * sees it — see the trap documented at the top of this file — and the owner
+   * would get today's invoice with no error anywhere.
+   *
+   * Bounds are NOT enforced here. Whether the caller may backdate at all, how
+   * far back a date may reach and what a bare "YYYY-MM-DD" means in Bangladesh
+   * time are all decided by `utils/saleDate.util.resolveSaleDate`, which is the
+   * one place that knows. Joi only checks the SHAPE — a date, or nothing — so
+   * the two cannot disagree about the policy.
+   */
+  saleDate: Joi.alternatives()
+    .try(
+      Joi.string().trim().pattern(/^\d{4}-\d{2}-\d{2}$/),
+      Joi.date().iso()
+    )
+    .allow('', null)
+    .messages({
+      'alternatives.match': 'বিক্রির তারিখ ঠিকভাবে দিন',
+    }),
 });
 
 module.exports = {

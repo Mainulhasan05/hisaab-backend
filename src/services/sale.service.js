@@ -34,6 +34,7 @@ const {
 } = require('../utils/invoiceMath.util');
 const { priceTierFor, sellingPriceFor, hasWholesalePrice } = require('../utils/pricing.util');
 const { resolveLineRate } = require('../utils/lineDiscount.util');
+const { resolveSaleDate } = require('../utils/saleDate.util');
 const { deductBatches, restoreBatches, batchWriteOp } = require('../utils/batch.util');
 const { hasFeature } = require('../utils/features.util');
 const { isCombo, findComponentVariant, isChooseSlot } = require('../utils/combo.util');
@@ -44,6 +45,8 @@ const { isCombo, findComponentVariant, isChooseSlot } = require('../utils/combo.
 const {
   getBangladeshTodayStr,
   getBangladeshTodayRange: bdTodayRange,
+  getBangladeshDayRange,
+  toBangladeshDateStr,
 } = require('../utils/bdTime.util');
 
 function getBangladeshTodayRange() {
@@ -82,8 +85,19 @@ class SaleService {
   //   - the sequence is per BRANCH, matching the prefix. It used to be
   //     shop-wide while the prefix was branch-specific, which coupled the
   //     branches' numbering to each other.
-  async generateInvoiceNumber(shopId, branchCode = null, branchId = null) {
-    const { startOfDay, endOfDay, dateStr } = getBangladeshTodayRange();
+  //
+  // `at` is the instant the sale is dated to. Omitted = now, which is every
+  // ordinary checkout. An owner backdating an invoice passes the earlier
+  // instant, and the number then comes from THAT day's series — a sale dated
+  // the 10th reading `INV-MAIN-20260816-0004` would be a number that contradicts
+  // the date printed beside it on the same piece of paper. The counter is keyed
+  // on (shop, branch, day), so an older day simply continues where it left off;
+  // and because it seeds itself from the sales already recorded on that day, a
+  // day that predates the counter entirely resumes rather than restarting at
+  // 0001.
+  async generateInvoiceNumber(shopId, branchCode = null, branchId = null, at = null) {
+    const dateStr = at ? toBangladeshDateStr(at) : getBangladeshTodayStr();
+    const { startOfDay, endOfDay } = getBangladeshDayRange(dateStr);
     // Date prefix from Bangladesh local date
     const datePrefix = dateStr.replace(/-/g, '');
 
@@ -330,9 +344,33 @@ class SaleService {
       deliveryCharge = 0,
       advancePaid = 0,
       courierName,
-      shippingAddress
+      shippingAddress,
+      saleDate: rawSaleDate
     } = saleData;
     const customerId = rawCustomerId || rawCustomer;
+
+    /**
+     * An owner may say this invoice happened on an earlier day.
+     *
+     * `null` on every ordinary checkout. When it is set, the sale lands in that
+     * day EVERYWHERE — its invoice number, its stock movements, its place in the
+     * reports and the drawer — because all of them key off `createdAt`. See
+     * utils/saleDate.util.js for why that is the model and what it costs.
+     *
+     * Resolved here, before anything is written, so a refusal costs nothing:
+     * the whole body is inside `runInTransaction` and a throw rolls back, but a
+     * gate that runs early never has anything to roll back.
+     */
+    const backdatedAt = resolveSaleDate({
+      raw: rawSaleDate,
+      req,
+      shop: req?.shop,
+    });
+    // The wall-clock moment this invoice was actually typed. Kept apart from
+    // `backdatedAt` because once `createdAt` moves, the Sale itself no longer
+    // records it — only the audit entry below does.
+    const enteredAt = new Date();
+    const occurredAt = backdatedAt || enteredAt;
 
     // --- Split Payment Support ---
     // If payments[] array is provided, calculate paid and primary paymentMethod from it
@@ -1146,6 +1184,21 @@ class SaleService {
 
     // --- BATCH: Insert all stock transactions in one call ---
     if (stockTransactions.length > 0) {
+      /**
+       * A backdated sale moved its goods on the backdated day.
+       *
+       * Stamped here rather than at each of the three `stockTransactions.push`
+       * sites (plain line, variant line, combo component) — one place to be
+       * right, and a fourth push added later inherits it for free instead of
+       * quietly landing on today.
+       *
+       * If this were left as now, the stock ledger would say the rice left the
+       * shelf on Saturday while the invoice that sold it says Thursday, and the
+       * two would never reconcile for the day either of them names.
+       */
+      if (backdatedAt) {
+        for (const txn of stockTransactions) txn.createdAt = backdatedAt;
+      }
       await StockTransaction.insertMany(stockTransactions, sessionOpt);
     }
 
@@ -1238,7 +1291,7 @@ class SaleService {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         const branchCode = req ? getBranchCode(req) : null;
-        const invoiceNo = await this.generateInvoiceNumber(shopId, branchCode, branchId);
+        const invoiceNo = await this.generateInvoiceNumber(shopId, branchCode, branchId, backdatedAt);
         const [newSale] = await Sale.create([{
           shop: shopId,
           branch: branchId,
@@ -1278,6 +1331,20 @@ class SaleService {
           courierName,
           shippingAddress,
           createdBy: userId,
+          /**
+           * Set ONLY when the owner backdated the invoice; `undefined` leaves
+           * Mongoose's `timestamps` to stamp now, exactly as before.
+           *
+           * Mongoose does not overwrite a `createdAt` that the document already
+           * carries, which is what makes this work at all — and is also why it
+           * must be `undefined` rather than `null` in the ordinary case, since
+           * a null would be "already set" and defeat the timestamp.
+           *
+           * `updatedAt` is deliberately left alone. It is the record's own
+           * modification time, not the sale's, and pinning it to the past would
+           * make a backdated invoice look like it had never been touched.
+           */
+          ...(backdatedAt ? { createdAt: backdatedAt } : {}),
         }], sessionOpt);
         sale = newSale;
         break; // Success — exit retry loop
@@ -1292,12 +1359,23 @@ class SaleService {
 
     // Update customer statistics if customer exists
     if (customer) {
-      const purchasedAt = new Date();
+      const purchasedAt = occurredAt;
       customer.totalPurchases += total;
       customer.totalPaid += paid;
       customer.totalDue += due;
       customer.purchaseCount += 1;
-      customer.lastPurchase = purchasedAt;
+      /**
+       * "Last purchase" only ever moves FORWARD.
+       *
+       * The money totals above are running sums and are correct whichever day
+       * the sale is dated to. This one is not: entering last Thursday's sale on
+       * Saturday, for a customer who also bought on Friday, would otherwise
+       * rewrite their last purchase to Thursday — and every "not seen for N
+       * days" list and dormant-customer follow-up reads this field.
+       */
+      if (!customer.lastPurchase || purchasedAt > customer.lastPurchase) {
+        customer.lastPurchase = purchasedAt;
+      }
       await customer.save(sessionOpt);
 
       // Same arithmetic, split per branch (Phase 7). Written whatever
@@ -1391,6 +1469,21 @@ class SaleService {
           itemCount: processedItems.length,
           customer: customer?._id || null,
           customerName: finalCustomerName || null,
+          /**
+           * The one place the true entry time survives a backdate.
+           *
+           * `Sale.createdAt` has been moved to the day the owner named, so the
+           * sale itself can no longer answer "when was this actually typed" —
+           * and that is the question support and the owner ask first when a
+           * closed day's total changes. Both instants are recorded here, and
+           * only here, so the answer exists.
+           *
+           * Absent on every ordinary sale, where `createdAt` already is the
+           * entry time and a second copy would be noise.
+           */
+          ...(backdatedAt
+            ? { backdatedTo: backdatedAt, enteredAt }
+            : {}),
         },
       },
     }).catch((err) => logger.error(`Audit log (sale_create) failed: ${err.message}`));
