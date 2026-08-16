@@ -81,6 +81,13 @@ const supplierBalanceSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  // This branch's share of the pre-software debt. `totalDue` includes it, and
+  // Σ across branches is `Supplier.openingDue` — the same invariant the money
+  // columns keep. See Supplier.model.js for the formula.
+  openingDue: {
+    type: Number,
+    default: 0
+  },
   // Number of purchases, mirroring `Supplier.totalPurchases`.
   purchaseCount: {
     type: Number,
@@ -113,12 +120,15 @@ supplierBalanceSchema.index({ shop: 1, branch: 1, totalDue: -1 });
  * @param {number} [delta.amount]  added to totalAmount
  * @param {number} [delta.paid]    added to totalPaid
  * @param {number} [delta.due]     added to totalDue
+ * @param {number} [delta.opening] added to openingDue (pass `due` alongside —
+ *                                 opening debt is due, and moving one without
+ *                                 the other is how the two rollups drift)
  * @param {number} [delta.count]   added to purchaseCount
  * @param {Date}   [delta.lastPurchase]
  * @param {Object|null} session
  */
 supplierBalanceSchema.statics.applyDelta = async function (delta, session = null) {
-  const { shop, supplier, branch, amount = 0, paid = 0, due = 0, count = 0, lastPurchase } = delta;
+  const { shop, supplier, branch, amount = 0, paid = 0, due = 0, opening = 0, count = 0, lastPurchase } = delta;
 
   if (!shop || !supplier || !branch) return null;
 
@@ -126,6 +136,7 @@ supplierBalanceSchema.statics.applyDelta = async function (delta, session = null
   if (amount) inc.totalAmount = amount;
   if (paid) inc.totalPaid = paid;
   if (due) inc.totalDue = due;
+  if (opening) inc.openingDue = opening;
   if (count) inc.purchaseCount = count;
 
   const update = {};
@@ -144,11 +155,19 @@ supplierBalanceSchema.statics.applyDelta = async function (delta, session = null
 };
 
 /**
- * Re-derive `totalDue` from amount minus paid, clamped at zero.
+ * Re-derive `totalDue` from amount plus opening minus paid, clamped at zero.
  *
  * Used only where `Supplier` does the same clamped recompute rather than a
  * plain `$inc` — the purchase-cancel path. Mirroring the clamp is what keeps
  * the Σ invariant true on an over-paid supplier.
+ *
+ * The `openingDue` term is load-bearing and easy to drop, exactly as it is on
+ * `CustomerBalance.recomputeDue`: `Supplier.totalDue` is only ever `$inc`-ed
+ * (cancel subtracts the purchase's own due and nothing else), so leaving it out
+ * here would silently wipe a shop's carried-over payable from the branch book
+ * the first time any purchase from that supplier was cancelled — while the
+ * shop-wide rollup kept it. That is the drift `recalc-supplier-balances.js`
+ * would then report forever with nothing to explain it.
  */
 supplierBalanceSchema.statics.recomputeDue = async function ({ shop, supplier, branch }, session = null) {
   if (!shop || !supplier || !branch) return null;
@@ -157,7 +176,7 @@ supplierBalanceSchema.statics.recomputeDue = async function ({ shop, supplier, b
   const row = await this.findOne({ shop, supplier, branch }, null, sessionOpt);
   if (!row) return null;
 
-  row.totalDue = Math.max(0, (row.totalAmount || 0) - (row.totalPaid || 0));
+  row.totalDue = Math.max(0, (row.totalAmount || 0) + (row.openingDue || 0) - (row.totalPaid || 0));
   await row.save(sessionOpt);
   return row;
 };
@@ -169,7 +188,7 @@ supplierBalanceSchema.statics.getBalance = async function ({ shop, supplier, bra
   const row = await this.findOne({ shop, supplier, branch }).lean();
   return row || {
     shop, supplier, branch,
-    totalAmount: 0, totalPaid: 0, totalDue: 0, purchaseCount: 0, lastPurchase: null,
+    totalAmount: 0, totalPaid: 0, totalDue: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null,
   };
 };
 
@@ -202,6 +221,11 @@ supplierBalanceSchema.statics.overlayBranchFigures = async function (suppliers, 
       totalAmount: row?.totalAmount || 0,
       totalPaid: row?.totalPaid || 0,
       totalDue: row?.totalDue || 0,
+      // Overlaid like every other money column. Left out, the edit form would
+      // show the shop-wide opening beside this branch's due and an owner
+      // correcting it would restate the wrong book — the bug
+      // `customer.service.setOpeningDue` carries a whole comment about.
+      openingDue: row?.openingDue || 0,
       totalPurchases: row?.purchaseCount || 0,
       lastPurchase: row?.lastPurchase || null,
       // Kept so a screen can say "৳X এই শাখায়, সব শাখা মিলে ৳Y" instead of

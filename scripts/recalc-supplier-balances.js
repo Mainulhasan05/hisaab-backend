@@ -15,21 +15,28 @@
  *
  *        Σ SupplierBalance.totalDue  ===  Supplier.totalDue      (per supplier)
  *
- * The rebuild derives every figure from source documents — Purchase and
- * Payment — never from the rollup it is checking, so it is a genuine second
- * opinion rather than a copy.
+ * The rebuild derives every figure from source documents — Purchase, Payment
+ * and SupplierDueAdjustment — never from the rollup it is checking, so it is a
+ * genuine second opinion rather than a copy.
  *
  * WHAT COUNTS
  * -----------
  *   totalAmount   = Σ purchase.totalAmount        (non-cancelled)
  *   totalPaid     = Σ purchase.paid  +  Σ payments of type 'purchase_payment'
- *   totalDue      = max(0, totalAmount − totalPaid)
+ *   openingDue    = Σ supplierdueadjustments.amount
+ *   totalDue      = max(0, totalAmount + openingDue − totalPaid)
  *   purchaseCount = number of non-cancelled purchases
  *
  * `purchase.paid` already includes anything settled at the counter. Later
  * settlements are separate `Payment` rows — which is exactly the pair the cash
  * register also has to add together, and the reason supplier payments were
  * invisible to it before.
+ *
+ * `openingDue` is the payable a shop carried in from its paper খাতা. It has no
+ * purchase behind it, so it lives in its own immutable collection — see
+ * models/SupplierDueAdjustment.model.js. Omitting the term here would make this
+ * script report every shop that onboarded old supplier debt as drifted, and
+ * with --apply it would WRITE that drift into the book.
  *
  * SAFETY
  * ------
@@ -91,13 +98,21 @@ async function rebuildShop(db, shopId) {
     },
   ]).toArray();
 
+  // Pre-software payables. These carry their own branch and have no purchase
+  // behind them, so they are summed straight from the ledger rows rather than
+  // joined through anything.
+  const openings = await db.collection('supplierdueadjustments').aggregate([
+    { $match: { shop: shopId } },
+    { $group: { _id: { supplier: '$supplier', branch: '$branch' }, opening: { $sum: '$amount' } } },
+  ]).toArray();
+
   const rows = new Map();
   const slot = (supplier, branch) => {
     const key = `${supplier}|${branch}`;
     if (!rows.has(key)) {
       rows.set(key, {
         shop: shopId, supplier, branch,
-        totalAmount: 0, totalPaid: 0, totalDue: 0, purchaseCount: 0, lastPurchase: null,
+        totalAmount: 0, totalPaid: 0, totalDue: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null,
       });
     }
     return rows.get(key);
@@ -117,10 +132,18 @@ async function rebuildShop(db, shopId) {
     slot(s._id.supplier, s._id.branch).totalPaid += s.paid || 0;
   }
 
+  for (const o of openings) {
+    // Same skip as purchases: a null branch is a single-branch shop's row and
+    // has no per-branch half to rebuild.
+    if (!o._id.branch || !o._id.supplier) continue;
+    slot(o._id.supplier, o._id.branch).openingDue += o.opening || 0;
+  }
+
   for (const row of rows.values()) {
     row.totalAmount = round(row.totalAmount);
     row.totalPaid = round(row.totalPaid);
-    row.totalDue = round(Math.max(0, row.totalAmount - row.totalPaid));
+    row.openingDue = round(row.openingDue);
+    row.totalDue = round(Math.max(0, row.totalAmount + row.openingDue - row.totalPaid));
   }
 
   return [...rows.values()];
@@ -159,15 +182,17 @@ async function main() {
 
     console.log(`  rebuilt ${rebuilt.length} (supplier, branch) rows; ${existing.length} currently stored`);
 
-    // --- the invariant, per supplier ---
+    // --- the invariants, per supplier ---
     const dueBySupplier = new Map();
+    const openingBySupplier = new Map();
     for (const row of rebuilt) {
       const k = String(row.supplier);
       dueBySupplier.set(k, round((dueBySupplier.get(k) || 0) + row.totalDue));
+      openingBySupplier.set(k, round((openingBySupplier.get(k) || 0) + row.openingDue));
     }
 
     const suppliers = await db.collection('suppliers')
-      .find({ shop: shop._id }).project({ name: 1, totalDue: 1 }).toArray();
+      .find({ shop: shop._id }).project({ name: 1, totalDue: 1, openingDue: 1 }).toArray();
 
     for (const supplier of suppliers) {
       const branchSum = dueBySupplier.get(String(supplier._id)) || 0;
@@ -177,6 +202,21 @@ async function main() {
         if (mismatches <= 20) {
           console.log(
             `  MISMATCH ${supplier.name}: branches sum to ৳${branchSum}, Supplier.totalDue is ৳${shopWide}`
+          );
+        }
+      }
+
+      // Checked on its own rather than folded into the due comparison above.
+      // The two can offset — an opening due lost from one branch and a payment
+      // miscounted on another net out in `totalDue` — and an invariant that
+      // only holds in aggregate hides exactly the write path that broke.
+      const openingSum = openingBySupplier.get(String(supplier._id)) || 0;
+      const openingShopWide = round(supplier.openingDue || 0);
+      if (Math.abs(openingSum - openingShopWide) > 0.01) {
+        mismatches++;
+        if (mismatches <= 20) {
+          console.log(
+            `  MISMATCH ${supplier.name}: branch openingDue sums to ৳${openingSum}, Supplier.openingDue is ৳${openingShopWide}`
           );
         }
       }
@@ -192,6 +232,7 @@ async function main() {
         Math.abs((current.totalAmount || 0) - row.totalAmount) > 0.01 ||
         Math.abs((current.totalPaid || 0) - row.totalPaid) > 0.01 ||
         Math.abs((current.totalDue || 0) - row.totalDue) > 0.01 ||
+        Math.abs((current.openingDue || 0) - row.openingDue) > 0.01 ||
         (current.purchaseCount || 0) !== row.purchaseCount;
 
       if (differs) {
@@ -203,6 +244,7 @@ async function main() {
                 totalAmount: row.totalAmount,
                 totalPaid: row.totalPaid,
                 totalDue: row.totalDue,
+                openingDue: row.openingDue,
                 purchaseCount: row.purchaseCount,
                 lastPurchase: row.lastPurchase,
                 updatedAt: new Date(),
@@ -220,11 +262,17 @@ async function main() {
     // that branch with no money attached.
     for (const [key, row] of existingByKey) {
       if (!rebuilt.some((r) => `${r.supplier}|${r.branch}` === key)) {
-        if ((row.totalAmount || 0) === 0 && (row.totalPaid || 0) === 0 && (row.totalDue || 0) === 0) continue;
+        if ((row.totalAmount || 0) === 0 && (row.totalPaid || 0) === 0 &&
+            (row.totalDue || 0) === 0 && (row.openingDue || 0) === 0) continue;
         ops.push({
           updateOne: {
             filter: { _id: row._id },
-            update: { $set: { totalAmount: 0, totalPaid: 0, totalDue: 0, purchaseCount: 0, updatedAt: new Date() } },
+            update: {
+              $set: {
+                totalAmount: 0, totalPaid: 0, totalDue: 0, openingDue: 0,
+                purchaseCount: 0, updatedAt: new Date(),
+              },
+            },
           },
         });
       }

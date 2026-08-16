@@ -24,7 +24,9 @@ exports.getSupplier = asyncHandler(async (req, res) => {
 
 // Create supplier
 exports.createSupplier = asyncHandler(async (req, res) => {
-  const supplier = await supplierService.createSupplier(req.shop._id, req.user._id, req.body);
+  // `req` is passed on so the service can resolve the branch to write the
+  // opening due into and enforce the owner-only gate on that one field.
+  const supplier = await supplierService.createSupplier(req.shop._id, req.user._id, req.body, req);
   return ApiResponse.created(res, {
     data: supplier,
     message: 'Supplier added successfully',
@@ -39,6 +41,30 @@ exports.updateSupplier = asyncHandler(async (req, res) => {
     data: supplier,
     message: 'Supplier updated successfully',
     messageBn: 'সরবরাহকারী সফলভাবে আপডেট হয়েছে',
+  });
+});
+
+// Set a supplier's pre-software payable to an absolute figure (owner-only)
+exports.setOpeningDue = asyncHandler(async (req, res) => {
+  const result = await supplierService.setOpeningDue(
+    req.shop._id, req.user._id, req.params.id, req.body, req
+  );
+  return ApiResponse.success(res, {
+    data: result.supplier,
+    message: result.applied === 0 ? 'No change' : 'Opening due updated',
+    messageBn: result.applied === 0 ? 'কোনো পরিবর্তন হয়নি' : 'পূর্বের বাকি আপডেট হয়েছে',
+  });
+});
+
+// One supplier's opening-due খতিয়ান
+exports.getOpeningDueHistory = asyncHandler(async (req, res) => {
+  const data = await supplierService.getOpeningDueHistory(
+    req.shop._id, req.params.id, req, req.query
+  );
+  return ApiResponse.success(res, {
+    data,
+    message: 'Opening due history retrieved',
+    messageBn: 'পূর্বের বাকির হিসাব লোড হয়েছে',
   });
 });
 

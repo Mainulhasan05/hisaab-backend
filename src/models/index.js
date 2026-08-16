@@ -10,6 +10,12 @@ module.exports = {
   DueAdjustment: require('./DueAdjustment.model'),
   Supplier: require('./Supplier.model'),
   SupplierBalance: require('./SupplierBalance.model'),
+  // Payable carried in from the shop's paper খাতা. A separate collection from
+  // `DueAdjustment` on purpose — the customer due-aging report aggregates that
+  // one with no customer predicate, so supplier debt in it would read as
+  // receivables. Registered here or `sync-indexes` never ships the খতিয়ান
+  // index to production, where autoIndex is off.
+  SupplierDueAdjustment: require('./SupplierDueAdjustment.model'),
   Category: require('./Category.model'),
   Product: require('./Product.model'),
   Sale: require('./Sale.model'),
