@@ -17,7 +17,16 @@ const MODULES = {
   // per item inside `createSale` via `permission.middleware.hasPermission`.
   // Inert unless `features.lineDiscount` is on, the way `storefront`'s actions
   // are inert without that capability.
-  sales:         { key: 'sales',         label: 'বিক্রয়',            labelEn: 'Sales',           actions: ['view', 'create', 'update', 'delete', 'view_profit', 'discount'] },
+  //
+  // `backdate` is dating an invoice to a day that has already been reported on.
+  // Also NOT implied by `create`, and for a sharper reason than `discount`:
+  // moving a sale between days moves it between report periods, between staff
+  // members' figures and between cash drawers, so a staff member who can do it
+  // can also paper over a discrepancy in yesterday's till. Enforced inside
+  // `createSale` via `utils/saleDate.util.resolveSaleDate`, not at the door —
+  // the endpoint stays open to anyone with `sales.create`, since a sale with no
+  // date named is the ordinary case and must never be refused.
+  sales:         { key: 'sales',         label: 'বিক্রয়',            labelEn: 'Sales',           actions: ['view', 'create', 'update', 'delete', 'view_profit', 'discount', 'backdate'] },
   customers:     { key: 'customers',     label: 'কাস্টমার',          labelEn: 'Customers',       actions: ['view', 'create', 'update', 'delete'] },
   // A purchase record IS cost data (unit prices, invoice totals, dues), so
   // `view` alone only reveals *that* a purchase happened — supplier, date,
@@ -79,6 +88,7 @@ const ACTION_LABELS = {
   view_profit:   { label: 'লাভ দেখা',       labelEn: 'View profit' },
   manual_adjust: { label: 'স্টক সমন্বয়',    labelEn: 'Adjust stock' },
   discount:      { label: 'ছাড় দেওয়া',      labelEn: 'Give discount' },
+  backdate:      { label: 'আগের তারিখে বিক্রি', labelEn: 'Backdate a sale' },
   cancel:        { label: 'বাতিল',           labelEn: 'Cancel' },
   publish:       { label: 'প্রকাশ',          labelEn: 'Publish' },
 };
@@ -182,7 +192,7 @@ const ROLE_PRESETS = {
     permissions: buildPermissionsFromConfig({
       products:      ['view', 'create', 'update', 'view_cost'],
       categories:    ['view', 'create', 'update'],
-      sales:         ['view', 'create', 'update', 'view_profit'],
+      sales:         ['view', 'create', 'update', 'view_profit', 'discount', 'backdate'],
       customers:     ['view', 'create', 'update'],
       purchases:     ['view', 'create', 'update', 'view_cost'],
       suppliers:     ['view', 'create', 'update'],
@@ -216,7 +226,21 @@ const ROLE_PRESETS = {
       categories:    ['view'],
       // `update` is what lets a cashier record a payment against a due sale
       // and put through a counter return — both routine till work.
-      sales:         ['view', 'create', 'update'],
+      //
+      // `discount` is haggling at the counter, which is what a cashier at these
+      // shops is doing all day. It stays a SEPARATE action rather than being
+      // folded into `create` so an owner who does not want it can still take it
+      // away from one role without also taking away selling — and it is inert
+      // in every shop without `features.lineDiscount`, which is almost all of
+      // them. The shop's own ceiling is `settings.maxLineDiscountPercent`, and
+      // selling below cost stays owner-only whatever this says.
+      //
+      // `backdate` is here because goods leave these shops before anyone gets
+      // to the till — a delivery on Thursday entered on Saturday has to say
+      // Thursday. The cashier who sold it is the one who knows which day it
+      // was. Revocable per role, and every use is recorded in the audit log
+      // with both the date claimed and the moment it was really typed.
+      sales:         ['view', 'create', 'update', 'discount', 'backdate'],
       customers:     ['view', 'create', 'update'],
       // `purchases` and `suppliers` were deliberately dropped: the purchase
       // ledger is raw buying-price data, so granting it here handed a cashier
@@ -278,7 +302,7 @@ const ROLE_PRESETS = {
  * created with. To roll a change out to shops that already exist, bump this and
  * add a PRESET_UPGRADES entry.
  */
-const PRESET_VERSION = 3;
+const PRESET_VERSION = 5;
 
 /**
  * Additive grants applied once per role, in version order.
@@ -327,6 +351,68 @@ const PRESET_UPGRADES = [
       cashier: {
         online_orders: ['view', 'create', 'update'],
       },
+    },
+  },
+  {
+    version: 4,
+    /**
+     * Per-item discount at the till.
+     *
+     * The original call was that no preset should grant this — that a shop
+     * given the capability should have to choose who may spend its margin. In
+     * practice that meant every shop switched on arrived at a POS with no rate
+     * control for anyone but the owner, reported it as a bug, and had to be
+     * walked through the roles matrix before the feature they had just been
+     * sold did anything. The counter staff ARE the people who haggle; making
+     * that the default and letting an owner revoke it is the right way round.
+     *
+     * Inert wherever `features.lineDiscount` is off, which is nearly every shop
+     * — the same argument version 3 made for the online panel, and the reason
+     * it is safe to grant platform-wide rather than shop by shop.
+     *
+     * Grants only, as ever: an owner who has already narrowed one of these
+     * roles keeps their decision, because the role is stamped with the version
+     * it reached and is never re-upgraded past it.
+     *
+     * Salesperson and inventory_manager are deliberately left out. A shop that
+     * wants floor staff negotiating prices grants it explicitly — and
+     * inventory_manager cannot sell at all.
+     *
+     * TWO LIMITS SURVIVE THIS, and support will be asked about both:
+     *   - selling BELOW COST is still owner-only (lineDiscount.util.js rule 7),
+     *     whatever this permission says;
+     *   - the shop's ceiling is `settings.maxLineDiscountPercent`, which is
+     *     `null` — no cap — until an owner sets one.
+     */
+    grants: {
+      manager: { sales: ['discount'] },
+      cashier: { sales: ['discount'] },
+    },
+  },
+  {
+    version: 5,
+    /**
+     * Backdating a sale to the day it actually happened.
+     *
+     * Shipped owner-only and widened on the same day, for the reason the shops
+     * gave: goods go out before anyone reaches the till, and the person who
+     * knows which day that was is the one who sold them. An owner who wants it
+     * back revokes it per role — which is the entire reason it is a separate
+     * action rather than part of `create`.
+     *
+     * Unlike `discount`, this is NOT inert in shops without a capability: there
+     * is no feature flag behind it, so these 46 roles gain a real ability the
+     * moment they next log in. That is deliberate and it is the trade — what
+     * bounds it instead is that a backdated sale can never land in the future
+     * or before the shop existed, and that EVERY use writes an audit entry
+     * carrying both the date claimed and the wall-clock moment it was typed
+     * (`sale.service` → `sale_create`, `backdatedTo` + `enteredAt`).
+     *
+     * Salesperson and inventory_manager are left out, as with `discount`.
+     */
+    grants: {
+      manager: { sales: ['backdate'] },
+      cashier: { sales: ['backdate'] },
     },
   },
 ];

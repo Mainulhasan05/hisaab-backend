@@ -36,6 +36,13 @@ const mongoose = require('mongoose');
 
 const { resolveSaleDate } = require('../utils/saleDate.util');
 const { toBangladeshDateStr, getBangladeshDayRange } = require('../utils/bdTime.util');
+const {
+  MODULES,
+  ACTION_LABELS,
+  ROLE_PRESETS,
+  PRESET_VERSION,
+  buildPresetUpgradePatch,
+} = require('../config/permissions');
 const saleValidation = require('../validations/sale.validation');
 
 const id = () => new mongoose.Types.ObjectId();
@@ -46,7 +53,13 @@ const id = () => new mongoose.Types.ObjectId();
 const shopDoc = (createdAt = new Date('2020-01-01T00:00:00Z')) => ({ _id: id(), createdAt });
 
 const ownerReq = (shop = shopDoc()) => ({ shop, user: { isOwner: true } });
+/** A cashier who HAS been granted `sales.backdate`. */
 const cashierReq = (shop = shopDoc()) => ({
+  shop,
+  user: { isOwner: false, permissions: { sales: { view: true, create: true, backdate: true } } },
+});
+/** A cashier who has NOT — may sell, may not move a sale between days. */
+const plainCashierReq = (shop = shopDoc()) => ({
   shop,
   user: { isOwner: false, permissions: { sales: { view: true, create: true } } },
 });
@@ -70,10 +83,10 @@ describe('A. no date asked for — invariant guards', () => {
     ['undefined', undefined],
     ['null', null],
     ['empty string', ''],
-  ])('%s returns null and throws nothing, for a CASHIER', (_label, raw) => {
+  ])('%s returns null and throws nothing, for a cashier WITHOUT the permission', (_label, raw) => {
     // The one that matters. Every ordinary POS payload takes this path, and a
     // gate that ran before the absent check would 403 the whole platform.
-    expect(resolveSaleDate({ raw, req: cashierReq(), shop: shopDoc() })).toBeNull();
+    expect(resolveSaleDate({ raw, req: plainCashierReq(), shop: shopDoc() })).toBeNull();
   });
 
   test('no request at all (a script or seeder) is not a violation', () => {
@@ -82,16 +95,33 @@ describe('A. no date asked for — invariant guards', () => {
 });
 
 describe('B. the gate', () => {
-  test('a cashier naming a date is refused 403, in Bengali', () => {
+  test('a cashier WITHOUT `sales.backdate` is refused 403, in Bengali', () => {
     expect.assertions(3);
     try {
-      resolveSaleDate({ raw: daysAgoBd(3), req: cashierReq(), shop: shopDoc() });
+      resolveSaleDate({ raw: daysAgoBd(3), req: plainCashierReq(), shop: shopDoc() });
     } catch (err) {
       expect(err.statusCode).toBe(403);
-      expect(err.messageBn).toContain('মালিক');
+      expect(err.messageBn).toContain('অনুমতি');
       // No figure and no date leaked back about what WOULD have been accepted.
       expect(err.messageBn).not.toMatch(/\d/);
     }
+  });
+
+  test('a cashier WITH `sales.backdate` may name a date', () => {
+    // The permission is the whole gate — this is what separates the two
+    // cashiers above and below, and it is revocable per role.
+    const when = resolveSaleDate({ raw: daysAgoBd(3), req: cashierReq(), shop: shopDoc() });
+    expect(toBangladeshDateStr(when)).toBe(daysAgoBd(3));
+  });
+
+  test('`sales.create` alone does NOT imply it', () => {
+    const req = {
+      shop: shopDoc(),
+      user: { isOwner: false, permissions: { sales: { create: true, discount: true } } },
+    };
+    // Selling, and discounting, are not the same authority as moving a sale
+    // into a day that has already been reported on.
+    expect(() => resolveSaleDate({ raw: daysAgoBd(1), req, shop: shopDoc() })).toThrow();
   });
 
   test('the owner may name a date', () => {
@@ -254,6 +284,40 @@ describe('D. wiring', () => {
     );
     expect(error).toBeUndefined();
     expect(value.saleDate).toBeUndefined();
+  });
+
+  test('`sales.backdate` is a real action with a label, separate from `create`', () => {
+    expect(MODULES.sales.actions).toContain('backdate');
+    expect(ACTION_LABELS.backdate).toBeDefined();
+    // It renders in the roles matrix from this alone — no frontend change.
+    expect(ACTION_LABELS.backdate.label).toBeTruthy();
+  });
+
+  test('the counter roles get it; the others must be granted it explicitly', () => {
+    const expected = {
+      manager: true,
+      cashier: true,
+      salesperson: false,
+      inventory_manager: false,
+    };
+    for (const [name, preset] of Object.entries(ROLE_PRESETS)) {
+      expect([name, preset.permissions.sales?.backdate === true])
+        .toEqual([name, expected[name]]);
+    }
+    expect(Object.keys(ROLE_PRESETS).sort()).toEqual(Object.keys(expected).sort());
+  });
+
+  test('an upgrade entry carries it to shops that already exist', () => {
+    // Presets only reach NEW shops. Without this, every live cashier keeps the
+    // Role document they were seeded with and the permission does nothing —
+    // which is exactly how `sales.discount` reached production doing nothing.
+    expect(buildPresetUpgradePatch('cashier', 4))
+      .toMatchObject({ 'permissions.sales.backdate': true });
+    expect(buildPresetUpgradePatch('manager', 4))
+      .toMatchObject({ 'permissions.sales.backdate': true });
+    // Already current: not re-granted, so a revoke sticks.
+    expect(buildPresetUpgradePatch('cashier', PRESET_VERSION)).toBeNull();
+    expect(buildPresetUpgradePatch('salesperson', 4)).toBeNull();
   });
 
   test('the schema checks SHAPE only — policy stays in resolveSaleDate', () => {

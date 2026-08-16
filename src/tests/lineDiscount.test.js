@@ -41,7 +41,13 @@ const {
 } = require('../utils/lineDiscount.util');
 const { hasPermission } = require('../middleware/permission.middleware');
 const { FEATURES, FEATURE_KEYS, featureMap } = require('../utils/features.util');
-const { MODULES, ROLE_PRESETS, ACTION_LABELS } = require('../config/permissions');
+const {
+  MODULES,
+  ROLE_PRESETS,
+  ACTION_LABELS,
+  PRESET_VERSION,
+  buildPresetUpgradePatch,
+} = require('../config/permissions');
 const saleValidation = require('../validations/sale.validation');
 const Sale = require('../models/Sale.model');
 const Shop = require('../models/Shop.model');
@@ -450,14 +456,56 @@ describe('E. the capability is wired end to end', () => {
   });
 
   /**
-   * No preset grants it. A shop upgrading to this capability must make a
-   * deliberate choice about who may spend its margin — inheriting it with a job
-   * title is exactly what the separate permission exists to prevent.
+   * WHO GETS IT BY DEFAULT — the decision changed, and this is the record.
+   *
+   * It used to be "nobody": a shop given the capability had to choose who may
+   * spend its margin. That read well and worked badly — every shop switched on
+   * arrived at a POS with no rate control for anyone but the owner, and had to
+   * be walked through the roles matrix before the feature it had just been sold
+   * did anything at all.
+   *
+   * Now the counter roles have it, because the counter is where haggling
+   * happens, and an owner who disagrees revokes it. It is still a SEPARATE
+   * action from `create` — that is what makes revoking possible — and still
+   * inert without `features.lineDiscount`.
+   *
+   * The two roles NOT granted it are the load-bearing half of this test: a
+   * salesperson negotiating prices unsupervised is a decision a shop makes
+   * explicitly, and an inventory manager cannot sell at all.
    */
-  it('no built-in role preset grants it', () => {
+  it('the counter roles get it; the others must be granted it explicitly', () => {
+    const expected = {
+      manager: true,
+      cashier: true,
+      salesperson: false,
+      inventory_manager: false,
+    };
     for (const [name, preset] of Object.entries(ROLE_PRESETS)) {
-      expect([name, preset.permissions.sales?.discount === true]).toEqual([name, false]);
+      expect([name, preset.permissions.sales?.discount === true])
+        .toEqual([name, expected[name]]);
     }
+    // Every preset is accounted for above — a new one added without a decision
+    // about this permission should fail here rather than inherit silently.
+    expect(Object.keys(ROLE_PRESETS).sort()).toEqual(Object.keys(expected).sort());
+  });
+
+  /**
+   * Presets only reach NEW shops. Without a matching upgrade entry, every shop
+   * that already exists keeps the Role document it was seeded with — which is
+   * exactly the state that produced the original support report: the capability
+   * was on, the preset said cashiers may discount, and the live cashier still
+   * had no control.
+   */
+  it('an upgrade entry carries it to shops that already exist', () => {
+    const patch = buildPresetUpgradePatch('cashier', 3);
+    expect(patch).toMatchObject({ 'permissions.sales.discount': true });
+    expect(buildPresetUpgradePatch('manager', 3))
+      .toMatchObject({ 'permissions.sales.discount': true });
+    // A role already at the current version is not re-upgraded, so an owner who
+    // revokes it later does not have it handed back on the next read.
+    expect(buildPresetUpgradePatch('cashier', PRESET_VERSION)).toBeNull();
+    // And the roles deliberately left out stay left out.
+    expect(buildPresetUpgradePatch('salesperson', 3)).toBeNull();
   });
 
   it('the shop cap is stored, bounded to 0..100, and defaults to null', () => {

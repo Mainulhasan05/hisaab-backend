@@ -43,37 +43,28 @@
  *      entered" is always answerable even though the Sale itself no longer says.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * OWNER ONLY
+ * WHO MAY DO IT — `sales.backdate`
  * ─────────────────────────────────────────────────────────────────────────────
  *
  * Moving a sale between days moves money between reporting periods, between
- * staff members' figures and between cash drawers. That is the shop owner's
- * call, the same way selling below cost is (`lineDiscount.util.js` rule 7), and
- * for the same reason: a cashier who can quietly move a sale out of the day it
- * belonged to can hide a discrepancy in that day's drawer.
+ * staff members' figures and between cash drawers. Someone who can do it can
+ * also paper over a discrepancy in yesterday's till, so it is not implied by
+ * `sales.create` — it is a permission of its own that an owner can revoke from
+ * one role without also stopping them selling.
  *
- * No new permission action for it. The owner bypasses RBAC everywhere already,
- * and a `sales.backdate` action would be a third axis to explain for a control
- * that has exactly one correct holder.
+ * It shipped owner-only and was widened the same day, because the shops were
+ * right: goods leave before anyone reaches the till, and the cashier who sold
+ * them is the one who knows which day it was. The counter presets carry it
+ * (PRESET_UPGRADES v5); salesperson and inventory_manager do not.
+ *
+ * What bounds it now that it is not the owner's alone:
+ *   -  it can never reach the future, or a date before the shop existed;
+ *   -  EVERY use writes a `sale_create` audit entry carrying both the date
+ *      claimed and the wall-clock moment the invoice was really typed, so a
+ *      sale moved out of its day is always reconstructable.
  */
 const { toBangladeshDateStr, getBangladeshDayRange } = require('./bdTime.util');
-
-/**
- * Is the caller the shop owner (or the platform admin acting inside the shop)?
- *
- * `req` absent = a script, a seeder, or an internal call with no cashier to
- * distrust. `req.isAdmin` is the platform admin, who carries no
- * `req.user.isOwner` — without that arm every admin-side import would be
- * refused, which is the M-7 trap `resolveWholesaleFlag` already documents.
- *
- * Same shape as `lineDiscount.util.isOwnerLike`, deliberately duplicated rather
- * than shared: they answer the same question today but are gates on different
- * capabilities, and one of them relaxing must not silently relax the other.
- */
-function isOwnerLike(req) {
-  if (!req) return true;
-  return req.user?.isOwner === true || req.isAdmin === true;
-}
+const { hasPermission } = require('../middleware/permission.middleware');
 
 /** A minute of tolerance for a client clock that runs slightly fast. */
 const FUTURE_SKEW_MS = 60 * 1000;
@@ -85,7 +76,7 @@ const FUTURE_SKEW_MS = 60 * 1000;
  * never 403:
  *
  *   1. no date named        -> null, no error, whoever is asking
- *   2. caller is not owner  -> 403
+ *   2. no `sales.backdate`  -> 403
  *   3. unparseable          -> 400
  *   4. in the future        -> 400 (this is BACKdating; a forward-dated invoice
  *                                   would be counted in a day that has not
@@ -107,10 +98,10 @@ const FUTURE_SKEW_MS = 60 * 1000;
  *
  * @param {Object}  input
  * @param {*}       input.raw   the client's `saleDate`
- * @param {Object} [input.req]  the Express request (ownership)
+ * @param {Object} [input.req]  the Express request (the permission check)
  * @param {Object} [input.shop] the Shop document (its `createdAt` is the floor)
  * @returns {Date|null}
- * @throws {AppError} 403 not the owner, 400 malformed or out of bounds
+ * @throws {AppError} 403 without the permission, 400 malformed or out of bounds
  */
 function resolveSaleDate({ raw, req = null, shop = null } = {}) {
   // Required lazily: `error.middleware` pulls in the logger, which pulls in
@@ -122,11 +113,17 @@ function resolveSaleDate({ raw, req = null, shop = null } = {}) {
   // 1. Nothing asked for. Not a violation — this is every ordinary checkout.
   if (raw === undefined || raw === null || raw === '') return null;
 
-  // 2. Moving money between days is the owner's decision.
-  if (!isOwnerLike(req)) {
+  // 2. Moving money between days is a permission of its own.
+  //
+  //    `req` absent = a script, a seeder or an internal call with nobody to
+  //    distrust, and it passes — the same carve-out `resolveLineRate` makes at
+  //    its own rule 3. `hasPermission` already answers true for the owner and
+  //    for the platform admin (who carries no `user.isOwner` — the M-7 trap),
+  //    so neither needs an arm of its own here.
+  if (req && !hasPermission(req, 'sales', 'backdate')) {
     throw new AppError(
-      'Only the shop owner can set an invoice date',
-      'শুধুমাত্র দোকান মালিক বিক্রির তারিখ পরিবর্তন করতে পারবেন',
+      'You do not have permission to set an invoice date',
+      'আপনার আগের তারিখে বিক্রি করার অনুমতি নেই',
       403
     );
   }
@@ -174,4 +171,4 @@ function resolveSaleDate({ raw, req = null, shop = null } = {}) {
   return when;
 }
 
-module.exports = { resolveSaleDate, isOwnerLike };
+module.exports = { resolveSaleDate };
