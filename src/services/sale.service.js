@@ -37,6 +37,7 @@ const {
 const { priceTierFor, sellingPriceFor, hasWholesalePrice } = require('../utils/pricing.util');
 const { resolveLineRate } = require('../utils/lineDiscount.util');
 const { resolveSaleDate } = require('../utils/saleDate.util');
+const { resolveCustomInvoiceNo } = require('../utils/invoiceNo.util');
 const { deductBatches, restoreBatches, batchWriteOp } = require('../utils/batch.util');
 const { hasFeature } = require('../utils/features.util');
 const { isCombo, findComponentVariant, isChooseSlot } = require('../utils/combo.util');
@@ -406,7 +407,8 @@ class SaleService {
       advancePaid = 0,
       courierName,
       shippingAddress,
-      saleDate: rawSaleDate
+      saleDate: rawSaleDate,
+      invoiceNo: rawInvoiceNo
     } = saleData;
     const customerId = rawCustomerId || rawCustomer;
 
@@ -424,6 +426,29 @@ class SaleService {
      */
     const backdatedAt = resolveSaleDate({
       raw: rawSaleDate,
+      req,
+      shop: req?.shop,
+    });
+
+    /**
+     * An owner may number this invoice themselves.
+     *
+     * `null` on every ordinary checkout, and on every shop without
+     * `features.customInvoiceNo` — which is all of them until an admin says
+     * otherwise. When it is set, it REPLACES the generated number and the
+     * per-(shop, branch, day) counter is never consulted, so the `INV-` series
+     * stays exactly where it was and the capability can be switched back off
+     * without leaving a gap.
+     *
+     * Resolved here, beside `resolveSaleDate` and for the same reason: the
+     * whole body is inside `runInTransaction`, so a gate that runs before
+     * anything is written has nothing to roll back.
+     *
+     * Uniqueness is NOT checked here — see utils/invoiceNo.util.js. The unique
+     * index decides, on the insert.
+     */
+    const customInvoiceNo = resolveCustomInvoiceNo({
+      raw: rawInvoiceNo,
       req,
       shop: req?.shop,
     });
@@ -1411,7 +1436,15 @@ class SaleService {
         // with it printed on, and after a reprint that paper must still be the
         // invoice. `reviseSale` frees the unique key first by renaming the
         // superseded document to `…~r1`.
+        //
+        // ORDER IS LOAD-BEARING. `forceInvoiceNo` outranks a typed one: a
+        // revision resubmits the whole basket, so the POS may well post the
+        // number it is showing, and if that won, revising an invoice would
+        // rename the original to `…~r1` and then write the replacement under a
+        // DIFFERENT number — leaving the customer's paper pointing at a
+        // cancelled document. The revision keeps its number whatever is posted.
         const invoiceNo = forceInvoiceNo
+          || customInvoiceNo
           || await this.generateInvoiceNumber(shopId, branchCode, branchId, pinnedAt);
         const [newSale] = await Sale.create([{
           shop: shopId,
@@ -1481,9 +1514,45 @@ class SaleService {
         // number has no next value to draw, so a duplicate there is a real
         // conflict — the caller failed to free the unique key — and retrying
         // would just fail twice more and report the wrong reason.
-        if (err.code === 11000 && !forceInvoiceNo && attempt < maxRetries - 1) {
+        //
+        // A TYPED number is the same case for a different reason: there is no
+        // next value because a human chose this one. Retrying would redraw the
+        // identical string three times and then report the third failure.
+        const chosen = forceInvoiceNo || customInvoiceNo;
+        if (err.code === 11000 && !chosen && attempt < maxRetries - 1) {
           // Duplicate invoiceNo — retry with new number
           continue;
+        }
+        /**
+         * Re-raise the one duplicate a human can actually act on.
+         *
+         * `handleDuplicateFieldsDB` would already turn this into a 409 saying
+         * "এই ইনভয়েস নম্বর আগে থেকেই আছে", which is the right message. What it
+         * cannot say is whether retrying would help — and the offline queue has
+         * to know: `lib/offlineErrors.js` treats 409 as TRANSIENT, because the
+         * only 409 a queued sale could previously get was the idempotency
+         * middleware saying "same request still in flight", which does resolve
+         * on retry. A taken invoice number never will, so without a code to
+         * distinguish it a parked sale retries until it hits the attempt cap,
+         * silently, and the cashier is never told to pick another number.
+         *
+         * Raised as a real `AppError` rather than by tagging `err`: a mutated
+         * Mongo error still has no `isOperational`, so `sendErrorProd` would
+         * take its unknown-error branch, replace this Bengali sentence with the
+         * generic one and drop the `code` — the single field this exists to
+         * deliver.
+         *
+         * Sale carries exactly one unique index (`{shop, invoiceNo}`), so an
+         * 11000 on this insert is always the invoice number.
+         */
+        if (err.code === 11000 && customInvoiceNo) {
+          const taken = new AppError(
+            `Invoice number ${customInvoiceNo} is already used in this shop`,
+            `এই ইনভয়েস নম্বর (${customInvoiceNo}) আগে থেকেই ব্যবহার করা হয়েছে — অন্য নম্বর দিন`,
+            409
+          );
+          taken.code = 'INVOICE_NO_TAKEN';
+          throw taken;
         }
         throw err; // Not a duplicate or last attempt — rethrow
       }
@@ -1616,6 +1685,19 @@ class SaleService {
           ...(backdatedAt
             ? { backdatedTo: backdatedAt, enteredAt }
             : {}),
+          /**
+           * This number was CHOSEN, not generated.
+           *
+           * Same reasoning as `backdatedTo` above: once it is stored, the Sale
+           * itself cannot answer where its number came from — `A-1043` and a
+           * generated number are both just strings on the document. Worth
+           * recording because it is the question asked when a shop's series has
+           * a gap or a repeat in it, and because a permission exists to grant
+           * and revoke this, which is only meaningful if its use is visible.
+           *
+           * Absent on every ordinary sale.
+           */
+          ...(customInvoiceNo ? { invoiceNoChosen: true } : {}),
         },
       },
     }).catch((err) => logger.error(`Audit log (sale_create) failed: ${err.message}`));

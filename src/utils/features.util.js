@@ -181,6 +181,28 @@ const FEATURES = Object.freeze({
       'control in the POS and a posted line rate is refused. Existing sales ' +
       'keep theirs, so the switch is reversible.',
   },
+  customInvoiceNo: {
+    bn: 'নিজস্ব ইনভয়েস নম্বর',
+    en: 'Own invoice numbering',
+    description:
+      'Lets the shop type its own invoice number instead of taking the ' +
+      'generated INV-<branch>-<date>-#### one — for a trader copying from a ' +
+      'manual invoice book, or carrying an existing series across. Uniqueness ' +
+      'is still enforced per shop, so a number already used is refused. ' +
+      'Bounded by the separate `sales.invoice_no` permission, which is ' +
+      'owner-only until the owner grants it. Off = the number is generated as ' +
+      'before and a typed one is refused; a typed number never advances the ' +
+      'generated series, so the switch is reversible.',
+    /**
+     * NO PREREQUISITES, and none of the existing keys is a sensible one.
+     *
+     * It is not storage-backed, it adds no route and it needs no other
+     * capability — it changes one string on a document that is written either
+     * way. The guarantee it depends on is the `{shop, invoiceNo}` unique index
+     * in Sale.model.js, which is not a feature flag and predates all of this.
+     */
+    requires: [],
+  },
 });
 
 /**

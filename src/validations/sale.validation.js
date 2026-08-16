@@ -199,6 +199,26 @@ const createSale = Joi.object({
     .messages({
       'alternatives.match': 'বিক্রির তারিখ ঠিকভাবে দিন',
     }),
+
+  /**
+   * The shop's own invoice number, when it numbers its own.
+   *
+   * MUST be listed here for the same reason `saleDate` must — `stripUnknown`
+   * would delete it and the owner would get a generated number with no error
+   * anywhere, which is the exact failure `resolveCustomInvoiceNo` refuses
+   * loudly to allow.
+   *
+   * SHAPE ONLY, and the ceiling is the same 40 characters
+   * `invoiceNo.util.MAX_LENGTH` enforces — stated twice because Joi is the
+   * first line and the util is the one that knows. Whether the shop may name a
+   * number at all, who may do it, and which characters are legal (`~` is
+   * reserved for revisions) are all decided there, so the two cannot disagree
+   * about the policy.
+   */
+  invoiceNo: Joi.string().trim().max(40).allow('', null).messages({
+    'string.base': 'ইনভয়েস নম্বর ঠিকভাবে দিন',
+    'string.max': 'ইনভয়েস নম্বর ৪০ অক্ষরের বেশি হতে পারবে না',
+  }),
 });
 
 module.exports = {

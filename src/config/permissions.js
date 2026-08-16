@@ -32,7 +32,18 @@ const MODULES = {
   // to sell, and an owner must be able to take it away without stopping them
   // ringing sales. It is NOT implied by `update` either — `update` is recording
   // a payment against a due invoice, which changes no line and no stock.
-  sales:         { key: 'sales',         label: 'বিক্রয়',            labelEn: 'Sales',           actions: ['view', 'create', 'update', 'delete', 'view_profit', 'discount', 'backdate', 'revise'] },
+  //
+  // `invoice_no` is choosing the invoice's own number instead of taking the
+  // generated one. Separate from `create` for the same reason as the three
+  // above, and NOT granted by any preset — unlike `backdate` and `revise`,
+  // which widened to the counter because the person standing there is the one
+  // who knows. Which series the shop's paper runs on is the owner's, so it
+  // starts owner-only and an owner who wants to delegate grants it explicitly.
+  // Inert without `features.customInvoiceNo`, the way `discount` is without
+  // `features.lineDiscount`. Enforced inside `createSale` via
+  // `utils/invoiceNo.util.resolveCustomInvoiceNo`, not at the door — a sale
+  // that names no number is the ordinary case and must never be refused.
+  sales:         { key: 'sales',         label: 'বিক্রয়',            labelEn: 'Sales',           actions: ['view', 'create', 'update', 'delete', 'view_profit', 'discount', 'backdate', 'revise', 'invoice_no'] },
   customers:     { key: 'customers',     label: 'কাস্টমার',          labelEn: 'Customers',       actions: ['view', 'create', 'update', 'delete'] },
   // A purchase record IS cost data (unit prices, invoice totals, dues), so
   // `view` alone only reveals *that* a purchase happened — supplier, date,
@@ -96,6 +107,7 @@ const ACTION_LABELS = {
   discount:      { label: 'ছাড় দেওয়া',      labelEn: 'Give discount' },
   backdate:      { label: 'আগের তারিখে বিক্রি', labelEn: 'Backdate a sale' },
   revise:        { label: 'বিক্রয় সংশোধন',   labelEn: 'Revise a sale' },
+  invoice_no:    { label: 'নিজে ইনভয়েস নম্বর দেওয়া', labelEn: 'Set the invoice number' },
   cancel:        { label: 'বাতিল',           labelEn: 'Cancel' },
   publish:       { label: 'প্রকাশ',          labelEn: 'Publish' },
 };

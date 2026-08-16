@@ -380,6 +380,24 @@ const shopSchema = new mongoose.Schema({
     lineDiscount: {
       type: Boolean,
       default: false
+    },
+    // The shop numbers its own invoices — a trader copying from a manual
+    // invoice book, or carrying an existing series across from whatever they
+    // used before. Off (every shop) = `INV-<BRANCH>-<YYYYMMDD>-####` from the
+    // atomic counter, and a posted `invoiceNo` is REFUSED rather than ignored,
+    // so a number the owner typed can never differ from the one printed.
+    //
+    // Three axes, as with `lineDiscount`: the platform sells the capability,
+    // the owner grants `sales.invoice_no` to whoever may use it, and the
+    // `{shop, invoiceNo}` unique index is what actually guarantees uniqueness.
+    // Numbering is never handed to the client — only the CHOICE of number is.
+    //
+    // Off again = the `INV-` series resumes exactly where it stopped, because a
+    // typed number never advances the counter. Sales already carrying one keep
+    // it, so the switch is reversible in both directions.
+    customInvoiceNo: {
+      type: Boolean,
+      default: false
     }
   },
 

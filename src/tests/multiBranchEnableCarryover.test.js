@@ -83,7 +83,9 @@ describe('enableMultiBranch seeds both per-branch ledgers', () => {
       enableBody.indexOf('supplierBalancesSeeded =')
     );
 
-    expect(seed).toContain('SupplierBalance');
+    // The bulkWrite sits past `supplierBalancesSeeded =`, so it is asserted on
+    // the whole enable body rather than the ops-building slice.
+    expect(enableBody).toMatch(/SupplierBalance\.bulkWrite/);
     for (const field of ['totalAmount', 'totalPaid', 'totalDue', 'openingDue', 'purchaseCount']) {
       expect(seed).toContain(field);
     }
