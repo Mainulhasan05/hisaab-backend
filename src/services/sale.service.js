@@ -280,6 +280,21 @@ class SaleService {
     const sale = await Sale.findOne(query)
       .populate('customer', 'name phone address totalDue')
       .populate('createdBy', 'name phone')
+      /**
+       * The shop's own identity, for the printed invoice header.
+       *
+       * The invoice used to take this from `state.auth.shop` in the browser —
+       * the session copy, fetched at login and cached server-side for 300s. So
+       * a shop that renamed itself kept printing its OLD name on every invoice
+       * until whoever was at the till happened to reload the app. The name at
+       * the top of a document a customer keeps is not a thing to serve from a
+       * session cache.
+       *
+       * Read here instead, on the request that renders the invoice, so it can
+       * never be stale. The client still falls back to the session copy when
+       * this is absent, which is what keeps older cached responses working.
+       */
+      .populate('shop', 'name address phone')
       .populate('items.product', 'name code unit barcode');
 
     if (!sale) {
