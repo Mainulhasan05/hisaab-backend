@@ -47,6 +47,20 @@ exports.recordPayment = asyncHandler(async (req, res) => {
   });
 });
 
+// Revise a printed sale.
+//
+// The body is a full cart — the same payload `POST /sales` takes — so the
+// response is the NEW live invoice, not a patch result. The client reprints
+// from it: the customer is still holding the old paper.
+exports.reviseSale = asyncHandler(async (req, res) => {
+  const sale = await saleService.reviseSale(req.shop._id, req.user._id, req.params.id, req.body, req);
+  return ApiResponse.success(res, {
+    data: sanitizeSales(sale, req),
+    message: 'Sale revised successfully',
+    messageBn: 'বিক্রয় সফলভাবে সংশোধন হয়েছে',
+  });
+});
+
 // Cancel sale
 exports.cancelSale = asyncHandler(async (req, res) => {
   const sale = await saleService.cancelSale(req.shop._id, req.user._id, req.params.id, req.body.reason, req.branchId);

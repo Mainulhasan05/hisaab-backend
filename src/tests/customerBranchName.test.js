@@ -220,10 +220,57 @@ describe('the list query', () => {
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '../services/customer.service.js'), 'utf8');
 
-  it('searches the branch label as well as the shared name', () => {
-    // Otherwise a branch that renamed a customer could not find them by the
-    // name on its own screen — the same failure, from the other direction.
-    expect(src).toMatch(/localName:\s*\{\s*\$regex:\s*escaped/);
+  // Was a source-text regex (`/localName:\s*\{\s*\$regex:\s*escaped/`), which
+  // broke the moment the three search sites were folded into one
+  // `buildSearchOr` helper — while the behaviour it guarded was untouched. It
+  // now asserts on the pipeline that actually reaches Mongo, so a future
+  // refactor is free to move the code and only a real regression fails.
+  it('searches the branch label as well as the shared name', async () => {
+    const spy = jest.spyOn(CustomerBalance, 'aggregate').mockResolvedValue([{ data: [], count: [], totals: [] }]);
+
+    await customerService.getCustomers(SHOP, { search: 'Sadek' }, separate());
+
+    const pipeline = spy.mock.calls[0][0];
+    const or = pipeline.find((s) => s.$match?.$or)?.$match.$or;
+
+    expect(or).toEqual(expect.arrayContaining([
+      { localName: { $regex: 'Sadek', $options: 'i' } },
+      { 'customer.name': { $regex: 'Sadek', $options: 'i' } },
+    ]));
+
+    spy.mockRestore();
+  });
+
+  // The bug this whole change set started from: the number was stored
+  // normalised and searched raw, so a shop that had the customer saved as
+  // `+880 1792-449180` matched nothing.
+  it('matches a phone typed in +880 form against the stored local form', async () => {
+    const spy = jest.spyOn(CustomerBalance, 'aggregate').mockResolvedValue([{ data: [], count: [], totals: [] }]);
+
+    await customerService.getCustomers(SHOP, { search: '+880 1792-449180' }, separate());
+
+    const or = spy.mock.calls[0][0].find((s) => s.$match?.$or)?.$match.$or;
+
+    expect(or).toEqual(expect.arrayContaining([
+      { 'customer.phone': { $regex: '01792449180', $options: 'i' } },
+    ]));
+
+    spy.mockRestore();
+  });
+
+  it('does not add a phone term for a query with no digits in it', async () => {
+    const spy = jest.spyOn(CustomerBalance, 'aggregate').mockResolvedValue([{ data: [], count: [], totals: [] }]);
+
+    await customerService.getCustomers(SHOP, { search: 'সাদেক' }, separate());
+
+    const or = spy.mock.calls[0][0].find((s) => s.$match?.$or)?.$match.$or;
+
+    // Name fields plus the single raw-text phone clause, and nothing else —
+    // `normalizePhone` reduces a Bengali name to '', which as a regex would
+    // match every customer in the shop.
+    expect(or).toHaveLength(3);
+
+    spy.mockRestore();
   });
 
   it('projects the resolved name so sorting by name sorts what is displayed', () => {

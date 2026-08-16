@@ -156,6 +156,7 @@ module.exports = {
     CUSTOMER_CREATE: { en: 'customer_create', bn: 'নতুন কাস্টমার যোগ' },
     CUSTOMER_UPDATE: { en: 'customer_update', bn: 'কাস্টমার তথ্য সম্পাদনা' },
     CUSTOMER_DELETE: { en: 'customer_delete', bn: 'কাস্টমার মুছে ফেলা' },
+    CUSTOMER_RESTORE: { en: 'customer_restore', bn: 'কাস্টমার ফিরিয়ে আনা' },
     DUE_COLLECTION: { en: 'due_collection', bn: 'বাকি আদায়' },
 
     // Team

@@ -15,6 +15,14 @@
  *      only the partial case fell through, which is why it went unseen.
  */
 
+// `cancelSale` became transactional (see its header — the four unatomic writes
+// it used to make). Run the callback directly so these tests do not need a
+// replica set, the same shim paymentGuards/duePayment use. Assertions below are
+// unchanged: this only removes the session, which they never exercised.
+jest.mock('../utils/transaction.util', () => ({
+  runInTransaction: (cb) => cb(null),
+}));
+
 const mongoose = require('mongoose');
 const Sale = require('../models/Sale.model');
 const saleService = require('../services/sale.service');

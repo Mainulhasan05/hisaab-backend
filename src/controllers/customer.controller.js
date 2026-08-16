@@ -62,6 +62,16 @@ exports.deleteCustomer = asyncHandler(async (req, res) => {
   });
 });
 
+// Restore a soft-deleted customer
+exports.restoreCustomer = asyncHandler(async (req, res) => {
+  const customer = await customerService.restoreCustomer(req.shop._id, req.user._id, req.params.id, req);
+  return ApiResponse.success(res, {
+    data: customer,
+    message: 'Customer restored successfully',
+    messageBn: 'কাস্টমার ফিরিয়ে আনা হয়েছে',
+  });
+});
+
 // Collect due payment
 exports.collectDue = asyncHandler(async (req, res) => {
   const result = await customerService.collectDuePayment(req.shop._id, req.user._id, req.params.id, req.body, req);

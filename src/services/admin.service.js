@@ -2238,6 +2238,8 @@ class AdminService {
   async enableMultiBranch(shopId, adminId, branchName = null) {
     const Customer = require('../models/Customer.model');
     const CustomerBalance = require('../models/CustomerBalance.model');
+    const Supplier = require('../models/Supplier.model');
+    const SupplierBalance = require('../models/SupplierBalance.model');
 
     const shop = await Shop.findById(shopId);
     if (!shop) {
@@ -2281,10 +2283,22 @@ class AdminService {
     // the online-order worklist (AGENT_WORKFLOW.md §9 item 4): without it,
     // every order taken before a shop went multi-branch would vanish from any
     // branch-selected worklist the moment the flag flipped.
+    //
+    // DueAdjustment and SupplierDueAdjustment were missing, and they are the
+    // rows that explain a debt rather than merely carry it. Both ledgers filter
+    // on `branch` the moment one is selected (`customer.service.getCustomerLedger`,
+    // `supplier.service`), so every "পূর্বের বাকি (খাতা থেকে)" line and every
+    // owner correction entered before enablement dropped out of the খতিয়ান —
+    // the money still counted in `totalDue`, with nothing on the page left to
+    // say where it came from. Nothing was deleted; it simply became unreachable,
+    // which reads the same to the shop.
     const Order = require('../models/Order.model');
+    const DueAdjustment = require('../models/DueAdjustment.model');
+    const SupplierDueAdjustment = require('../models/SupplierDueAdjustment.model');
     const branchScopedModels = [
       Sale, Purchase, Expense, CashRegister, StockTransaction,
-      Payment, SalesReturn, SMSLog, AuditLog, HeldCart, Order
+      Payment, SalesReturn, SMSLog, AuditLog, HeldCart, Order,
+      DueAdjustment, SupplierDueAdjustment
     ];
 
     // Batched so a large history never builds one unbounded write, and so a
@@ -2329,8 +2343,18 @@ class AdminService {
     // Rows are seeded whatever `customerScope` ends up being: writes never
     // consult the flag, only reads do, which is what lets the platform admin
     // flip it later with nothing to migrate.
+    // `openingDue` is seeded with the rest. It was the one money column left
+    // out, and it is not inert: `customer.service.setOpeningDue` measures its
+    // delta against the figure the owner is LOOKING AT, which under branch
+    // scope is this row. Seeded at 0 against a shop-wide ৳11,000, the branch
+    // page showed পূর্বের বাকি ৳0, and an owner re-entering the true ৳11,000
+    // computed `delta = 11,000 − 0` and ADDED it a second time — doubling both
+    // the opening due and the total due. The Σ invariant this collection exists
+    // to hold (`Σ CustomerBalance.openingDue === Customer.openingDue`) was also
+    // broken from the first request, so `recalc-customer-balances.js` would
+    // report the gap forever with nothing to explain it.
     const customerBalanceOps = [];
-    for await (const customer of Customer.find({ shop: shopId }).select('_id totalPurchases totalPaid totalDue purchaseCount lastPurchase').lean()) {
+    for await (const customer of Customer.find({ shop: shopId }).select('_id totalPurchases totalPaid totalDue openingDue purchaseCount lastPurchase').lean()) {
       customerBalanceOps.push({
         updateOne: {
           filter: { shop: shopId, customer: customer._id, branch: defaultBranch._id },
@@ -2339,6 +2363,7 @@ class AdminService {
               totalPurchases: customer.totalPurchases || 0,
               totalPaid: customer.totalPaid || 0,
               totalDue: customer.totalDue || 0,
+              openingDue: customer.openingDue || 0,
               purchaseCount: customer.purchaseCount || 0,
               lastPurchase: customer.lastPurchase || null,
               updatedAt: new Date(),
@@ -2353,6 +2378,58 @@ class AdminService {
     if (customerBalanceOps.length > 0) {
       const res = await CustomerBalance.bulkWrite(customerBalanceOps, { ordered: false });
       customerBalancesSeeded = (res.upsertedCount || 0) + (res.modifiedCount || 0);
+    }
+
+    // 4c. The same seeding for suppliers, which was not happening AT ALL.
+    //
+    // `SupplierBalance` has no scope flag — unlike customers, the figures follow
+    // the active branch unconditionally (see that model's header), and
+    // `overlayBranchFigures` falls back to `|| 0` for a supplier with no row. So
+    // the moment the flag below flipped, EVERY supplier's payable read ৳0 at
+    // branch level while the shop-wide rollup still held the real figure. The
+    // shop's whole payables book disappeared from the only view its staff use.
+    //
+    // `Supplier` carries no `totalPaid` column — it only ever `$inc`s, so paid
+    // is recovered from the identity the model documents:
+    //
+    //     totalDue = max(0, totalAmount + openingDue − totalPaid)
+    //
+    // inverted to `totalPaid = totalAmount + openingDue − totalDue`. Clamped at
+    // zero: on an over-paid supplier the stored `totalDue` is the clamped value,
+    // so the inversion can land slightly negative, and a negative paid figure
+    // would make `recomputeDue` overstate the debt on the next purchase cancel.
+    const supplierBalanceOps = [];
+    for await (const supplier of Supplier.find({ shop: shopId }).select('_id totalAmount totalDue openingDue totalPurchases').lean()) {
+      const amount = supplier.totalAmount || 0;
+      const opening = supplier.openingDue || 0;
+      const due = supplier.totalDue || 0;
+
+      supplierBalanceOps.push({
+        updateOne: {
+          filter: { shop: shopId, supplier: supplier._id, branch: defaultBranch._id },
+          update: {
+            $set: {
+              totalAmount: amount,
+              totalPaid: Math.max(0, Math.round((amount + opening - due) * 100) / 100),
+              totalDue: due,
+              openingDue: opening,
+              // Vocabulary differs from Customer on purpose: on a supplier
+              // `totalPurchases` is the COUNT, and its per-branch twin is
+              // `purchaseCount`. Mapping these by name would silently seed the
+              // count with money.
+              purchaseCount: supplier.totalPurchases || 0,
+              updatedAt: new Date(),
+            },
+            $setOnInsert: { createdAt: new Date() },
+          },
+          upsert: true,
+        },
+      });
+    }
+    let supplierBalancesSeeded = 0;
+    if (supplierBalanceOps.length > 0) {
+      const res = await SupplierBalance.bulkWrite(supplierBalanceOps, { ordered: false });
+      supplierBalancesSeeded = (res.upsertedCount || 0) + (res.modifiedCount || 0);
     }
 
     // 5. Everything is tagged — only now is the shop switched over.
@@ -2384,7 +2461,8 @@ class AdminService {
         rows: backfilled,
         staff: staffResult.modifiedCount,
         products: productResult.modifiedCount,
-        customerBalances: customerBalancesSeeded
+        customerBalances: customerBalancesSeeded,
+        supplierBalances: supplierBalancesSeeded
       }
     };
   }

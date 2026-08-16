@@ -5,6 +5,7 @@ const CustomerBalance = require('../models/CustomerBalance.model');
 const Payment = require('../models/Payment.model');
 const User = require('../models/User.model');
 const StockTransaction = require('../models/StockTransaction.model');
+const CashRegister = require('../models/CashRegister.model');
 const Shop = require('../models/Shop.model');
 const AuditLog = require('../models/AuditLog.model');
 const InvoiceCounter = require('../models/InvoiceCounter.model');
@@ -12,6 +13,7 @@ const { AppError } = require('../middleware/error.middleware');
 const cacheService = require('./cache.service');
 const logger = require('../utils/logger.util');
 const { branchFilter, requireBranch, getBranchCode, wrongBranchError } = require('../utils/branchScope.util');
+const { normalizePhone } = require('../utils/phone.util');
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
 const {
@@ -313,24 +315,68 @@ class SaleService {
       throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }
 
-    return sale;
+    /**
+     * Whether this invoice may still be revised, decided by the server.
+     *
+     * Attached here rather than left to the client, because the answer depends
+     * on six things the browser cannot see: a return's existence, a payment
+     * recorded after checkout, the cash register's status, the Bangladesh
+     * trading day, the revision chain and the sale's channel. A client
+     * re-deriving them would show a সংশোধন button that the API then refuses —
+     * worse than no button, because the seller has already told the customer.
+     *
+     * Two extra fields on a response the sale page already fetches; the reason
+     * rides along so the UI can say WHY instead of just hiding the control.
+     */
+    const blocked = await this.reviseBlockedReason(shopId, sale);
+    const result = sale.toObject();
+    result.canRevise = blocked === null;
+    result.reviseBlockedReason = blocked
+      ? { code: blocked.code, message: blocked.message, messageBn: blocked.messageBn }
+      : null;
+
+    return result;
   }
 
   // Create new sale
   /**
    * @param {object} internalOptions NOT derived from any request body — only
-   *   internal callers may pass it. `unitPriceOverrides` is a Map of
-   *   `"<productId>"` or `"<productId>:<variantId>"` → price, used by
-   *   `orderService.confirmOrder` so the Sale bills exactly what the online
-   *   order QUOTED (the storefront's `onlinePrice ?? sellingPrice`), not what
-   *   the POS would charge today. The controllers never forward anything from
+   *   internal callers may pass it. The controllers never forward anything from
    *   `req.body` into this argument; doing so would reopen the client-priced
    *   sale that I-10 / §15.2 exist to prevent.
+   *
+   *   `unitPriceOverrides` — Map of `"<productId>"` or `"<productId>:<variantId>"`
+   *     → price, used by `orderService.confirmOrder` so the Sale bills exactly
+   *     what the online order QUOTED (the storefront's `onlinePrice ??
+   *     sellingPrice`), not what the POS would charge today.
+   *
+   *   The rest are `reviseSale`'s, and each exists because a revision must be
+   *   the SAME invoice, on the SAME day, inside the SAME transaction:
+   *
+   *   `session`        — join the caller's transaction rather than opening a
+   *     second one. Without it the re-create reads stock from before the cancel
+   *     restored it (see utils/transaction.util.js).
+   *   `forceInvoiceNo` — reuse the original number instead of drawing a new one
+   *     from the counter. The customer is holding paper with it printed on.
+   *   `forceCreatedAt` — keep the original's timestamp. Load-bearing: revising
+   *     a 9pm sale at 9:05 would otherwise move it across midnight into a day
+   *     it did not happen on, taking its invoice number, stock movements,
+   *     reports and drawer with it.
+   *   `revisedFrom` / `revision` — the chain back to the superseded document.
+   *
+   *   With none of them passed, every line below behaves exactly as it did
+   *   before they existed.
    */
   async createSale(shopId, userId, saleData, req, internalOptions = {}) {
     const unitPriceOverrides = internalOptions.unitPriceOverrides instanceof Map
       ? internalOptions.unitPriceOverrides
       : null;
+    const {
+      forceInvoiceNo = null,
+      forceCreatedAt = null,
+      revisedFrom = null,
+      revision = 0,
+    } = internalOptions;
     // The quoted price wins over every pricing rule, including wholesale —
     // an online order is billed at what the customer was shown.
     const overrideFor = (productId, variantId = null) => {
@@ -385,7 +431,24 @@ class SaleService {
     // `backdatedAt` because once `createdAt` moves, the Sale itself no longer
     // records it — only the audit entry below does.
     const enteredAt = new Date();
-    const occurredAt = backdatedAt || enteredAt;
+
+    /**
+     * The day this invoice belongs to, whichever way it got there.
+     *
+     * `backdatedAt` is the owner saying "this happened on Thursday".
+     * `forceCreatedAt` is a revision saying "this is still the same sale, on the
+     * day it already had" — which is usually today, and is emphatically NOT a
+     * backdate: no `sales.backdate` permission is consulted and no
+     * `backdatedTo` is written, because nothing about WHEN the sale happened is
+     * being claimed. It is being preserved.
+     *
+     * Collapsed into one name here rather than checked at each of the four
+     * sites that date something (stock transactions, the invoice counter, the
+     * document's `createdAt`, the customer's `lastPurchase`), so a fifth added
+     * later inherits it instead of quietly landing on today.
+     */
+    const pinnedAt = forceCreatedAt || backdatedAt;
+    const occurredAt = pinnedAt || enteredAt;
 
     // --- Split Payment Support ---
     // If payments[] array is provided, calculate paid and primary paymentMethod from it
@@ -430,11 +493,43 @@ class SaleService {
     // The lookup is deliberately shop-wide (`shop` + id/phone, no branch
     // predicate): `Customer` has no `branch` field, and adding one would match
     // zero rows in silence. Same trap as H-7.
+    // The phone is normalised to the stored form. It was matched raw, so a
+    // cashier typing `+8801792449180` — or an offline payload carrying the
+    // number as the customer's card prints it — missed an existing customer,
+    // fell through to the `Customer.create` below, and blew up on the
+    // {shop, phone} unique index. The sale failed at the till with a 500.
     let customer = null;
     if (customerId) {
       customer = await Customer.findOne({ _id: customerId, shop: shopId }).session(session || null);
     } else if (customerPhone) {
-      customer = await Customer.findOne({ shop: shopId, phone: customerPhone }).session(session || null);
+      customer = await Customer.findOne({
+        shop: shopId,
+        phone: normalizePhone(customerPhone),
+      }).session(session || null);
+    }
+
+    // ── A soft-deleted customer must not take on new debt ──────────────────────
+    //
+    // Neither lookup filters `isActive`, deliberately: filtering here would send
+    // a known phone down the create path and straight into E11000, since a
+    // deleted customer still holds their number. So the record is found — and
+    // then refused.
+    //
+    // It used to be found and USED. Every screen in the app hides an inactive
+    // customer, but this path bound invoices to them anyway, so due accumulated
+    // on a record nobody could open: one shop reached ৳1,06,305 that way, owed
+    // by a customer their own due list could not show. The branch dashboard
+    // counted it and the All-Branches dashboard did not, and no figure on either
+    // page explained the gap (report.service.js carries the full account).
+    //
+    // Actionable rather than silent, now that `restoreCustomer` exists: the
+    // cashier is told what is wrong and what to do about it.
+    if (customer && customer.isActive === false) {
+      throw new AppError(
+        'This customer was deleted — restore them before selling to them again',
+        'এই কাস্টমারকে মুছে ফেলা হয়েছে — বিক্রি করার আগে কাস্টমারকে ফিরিয়ে আনুন',
+        400
+      );
     }
 
     // Which price list this whole invoice is rung up against. Resolved from the
@@ -1211,8 +1306,8 @@ class SaleService {
        * shelf on Saturday while the invoice that sold it says Thursday, and the
        * two would never reconcile for the day either of them names.
        */
-      if (backdatedAt) {
-        for (const txn of stockTransactions) txn.createdAt = backdatedAt;
+      if (pinnedAt) {
+        for (const txn of stockTransactions) txn.createdAt = pinnedAt;
       }
       await StockTransaction.insertMany(stockTransactions, sessionOpt);
     }
@@ -1268,7 +1363,13 @@ class SaleService {
     // nothing to recompute, and recomputing would be wrong: the price the
     // cashier was quoted is the price on the invoice.
     let finalCustomerName = customerName;
-    let finalCustomerPhone = customerPhone;
+    // Normalised, because this is a SNAPSHOT written onto the invoice and read
+    // back by the SMS receipt, the due-aging report (which groups on it) and
+    // every "find the sale by phone" lookup. A walk-in sale typed as
+    // `+8801792449180` used to store that literal string on the Sale while the
+    // Customer document stored `01792449180`, so the same person's invoices
+    // sorted into two groups depending on how the cashier typed the number.
+    let finalCustomerPhone = normalizePhone(customerPhone) || customerPhone;
 
     if (customer) {
       finalCustomerName = customer.name;
@@ -1306,7 +1407,12 @@ class SaleService {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         const branchCode = req ? getBranchCode(req) : null;
-        const invoiceNo = await this.generateInvoiceNumber(shopId, branchCode, branchId, backdatedAt);
+        // A revision reuses the original number — the customer is holding paper
+        // with it printed on, and after a reprint that paper must still be the
+        // invoice. `reviseSale` frees the unique key first by renaming the
+        // superseded document to `…~r1`.
+        const invoiceNo = forceInvoiceNo
+          || await this.generateInvoiceNumber(shopId, branchCode, branchId, pinnedAt);
         const [newSale] = await Sale.create([{
           shop: shopId,
           branch: branchId,
@@ -1359,12 +1465,23 @@ class SaleService {
            * modification time, not the sale's, and pinning it to the past would
            * make a backdated invoice look like it had never been touched.
            */
-          ...(backdatedAt ? { createdAt: backdatedAt } : {}),
+          ...(pinnedAt ? { createdAt: pinnedAt } : {}),
+          /**
+           * The chain back to the document this replaced. Written together and
+           * only for a revision, so an ordinary sale carries neither field and
+           * `revision` keeps its schema default of 0 — which is what makes this
+           * a no-migration change: absent means "never revised", everywhere.
+           */
+          ...(revisedFrom ? { revisedFrom, revision } : {}),
         }], sessionOpt);
         sale = newSale;
         break; // Success — exit retry loop
       } catch (err) {
-        if (err.code === 11000 && attempt < maxRetries - 1) {
+        // Retrying is what resolves a race for the NEXT counter value. A forced
+        // number has no next value to draw, so a duplicate there is a real
+        // conflict — the caller failed to free the unique key — and retrying
+        // would just fail twice more and report the wrong reason.
+        if (err.code === 11000 && !forceInvoiceNo && attempt < maxRetries - 1) {
           // Duplicate invoiceNo — retry with new number
           continue;
         }
@@ -1578,7 +1695,7 @@ class SaleService {
     this.invalidateCache(shopId).catch(() => {}); // Non-blocking
 
     return sale;
-    });
+    }, internalOptions.session ? { session: internalOptions.session } : {});
   }
 
   // Record payment for existing sale.
@@ -1732,10 +1849,35 @@ class SaleService {
   }
 
   // Cancel sale
-  async cancelSale(shopId, userId, saleId, reason, activeBranchId = null) {
+  /**
+   * ── Transactional as of the revision work ─────────────────────────────────
+   *
+   * This used to run four independent writes with no atomicity: a `bulkWrite`
+   * restoring stock, a second one rewriting FEFO batches, an `insertMany` of
+   * stock transactions, the customer-ledger unwind, and finally `sale.save()`.
+   * An error anywhere between the first and the last left goods back on the
+   * shelf with the sale still `completed` — stock the shop thought it had, sold
+   * against an invoice that was never cancelled.
+   *
+   * That was a latent bug on its own merits, independent of revision. It is
+   * fixed here because nothing may COMPOSE with a half-atomic cancel: a
+   * revision is a cancel followed by a create, and "half of it landed" is the
+   * one outcome that must be impossible.
+   *
+   * `internalOptions.session` joins a caller's transaction rather than opening
+   * a second one — see the header of utils/transaction.util.js for why that
+   * distinction is load-bearing and not a micro-optimisation.
+   *
+   * @param {object} internalOptions NOT derived from any request body.
+   *   `session` joins an ambient transaction; `revisedTo` records that this
+   *   cancellation is a supersession rather than a void.
+   */
+  async cancelSale(shopId, userId, saleId, reason, activeBranchId = null, internalOptions = {}) {
+    return await runInTransaction(async (session) => {
+    const sessionOpt = session ? { session } : {};
     const saleQuery = { _id: saleId, shop: shopId };
     if (activeBranchId) saleQuery.branch = activeBranchId;
-    const sale = await Sale.findOne(saleQuery);
+    const sale = await Sale.findOne(saleQuery, null, sessionOpt);
     if (!sale) {
       throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }
@@ -1779,7 +1921,11 @@ class SaleService {
     // query here that could resolve a document belonging to another shop if an
     // id ever leaked into a sale's items. It also lets the query use the
     // shop-prefixed compound indexes instead of falling back to the _id index.
-    const cancelProducts = await Product.find({ _id: { $in: cancelProductIds }, shop: shopId });
+    const cancelProducts = await Product.find(
+      { _id: { $in: cancelProductIds }, shop: shopId },
+      null,
+      sessionOpt
+    );
     const cancelProductMap = new Map(cancelProducts.map(p => [p._id.toString(), p]));
 
     // Stock is restored onto the sale's own product documents — those already
@@ -1956,15 +2102,15 @@ class SaleService {
     }
 
     if (restoreOps.length > 0) {
-      await Product.bulkWrite(restoreOps);
+      await Product.bulkWrite(restoreOps, sessionOpt);
     }
     // After the stock restores, and in its own bulkWrite — see the note on
     // `queueBatchRestore` above and the matching split in `createSale`.
     if (cancelBatchOps.length > 0) {
-      await Product.bulkWrite(cancelBatchOps);
+      await Product.bulkWrite(cancelBatchOps, sessionOpt);
     }
     if (cancelStockTxns.length > 0) {
-      await StockTransaction.insertMany(cancelStockTxns);
+      await StockTransaction.insertMany(cancelStockTxns, sessionOpt);
     }
 
     // Update customer balance if applicable
@@ -1976,7 +2122,7 @@ class SaleService {
           totalDue: -sale.due,
           purchaseCount: -1,
         },
-      });
+      }, sessionOpt);
 
       // Unwound at the branch that raised the sale — which is the only branch
       // whose figures the sale ever moved.
@@ -1988,7 +2134,7 @@ class SaleService {
         paid: -sale.paid,
         due: -sale.due,
         count: -1,
-      });
+      }, session);
     }
 
     // Update sale status
@@ -1997,9 +2143,16 @@ class SaleService {
     sale.cancelledBy = userId;
     sale.cancelReason = reason;
     sale.notes = `${sale.notes || ''}\nCancelled: ${reason}`;
-    await sale.save();
+    // Set by `reviseSale` only: this document was superseded, not voided, and
+    // this is the invoice that replaced it. Absent on an ordinary cancellation.
+    if (internalOptions.revisedTo) sale.revisedTo = internalOptions.revisedTo;
+    await sale.save(sessionOpt);
 
-    // Create audit log
+    // Create audit log.
+    //
+    // Deliberately NOT passed `sessionOpt`, exactly as before and for the same
+    // reason `createSale`'s entry is not: an audit write that could roll the
+    // cancellation back would be a reversal that fails because the logging did.
     await AuditLog.create({
       shop: shopId,
       user: userId,
@@ -2018,6 +2171,279 @@ class SaleService {
     this.invalidateCache(shopId).catch(() => {}); // Non-blocking
 
     return sale;
+    }, internalOptions.session ? { session: internalOptions.session } : {});
+  }
+
+  /**
+   * Why this invoice cannot be revised, or null if it can.
+   *
+   * Split out of `reviseSale` so the sale detail page can ask the SAME question
+   * without attempting the write — `getSaleById` attaches the answer as
+   * `canRevise` / `reviseBlockedReason`. Re-deriving six guards in the client
+   * would give a button that appears when the server would refuse, which is
+   * worse than no button.
+   *
+   * Ordered by how much money each one saves, not by how cheap it is to check.
+   *
+   * @returns {Promise<{code: string, message: string, messageBn: string,
+   *                    statusCode: number}|null>}
+   */
+  async reviseBlockedReason(shopId, sale) {
+    if (!sale) return null;
+
+    // 1. Already cancelled, or already superseded by a later revision. Both are
+    //    "this document is not the live invoice" — revising it would fork the
+    //    chain and leave two documents claiming the same number.
+    if (sale.status === 'cancelled') {
+      return {
+        code: 'SALE_CANCELLED',
+        message: 'This sale is cancelled and cannot be revised.',
+        messageBn: 'এই বিক্রয়টি বাতিল করা হয়েছে — সংশোধন করা যাবে না।',
+        statusCode: 400,
+      };
+    }
+    if (sale.revisedTo) {
+      return {
+        code: 'ALREADY_REVISED',
+        message: 'This version has already been replaced by a newer revision.',
+        messageBn: 'এই সংস্করণটি ইতিমধ্যে সংশোধিত হয়েছে — নতুন সংস্করণটি খুলুন।',
+        statusCode: 400,
+      };
+    }
+
+    // 2. A return exists against it. The return has ALREADY put stock back and
+    //    ALREADY credited the customer, and it allocated its refund
+    //    proportionally against the original line values. Revising on top counts
+    //    both twice — the same reasoning that makes `cancelSale` refuse here.
+    //    The remedy is the return, which knows what it has already reversed.
+    if ((sale.returnedAmount || 0) > 0) {
+      return {
+        code: 'HAS_RETURN',
+        message: 'This sale has returns against it — use a return instead of revising.',
+        messageBn: 'এই বিক্রয়ের বিপরীতে মাল ফেরত নেওয়া হয়েছে — সংশোধন না করে মাল ফেরত ব্যবহার করুন।',
+        statusCode: 409,
+      };
+    }
+
+    // 3. Not the same Bangladesh trading day. Yesterday has been reported on and
+    //    its drawer counted. The cliff is deliberate and it is the whole reason
+    //    this is affordable: a closed day needs the amendment model, not this.
+    const saleDay = toBangladeshDateStr(sale.createdAt);
+    if (saleDay !== getBangladeshTodayStr()) {
+      return {
+        code: 'DIFFERENT_DAY',
+        message: 'A sale can only be revised on the day it was made.',
+        messageBn: 'যেদিন বিক্রি হয়েছে সেদিনই কেবল সংশোধন করা যায় — এর জন্য মাল ফেরত ব্যবহার করুন।',
+        statusCode: 409,
+      };
+    }
+
+    // 4. The sale came from an online order. That Sale is the settlement of an
+    //    `Order` with its own lifecycle; revising it desynchronises the two
+    //    silently, and the order screen would keep showing the old basket.
+    if (sale.isOnline || (sale.channel && sale.channel !== 'pos')) {
+      return {
+        code: 'ONLINE_SALE',
+        message: 'An online order’s sale cannot be revised — edit the order instead.',
+        messageBn: 'অনলাইন অর্ডারের বিক্রয় সংশোধন করা যাবে না — অর্ডারটি সম্পাদনা করুন।',
+        statusCode: 400,
+      };
+    }
+
+    // 5. Money arrived after checkout. `atCheckout` is exactly this distinction:
+    //    true means the row is the checkout leg already recorded in
+    //    `sale.payments[]`, false means a later, separate money event with its
+    //    own history (`recordPayment`, a due collection). A revision rewrites
+    //    the invoice those events were settled against.
+    const laterPayment = await Payment.exists({
+      shop: shopId,
+      sale: sale._id,
+      atCheckout: { $ne: true },
+    });
+    if (laterPayment) {
+      return {
+        code: 'LATER_PAYMENT',
+        message: 'A payment was recorded against this sale after checkout.',
+        messageBn: 'বিক্রয়ের পরে এই ইনভয়েসে পেমেন্ট নেওয়া হয়েছে — সংশোধন করা যাবে না।',
+        statusCode: 409,
+      };
+    }
+
+    // 6. The drawer for that day and branch has been reconciled. A till whose
+    //    sales change underneath it is precisely what reconciliation exists to
+    //    prevent. Checked last because it is the only guard that costs a query
+    //    against a collection the sale does not point at.
+    const { startOfDay, endOfDay } = getBangladeshDayRange(saleDay);
+    const register = await CashRegister.findOne({
+      shop: shopId,
+      // Single-branch shops carry `branch: null` on both documents, so an
+      // unconditional `branch` predicate would match the row it should.
+      ...(sale.branch ? { branch: sale.branch } : {}),
+      date: { $gte: startOfDay, $lte: endOfDay },
+    }).select('status closedAt').lean();
+
+    if (register?.status === 'closed') {
+      return {
+        code: 'REGISTER_CLOSED',
+        message: 'The cash register for this day is closed.',
+        messageBn: 'এই দিনের ক্যাশ রেজিস্টার বন্ধ করা হয়েছে — সংশোধন করা যাবে না।',
+        statusCode: 409,
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * Replace a printed invoice with a corrected one, keeping its number.
+   *
+   * ── SUPERSEDE, never mutate ───────────────────────────────────────────────
+   *
+   * The old document is CANCELLED through the path that already knows how to
+   * unwind a sale, and a new one is written that inherits its invoice number.
+   * Nothing is edited in place, because everything downstream of a sale is
+   * append-only or delta-based: `StockTransaction` stores previousStock /
+   * newStock snapshots, FEFO consumed specific expiry batches that are not
+   * derivable from an edited line, `CustomerBalance.applyDelta` is a running
+   * delta rather than a recompute, and the audit trail, the staff report and
+   * the line-discount figures have all already counted the original. See
+   * SALE_REVISION_PLAN.md §2.1.
+   *
+   * The seller submits a CART, not a patch: the payload is the same one
+   * `POST /api/sales` takes, and the new sale goes through `createSale` in full
+   * — same pricing resolution, same stock guard, same combo handling, same
+   * `resolveLineRate`, same validation. A line-level patch API would need a
+   * parallel copy of all of it.
+   *
+   * ── STEP ORDER IS LOAD-BEARING ─────────────────────────────────────────────
+   *
+   *   rename → cancel → create
+   *
+   * The rename must precede the create or the `{shop, invoiceNo}` unique index
+   * rejects the new document. The cancel must precede the create or the stock
+   * guard measures against stock that is about to be restored, and a revision
+   * that only adds an item would fail on a product that has plenty.
+   *
+   * All of it in ONE transaction. Half of this landing — stock restored, no
+   * replacement invoice — leaves the shop short a sale it has been paid for.
+   *
+   * @param {object} saleData the full new basket (a `createSale` payload)
+   * @returns {Promise<Sale>} the new, live invoice
+   */
+  async reviseSale(shopId, userId, saleId, saleData, req) {
+    return await runInTransaction(async (session) => {
+      const sessionOpt = { session };
+
+      const saleQuery = { _id: saleId, shop: shopId };
+      if (req?.branchId) saleQuery.branch = req.branchId;
+      const original = await Sale.findOne(saleQuery, null, sessionOpt);
+      if (!original) {
+        throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
+      }
+
+      const blocked = await this.reviseBlockedReason(shopId, original);
+      if (blocked) {
+        const error = new AppError(blocked.message, blocked.messageBn, blocked.statusCode);
+        error.code = blocked.code;
+        throw error;
+      }
+
+      const liveInvoiceNo = original.invoiceNo;
+      const nextRevision = (original.revision || 0) + 1;
+      const previousTotal = original.total;
+      const previousItemCount = original.items.length;
+
+      /*
+       * Free the unique key.
+       *
+       * `~` is deliberate and is the whole reason this is safe: it appears in no
+       * generated invoice number, so `INV-…-0007~r1` can never collide with a
+       * real one, while a PREFIX search for `INV-…-0007` still finds every
+       * version. The suffix is internal — visible in history, never printed.
+       *
+       * `updateOne` rather than `original.save()`: saving the whole document
+       * would run `pre('save')`, which re-derives `due` and `profit`. Harmless
+       * today, but this write exists only to move a string.
+       */
+      await Sale.updateOne(
+        { _id: original._id },
+        { $set: { invoiceNo: `${liveInvoiceNo}~r${nextRevision}` } },
+        sessionOpt
+      );
+      original.invoiceNo = `${liveInvoiceNo}~r${nextRevision}`;
+
+      // Reverses stock, batches, the customer ledger and the shop counters,
+      // inside THIS transaction. `revisedTo` is filled in below, once the
+      // replacement exists to point at.
+      await this.cancelSale(
+        shopId,
+        userId,
+        original._id,
+        'revised',
+        original.branch || null,
+        { session }
+      );
+
+      const revised = await this.createSale(shopId, userId, saleData, req, {
+        session,
+        forceInvoiceNo: liveInvoiceNo,
+        // Same day, same invoice. Not a backdate — see the note on `pinnedAt`.
+        forceCreatedAt: original.createdAt,
+        revisedFrom: original._id,
+        revision: nextRevision,
+      });
+
+      // Written after the create, because until now there was nothing to point
+      // at. `updateOne` for the same reason as the rename above.
+      await Sale.updateOne(
+        { _id: original._id },
+        { $set: { revisedTo: revised._id } },
+        sessionOpt
+      );
+
+      // Outside the session, like every other audit write in this service: a
+      // log failure must never roll back the money.
+      AuditLog.create({
+        shop: shopId,
+        user: userId,
+        action: 'sale_revise',
+        actionBn: 'বিক্রয় সংশোধন',
+        description:
+          `Revised ${liveInvoiceNo} (r${nextRevision}): `
+          + `৳${previousTotal} → ৳${revised.total}, `
+          + `${previousItemCount} → ${revised.items.length} lines`,
+        descriptionBn:
+          `বিক্রয় সংশোধন ${liveInvoiceNo} (সংস্করণ ${nextRevision}): `
+          + `৳${previousTotal} → ৳${revised.total}, `
+          + `${previousItemCount} → ${revised.items.length} লাইন`,
+        entity: {
+          type: 'sale',
+          id: revised._id,
+          name: liveInvoiceNo,
+        },
+        changes: {
+          before: {
+            saleId: original._id,
+            invoiceNo: original.invoiceNo,
+            total: previousTotal,
+            paid: original.paid,
+            due: original.due,
+            itemCount: previousItemCount,
+          },
+          after: {
+            saleId: revised._id,
+            invoiceNo: revised.invoiceNo,
+            total: revised.total,
+            paid: revised.paid,
+            due: revised.due,
+            itemCount: revised.items.length,
+            revision: nextRevision,
+          },
+        },
+      }).catch((err) => logger.error(`Audit log (sale_revise) failed: ${err.message}`));
+
+      return revised;
+    });
   }
 
   // Get today's sales summary

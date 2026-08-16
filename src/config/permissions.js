@@ -26,7 +26,13 @@ const MODULES = {
   // `createSale` via `utils/saleDate.util.resolveSaleDate`, not at the door —
   // the endpoint stays open to anyone with `sales.create`, since a sale with no
   // date named is the ordinary case and must never be refused.
-  sales:         { key: 'sales',         label: 'বিক্রয়',            labelEn: 'Sales',           actions: ['view', 'create', 'update', 'delete', 'view_profit', 'discount', 'backdate'] },
+  // `revise` is correcting an invoice that has already been printed — a
+  // separate action from `create` for the same reason `discount` and `backdate`
+  // are: it is spending authority a seller may hold independently of being able
+  // to sell, and an owner must be able to take it away without stopping them
+  // ringing sales. It is NOT implied by `update` either — `update` is recording
+  // a payment against a due invoice, which changes no line and no stock.
+  sales:         { key: 'sales',         label: 'বিক্রয়',            labelEn: 'Sales',           actions: ['view', 'create', 'update', 'delete', 'view_profit', 'discount', 'backdate', 'revise'] },
   customers:     { key: 'customers',     label: 'কাস্টমার',          labelEn: 'Customers',       actions: ['view', 'create', 'update', 'delete'] },
   // A purchase record IS cost data (unit prices, invoice totals, dues), so
   // `view` alone only reveals *that* a purchase happened — supplier, date,
@@ -89,6 +95,7 @@ const ACTION_LABELS = {
   manual_adjust: { label: 'স্টক সমন্বয়',    labelEn: 'Adjust stock' },
   discount:      { label: 'ছাড় দেওয়া',      labelEn: 'Give discount' },
   backdate:      { label: 'আগের তারিখে বিক্রি', labelEn: 'Backdate a sale' },
+  revise:        { label: 'বিক্রয় সংশোধন',   labelEn: 'Revise a sale' },
   cancel:        { label: 'বাতিল',           labelEn: 'Cancel' },
   publish:       { label: 'প্রকাশ',          labelEn: 'Publish' },
 };
@@ -192,7 +199,7 @@ const ROLE_PRESETS = {
     permissions: buildPermissionsFromConfig({
       products:      ['view', 'create', 'update', 'view_cost'],
       categories:    ['view', 'create', 'update'],
-      sales:         ['view', 'create', 'update', 'view_profit', 'discount', 'backdate'],
+      sales:         ['view', 'create', 'update', 'view_profit', 'discount', 'backdate', 'revise'],
       customers:     ['view', 'create', 'update'],
       purchases:     ['view', 'create', 'update', 'view_cost'],
       suppliers:     ['view', 'create', 'update'],
@@ -240,7 +247,13 @@ const ROLE_PRESETS = {
       // Thursday. The cashier who sold it is the one who knows which day it
       // was. Revocable per role, and every use is recorded in the audit log
       // with both the date claimed and the moment it was really typed.
-      sales:         ['view', 'create', 'update', 'discount', 'backdate'],
+      //
+      // `revise` is the counter's own correction: the customer is still
+      // standing there and the invoice they were handed is wrong. It is bounded
+      // hard — same trading day, open drawer, no return, no later payment — so
+      // granting it to the person at the till is granting them the minutes
+      // after printing, not the life of the sale.
+      sales:         ['view', 'create', 'update', 'discount', 'backdate', 'revise'],
       customers:     ['view', 'create', 'update'],
       // `purchases` and `suppliers` were deliberately dropped: the purchase
       // ledger is raw buying-price data, so granting it here handed a cashier
@@ -302,7 +315,7 @@ const ROLE_PRESETS = {
  * created with. To roll a change out to shops that already exist, bump this and
  * add a PRESET_UPGRADES entry.
  */
-const PRESET_VERSION = 5;
+const PRESET_VERSION = 6;
 
 /**
  * Additive grants applied once per role, in version order.
@@ -413,6 +426,37 @@ const PRESET_UPGRADES = [
     grants: {
       manager: { sales: ['backdate'] },
       cashier: { sales: ['backdate'] },
+    },
+  },
+  {
+    version: 6,
+    /**
+     * Correcting an invoice that has already been printed.
+     *
+     * The case is the counter, not the back office: the customer is still at
+     * the till, the paper is in their hand, and they want one more item or want
+     * one taken off. Today that costs a second invoice number or a full
+     * cancel-and-re-ring. So it goes to the people standing there — manager and
+     * cashier — for the same reason `backdate` did.
+     *
+     * Like `backdate` and unlike `discount`, there is NO feature flag behind
+     * this: these roles gain a real ability the moment they next log in. What
+     * bounds it is not a capability but the guards, which are deliberately
+     * narrow (SALE_REVISION_PLAN.md §3.4): same Bangladesh trading day, drawer
+     * still open, no return against the invoice, no payment recorded after it,
+     * not an online order. Outside that window the correct instruments are the
+     * ones that already exist — a return, or a cancel.
+     *
+     * Every revision writes a `sale_revise` audit entry carrying both document
+     * ids, both totals and the line-count delta, and the superseded document is
+     * kept verbatim under a `~r1` invoice number. Nothing is erased.
+     *
+     * Salesperson and inventory_manager are left out, as with `discount` and
+     * `backdate`. A shop that wants floor staff revising grants it explicitly.
+     */
+    grants: {
+      manager: { sales: ['revise'] },
+      cashier: { sales: ['revise'] },
     },
   },
 ];

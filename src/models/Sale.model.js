@@ -330,6 +330,41 @@ const saleSchema = new mongoose.Schema({
   cancelReason: {
     type: String
   },
+  // ── Revision chain ─────────────────────────────────────────────────────────
+  //
+  // A revision does not edit this document. It cancels it and writes a NEW one
+  // that inherits its invoice number, because everything downstream of a sale
+  // is append-only or delta-based and cannot be rewritten in place:
+  // `StockTransaction` stores previousStock/newStock snapshots, FEFO consumed
+  // specific expiry batches, `CustomerBalance.applyDelta` is a running delta,
+  // and `salesReturn` allocates refunds proportionally against the ORIGINAL
+  // line values. See SALE_REVISION_PLAN.md §2.1.
+  //
+  // `SALE_STATUS` deliberately gains no `superseded` member. A superseded sale
+  // IS cancelled — that is exactly what happened to it — and `cancelReason:
+  // 'revised'` plus `revisedTo` say why. Adding a status would mean auditing
+  // every `status: 'cancelled'` query in the codebase for whether it meant to
+  // include supersessions.
+  //
+  // All three are absent on every ordinary sale and on every sale written
+  // before this existed, so there is no migration: readers fall back.
+
+  /** On a SUPERSEDED document: the revision that replaced it and now carries
+   *  this document's invoice number. */
+  revisedTo: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Sale'
+  },
+  /** On a REVISION: the document it replaced. */
+  revisedFrom: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Sale'
+  },
+  /** Counts from 1, so the third version of an invoice reads 2. */
+  revision: {
+    type: Number,
+    default: 0
+  },
   // ── Return tracking ────────────────────────────────────────────────────────
   //
   // Three accumulators, all `$inc`-ed by the returns path. They exist as STORED

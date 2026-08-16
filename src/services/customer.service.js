@@ -18,6 +18,53 @@ const mongoose = require('mongoose');
 /** Escape user input before it reaches $regex — raw input is a ReDoS vector. */
 const escapeRegex = (value) => String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+/**
+ * The name/phone search clause, in the one shape every customer read uses.
+ *
+ * ── Why the phone gets its own term ──────────────────────────────────────────
+ *
+ * Phones are STORED normalised (`01792449180` — see `Customer.pre('save')`) and
+ * were SEARCHED raw. So a shop whose staff have the number saved the way it is
+ * printed on a card — `+880 1792-449180`, the form this bug was reported in —
+ * matched nothing, and neither did `01792-449180` or `017 9244 9180`. The
+ * customer was sitting in the list the whole time under a different spelling of
+ * the same eleven digits.
+ *
+ * Both terms are emitted rather than one:
+ *
+ *   - the RAW text matches names, which `normalizePhone` would reduce to '' —
+ *     it strips every non-digit, so "নাঈম" comes back empty;
+ *   - the NORMALISED text matches phones, and is dropped when the query has no
+ *     digits in it at all.
+ *
+ * Partial input keeps working: `normalizePhone('0179')` is `'0179'`, so typing
+ * a prefix still prefix-matches. `+8801792` reduces to `01792`, which is the
+ * point.
+ *
+ * @param {string} search raw text as typed
+ * @param {string[]} nameFields document paths to match the raw text against
+ * @param {string} phoneField document path holding the normalised phone
+ * @returns {Array|null} $or branches, or null when there is nothing to search
+ */
+const buildSearchOr = (search, nameFields, phoneField) => {
+  const raw = String(search ?? '').trim();
+  if (!raw) return null;
+
+  const escaped = escapeRegex(raw);
+  const clauses = nameFields.map((field) => ({ [field]: { $regex: escaped, $options: 'i' } }));
+
+  // Always include the raw term against the phone too: it is what makes a
+  // straight `01792449180` keep working if normalisation ever changes shape.
+  clauses.push({ [phoneField]: { $regex: escaped, $options: 'i' } });
+
+  const normalised = normalizePhone(raw);
+  if (normalised && normalised !== raw) {
+    clauses.push({ [phoneField]: { $regex: escapeRegex(normalised), $options: 'i' } });
+  }
+
+  return clauses;
+};
+
 /** Customer fields the list and leaderboard surface, projected out of a $lookup. */
 const CUSTOMER_PROJECTION = {
   name: '$customer.name',
@@ -124,6 +171,9 @@ const normalizeSummary = (row) => ({
  */
 const round2 = (n) => quantizeMoney(n || 0);
 
+/** Query-string booleans arrive as 'true'/'false' strings, never as booleans. */
+const isTrue = (value) => value === true || value === 'true';
+
 /** Money never travels as a string. Rejects NaN/Infinity/negative-zero noise. */
 const toAmount = (value) => {
   const n = Number(value);
@@ -152,7 +202,7 @@ class CustomerService {
    * know which mode it is in.
    */
   async _getBranchCustomers(shopId, branchId, options = {}) {
-    const { page = 1, limit = 20, search, hasDue, sortBy = 'createdAt', sortOrder = 'desc' } = options;
+    const { page = 1, limit = 20, search, hasDue, sortBy = 'createdAt', sortOrder = 'desc', deleted = false } = options;
 
     // Union of what the list and the leaderboard each allow — both funnel here.
     const sortField = ['createdAt', 'name', 'totalDue', 'totalPurchases', 'purchaseCount', 'lastPurchase'].includes(sortBy)
@@ -166,19 +216,13 @@ class CustomerService {
     };
     if (hasDue === 'true' || hasDue === true) match.totalDue = { $gt: 0 };
 
-    const postJoinMatch = { 'customer.isActive': true };
-    if (search) {
-      const escaped = escapeRegex(search);
-      postJoinMatch.$or = [
-        { 'customer.name': { $regex: escaped, $options: 'i' } },
-        { 'customer.phone': { $regex: escaped, $options: 'i' } },
-        // The branch's own label is searchable too. Without this a branch that
-        // renamed a customer could no longer find them by the name on its own
-        // screen — which is the exact failure this feature exists to prevent,
-        // reintroduced from the other direction.
-        { localName: { $regex: escaped, $options: 'i' } },
-      ];
-    }
+    const postJoinMatch = { 'customer.isActive': !deleted };
+    // The branch's own label is searchable too. Without this a branch that
+    // renamed a customer could no longer find them by the name on its own
+    // screen — which is the exact failure this feature exists to prevent,
+    // reintroduced from the other direction.
+    const searchOr = buildSearchOr(search, ['customer.name', 'localName'], 'customer.phone');
+    if (searchOr) postJoinMatch.$or = searchOr;
 
     const [result] = await CustomerBalance.aggregate([
       { $match: match },
@@ -246,8 +290,13 @@ class CustomerService {
 
   // Get all customers with filtering, searching, pagination
   async getCustomers(shopId, options = {}, req = null) {
+    // `deleted=true` is the recycle bin — the only screen in the app that can
+    // see a soft-deleted customer, and therefore the only way back from
+    // `deleteCustomer`. Parsed here rather than in each arm so both modes agree.
+    const opts = { ...options, deleted: isTrue(options.deleted) };
+
     if (isBranchCustomerScope(req)) {
-      return this._getBranchCustomers(shopId, req.branchId, options);
+      return this._getBranchCustomers(shopId, req.branchId, opts);
     }
 
     const {
@@ -257,18 +306,15 @@ class CustomerService {
       hasDue,
       sortBy = 'createdAt',
       sortOrder = 'desc',
-    } = options;
+      deleted,
+    } = opts;
 
-    const query = { shop: shopId, isActive: true };
+    const query = { shop: shopId, isActive: !deleted };
 
-    // Search by name or phone (regex-escaped — raw input is a ReDoS vector)
-    if (search) {
-      const escaped = escapeRegex(search);
-      query.$or = [
-        { name: { $regex: escaped, $options: 'i' } },
-        { phone: { $regex: escaped, $options: 'i' } },
-      ];
-    }
+    // Search by name or phone (regex-escaped — raw input is a ReDoS vector,
+    // and the phone term is normalised — see `buildSearchOr`)
+    const searchOr = buildSearchOr(search, ['name'], 'phone');
+    if (searchOr) query.$or = searchOr;
 
     // Filter by due status
     if (hasDue === 'true' || hasDue === true) {
@@ -380,7 +426,16 @@ class CustomerService {
     // with two records and the scope toggle stops being reversible. What branch
     // scope changes is what comes back with them — this branch's figures only,
     // never another branch's dues.
-    const customer = await Customer.findOne({ shop: shopId, phone, isActive: true });
+    //
+    // Normalised first. Phones are STORED normalised, and this compared the raw
+    // parameter, so `/customers/phone/+8801792449180` found nobody while
+    // `/customers/phone/01792449180` found the same person — the till reporting
+    // "নতুন কাস্টমার" for a customer of ten years.
+    const customer = await Customer.findOne({
+      shop: shopId,
+      phone: normalizePhone(phone),
+      isActive: true,
+    });
     if (!customer) return null;
 
     if (isBranchCustomerScope(req)) {
@@ -602,7 +657,14 @@ class CustomerService {
 
   // Create new customer
   async createCustomer(shopId, userId, customerData, req) {
-    const { phone, name, address, notes } = customerData;
+    const { name, address, notes } = customerData;
+    // Normalised HERE, not left to `Customer.pre('save')`, because the
+    // duplicate check below has to ask the same question the unique index will.
+    // It did not: a form submitting `+8801792449180` looked up that literal
+    // string, found nothing, and fell through to `Customer.create` — which
+    // normalised on save and hit E11000 on {shop, phone}. A 500 where the shop
+    // should have been told "this customer already exists".
+    const phone = normalizePhone(customerData.phone);
     const branchId = req ? requireBranch(req) : null;
 
     // Owner-only and flag-gated — see `resolveWholesaleFlag`. Checked here
@@ -636,6 +698,32 @@ class CustomerService {
     // document for the same phone) is what makes the scope toggle irreversible.
     const existingCustomer = await Customer.findOne({ shop: shopId, phone });
     if (existingCustomer) {
+      // ── The soft-deleted dead end ──────────────────────────────────────────
+      //
+      // A deleted customer still holds their phone — `{shop, phone}` is unique
+      // over every document, active or not — while being invisible to every
+      // read path in the app. So "add this customer again" was the one move the
+      // shop would obviously try, and it could not work:
+      //
+      //   - shared book  → "এই ফোন নম্বর দিয়ে ইতিমধ্যে কাস্টমার আছে", pointing
+      //                    at a record no screen can open;
+      //   - branch book  → 200 OK from the adopt path below, a success toast,
+      //                    and STILL nothing in the list, because the list
+      //                    re-filters on `customer.isActive`. A silent no-op.
+      //
+      // One real shop lost six customers this way, one of them carrying
+      // ৳1,06,305 of due that kept growing because `sale.service` bound new
+      // invoices to the same hidden record.
+      //
+      // Re-adding a deleted customer IS the request to bring them back, so it
+      // is honoured as one — through the same single writer the restore
+      // endpoint uses, and audited as a restore rather than a create so the
+      // trail says what actually happened to the record.
+      const wasRestored = existingCustomer.isActive === false;
+      if (wasRestored) {
+        await this._restore(shopId, userId, existingCustomer, req, 'customer_create');
+      }
+
       // In branch scope the customer may exist shop-wide while being absent
       // from THIS branch's list — so "already exists" would be a dead end for a
       // record the staff cannot see or reach. Adopt them into this branch and
@@ -671,8 +759,21 @@ class CustomerService {
         // it just typed, not the shop-wide one.
         return this._applyBranchFigures(existingCustomer, shopId, branchId);
       }
-      // Shared book: the customer really is in their list already, so the
-      // error is both correct and actionable. Unchanged from before Phase 7.
+      // Shared book. If they were deleted a moment ago they have just been
+      // restored above, and the restore IS the outcome the shop asked for — so
+      // hand them back rather than reporting a duplicate, which would leave the
+      // record active while telling the staff member their action failed.
+      //
+      // Keyed on `wasRestored`, NOT on `existingCustomer.isActive`: by this
+      // point the restore has already flipped that flag to true, so reading it
+      // here would also swallow the ordinary duplicate error for a customer who
+      // was never deleted at all.
+      if (wasRestored) {
+        return existingCustomer;
+      }
+
+      // Genuinely already in their list, so the error is both correct and
+      // actionable. Unchanged from before Phase 7.
       throw new AppError('এই ফোন নম্বর দিয়ে ইতিমধ্যে কাস্টমার আছে', 'Customer with this phone already exists', 400);
     }
 
@@ -778,11 +879,24 @@ class CustomerService {
 
     const beforeData = customer.toObject();
 
-    // Check if phone is being changed and if it conflicts
-    if (updateData.phone && updateData.phone !== customer.phone) {
-      const existingCustomer = await Customer.findOne({ shop: shopId, phone: updateData.phone, _id: { $ne: customerId } });
-      if (existingCustomer) {
-        throw new AppError('এই ফোন নম্বর দিয়ে ইতিমধ্যে কাস্টমার আছে', 'Customer with this phone already exists', 400);
+    // Check if phone is being changed and if it conflicts.
+    //
+    // Normalised on both sides of the comparison, for the same reason
+    // `createCustomer` is: the raw form value was compared against the stored
+    // normalised one, so re-saving the SAME number written `+880 1792-449180`
+    // read as a change, missed the conflict lookup (also raw), and only failed
+    // at the unique index. Assigned back onto `updateData` so the value that
+    // reaches `Object.assign` below is the one that was actually checked.
+    if (updateData.phone) {
+      updateData.phone = normalizePhone(updateData.phone);
+
+      if (updateData.phone !== customer.phone) {
+        const existingCustomer = await Customer.findOne({
+          shop: shopId, phone: updateData.phone, _id: { $ne: customerId },
+        });
+        if (existingCustomer) {
+          throw new AppError('এই ফোন নম্বর দিয়ে ইতিমধ্যে কাস্টমার আছে', 'Customer with this phone already exists', 400);
+        }
       }
     }
 
@@ -862,6 +976,89 @@ class CustomerService {
     }
 
     return customer;
+  }
+
+  /**
+   * Bring a soft-deleted customer back. The single writer for `isActive: true`.
+   *
+   * ── Why this exists ──────────────────────────────────────────────────────────
+   *
+   * `deleteCustomer` was a one-way door. It is the only line in the codebase
+   * that writes `isActive: false`, and until now nothing wrote it back — no
+   * endpoint, no admin script, no UI. Every read filters the flag out, so a
+   * mis-tap on ডিলিট removed a customer from the list, the search, the till
+   * lookup, the due list, the leaderboard and the aging report at once, with no
+   * screen anywhere that could still see them and no way to undo it.
+   *
+   * The record was never gone — soft delete, by definition — so the shop was
+   * told their customer had vanished while the document sat in the database
+   * holding the phone number that stopped them re-creating it.
+   *
+   * Shared by the restore endpoint and by `createCustomer`, which treats
+   * "add this phone again" as the same request.
+   *
+   * @param {Object} customer a loaded, soft-deleted Customer document
+   * @param {string} viaAction what to record the restore as ('customer_restore'
+   *   from the endpoint, 'customer_create' when it came from the add form)
+   */
+  async _restore(shopId, userId, customer, req, viaAction = 'customer_restore') {
+    customer.isActive = true;
+    await customer.save();
+
+    // Make sure the branch doing the restoring can actually SEE them. In branch
+    // scope the list is driven by `CustomerBalance` rows, so restoring the
+    // identity alone would flip the flag and change nothing on screen for the
+    // person who pressed the button. Moves no money — `applyDelta` with no
+    // deltas is a `$setOnInsert` of a zero row, exactly as `createCustomer`
+    // does when adopting an existing customer into a new branch.
+    const branchId = req ? requireBranch(req) : null;
+    if (branchId) {
+      await CustomerBalance.applyDelta({ shop: shopId, customer: customer._id, branch: branchId });
+    }
+
+    await AuditLog.log({
+      shop: shopId,
+      user: userId,
+      customer: customer._id,
+      action: viaAction,
+      description: `Restored customer: ${customer.name} (${customer.phone})`,
+      entity: { type: 'customer', id: customer._id, name: customer.name },
+      changes: { before: { isActive: false }, after: { isActive: true } },
+      req,
+    });
+
+    return customer;
+  }
+
+  /**
+   * Restore a soft-deleted customer (owner / `customers.delete` holders).
+   *
+   * Gated on `delete` rather than `update` deliberately: undoing a removal is
+   * the same authority as making one, and a cashier who cannot delete a
+   * customer has no business resurrecting one either.
+   */
+  async restoreCustomer(shopId, userId, customerId, req) {
+    // Deliberately NOT `getCustomerById` — that read is what filters the
+    // deleted customer out in the first place, and in branch scope it 404s on a
+    // missing ledger row, which is precisely the state a restore has to fix.
+    // `AppError` is (message, messageBn, statusCode) — English first. Much of
+    // this file has the two the wrong way round, which is why its 404s surface
+    // in English-language contexts as Bengali; not fixed wholesale here, but
+    // new throws follow the actual signature.
+    const customer = await Customer.findOne({ _id: customerId, shop: shopId });
+    if (!customer) {
+      throw new AppError('Customer not found', 'কাস্টমার পাওয়া যায়নি', 404);
+    }
+
+    if (customer.isActive !== false) {
+      throw new AppError('This customer is not deleted', 'এই কাস্টমার মুছে ফেলা হয়নি', 400);
+    }
+
+    await this._restore(shopId, userId, customer, req);
+
+    return isBranchCustomerScope(req)
+      ? this._applyBranchFigures(customer, shopId, req.branchId)
+      : customer;
   }
 
   // Delete customer (soft delete)
@@ -1360,13 +1557,11 @@ class CustomerService {
       };
     }
 
+    // Was an UNESCAPED `$regex: search` on both fields — a ReDoS vector the
+    // customer list had already been fixed for, still open on this endpoint.
     const query = { shop: shopId, isActive: true };
-    if (search) {
-      query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { phone: { $regex: search, $options: 'i' } },
-      ];
-    }
+    const searchOr = buildSearchOr(search, ['name'], 'phone');
+    if (searchOr) query.$or = searchOr;
 
     const skip = (page - 1) * limit;
     const sort = { [sortField]: sortOrder === 'asc' ? 1 : -1 };
