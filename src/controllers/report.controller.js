@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const reportService = require('../services/report.service');
+const detailedReportService = require('../services/detailedReport.service');
 const customerService = require('../services/customer.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
@@ -145,6 +146,91 @@ exports.exportReport = asyncHandler(async (req, res) => {
     data: sanitizeReport(report, req),
     message: 'Report exported successfully',
     messageBn: 'রিপোর্ট সফলভাবে এক্সপোর্ট হয়েছে',
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Printable documents (customer statement, stock valuation, supplier statement)
+//
+// All three go through `sanitizeReport` like every other report on this
+// controller. That is not belt-and-braces on the stock one: the valuation
+// carries `buyingPrice`/`totalCost`/`totalBuyingValue`/`totalProfit` for every
+// line in the catalogue, which is the most concentrated cost disclosure the API
+// produces. The route grants access; the sanitiser decides which columns come
+// back.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Reject a malformed party id rather than silently widening the statement. */
+function invalidId(res, id, labelBn) {
+  if (!id || mongoose.Types.ObjectId.isValid(id)) return false;
+  ApiResponse.error(res, {
+    message: 'Invalid id',
+    messageBn: labelBn,
+    statusCode: 400,
+  });
+  return true;
+}
+
+// Customer statement of account
+exports.getCustomerStatement = asyncHandler(async (req, res) => {
+  // A bad `customerId` must not fall through to "every customer" — asking for
+  // one person's statement and being handed the whole shop's is both a leak and
+  // a several-hundred-page PDF.
+  if (invalidId(res, req.query.customerId, 'কাস্টমার সঠিক নয়')) return;
+
+  const report = await detailedReportService.getCustomerStatements(
+    req.shop._id,
+    {
+      ...req.query,
+      withDueOnly: req.query.withDueOnly === 'true',
+      includeEmpty: req.query.includeEmpty === 'true',
+    },
+    req
+  );
+
+  return ApiResponse.success(res, {
+    data: sanitizeReport(report, req),
+    message: 'Customer statement generated successfully',
+    messageBn: 'কাস্টমার স্টেটমেন্ট তৈরি হয়েছে',
+  });
+});
+
+// Supplier statement of account
+exports.getSupplierStatement = asyncHandler(async (req, res) => {
+  if (invalidId(res, req.query.supplierId, 'সরবরাহকারী সঠিক নয়')) return;
+
+  const report = await detailedReportService.getSupplierStatements(
+    req.shop._id,
+    {
+      ...req.query,
+      withDueOnly: req.query.withDueOnly === 'true',
+      includeEmpty: req.query.includeEmpty === 'true',
+    },
+    req
+  );
+
+  return ApiResponse.success(res, {
+    data: sanitizeReport(report, req),
+    message: 'Supplier statement generated successfully',
+    messageBn: 'সরবরাহকারী স্টেটমেন্ট তৈরি হয়েছে',
+  });
+});
+
+// Stock valuation report
+exports.getStockReport = asyncHandler(async (req, res) => {
+  if (invalidId(res, req.query.categoryId, 'ক্যাটাগরি সঠিক নয়')) return;
+  if (invalidId(res, req.query.brandId, 'ব্র্যান্ড সঠিক নয়')) return;
+
+  const report = await detailedReportService.getStockReport(
+    req.shop._id,
+    { ...req.query, includeInactive: req.query.includeInactive === 'true' },
+    req
+  );
+
+  return ApiResponse.success(res, {
+    data: sanitizeReport(report, req),
+    message: 'Stock report generated successfully',
+    messageBn: 'স্টক রিপোর্ট তৈরি হয়েছে',
   });
 });
 

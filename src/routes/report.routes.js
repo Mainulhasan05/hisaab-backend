@@ -23,6 +23,22 @@ router.get('/date-wise', rbac('reports', 'view'), reportController.getDateWiseSu
 router.get('/date-wise/:date', rbac('reports', 'view'), reportController.getSalesByDate);
 router.get('/trending-products', rbac('reports', 'view'), reportController.getTrendingProducts);
 router.get('/due-aging', rbac('reports', 'view'), reportController.getDueAging);
+
+// Printable documents. Registered before the `/:type/export/:format` catch-all
+// below — that route is three segments deep so it cannot shadow these, but
+// keeping specific paths above a parameterised one is the rule that stops the
+// next addition from quietly becoming a report type named "stock".
+//
+// Gated on `reports.view` and NOT additionally on `customers.view` /
+// `suppliers.view` / `products.view`, matching every other route on this
+// router: reports are their own module in the permission matrix, and a shop
+// that grants report access is granting the reports it contains. The cost and
+// profit COLUMNS are a separate question and are answered by `sanitizeReport`
+// in the controller, per user, not per route.
+router.get('/customer-statement', rbac('reports', 'view'), reportController.getCustomerStatement);
+router.get('/supplier-statement', rbac('reports', 'view'), reportController.getSupplierStatement);
+router.get('/stock', rbac('reports', 'view'), reportController.getStockReport);
+
 router.get('/:type/export/:format', rbac('reports', 'view'), reportController.exportReport);
 
 module.exports = router;
