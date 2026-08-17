@@ -1313,13 +1313,33 @@ class AdminService {
 
   // Get all SMS logs (admin level - all shops)
   async getSMSLogs(options = {}) {
-    const { page = 1, limit = 50, shopId, status, type } = options;
+    const { page = 1, limit = 50, shopId, status, type, ip, source } = options;
     const SMSLog = require('../models/SMSLog.model');
 
     const query = {};
-    if (shopId) query.shop = shopId;
+
+    // Three kinds of row live in this collection and only one has a shop. The
+    // two shop-less kinds were narrowed in the browser, over whatever the
+    // server happened to return for the current page — so "System (OTP)" showed
+    // 4 rows out of a page of 50 and paginated against the unfiltered total.
+    // Tolerable while no document had ever carried `type: 'otp'`; not now that
+    // every registration writes one. Both are resolved here instead.
+    if (shopId === 'system') {
+      query.shop = null;
+      query.sentByAdmin = null;
+    } else if (shopId === 'broadcast') {
+      query.shop = null;
+      query.sentByAdmin = { $ne: null };
+    } else if (shopId) {
+      query.shop = shopId;
+    }
+
     if (status) query.status = status;
     if (type) query.type = type;
+    // "Everything this address has sent" — served by the sparse
+    // { 'origin.ip': 1, createdAt: -1 } index.
+    if (ip) query['origin.ip'] = ip;
+    if (source) query['origin.source'] = source;
 
     const skip = (page - 1) * limit;
 

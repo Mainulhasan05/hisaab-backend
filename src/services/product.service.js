@@ -19,6 +19,9 @@ const { hasFeature } = require('../utils/features.util');
 const { normalizeWholesalePrice } = require('../utils/pricing.util');
 const cacheService = require('./cache.service');
 const mediaService = require('./media.service');
+// Safe to require directly: `category.service` reaches for the Product MODEL,
+// never this service, so there is no cycle between the two.
+const categoryService = require('./category.service');
 const { KEYS, getTTL } = require('../config/cacheKeys');
 const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.util');
 const { capBatchesToStock } = require('../utils/batch.util');
@@ -2483,6 +2486,21 @@ class ProductService {
           code = `PRD-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000)}`;
         }
 
+        /**
+         * Categories named in the CSV, created on demand.
+         *
+         * The find-or-create itself now lives in `category.service`, which is
+         * also what the product form's inline picker calls. This used to be its
+         * own copy and the two had already drifted: this one wrote a
+         * hand-rolled `slug` that stripped every Bengali character (leaving
+         * `''`, then a `cat-<timestamp>` fallback) while the model's own
+         * pre-save hook builds one properly, and it never noticed a category
+         * that differed only in case, so a sheet listing "Shirt" and "shirt"
+         * tried to create both and the second threw E11000 mid-import.
+         *
+         * `categoryMap` stays as a per-run memo — one round trip per distinct
+         * name rather than per row.
+         */
         let categoryId = null;
         if (item.categoryName && String(item.categoryName).trim()) {
           const catNameClean = String(item.categoryName).trim();
@@ -2490,14 +2508,12 @@ class ProductService {
           if (categoryMap.has(catLower)) {
             categoryId = categoryMap.get(catLower);
           } else {
-            const newCat = await Category.create({
-              shop: shopId,
-              name: catNameClean,
-              slug: catNameClean.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, '') || `cat-${Date.now()}`,
-              createdBy: userId,
-            });
-            categoryId = newCat._id;
-            categoryMap.set(catLower, newCat._id);
+            const { category: resolved } = await categoryService.findOrCreateByName(
+              shopId,
+              catNameClean
+            );
+            categoryId = resolved._id;
+            categoryMap.set(catLower, resolved._id);
           }
         }
 

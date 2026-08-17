@@ -78,11 +78,32 @@ class AuthService {
       }
     });
 
-    // Seed default categories for this shop type
-    try {
-      await seedCategories(shop._id, resolvedShopType);
-    } catch (error) {
-      console.error('Failed to seed categories:', error.message);
+    /**
+     * Categories are NO LONGER pre-created here by default.
+     *
+     * This ran unconditionally and gave a new grocery shop 85 categories, a
+     * cosmetics shop 78 and a cloth shop 63 — before either had a single
+     * product. Around eight in ten of those rows never held one. The first
+     * screen after signup was a required dropdown full of names the shopkeeper
+     * had not chosen and largely did not stock, which is a wall, not a
+     * head start.
+     *
+     * The lists still exist and are still offered — from the suggestions panel,
+     * parents first, nothing pre-ticked, once the shop has actually seen the
+     * app (`category.service.getSuggestions`). Same data, asked instead of
+     * assumed.
+     *
+     * `autoSeedCategoriesOnSignup` defaults false and is the way back if
+     * activation moves the wrong way. Reading it through `?.` with a `=== true`
+     * fallback keeps registration working when the settings read fails, and
+     * fails toward the new behaviour rather than the old one.
+     */
+    if (settings?.autoSeedCategoriesOnSignup === true) {
+      try {
+        await seedCategories(shop._id, resolvedShopType);
+      } catch (error) {
+        console.error('Failed to seed categories:', error.message);
+      }
     }
 
     // Seed default roles for the shop

@@ -51,17 +51,31 @@ exports.submitContact = asyncHandler(async (req, res) => {
     userAgent: req.headers['user-agent'],
   });
 
-  // Send SMS notification to admin
+  // Notify the operator by SMS.
+  //
+  // This called `sendSingle({ to, message })` against a signature of
+  // `(shopId, userId, phone, message, …)` — the object landed in `shopId`,
+  // `phone` and `message` were undefined, and the call threw on every
+  // submission into the catch below. The notification had never once been
+  // delivered, and nothing said so because the throw was swallowed.
+  //
+  // `sendSystemSingle` is the platform-account path: no shop quota to charge
+  // (there is no shop here), the platform's own sign-off, and a row in the SMS
+  // panel carrying the submitter's IP and the time — so a form used to spam the
+  // operator's phone is traceable to where it came from.
   try {
     const smsService = require('../services/sms.service');
     const adminPhone = process.env.ADMIN_CONTACT_PHONE || '01757995016';
 
-    await smsService.sendSingle({
-      to: adminPhone,
+    await smsService.sendSystemSingle({
+      phone: adminPhone,
       message: `হিসাব যোগাযোগ ফর্ম:\nনাম: ${name}\nবিষয়: ${subject}\nফোন: ${phone || 'N/A'}`,
+      audience: 'system_contact',
     });
   } catch (smsError) {
-    // Log but don't fail the request
+    // Still non-fatal — a contact message that saved must not 500 because the
+    // gateway was down. The attempt and its failure reason are now on the SMS
+    // log either way, which is the part that was missing.
     console.error('Failed to send contact notification SMS:', smsError.message);
   }
 

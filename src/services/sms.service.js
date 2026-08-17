@@ -179,8 +179,77 @@ class SMSService {
     return reserved.remainingQuota;
   }
 
+  /* ── Logging a send that belongs to no shop ───────────────────────────────
+   *
+   * OTPs and platform notices are sent on the platform's own gateway account,
+   * so there is no `SMSQuota` to reserve and no shop to bill. That is why they
+   * were never logged: every other path writes its log next to a quota
+   * movement, and these have none.
+   *
+   * The consequence was that the single highest-volume message the product
+   * sends — the registration OTP — appeared nowhere. `SMS_TYPES.OTP` existed,
+   * the admin panel had an "OTP" filter and a "System OTP" pill, and not one
+   * document had ever carried that type. An operator asking "did this number
+   * get its code, and when" had only the process log to go on, which rotates.
+   *
+   * `shop: null` is how a shop-less send has always been represented (see the
+   * platform-broadcast block), so this needs no migration and the shop-facing
+   * history — which filters on a concrete `shop` — cannot pick these up.
+   */
+
+  /**
+   * Record a platform-account send. Never throws.
+   *
+   * A failure to write the log must not fail the thing that caused it: an
+   * SMSLog write that rejects during registration would roll a new shop owner
+   * back over a bookkeeping row. The origin (IP, device, request id) is stamped
+   * by the model's hook, so nothing needs to be threaded in here.
+   */
+  async recordSystemLog({
+    phone,
+    message,
+    type = SMS_TYPES.OTP,
+    audience,
+    status,
+    transactionId = null,
+    apiResponse = null,
+    errorMessage = null,
+    senderName = null,
+  }) {
+    const sent = status === SMS_STATUS.SENT;
+    try {
+      return await SMSLog.create({
+        shop: null,
+        branch: null,
+        recipients: [{ phone, status }],
+        message,
+        type,
+        audience,
+        transactionId,
+        // No quota is charged, but the segments are still what the platform is
+        // billed by MimSMS — and an OTP in Bangla is two of them, not one.
+        cost: countSms(message).segments || 1,
+        status,
+        sentCount: sent ? 1 : 0,
+        failedCount: sent ? 0 : 1,
+        sentAt: sent ? new Date() : null,
+        apiResponse,
+        errorMessage,
+        senderName,
+      });
+    } catch (err) {
+      logger.error(`SMS: failed to write ${type} log for ${phone}: ${err.message}`);
+      return null;
+    }
+  }
+
   /**
    * Send OTP (no quota check for registration)
+   *
+   * Logged like any other send. The body is stored verbatim, OTP digits and
+   * all — a deliberate call, taken knowing that anyone with SMS-panel access
+   * can therefore read a live code for the 60 days the TTL keeps the row.
+   * Treat panel access accordingly.
    */
   async sendOTP(phone, otp) {
     const formattedPhone = formatPhone(phone);
@@ -189,6 +258,17 @@ class SMSService {
     // OTPs are secrets — only log them in development, never in production logs
     if (process.env.NODE_ENV === 'development' || process.env.SKIP_SMS === 'true') {
       logger.info(`[DEVELOPMENT OTP] Phone: ${formattedPhone} | OTP Code: ${otp}`);
+      // Logged even though nothing left the building. A development run that
+      // records nothing gives the panel no way to be exercised before it meets
+      // production traffic, and `{ simulated: true }` is already how the batch
+      // path marks a pretended send.
+      await this.recordSystemLog({
+        phone: formattedPhone,
+        message,
+        audience: 'system_otp',
+        status: SMS_STATUS.SENT,
+        apiResponse: { simulated: true },
+      });
       return { success: true, message: 'OTP logged to console' };
     }
 
@@ -202,10 +282,99 @@ class SMSService {
         Message: message
       });
 
+      // The same HTTP-200-refusal trap the other two send paths already guard.
+      // Without it the panel would record `sent` for every OTP the gateway
+      // turned away — a dead number, an exhausted platform float — and the one
+      // screen built to answer "why did this user never get their code" would
+      // answer it wrongly.
+      const verdict = readGatewayVerdict(response.data);
+      if (!verdict.accepted) {
+        const refusal = new Error(verdict.reason);
+        refusal.gatewayResponse = response.data;
+        throw refusal;
+      }
+
+      await this.recordSystemLog({
+        phone: formattedPhone,
+        message,
+        audience: 'system_otp',
+        status: SMS_STATUS.SENT,
+        transactionId: response.data?.TransactionId,
+        apiResponse: response.data,
+      });
+
       logger.info(`OTP sent to ${formattedPhone}: ${JSON.stringify(response.data)}`);
       return response.data;
     } catch (error) {
+      await this.recordSystemLog({
+        phone: formattedPhone,
+        message,
+        audience: 'system_otp',
+        status: SMS_STATUS.FAILED,
+        errorMessage: error.message,
+        apiResponse: error.gatewayResponse || null,
+      });
+
       logger.error(`Failed to send OTP: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * A one-off message on the platform's own account.
+   *
+   * For the platform notifying itself or an operator — not for shop traffic,
+   * which must go through `sendSingle` so it is priced and charged. No quota is
+   * touched, the platform's sign-off is used rather than a shop's, and the log
+   * lands with `shop: null` beside the OTPs and broadcasts.
+   */
+  async sendSystemSingle({ phone, message, audience = 'system_notice' }) {
+    const formattedPhone = formatPhone(phone);
+    const senderName = process.env.PLATFORM_SMS_SENDER_NAME || 'Hisaab';
+    const body = appendShopSignature(message, senderName);
+
+    if (process.env.SKIP_SMS === 'true') {
+      logger.info(`[SKIP_SMS] Pretending to send system SMS to ${formattedPhone}`);
+      await this.recordSystemLog({
+        phone: formattedPhone, message: body, type: SMS_TYPES.SINGLE, audience,
+        status: SMS_STATUS.SENT, apiResponse: { simulated: true }, senderName,
+      });
+      return { success: true, simulated: true };
+    }
+
+    try {
+      const response = await smsHttp.post(MIMSMS.BASE_URL + MIMSMS.SINGLE, {
+        UserName: process.env.MIMSMS_USERNAME,
+        Apikey: process.env.MIMSMS_API_KEY,
+        MobileNumber: formattedPhone,
+        SenderName: process.env.MIMSMS_SENDER_ID,
+        TransactionType: TRANSACTION_TYPE.single,
+        Message: body,
+      });
+
+      const verdict = readGatewayVerdict(response.data);
+      if (!verdict.accepted) {
+        const refusal = new Error(verdict.reason);
+        refusal.gatewayResponse = response.data;
+        throw refusal;
+      }
+
+      const smsLog = await this.recordSystemLog({
+        phone: formattedPhone, message: body, type: SMS_TYPES.SINGLE, audience,
+        status: SMS_STATUS.SENT, transactionId: response.data?.TransactionId,
+        apiResponse: response.data, senderName,
+      });
+
+      logger.info(`System SMS sent to ${formattedPhone} (${audience})`);
+      return { success: true, smsLog, response: response.data };
+    } catch (error) {
+      await this.recordSystemLog({
+        phone: formattedPhone, message: body, type: SMS_TYPES.SINGLE, audience,
+        status: SMS_STATUS.FAILED, errorMessage: error.message,
+        apiResponse: error.gatewayResponse || null, senderName,
+      });
+
+      logger.error(`Failed to send system SMS to ${formattedPhone}: ${error.message}`);
       throw error;
     }
   }
@@ -269,6 +438,10 @@ class SMSService {
         cost: segmentCost,
         status: SMS_STATUS.SENT,
         sentCount: 1,
+        // A single send finishes inside the call, so this is within
+        // milliseconds of `createdAt` — recorded anyway so the panel reads one
+        // field for "when did it leave" across single, campaign and OTP rows.
+        sentAt: new Date(),
         apiResponse: response.data,
         sentBy: userId,
         invoiceNumber: options.invoiceNumber || null,
@@ -838,6 +1011,10 @@ class SMSService {
       // campaign, not just the batches this attempt happened to run.
       sentCount: log.sentCount || 0,
       failedCount: log.failedCount || 0,
+      // Likewise the first-send time. A resume that re-stamped it would move
+      // "when did this campaign start reaching people" forward to whenever the
+      // worker was restarted, which is the one thing the field exists to say.
+      sentAt: log.sentAt || null,
     });
   }
 
@@ -938,6 +1115,7 @@ class SMSService {
     startBatch = 0,
     sentCount: initialSent = 0,
     failedCount: initialFailed = 0,
+    sentAt: initialSentAt = null,
   }) {
     // Where in the recipient array the starting batch begins. Derived from the
     // batches themselves rather than assumed to be `startBatch × BATCH_SIZE`,
@@ -949,6 +1127,7 @@ class SMSService {
 
     let sentCount = initialSent;
     let failedCount = initialFailed;
+    let sentAt = initialSentAt;
     let refundSegments = 0;
     let transactionId = null;
     let lastResponse = null;
@@ -971,6 +1150,14 @@ class SMSService {
       if (result.ok) {
         sentCount += batch.length;
         lastResponse = result.response;
+        // The first batch the gateway takes IS when this campaign started
+        // reaching people — written now rather than at completion, because a
+        // campaign that dies at batch 30 of 40 still reached three thousand
+        // customers and the log has to be able to say when.
+        if (!sentAt) {
+          sentAt = new Date();
+          set.sentAt = sentAt;
+        }
         if (!transactionId && result.response?.TransactionId) {
           transactionId = result.response.TransactionId;
         }

@@ -88,6 +88,28 @@ const platformSettingSchema = new mongoose.Schema({
 
   supportPhone: { type: String, default: '01757995016' },
 
+  /**
+   * Should registration still pre-create the shop-type category taxonomy?
+   *
+   * Defaults to FALSE, which is a deliberate behaviour change. It used to be
+   * unconditional, and the numbers are why it stopped: a grocery signup was
+   * handed 85 categories before it had a single product, cosmetics 78, cloth
+   * 63 — and roughly eight in ten of those rows never held a product for the
+   * life of the account. The shopkeeper's first screen after a four-step signup
+   * was a REQUIRED dropdown listing sixty-three names they had not chosen and
+   * mostly did not stock.
+   *
+   * The same lists are still offered, from the "প্রস্তাবিত ক্যাটাগরি" panel —
+   * parents first, nothing pre-ticked, and only once the shop has seen the app.
+   * See `category.service.getSuggestions`.
+   *
+   * It is a setting rather than a deleted line so that if activation moves the
+   * wrong way this is one boolean in the admin console, not a redeploy. The
+   * seeder itself is untouched and still passes through `findOrCreateByName`,
+   * so switching it back on is safe for a shop that has already added its own.
+   */
+  autoSeedCategoriesOnSignup: { type: Boolean, default: false },
+
   // Phase 2. While this is 'none' the owner-facing renew flow is a "call us"
   // card and no webhook route is mounted. Switching it on is a config change:
   // manual entry and a gateway callback already funnel through the same

@@ -240,6 +240,13 @@ describe('deleting an entity detaches its media', () => {
 
   it('does not detach a category that refuses to delete because it still holds products', async () => {
     jest.spyOn(Category, 'findOne').mockResolvedValue({ _id: id(), imageMediaId: id() });
+    // The subcategory read now happens BEFORE the product count, because the
+    // guard counts the whole subtree rather than the one row — a parent whose
+    // subcategory holds stock must refuse too. Unmocked, this reaches for a
+    // real connection and the test times out rather than failing usefully.
+    jest.spyOn(Category, 'find').mockReturnValue({
+      select: () => ({ lean: async () => [] }),
+    });
     jest.spyOn(Product, 'countDocuments').mockResolvedValue(3);
     const reconcile = jest.spyOn(mediaService, 'reconcileRefs');
 

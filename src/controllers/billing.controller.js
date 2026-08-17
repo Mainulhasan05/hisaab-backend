@@ -261,6 +261,9 @@ exports.updatePlatformSettings = asyncHandler(async (req, res) => {
     'smsTiers',
     'supportPhone',
     'billingProvider',
+    // The way back to pre-creating a shop's category taxonomy at signup.
+    // Defaults false; see PlatformSetting.model.js for why.
+    'autoSeedCategoriesOnSignup',
   ];
   const patch = {};
   for (const key of allowed) {
