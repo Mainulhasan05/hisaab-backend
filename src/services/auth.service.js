@@ -3,6 +3,7 @@ const Role = require('../models/Role.model');
 const Shop = require('../models/Shop.model');
 const Admin = require('../models/Admin.model');
 const AuditLog = require('../models/AuditLog.model');
+const PasswordReset = require('../models/PasswordReset.model');
 const SMSService = require('./sms.service');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS, TRIAL_PERIOD_DAYS, SUBSCRIPTION_PRICE } = require('../config/constants');
@@ -17,7 +18,43 @@ const { INITIAL_SHOP_CATEGORIES } = require('../seeds/shopCategorySeeder');
 const ShopCategory = require('../models/ShopCategory.model');
 const { normalizePhone } = require('../utils/phone.util');
 const { applyPresetUpgrades } = require('../utils/rolePreset.util');
+const { invalidateUserAuthCache } = require('../utils/authCache.util');
+const { toBengaliNumber } = require('../utils/bengali.util');
+const logger = require('../utils/logger.util');
 const metaCapi = require('./metaCapi.service');
+
+/**
+ * Timings for the forgot-password flow. Gathered here rather than inlined
+ * because four of the six are quoted back to the user — "wait 60 seconds",
+ * "valid for 5 minutes", "5 attempts remaining" — and a number that appears in
+ * both a check and a sentence has to come from one place or the app eventually
+ * lies to somebody.
+ */
+const PASSWORD_RESET = {
+  /** How long a texted code stays usable. Matches `User.generateOTP`. */
+  CODE_TTL_MS: 5 * 60 * 1000,
+  /** Minimum gap between two codes to the same number. */
+  RESEND_COOLDOWN_MS: 60 * 1000,
+  /** The window `MAX_SENDS_PER_WINDOW` is counted over. */
+  SEND_WINDOW_MS: 60 * 60 * 1000,
+  /**
+   * Codes per number per window. This is the real anti-SMS-bombing control —
+   * the IP limiter in front of the route is defeated by rotating IPs, this is
+   * not defeated by anything, because the budget belongs to the number being
+   * texted rather than to whoever is asking.
+   */
+  MAX_SENDS_PER_WINDOW: 5,
+  /**
+   * Wrong guesses per code. 6 digits is a million-wide space, so this is not
+   * really about brute force; it is about the 1-in-200,000 lucky guess an
+   * unlimited retry loop turns into a certainty.
+   */
+  MAX_VERIFY_ATTEMPTS: 5,
+  /** How long the post-verification token is spendable for. */
+  TOKEN_TTL_MS: 10 * 60 * 1000,
+  /** TTL floor on the record itself — outlives both secrets by a margin. */
+  PURGE_MS: 60 * 60 * 1000,
+};
 
 class AuthService {
   /**
@@ -652,12 +689,37 @@ class AuthService {
   }
 
   /**
-   * Change password
+   * Change password (signed in, current password known)
+   *
+   * Returns a FRESH TOKEN PAIR, and the caller is expected to put the access
+   * token back in the cookie. That is not a convenience — without it this
+   * endpoint logs the user out of the tab they just used it from, unpredictably.
+   *
+   * The chain: `user.save()` stamps `passwordChangedAt`, and `protect` rejects
+   * any token issued before that stamp (`changedPasswordAfter`). So the session
+   * that made this very request is invalid the moment it succeeds. It does not
+   * FEEL that way, because `getCachedUser` holds the pre-change document for up
+   * to five minutes — so the user carries on working and is then bounced to the
+   * login screen at some arbitrary point up to five minutes later, with nothing
+   * on screen connecting the two events.
+   *
+   * Re-issuing here makes the rule do what it is for: every OTHER session on
+   * this account dies immediately, and this one continues. The cache is dropped
+   * explicitly for the same reason — a stale entry would let the old tokens
+   * keep working for the rest of the TTL, which is exactly backwards.
    */
   async changePassword(userId, data, req) {
     const { currentPassword, newPassword } = data;
 
     const user = await User.findById(userId).select('+password');
+
+    if (!user) {
+      throw new AppError(
+        'User not found',
+        'ইউজার পাওয়া যায়নি',
+        404
+      );
+    }
 
     if (!(await user.comparePassword(currentPassword))) {
       throw new AppError(
@@ -667,8 +729,21 @@ class AuthService {
       );
     }
 
+    // A no-op change would still stamp `passwordChangedAt` and kill every other
+    // session on the account, which is a surprising amount of damage for a form
+    // submitted by accident.
+    if (currentPassword === newPassword) {
+      throw new AppError(
+        'New password must be different from the current one',
+        'নতুন পাসওয়ার্ড আগেরটির থেকে আলাদা হতে হবে',
+        400
+      );
+    }
+
     user.password = newPassword;
     await user.save();
+
+    await invalidateUserAuthCache(user._id);
 
     // Log action
     await AuditLog.log({
@@ -679,7 +754,336 @@ class AuthService {
       req
     });
 
-    return { message: 'Password changed successfully' };
+    return {
+      message: 'Password changed successfully',
+      tokens: user.generateAuthTokens()
+    };
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+   * FORGOT PASSWORD
+   *
+   * Three steps, three endpoints, one `PasswordReset` document per phone:
+   *
+   *   1. ask    → a 6-digit code goes out by SMS
+   *   2. verify → the code is spent, a short-lived reset token comes back
+   *   3. reset  → the token is spent, the password is written
+   *
+   * Two decisions run through all of it and are worth stating once.
+   *
+   * ── THE FLOW IS KEYED ON THE PHONE, AND RESETS EVERY ACCOUNT ON IT ──────────
+   *
+   * `{phone, shop}` is the unique key on `User`, so one number can hold an
+   * owner account in one shop and a staff account in another. A reset therefore
+   * cannot pick "the" account without asking, and asking is both an extra
+   * screen and a disclosure of every shop the number works at.
+   *
+   * So step 3 writes the new password to ALL active accounts on the number, and
+   * step 2 tells the caller how many that will be so it is never a surprise.
+   * This gives up nothing: whoever received the SMS controls the number, and
+   * control of the number is already sufficient to reset each of those accounts
+   * one at a time. It also removes the failure this flow would otherwise
+   * produce most often — "I reset my password and it still says wrong" from
+   * someone who reset one shop and logged into another.
+   *
+   * ── STEP 1 NEVER SAYS WHETHER THE NUMBER IS REGISTERED ─────────────────────
+   *
+   * `/auth/send-otp` does (it 404s), and that is a pre-existing leak on a route
+   * with a narrower purpose. This one must not: it is the endpoint an attacker
+   * would point at a list of numbers to learn which belong to shop owners, which
+   * is the input to a targeted phishing call. So a `PasswordReset` row is
+   * written for ANY number asked about — registered or not — which is what makes
+   * the throttles, the timings and the response identical either way. A code is
+   * only minted when there is somebody to send it to.
+   * ═══════════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Step 1 — send a reset code.
+   *
+   * @returns {Promise<object>} Always the same shape, whether or not the number
+   *          has an account. Only the throttles can make this fail.
+   */
+  async requestPasswordReset(phone, req) {
+    const normalizedPhone = normalizePhone(phone);
+    const now = new Date();
+
+    let record = await PasswordReset.findOne({ phone: normalizedPhone });
+    if (!record) {
+      record = new PasswordReset({
+        phone: normalizedPhone,
+        purgeAt: new Date(now.getTime() + PASSWORD_RESET.PURGE_MS)
+      });
+
+      // `phone` is unique, so a double-tapped "send code" can have both
+      // requests find nothing and both try to insert. Losing that race is not
+      // an error — the row the winner wrote is exactly the row this request
+      // wanted — but left unhandled it surfaces as a 500 on a button people
+      // double-tap precisely because they are anxious about being locked out.
+      // Adopting the winner's row also means the cooldown below is evaluated
+      // against it, so the loser gets a throttle rather than a second SMS.
+      try {
+        await record.save();
+      } catch (error) {
+        if (error?.code !== 11000) throw error;
+        record = await PasswordReset.findOne({ phone: normalizedPhone });
+        if (!record) throw error;
+      }
+    }
+
+    // Roll the hourly window before reading the count, so a shop that asked
+    // five times yesterday is not still locked out today.
+    if (
+      !record.windowStartedAt ||
+      now.getTime() - new Date(record.windowStartedAt).getTime() >= PASSWORD_RESET.SEND_WINDOW_MS
+    ) {
+      record.windowStartedAt = now;
+      record.sendCount = 0;
+    }
+
+    // ── The throttles that actually protect the victim ──
+    //
+    // Checked BEFORE the user lookup, deliberately. They are decided purely by
+    // the phone's own history, so they behave identically for a number with no
+    // account — which is what keeps the endpoint from answering "is this
+    // registered?" through its error codes.
+    if (record.sentAt) {
+      const elapsed = now.getTime() - new Date(record.sentAt).getTime();
+      if (elapsed < PASSWORD_RESET.RESEND_COOLDOWN_MS) {
+        const secondsLeft = Math.ceil((PASSWORD_RESET.RESEND_COOLDOWN_MS - elapsed) / 1000);
+        throw new AppError(
+          `Please wait ${secondsLeft} seconds before requesting another code`,
+          `অনুগ্রহ করে ${toBengaliNumber(secondsLeft)} সেকেন্ড পর আবার কোড নিন`,
+          429
+        );
+      }
+    }
+
+    if (record.sendCount >= PASSWORD_RESET.MAX_SENDS_PER_WINDOW) {
+      throw new AppError(
+        'Too many reset codes requested for this number. Please try again in an hour.',
+        'এই নম্বরে অনেকবার কোড পাঠানো হয়েছে। এক ঘণ্টা পর আবার চেষ্টা করুন।',
+        429
+      );
+    }
+
+    const users = await User.find({ phone: normalizedPhone, isActive: true })
+      .select('_id')
+      .lean();
+
+    record.sentAt = now;
+    record.sendCount += 1;
+    record.lastIp = req?.ip || null;
+    record.attempts = 0;
+    // Asking for a new code invalidates any token an earlier verification
+    // handed out — otherwise a token obtained from a code sent to the OLD
+    // holder of a recycled number would survive the real owner starting over.
+    record.resetTokenHash = null;
+    record.resetTokenExpiresAt = null;
+    record.purgeAt = new Date(now.getTime() + PASSWORD_RESET.PURGE_MS);
+
+    if (users.length === 0) {
+      // The attempt is recorded — that is what keeps the throttles honest for
+      // an attacker walking a number list — but nothing is minted and nothing
+      // is sent. The caller's response is byte-identical to the success case.
+      record.otpHash = null;
+      record.otpExpiresAt = null;
+      await record.save();
+
+      logger.warn(`Password reset requested for unregistered phone ${normalizedPhone}`);
+      return {
+        cooldownSeconds: PASSWORD_RESET.RESEND_COOLDOWN_MS / 1000,
+        expiresInSeconds: PASSWORD_RESET.CODE_TTL_MS / 1000
+      };
+    }
+
+    const code = PasswordReset.generateCode();
+    record.otpHash = PasswordReset.hashSecret(code);
+    record.otpExpiresAt = new Date(now.getTime() + PASSWORD_RESET.CODE_TTL_MS);
+    await record.save();
+
+    try {
+      await SMSService.sendPasswordResetOtp(normalizedPhone, code);
+    } catch (error) {
+      // Swallowed on purpose. Surfacing a gateway failure here would answer
+      // "does this number have an account?" for anyone who can make the gateway
+      // fail, because the no-account path never touches the gateway at all. The
+      // shopkeeper's recourse is the resend button; ours is this log line and
+      // the `system_password_reset` row `sendPasswordResetOtp` always writes.
+      logger.error(`Failed to send password reset OTP to ${normalizedPhone}: ${error.message}`);
+    }
+
+    return {
+      cooldownSeconds: PASSWORD_RESET.RESEND_COOLDOWN_MS / 1000,
+      expiresInSeconds: PASSWORD_RESET.CODE_TTL_MS / 1000
+    };
+  }
+
+  /**
+   * Step 2 — spend the code, get a reset token.
+   *
+   * The token exists so the last step does not have to re-send the code or ask
+   * the browser to hold it: the code is destroyed here, so it cannot be replayed
+   * once used, and the token it is traded for is single-use and expires in ten
+   * minutes.
+   */
+  async verifyPasswordResetCode(phone, otp, req) {
+    const normalizedPhone = normalizePhone(phone);
+    const now = new Date();
+
+    const record = await PasswordReset.findOne({ phone: normalizedPhone });
+
+    // One message for "no such request", "expired" and "never had a code"
+    // (the unregistered-number path). Distinguishing them here would give back
+    // exactly the oracle step 1 goes to some trouble to withhold.
+    const rejected = () => new AppError(
+      'Invalid or expired code',
+      'কোডটি ভুল বা মেয়াদ শেষ। নতুন কোড নিন।',
+      400
+    );
+
+    if (!record || !record.hasLiveCode()) {
+      throw rejected();
+    }
+
+    if (record.attempts >= PASSWORD_RESET.MAX_VERIFY_ATTEMPTS) {
+      throw new AppError(
+        'Too many incorrect attempts. Request a new code.',
+        'অনেকবার ভুল কোড দেওয়া হয়েছে। নতুন কোড নিন।',
+        429
+      );
+    }
+
+    if (!PasswordReset.matchesHash(otp, record.otpHash)) {
+      record.attempts += 1;
+      await record.save();
+
+      const left = PASSWORD_RESET.MAX_VERIFY_ATTEMPTS - record.attempts;
+      throw new AppError(
+        left > 0 ? `Incorrect code. ${left} attempts remaining.` : 'Incorrect code. Request a new one.',
+        left > 0
+          ? `কোডটি ভুল। আর ${toBengaliNumber(left)} বার চেষ্টা করতে পারবেন।`
+          : 'কোডটি ভুল। নতুন কোড নিন।',
+        400
+      );
+    }
+
+    const resetToken = PasswordReset.generateResetToken();
+    record.resetTokenHash = PasswordReset.hashSecret(resetToken);
+    record.resetTokenExpiresAt = new Date(now.getTime() + PASSWORD_RESET.TOKEN_TTL_MS);
+    // Single use. The code has done its job and must not survive to be replayed
+    // against a second token if this one is abandoned.
+    record.otpHash = null;
+    record.otpExpiresAt = null;
+    record.attempts = 0;
+    record.purgeAt = new Date(now.getTime() + PASSWORD_RESET.TOKEN_TTL_MS + 5 * 60 * 1000);
+    await record.save();
+
+    // Which accounts this will change. Disclosed only after the SMS code was
+    // entered correctly — the same bar login sets before it lists a phone's
+    // shops — and shown up front so "all your shops" is never a surprise.
+    const users = await User.find({ phone: normalizedPhone, isActive: true })
+      .select('isOwner shop')
+      .populate('shop', 'name')
+      .lean();
+
+    logger.info(`Password reset code verified for ${normalizedPhone} (${users.length} account(s))`);
+
+    return {
+      resetToken,
+      expiresInSeconds: PASSWORD_RESET.TOKEN_TTL_MS / 1000,
+      accounts: users.map((u) => ({
+        shopName: u.shop?.name || null,
+        isOwner: u.isOwner === true
+      }))
+    };
+  }
+
+  /**
+   * Step 3 — spend the token, write the password.
+   *
+   * Every active account on the number is updated; see the block comment above
+   * for why. Each save stamps `passwordChangedAt`, which is what invalidates
+   * whatever sessions the account had — including, importantly, any session an
+   * attacker had already established, which is half of what a reset is FOR. The
+   * cache is dropped per user so that takes effect now rather than within five
+   * minutes.
+   */
+  async resetPassword(data, req) {
+    const { phone, resetToken, newPassword } = data;
+    const normalizedPhone = normalizePhone(phone);
+    const now = new Date();
+
+    const record = await PasswordReset.findOne({ phone: normalizedPhone });
+
+    const expired = () => new AppError(
+      'This reset session has expired. Please start again.',
+      'সময় শেষ হয়ে গেছে। আবার নতুন করে শুরু করুন।',
+      400
+    );
+
+    if (
+      !record ||
+      !record.resetTokenHash ||
+      !record.resetTokenExpiresAt ||
+      record.resetTokenExpiresAt <= now
+    ) {
+      throw expired();
+    }
+
+    if (!PasswordReset.matchesHash(resetToken, record.resetTokenHash)) {
+      throw expired();
+    }
+
+    const users = await User.find({ phone: normalizedPhone, isActive: true });
+
+    if (users.length === 0) {
+      // Only reachable if every account on the number was deactivated between
+      // step 2 and step 3. Burn the token anyway — it has no accounts left to
+      // act on and must not stay spendable.
+      await PasswordReset.deleteOne({ _id: record._id });
+      throw new AppError(
+        'No active account found for this number',
+        'এই নম্বরে সক্রিয় কোনো অ্যাকাউন্ট নেই',
+        400
+      );
+    }
+
+    const shops = [];
+
+    for (const user of users) {
+      user.password = newPassword;
+      // They just proved they hold the number, which is the whole content of
+      // phone verification. Without this an owner who never finished signup
+      // resets their password and is still bounced to the OTP screen at login —
+      // the exact dead end this feature exists to open up.
+      user.isPhoneVerified = true;
+      user.clearOTP();
+      await user.save();
+
+      await invalidateUserAuthCache(user._id);
+
+      await AuditLog.log({
+        shop: user.shop,
+        user: user._id,
+        action: AUDIT_ACTIONS.PASSWORD_RESET.en,
+        description: `Password reset via SMS code for ${user.name} (${normalizedPhone})`,
+        entity: { type: 'user', id: user._id, name: user.name },
+        req
+      }).catch(() => {});
+
+      shops.push(String(user.shop));
+    }
+
+    // Single use, and nothing left worth keeping.
+    await PasswordReset.deleteOne({ _id: record._id });
+
+    logger.info(`Password reset completed for ${normalizedPhone} across ${users.length} account(s)`);
+
+    return {
+      message: 'Password reset successfully',
+      accountsUpdated: users.length,
+      shopCount: new Set(shops).size
+    };
   }
 
   /**

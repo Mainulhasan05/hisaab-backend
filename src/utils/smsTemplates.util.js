@@ -95,6 +95,22 @@ const buildDueReminder = ({ customerName, due, shopName }) =>
  */
 const buildOtp = (otp) => `Your Hisaab OTP: ${otp}\nValid for 5 minutes`;
 
+/**
+ * Password-reset code. Same platform-account, unbranded, unbilled category as
+ * `buildOtp` — and, like it, NOT mirrored in `lib/sms/templates.js`. The mirror
+ * exists so the dashboard can show a shopkeeper what their CUSTOMER will
+ * receive; nobody previews this one, so a second copy would be drift with no
+ * reader.
+ *
+ * Deliberately worded differently from `buildOtp`. Both codes arrive on the
+ * same number from the same sender, and a message that does not say what it
+ * authorises trains people to type any six digits they are asked for — which is
+ * exactly the behaviour a reset-code phishing call relies on. "Do not share"
+ * costs 14 characters and the whole body still fits one GSM-7 segment.
+ */
+const buildPasswordResetOtp = (otp) =>
+  `Hisaab password reset code: ${otp}\nValid for 5 minutes. Do not share this code.`;
+
 /* ────────────────────────────────────────────────────────────────────────────
  * The shop's sign-off
  *
@@ -155,6 +171,7 @@ module.exports = {
   buildPaymentReceipt,
   buildDueReminder,
   buildOtp,
+  buildPasswordResetOtp,
   buildShopSignature,
   hasShopSignature,
   appendShopSignature,

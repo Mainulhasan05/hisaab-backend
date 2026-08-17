@@ -11,7 +11,7 @@ const jwt = require('jsonwebtoken');
 const Admin = require('../models/Admin.model');
 const ApiResponse = require('../utils/response.util');
 
-const { authLimiter } = require('../middleware/rateLimiter.middleware');
+const { authLimiter, passwordResetLimiter } = require('../middleware/rateLimiter.middleware');
 
 // Public routes
 router.post('/register', authLimiter, validate(authValidation.register), authController.register);
@@ -19,6 +19,33 @@ router.post('/send-otp', authLimiter, validate(authValidation.sendOTP), authCont
 router.post('/verify-otp', authLimiter, validate(authValidation.verifyOTP), authController.verifyOTP);
 router.post('/login', authLimiter, validate(authValidation.login), authController.login);
 router.post('/refresh', authController.refreshToken);
+
+// ── Forgot password ────────────────────────────────────────────────────────
+//
+// Public by necessity: the entire point is that the caller cannot log in. All
+// three steps sit behind `passwordResetLimiter` rather than `authLimiter` — a
+// single honest reset costs three requests and `authLimiter` allows five a
+// minute across login as well, so sharing it would 429 the recovery flow on the
+// screen users reach precisely because they are already stuck. The controls
+// that matter are keyed on the phone and live in the service.
+router.post(
+  '/forgot-password',
+  passwordResetLimiter,
+  validate(authValidation.forgotPassword),
+  authController.forgotPassword
+);
+router.post(
+  '/forgot-password/verify',
+  passwordResetLimiter,
+  validate(authValidation.verifyPasswordResetCode),
+  authController.verifyPasswordResetCode
+);
+router.post(
+  '/reset-password',
+  passwordResetLimiter,
+  validate(authValidation.resetPassword),
+  authController.resetPassword
+);
 router.post('/admin/login', authLimiter, validate(authValidation.adminLogin), authController.adminLogin);
 router.post('/admin/logout', authController.adminLogout);
 

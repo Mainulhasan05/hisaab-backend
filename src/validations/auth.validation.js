@@ -52,6 +52,25 @@ const login = Joi.object({
   shopSlug: Joi.string().trim() // Optional - for team members
 });
 
+/**
+ * `confirmPassword` is OPTIONAL, and that is the fix for a real outage.
+ *
+ * It used to be `.required()`, while the only client — the settings page's
+ * security tab — posts `{ currentPassword, newPassword }`. Every password
+ * change from the dashboard therefore died in this schema, and the user got the
+ * generic "তথ্য যাচাই ব্যর্থ" from `validate.middleware`, which names no field
+ * and is indistinguishable from a server fault. The form collects a confirm box
+ * and checks it before submitting; it simply never sent it.
+ *
+ * The client now sends it, but requiring it again would be re-arming the same
+ * trap for the next caller. Confirming a password is a TYPO GUARD, and a typo
+ * guard belongs where the typing happens — repeating it here buys no security
+ * (an attacker posts whatever pair of matching strings they like) and costs an
+ * API that breaks when a caller reasonably omits a field it does not need.
+ *
+ * Validated when present, so a client that does send it still gets told when
+ * the two boxes disagree.
+ */
 const changePassword = Joi.object({
   currentPassword: Joi.string().required().messages({
     'any.required': 'Current password is required'
@@ -59,9 +78,41 @@ const changePassword = Joi.object({
   newPassword: commonSchemas.password.required().messages({
     'any.required': 'New password is required'
   }),
-  confirmPassword: Joi.string().valid(Joi.ref('newPassword')).required().messages({
-    'any.only': 'Passwords do not match',
-    'any.required': 'Confirm password is required'
+  confirmPassword: Joi.string().valid(Joi.ref('newPassword')).messages({
+    'any.only': 'Passwords do not match'
+  })
+});
+
+/* ── Forgot password ─────────────────────────────────────────────────────── */
+
+const forgotPassword = Joi.object({
+  phone: commonSchemas.phone.required()
+});
+
+const verifyPasswordResetCode = Joi.object({
+  phone: commonSchemas.phone.required(),
+  otp: Joi.string().length(6).pattern(/^\d+$/).required().messages({
+    'string.length': 'OTP must be 6 digits',
+    'string.pattern.base': 'OTP must contain only numbers',
+    'any.required': 'OTP is required'
+  })
+});
+
+const resetPassword = Joi.object({
+  phone: commonSchemas.phone.required(),
+  // 32 random bytes, hex — issued by the verify step. Length-pinned so a
+  // malformed value is refused here rather than reaching a hash comparison.
+  resetToken: Joi.string().length(64).hex().required().messages({
+    'string.length': 'Invalid reset token',
+    'string.hex': 'Invalid reset token',
+    'any.required': 'Reset token is required'
+  }),
+  newPassword: commonSchemas.password.required().messages({
+    'any.required': 'New password is required'
+  }),
+  // Optional for the same reason as in `changePassword` above.
+  confirmPassword: Joi.string().valid(Joi.ref('newPassword')).messages({
+    'any.only': 'Passwords do not match'
   })
 });
 
@@ -86,6 +137,9 @@ module.exports = {
   verifyOTP,
   login,
   changePassword,
+  forgotPassword,
+  verifyPasswordResetCode,
+  resetPassword,
   adminLogin,
   updateProfile
 };

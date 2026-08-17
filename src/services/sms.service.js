@@ -18,6 +18,7 @@ const {
   buildPaymentReceipt,
   buildDueReminder,
   buildOtp,
+  buildPasswordResetOtp,
   appendShopSignature,
 } = require('../utils/smsTemplates.util');
 const { normalizeRecipients, chunk, MAX_SKIPPED_STORED } = require('../utils/smsRecipients.util');
@@ -251,9 +252,9 @@ class SMSService {
    * can therefore read a live code for the 60 days the TTL keeps the row.
    * Treat panel access accordingly.
    */
-  async sendOTP(phone, otp) {
+  async sendOTP(phone, otp, { message: bodyOverride = null, audience = 'system_otp' } = {}) {
     const formattedPhone = formatPhone(phone);
-    const message = buildOtp(otp);
+    const message = bodyOverride || buildOtp(otp);
 
     // OTPs are secrets — only log them in development, never in production logs
     if (process.env.NODE_ENV === 'development' || process.env.SKIP_SMS === 'true') {
@@ -265,7 +266,7 @@ class SMSService {
       await this.recordSystemLog({
         phone: formattedPhone,
         message,
-        audience: 'system_otp',
+        audience,
         status: SMS_STATUS.SENT,
         apiResponse: { simulated: true },
       });
@@ -297,7 +298,7 @@ class SMSService {
       await this.recordSystemLog({
         phone: formattedPhone,
         message,
-        audience: 'system_otp',
+        audience,
         status: SMS_STATUS.SENT,
         transactionId: response.data?.TransactionId,
         apiResponse: response.data,
@@ -309,7 +310,7 @@ class SMSService {
       await this.recordSystemLog({
         phone: formattedPhone,
         message,
-        audience: 'system_otp',
+        audience,
         status: SMS_STATUS.FAILED,
         errorMessage: error.message,
         apiResponse: error.gatewayResponse || null,
@@ -318,6 +319,24 @@ class SMSService {
       logger.error(`Failed to send OTP: ${error.message}`);
       throw error;
     }
+  }
+
+  /**
+   * Send a password-reset code.
+   *
+   * Same platform account, same unbilled path, same log shape as `sendOTP` —
+   * two things differ, and both matter:
+   *
+   *   · THE BODY says what the code is for. See `buildPasswordResetOtp`.
+   *   · THE AUDIENCE is `system_password_reset`, so the SMS panel can answer
+   *     "was this number's reset code actually delivered" without that question
+   *     being buried among every registration OTP ever sent.
+   */
+  async sendPasswordResetOtp(phone, otp) {
+    return this.sendOTP(phone, otp, {
+      message: buildPasswordResetOtp(otp),
+      audience: 'system_password_reset',
+    });
   }
 
   /**

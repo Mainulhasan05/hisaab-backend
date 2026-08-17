@@ -138,6 +138,7 @@ module.exports = {
     USER_LOGOUT: { en: 'user_logout', bn: 'লগআউট' },
     AUTH_FAILED: { en: 'auth_failed', bn: 'লগইন ব্যর্থ' },
     PASSWORD_CHANGE: { en: 'password_change', bn: 'পাসওয়ার্ড পরিবর্তন' },
+    PASSWORD_RESET: { en: 'password_reset', bn: 'পাসওয়ার্ড রিসেট' },
     PROFILE_UPDATE: { en: 'profile_update', bn: 'প্রোফাইল আপডেট' },
 
     // Products

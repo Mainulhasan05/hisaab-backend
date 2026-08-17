@@ -4,6 +4,12 @@ module.exports = {
   Shop: require('./Shop.model'),
   Branch: require('./Branch.model'),
   User: require('./User.model'),
+  // Forgot-password attempts, keyed on the phone rather than on a user (one
+  // number can hold accounts in several shops). Registered here or
+  // `sync-indexes` never ships its unique phone key or the `purgeAt` TTL to
+  // production, where autoIndex is off — and without the TTL the collection
+  // grows forever while abandoned reset codes stay queryable.
+  PasswordReset: require('./PasswordReset.model'),
   Role: require('./Role.model'),
   Customer: require('./Customer.model'),
   CustomerBalance: require('./CustomerBalance.model'),

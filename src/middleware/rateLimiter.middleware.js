@@ -127,6 +127,40 @@ const authLimiter = rateLimit({
 });
 
 /**
+ * Password Reset Limiter
+ * 20 requests per 15 minutes per IP, across all three steps of the flow.
+ *
+ * ── Why not just reuse `authLimiter` ────────────────────────────────────────
+ *
+ * `authLimiter` is 5 per MINUTE and is shared by login, register and OTP. A
+ * reset costs at least three requests (ask → verify → set), and a shopkeeper
+ * who mistypes the code twice is at five before they have finished — so sharing
+ * that bucket would 429 the honest case, on the one screen a user reaches
+ * precisely because they are already locked out. Worse, it couples the two: a
+ * few failed logins would consume the budget for recovering from them.
+ *
+ * This is the IP-shaped half of the defence only, and deliberately loose: a lot
+ * of Bangladeshi mobile traffic leaves through carrier NAT, so a tight per-IP
+ * cap punishes a neighbourhood for one person's typing. The half that actually
+ * protects a victim from being SMS-bombed is keyed on the PHONE and lives in
+ * `AuthService.requestPasswordReset` — a 60-second cooldown and 5 sends an
+ * hour, which no amount of IP rotation gets around.
+ */
+const passwordResetLimiter = rateLimit({
+  windowMs: parseInt(process.env.PASSWORD_RESET_RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
+  max: parseInt(process.env.PASSWORD_RESET_RATE_LIMIT_MAX) || 20,
+  store: new HybridStore('rl:pwreset:'),
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    return ApiResponse.tooManyRequests(res, {
+      message: 'Too many password reset attempts. Please try again in a few minutes.',
+      messageBn: 'অনেকবার চেষ্টা করা হয়েছে। কিছুক্ষণ পর আবার চেষ্টা করুন।'
+    });
+  }
+});
+
+/**
  * SMS Rate Limiter
  * 10 SMS requests per minute
  */
@@ -231,6 +265,7 @@ const telegramLinkLimiter = rateLimit({
 module.exports = {
   apiLimiter,
   authLimiter,
+  passwordResetLimiter,
   smsLimiter,
   storefrontLimiter,
   isPublicStorefrontPath,

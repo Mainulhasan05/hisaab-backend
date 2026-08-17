@@ -230,12 +230,76 @@ const getMe = asyncHandler(async (req, res) => {
  * @access  Private
  */
 const changePassword = asyncHandler(async (req, res) => {
-  const result = await AuthService.changePassword(req.user._id, req.body, req);
+  const { tokens, ...result } = await AuthService.changePassword(req.user._id, req.body, req);
+
+  // The old cookie is dead the instant the password changed — `protect` rejects
+  // any token minted before `passwordChangedAt`. Swapping in the fresh one here
+  // is what keeps THIS session alive while killing every other one; see the
+  // service for the full reasoning.
+  if (tokens?.accessToken) {
+    setUserTokenCookie(res, tokens.accessToken);
+  }
 
   return ApiResponse.success(res, {
     data: result,
     message: 'Password changed successfully',
     messageBn: 'পাসওয়ার্ড পরিবর্তন সফল'
+  });
+});
+
+/**
+ * @desc    Send a password reset code by SMS
+ * @route   POST /api/auth/forgot-password
+ * @access  Public
+ */
+const forgotPassword = asyncHandler(async (req, res) => {
+  const result = await AuthService.requestPasswordReset(req.body.phone, req);
+
+  // Worded so it is true, and equally true, whether or not the number has an
+  // account — the response must not be the thing that tells an attacker which.
+  // The client shows the same sentence, so a shopkeeper who mistyped their
+  // number learns it from the code never arriving rather than from us
+  // confirming the typo exists as somebody else's account.
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'If this number has an account, a reset code has been sent to it',
+    messageBn: 'এই নম্বরে অ্যাকাউন্ট থাকলে একটি কোড পাঠানো হয়েছে'
+  });
+});
+
+/**
+ * @desc    Verify a password reset code, exchanging it for a reset token
+ * @route   POST /api/auth/forgot-password/verify
+ * @access  Public
+ */
+const verifyPasswordResetCode = asyncHandler(async (req, res) => {
+  const result = await AuthService.verifyPasswordResetCode(req.body.phone, req.body.otp, req);
+
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Code verified',
+    messageBn: 'কোড যাচাই সফল'
+  });
+});
+
+/**
+ * @desc    Set a new password using a verified reset token
+ * @route   POST /api/auth/reset-password
+ * @access  Public
+ */
+const resetPassword = asyncHandler(async (req, res) => {
+  const result = await AuthService.resetPassword(req.body, req);
+
+  // Deliberately NOT logged in afterwards. A reset can be performed from a
+  // device that is not the owner's — a shop phone, a relative's handset — and
+  // handing that device a session is a worse default than one more login. It
+  // also means the new password is used once immediately, which is how a typo
+  // in a password box nobody can read is caught while the user still remembers
+  // what they typed.
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Password reset successfully. Please log in.',
+    messageBn: 'পাসওয়ার্ড পরিবর্তন হয়েছে। এখন লগইন করুন।'
   });
 });
 
@@ -447,6 +511,9 @@ module.exports = {
   refreshToken,
   getMe,
   changePassword,
+  forgotPassword,
+  verifyPasswordResetCode,
+  resetPassword,
   adminLogin,
   adminLogout,
   updateShopSettings,
