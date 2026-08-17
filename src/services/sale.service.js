@@ -1988,6 +1988,55 @@ class SaleService {
       );
     }
 
+    // ── The day's drawer has been counted ─────────────────────────────────────
+    //
+    // `reviseSale` has refused this since it shipped (`reviseBlockedReason`
+    // guard 6) and cancellation did not, which made the weaker operation the way
+    // round it: a sale that could not be corrected on a reconciled day could
+    // still be voided on one, and voiding moves the same money.
+    //
+    // A closed register is a statement that the cash on hand was counted against
+    // what the system expected. Cancelling a sale inside that window silently
+    // restates the expectation after the count — the drawer no longer ties out
+    // and nothing on the screen says why. The remedy is the same one revision
+    // points at: reopen the day deliberately, or record a sales return, which is
+    // dated when it happens rather than backdated into a closed period.
+    //
+    // Checked before any write, and last among the guards, because it is the
+    // only one that costs a query against a collection the sale does not point
+    // at. `order.service.cancelOrder` inherits it — an online order whose sale
+    // lands in a reconciled day now fails loudly instead of quietly moving the
+    // till, which is the same trade every other write in that period makes.
+    // `saleDay` can only be null for a document with no `createdAt`, which
+    // `timestamps: true` makes impossible for anything that came out of the
+    // database. Guarded anyway: there is no day to look up a register for, and
+    // throwing a TypeError out of the middle of a reversal — before the stock
+    // has gone back but after the caller believes it is cancelling — is a far
+    // worse failure than skipping a check that has nothing to check against.
+    const saleDay = toBangladeshDateStr(sale.createdAt);
+    if (saleDay) {
+      const { startOfDay, endOfDay } = getBangladeshDayRange(saleDay);
+      const register = await CashRegister.findOne(
+        {
+          shop: shopId,
+          // Single-branch shops carry `branch: null` on both documents, so an
+          // unconditional `branch` predicate would match the row it should.
+          ...(sale.branch ? { branch: sale.branch } : {}),
+          date: { $gte: startOfDay, $lte: endOfDay },
+        },
+        'status',
+        sessionOpt
+      ).lean();
+
+      if (register?.status === 'closed') {
+        throw new AppError(
+          'The cash register for that day is closed — reopen it or record a sales return instead.',
+          'ওই দিনের ক্যাশ রেজিস্টার বন্ধ করা হয়েছে — রেজিস্টার আবার খুলুন, অথবা মাল ফেরত হিসেবে লিখুন।',
+          409
+        );
+      }
+    }
+
     // --- BATCH: Restore stock using bulkWrite ---
     // A combo line's stock lives on its COMPONENTS — fetch those too, so the
     // snapshot loop below finds a document to restore onto.
@@ -2197,25 +2246,58 @@ class SaleService {
 
     // Update customer balance if applicable
     if (sale.customer) {
+      // ── The due is DERIVED, never `$inc`-ed ────────────────────────────────
+      //
+      // `totalDue` used to come off with the rest, as `$inc: -sale.due`. That is
+      // wrong whenever the stored due and the invoice have stopped agreeing,
+      // and it fails in the one direction nobody checks — downward, past zero.
+      //
+      // The case that bites: an owner writes off a customer's debt with a
+      // `DueAdjustment`, which reduces `openingDue` and `totalDue` without ever
+      // touching `sale.due`. Cancelling that invoice afterwards then subtracts
+      // its due a second time and the customer ends up with a NEGATIVE balance —
+      // the shop's book now says it owes the customer money. `deriveDue` cannot
+      // do that: it recomputes from `openingDue + totalPurchases − totalPaid`
+      // and clamps at zero, so it is self-correcting rather than cumulative.
+      //
+      // This is the same two-step the returns path already uses (`$inc` the
+      // components, then derive the due) — the two reversal paths disagreeing on
+      // how the headline figure is produced is what let them drift apart.
       await Customer.findByIdAndUpdate(sale.customer, {
         $inc: {
           totalPurchases: -sale.total,
           totalPaid: -sale.paid,
-          totalDue: -sale.due,
           purchaseCount: -1,
         },
       }, sessionOpt);
 
+      const cancelCustomer = await Customer.findById(sale.customer).session(session || null);
+      if (cancelCustomer) {
+        // `deriveDue` carries the `openingDue` term, so a cancellation cannot
+        // wipe debt the customer brought in from the shop's paper খাতা.
+        cancelCustomer.totalDue = Customer.deriveDue(cancelCustomer);
+        await cancelCustomer.save(sessionOpt);
+      }
+
       // Unwound at the branch that raised the sale — which is the only branch
       // whose figures the sale ever moved.
+      //
+      // `recomputeDue` rather than a `due` delta, mirroring the clamp above.
+      // Clamping on one side only is precisely how the shop-wide book and the
+      // per-branch rows drift apart while `Σ CustomerBalance.totalDue ===
+      // Customer.totalDue` still looks like it should hold.
       await CustomerBalance.applyDelta({
         shop: shopId,
         customer: sale.customer,
         branch: sale.branch,
         purchases: -sale.total,
         paid: -sale.paid,
-        due: -sale.due,
         count: -1,
+      }, session);
+      await CustomerBalance.recomputeDue({
+        shop: shopId,
+        customer: sale.customer,
+        branch: sale.branch,
       }, session);
     }
 
@@ -2229,6 +2311,29 @@ class SaleService {
     // this is the invoice that replaced it. Absent on an ordinary cancellation.
     if (internalOptions.revisedTo) sale.revisedTo = internalOptions.revisedTo;
     await sale.save(sessionOpt);
+
+    // ── Give back the counter `createSale` took ───────────────────────────────
+    //
+    // `createSale` does `$inc: { 'stats.totalSales': 1 }` and nothing gave it
+    // back, so the figure counted invoices ever WRITTEN rather than invoices
+    // that stand. A shop that voids a mistake and re-rings it was counted twice
+    // for one sale, and the operator console's per-shop activity column drifted
+    // further from the truth with every cancellation. Found reading 9 on a shop
+    // with 4 live invoices.
+    //
+    // A revision is a cancel plus a create, so this nets to zero across the pair
+    // and the count keeps meaning "invoices that stand" through a revision too.
+    //
+    // The `$gt: 0` on the FILTER, not a clamp after the fact: `$inc` has no
+    // floor, and a stat that has already drifted low (or was never incremented,
+    // for sales predating the counter) must not be driven negative by a
+    // cancellation that is otherwise correct. No match simply means there is
+    // nothing to give back.
+    await Shop.updateOne(
+      { _id: shopId, 'stats.totalSales': { $gt: 0 } },
+      { $inc: { 'stats.totalSales': -1 } },
+      sessionOpt
+    );
 
     // Create audit log.
     //

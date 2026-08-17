@@ -26,6 +26,7 @@ const {
   formatQuantityWithUnit,
   buildStockUpdate,
   buildVariantStockUpdate,
+  buildVariantStockRollupUpdate,
 } = require('../utils/quantity.util');
 const {
   UNITS,
@@ -109,12 +110,57 @@ describe('A. flag off — nothing changes', () => {
     // This is the hot path for ~every product in ~every shop. If it ever
     // becomes a pipeline, the "single-branch shop is untouched" claim in I-6
     // stops being true at the query level.
+    //
+    // PRODUCT-level only. The variant update below is deliberately no longer
+    // part of this claim — see the test that follows.
     expect(buildStockUpdate(-3, 'piece')).toEqual({ $inc: { stock: -3 } });
     expect(buildStockUpdate(5, 'piece')).toEqual({ $inc: { stock: 5 } });
+  });
 
+  test('the variant update is a pipeline at every unit, and carries the rollup', () => {
+    // It used to return a positional `$inc` for integer units, which touched
+    // `variants.$.stock` and NOTHING else. But `stock` on a variant product is
+    // defined as the sum across `variants[]` — every read-time aggregation
+    // recomputes it that way — so writing the element alone left the stored
+    // rollup reading whatever it did before the sale, drifting up by the
+    // quantity sold. Found live: a product reading `stock: 74` against variants
+    // summing 64.
+    //
+    // The cheap `$inc` cannot express "and then re-sum the array", so integer
+    // units join the pipeline. The cost is one document update either way.
     const vid = new mongoose.Types.ObjectId();
-    expect(buildVariantStockUpdate(vid, -2, 'piece'))
-      .toEqual({ $inc: { 'variants.$.stock': -2 } });
+    const update = buildVariantStockUpdate(vid, -2, 'piece');
+
+    expect(Array.isArray(update)).toBe(true);
+    expect(update).toHaveLength(2);
+
+    // Stage 1: the element.
+    expect(update[0].$set.variants.$map.in.$cond[0].$eq[1]).toBeInstanceOf(mongoose.Types.ObjectId);
+    expect(update[0].$set.variants.$map.in.$cond[1].$mergeObjects[1].stock.$round[0].$add[1]).toBe(-2);
+
+    // Stage 2: the rollup, summed from the array stage 1 just wrote.
+    expect(update[1].$set.stock.$cond[1].$round[0].$sum.$map.input).toBe('$variants');
+  });
+
+  test('the rollup stage cannot zero a product that has no variants', () => {
+    // `$sum` over an empty `$map` is 0, so an unguarded stage 2 would turn a
+    // stock update into stock DESTRUCTION the moment it reached a variantless
+    // product — a filter that stops matching is all it would take. The guard
+    // makes that unreachable regardless of the caller's filter.
+    const update = buildVariantStockUpdate(new mongoose.Types.ObjectId(), 5, 'piece');
+    const rollup = update[1].$set.stock.$cond;
+
+    expect(rollup[0]).toEqual({ $gt: [{ $size: { $ifNull: ['$variants', []] } }, 0] });
+    expect(rollup[2]).toBe('$stock'); // no variants → leave it exactly as it was
+  });
+
+  test('buildVariantStockRollupUpdate is the same function under its old name', () => {
+    // The returns path calls it by that name because it reads better there.
+    // Both must stay the same update, or the sale and return paths go back to
+    // maintaining `stock` differently — which is the drift this fixed.
+    const vid = new mongoose.Types.ObjectId();
+    expect(buildVariantStockRollupUpdate(vid, 3, 'kg'))
+      .toEqual(buildVariantStockUpdate(vid, 3, 'kg'));
   });
 
   test('storageUnit collapses non-divisible units so they keep the cheap path', () => {
@@ -257,7 +303,10 @@ describe('B2. the fractional stock update', () => {
   test('the variant pipeline preserves the untouched elements', () => {
     const update = buildVariantStockUpdate(new mongoose.Types.ObjectId(), 1.5, 'kg');
     const map = update[0].$set.variants.$map;
-    expect(map.input).toBe('$variants');
+    // `$ifNull`-wrapped rather than bare `$variants`: stage 1 is now reachable
+    // on a document whose array is absent (the rollup guard in stage 2 is what
+    // keeps that harmless), and `$map` over null is an error, not a no-op.
+    expect(map.input).toEqual({ $ifNull: ['$variants', []] });
     expect(map.in.$cond[2]).toBe('$$v');                 // non-matching → as-is
     expect(map.in.$cond[1].$mergeObjects[0]).toBe('$$v'); // matching → merged
   });

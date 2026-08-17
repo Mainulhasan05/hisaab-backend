@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const StockTransfer = require('../models/StockTransfer.model');
 const StockTransaction = require('../models/StockTransaction.model');
 const Product = require('../models/Product.model');
@@ -190,22 +191,68 @@ const loadProductsFor = async (items, filter, session = null) => {
  * should do. (The sale path uses `$inc` with a `$gte` guard because it needs
  * atomic oversell protection; transfers guard by explicit pre-validation.)
  */
-const stockWriteOp = (product, variantId, newStock) => (
-  variantId
-    ? {
-      updateOne: {
-        filter: { _id: product._id },
-        update: { $set: { 'variants.$[v].stock': newStock } },
-        arrayFilters: [{ 'v._id': variantId }],
-      },
-    }
-    : {
+const stockWriteOp = (product, variantId, newStock) => {
+  if (!variantId) {
+    return {
       updateOne: {
         filter: { _id: product._id },
         update: { $set: { stock: newStock } },
       },
-    }
-);
+    };
+  }
+
+  // Cast, for the reason `buildVariantStockUpdate` spells out: `$eq` inside a
+  // pipeline compares BSON types, so a string id matches no element and stage 1
+  // becomes a silent no-op — the transfer would report success having moved
+  // nothing. `arrayFilters` was forgiving about this; a pipeline is not.
+  const vid = new mongoose.Types.ObjectId(variantId);
+
+  return {
+    updateOne: {
+      filter: { _id: product._id },
+      // Two stages for the reason `buildVariantStockUpdate` documents: the
+      // product-level `stock` on a variant product IS the sum across
+      // `variants[]`, so writing the element without the rollup leaves the
+      // stored total reading whatever it did before the transfer.
+      //
+      // Stage 1 keeps `$set` of the absolute value rather than a delta —
+      // `applyStock` has already quantized it at the product's precision, and
+      // this op exists to persist that exact figure (see above). Stage 2 then
+      // sums the array stage 1 just wrote, so the rollup is derived on the
+      // server from post-write state and cannot be computed from a stale read.
+      update: [
+        {
+          $set: {
+            variants: {
+              $map: {
+                input: { $ifNull: ['$variants', []] },
+                as: 'v',
+                in: {
+                  $cond: [
+                    { $eq: ['$$v._id', vid] },
+                    { $mergeObjects: ['$$v', { stock: newStock }] },
+                    '$$v',
+                  ],
+                },
+              },
+            },
+          },
+        },
+        {
+          $set: {
+            stock: {
+              $cond: [
+                { $gt: [{ $size: { $ifNull: ['$variants', []] } }, 0] },
+                { $sum: { $map: { input: '$variants', as: 'v', in: { $ifNull: ['$$v.stock', 0] } } } },
+                '$stock',
+              ],
+            },
+          },
+        },
+      ],
+    },
+  };
+};
 
 /** Flush queued stock writes and ledger rows — at most two round trips. */
 const flushStockOps = async (stockOps, txns, sessionOpt) => {

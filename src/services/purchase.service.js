@@ -441,9 +441,11 @@ class PurchaseService {
         newStock = getVariantStock(product, item.variantId);
         purchaseStockOps.push({
           updateOne: {
-            // `'variants._id'` is load-bearing, not decoration: for an integer
-            // unit `buildVariantStockUpdate` returns a POSITIONAL `$inc`, and
-            // the `$` only binds to an array element the FILTER matched.
+            // `'variants._id'` no longer binds a positional `$` — the helper
+            // returns a `$map` pipeline for every unit now, so nothing depends
+            // on the filter having matched an element. Kept because a purchase
+            // for a variant that has since been deleted should write nothing
+            // rather than recompute a rollup over an array it does not appear in.
             filter: { _id: product._id, 'variants._id': item.variantId },
             update: buildVariantStockUpdate(item.variantId, item.quantity, stkUnit),
           },

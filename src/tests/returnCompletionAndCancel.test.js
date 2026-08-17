@@ -93,9 +93,20 @@ describe('B. a sale with returns against it cannot be cancelled', () => {
     paid: 1000,
     due: 0,
     branch: null,
+    // Every Sale carries one (`timestamps: true`), and the closed-register
+    // guard reads it to work out which day's drawer to check.
+    createdAt: new Date(),
     items: [],
     ...over,
   });
+
+  /** The day's drawer, for the guard that runs after the returns check. */
+  const mockRegister = (status = null) => {
+    const CashRegister = require('../models/CashRegister.model');
+    return jest.spyOn(CashRegister, 'findOne').mockReturnValue({
+      lean: jest.fn().mockResolvedValue(status ? { status } : null),
+    });
+  };
 
   it('refuses a partly-returned invoice', async () => {
     jest.spyOn(Sale, 'findOne').mockResolvedValue(saleDoc({ returnedAmount: 300 }));
@@ -121,13 +132,29 @@ describe('B. a sale with returns against it cannot be cancelled', () => {
     ).rejects.toThrow(/already cancelled/i);
   });
 
+  it('refuses when the day’s cash register has been closed', async () => {
+    // `reviseSale` has always refused this; cancelling did not, which made the
+    // weaker operation the way round it — a sale that could not be corrected on
+    // a reconciled day could still be voided on one, moving the same money.
+    jest.spyOn(Sale, 'findOne').mockResolvedValue(saleDoc());
+    mockRegister('closed');
+
+    await expect(
+      saleService.cancelSale(SHOP, new mongoose.Types.ObjectId(), 'id', 'mistake')
+    ).rejects.toMatchObject({ statusCode: 409 });
+  });
+
   it('lets an untouched sale through to the reversal', async () => {
-    // No returns: the guard must not block the ordinary cancellation it sits in
-    // front of. Reaching the product lookup is proof it passed both checks.
+    // No returns and an open drawer: the guards must not block the ordinary
+    // cancellation they sit in front of. Reaching the product lookup is proof it
+    // passed all three checks.
     const Product = require('../models/Product.model');
+    const Shop = require('../models/Shop.model');
     jest.spyOn(Sale, 'findOne').mockResolvedValue(saleDoc());
     const find = jest.spyOn(Product, 'find').mockResolvedValue([]);
     jest.spyOn(require('../models/AuditLog.model'), 'create').mockResolvedValue({});
+    mockRegister(null); // no register row for that day at all
+    const shopUpdate = jest.spyOn(Shop, 'updateOne').mockResolvedValue({ modifiedCount: 1 });
 
     const sale = saleDoc();
     sale.save = jest.fn().mockResolvedValue(sale);
@@ -137,5 +164,15 @@ describe('B. a sale with returns against it cannot be cancelled', () => {
 
     expect(find).toHaveBeenCalled();
     expect(sale.status).toBe('cancelled');
+
+    // `createSale` does `$inc: +1` and nothing used to give it back, so the stat
+    // counted invoices ever WRITTEN rather than invoices that stand. The `$gt: 0`
+    // sits on the FILTER because `$inc` has no floor — a stat that has already
+    // drifted low must not be driven negative by an otherwise-correct cancel.
+    expect(shopUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ 'stats.totalSales': { $gt: 0 } }),
+      { $inc: { 'stats.totalSales': -1 } },
+      expect.anything()
+    );
   });
 });

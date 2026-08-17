@@ -689,6 +689,70 @@ productSchema.index({ shop: 1, 'comboItems.product': 1 }, { sparse: true });
 productSchema.index({ createdAt: -1 });
 // Note: Text search removed for scalability - use regex or external search (Elasticsearch) for large datasets
 
+/**
+ * Keep the product-level `stock` rollup equal to the sum across `variants[]`.
+ *
+ * ── Why a hook and not a fix at each call site ──────────────────────────────
+ *
+ * `stock` on a variant product is DEFINED as that sum — the inventory-value
+ * aggregation, the stock-count stat and the `totalStock` virtual all recompute
+ * it at read time rather than trusting the stored field. But the WRITE paths
+ * did not maintain it: for a long time only the sales-return path wrote the
+ * rollup, so every variant sale, purchase, transfer and manual recount left the
+ * stored total where it was and the number drifted upward by whatever moved.
+ *
+ * `buildVariantStockUpdate` now carries the rollup for the bulkWrite paths, but
+ * a `bulkWrite` pipeline and a `.save()` are two different doors into the same
+ * field, and the manual-recount path (`productService.updateStock`) goes through
+ * the second: it assigns `variant.stock` and saves the document, where no
+ * pipeline runs. Fixing that one call site would leave the next `.save()` free
+ * to reintroduce the drift, which is how this got out of hand the first time.
+ *
+ * ── BOTH conditions, and `hasVariants` is not optional ──────────────────────
+ *
+ * The virtuals below guard on `variants.length` alone and deliberately ignore
+ * `hasVariants` — "believe the data, not the flag". That rule is right for a
+ * READ that degrades to a sensible number. It is exactly wrong for a WRITE that
+ * overwrites a maintained field, and this database has the products to prove it:
+ * four of them carry `hasVariants: false` beside a stale, abandoned `variants[]`
+ * — a product converted back to plain, whose variant rows were zeroed and whose
+ * real stock lives at the product level. Their stock-transaction trails are
+ * entirely product-level and agree with `stock`.
+ *
+ * On `Brazil P.E Home` (stock 61, variants summing 0) a hook guarded only on
+ * `variants.length` would have silently written 61 units of real inventory down
+ * to zero on the next save of that document. So: roll up only when the flag says
+ * this IS a variant product AND there are variants to sum. When they disagree,
+ * the field that every write path has actually been maintaining wins, and that
+ * is `stock`.
+ *
+ * A product mid-edit with `hasVariants: true` and an empty array is likewise
+ * left alone, for the mirror-image reason.
+ *
+ * Sums EVERY variant, active or not — the same choice `buildVariantStockUpdate`
+ * makes, and for the same reason: deactivating a variant hides it from the POS,
+ * it does not make its stock vanish from the shop.
+ */
+productSchema.statics.deriveVariantStock = function(doc) {
+  if (!doc?.hasVariants || !Array.isArray(doc.variants) || doc.variants.length === 0) {
+    return null; // not a variant product — its `stock` is its own
+  }
+  const total = doc.variants.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+  // Rounded to the same 3 dp `quantize` uses for stock, so a fractional-unit
+  // product cannot accumulate a floating-point residue in the rollup that the
+  // per-variant figures do not have.
+  return Math.round(total * 1000) / 1000;
+};
+
+// A static rather than arithmetic inlined in the hook, following `deriveDue` on
+// Customer: the rule has to be stated in exactly one place, and a named function
+// is the only version of it that a test or a repair script can call.
+productSchema.pre('save', function(next) {
+  const rolled = this.constructor.deriveVariantStock(this);
+  if (rolled !== null) this.stock = rolled;
+  next();
+});
+
 /*
  * Both virtuals guard `variants` rather than trusting `hasVariants`.
  *
