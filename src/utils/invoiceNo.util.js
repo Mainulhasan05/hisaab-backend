@@ -43,16 +43,40 @@
  * costs a reconciliation.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * WHO MAY DO IT — `features.customInvoiceNo` + `sales.invoice_no`
+ * WHO MAY DO IT — `features.customInvoiceNo`, AND NOTHING ELSE
  * ─────────────────────────────────────────────────────────────────────────────
  *
- * Two axes, deliberately, exactly as `lineDiscount` has: the platform switches
- * the capability on for a shop that asked for it, and the owner decides who
- * inside the shop may use it. Unlike `backdate` and `revise` no preset grants
- * the permission, so it starts owner-only — which series the shop's paper runs
- * on is not a decision that belongs to whoever is standing at the till.
+ * ONE axis, and it is the SHOP's, not the person's. The platform switches the
+ * capability on for a shop that asked for it; from that moment anyone who may
+ * ring up a sale may number it. There is no per-user permission behind this and
+ * deliberately so.
+ *
+ * It shipped with one — `sales.invoice_no`, granted by no preset, so owner-only
+ * until delegated — on the reasoning that which series the shop's paper runs on
+ * is the owner's decision, not the till's. That reasoning is sound and it
+ * describes the WRONG MOMENT. The decision is indeed the owner's, and they make
+ * it once: when they ask for the capability and open their invoice book. What
+ * happens afterwards is transcription. The number is already written on the
+ * customer's carbon copy before anyone reaches the counter, so the person
+ * standing there is not choosing a series — they are copying one, and a staff
+ * member who may not copy it has to fetch the owner for every single sale.
+ *
+ * A capability with a permission behind it also has to be granted TWICE, in two
+ * different screens, by two different people — and the shop discovers the second
+ * grant exists only when the box it was promised fails to appear. That is what
+ * this feature was reported as: a broken capability.
+ *
+ * The permission is REMOVED rather than widened to the presets, because widening
+ * fixes the presets and nothing else: a shop's own custom role — and every role
+ * created after the upgrade ran — would still be silently without it.
+ *
+ * What bounds the feature is therefore not authority but the string rules below
+ * and the `{shop, invoiceNo}` unique index: a number already used is refused
+ * whoever types it, and every Sale carries `createdBy`, so a number typed wrong
+ * is attributable after the fact.
  */
 const { AppError } = require('../middleware/error.middleware');
+const { shopHasFeature } = require('./features.util');
 
 /**
  * The longest number we will store. Generous — `INV-DHANMONDI-20260816-0004` is
@@ -98,42 +122,39 @@ const ALLOWED = /^[\p{L}\p{N}#][\p{L}\p{M}\p{N} \-/_.#()]*$/u;
  * Resolve the invoice number the client asked for.
  *
  * Rules, in the order they are checked — the order is why "not asked for" can
- * never 400 or 403 for the shops that have never heard of this:
+ * never 400 for the shops that have never heard of this:
  *
  *   1. nothing named          -> null, no error, whoever is asking
  *   2. capability off         -> 400 (see "why a refusal" above)
- *   3. no `sales.invoice_no`  -> 403
- *   4. not a string           -> 400
- *   5. too long / empty       -> 400
- *   6. contains `~`           -> 400 (reserved, see REVISION_MARKER)
- *   7. disallowed characters  -> 400
- *   8. otherwise              -> the normalised string
+ *   3. not a string           -> 400
+ *   4. too long / empty       -> 400
+ *   5. contains `~`           -> 400 (reserved, see REVISION_MARKER)
+ *   6. disallowed characters  -> 400
+ *   7. otherwise              -> the normalised string
  *
  * Normalisation is deliberately minimal: NFC, trimmed, and internal whitespace
  * runs collapsed to one space. Case is NOT touched — `HFG/26-1043` is stored as
  * typed, because this string is printed and an owner who capitalises their
  * series a particular way is entitled to have it come out that way.
  *
+ * NO `req`, on purpose — see "who may do it" above. This function used to take
+ * one solely to read the caller's permissions off it, and a parameter kept for a
+ * check that no longer exists is an invitation to reintroduce it.
+ *
  * @param {Object}  input
  * @param {*}       input.raw   the client's `invoiceNo`
- * @param {Object} [input.req]  the Express request (the permission check)
  * @param {Object} [input.shop] the Shop document (the capability check)
  * @returns {string|null}
- * @throws {AppError} 403 without the permission, 400 for everything else
+ * @throws {AppError} 400 for every refusal
  */
-function resolveCustomInvoiceNo({ raw, req = null, shop = null } = {}) {
-  // Required lazily for the same reason `saleDate.util` does it: `permission
-  // .middleware` reaches config, which makes this unusable from the scripts and
-  // seeders that have no app context.
-  const { hasPermission } = require('../middleware/permission.middleware');
-  const { shopHasFeature } = require('./features.util');
-
+function resolveCustomInvoiceNo({ raw, shop = null } = {}) {
   // 1. Nothing asked for. Not a violation — this is every ordinary checkout,
-  //    and it is checked FIRST so that a shop without the capability, or a
-  //    cashier without the permission, can still sell.
+  //    and it is checked FIRST so that a shop without the capability can still
+  //    sell.
   if (raw === undefined || raw === null || raw === '') return null;
 
-  // 2. The platform has not sold this shop its own numbering.
+  // 2. The platform has not sold this shop its own numbering. THE ONLY GATE —
+  //    once it is open, whoever may ring up the sale may number it.
   //
   //    `shop` absent = a script or an internal call with no shop context, and
   //    it passes — the same carve-out `resolveSaleDate` makes for `req`. No
@@ -146,16 +167,7 @@ function resolveCustomInvoiceNo({ raw, req = null, shop = null } = {}) {
     );
   }
 
-  // 3. The owner has not given this person the series.
-  if (req && !hasPermission(req, 'sales', 'invoice_no')) {
-    throw new AppError(
-      'You do not have permission to set an invoice number',
-      'আপনার নিজে ইনভয়েস নম্বর দেওয়ার অনুমতি নেই',
-      403
-    );
-  }
-
-  // 4. A number is a string. An object or an array here is a malformed client,
+  // 3. A number is a string. An object or an array here is a malformed client,
   //    not a typo, and `String(raw)` would happily store "[object Object]".
   if (typeof raw !== 'string') {
     throw new AppError(
@@ -167,7 +179,7 @@ function resolveCustomInvoiceNo({ raw, req = null, shop = null } = {}) {
 
   const value = raw.normalize('NFC').trim().replace(/\s+/g, ' ');
 
-  // 5. Whitespace only, or longer than a receipt can carry.
+  // 4. Whitespace only, or longer than a receipt can carry.
   if (!value) {
     throw new AppError(
       'Invoice number cannot be blank',
@@ -183,7 +195,7 @@ function resolveCustomInvoiceNo({ raw, req = null, shop = null } = {}) {
     );
   }
 
-  // 6. Reserved. Checked before the charset so the message names the real
+  // 5. Reserved. Checked before the charset so the message names the real
   //    reason rather than "invalid character".
   if (value.includes(REVISION_MARKER)) {
     throw new AppError(
@@ -193,7 +205,7 @@ function resolveCustomInvoiceNo({ raw, req = null, shop = null } = {}) {
     );
   }
 
-  // 7. Everything else printable-and-sane.
+  // 6. Everything else printable-and-sane.
   if (!ALLOWED.test(value)) {
     throw new AppError(
       'Invoice number may use letters, numbers and - / _ . # ( ) only',

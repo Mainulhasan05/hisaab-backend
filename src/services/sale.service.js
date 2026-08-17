@@ -431,7 +431,7 @@ class SaleService {
     });
 
     /**
-     * An owner may number this invoice themselves.
+     * The shop may number this invoice itself.
      *
      * `null` on every ordinary checkout, and on every shop without
      * `features.customInvoiceNo` — which is all of them until an admin says
@@ -439,6 +439,10 @@ class SaleService {
      * per-(shop, branch, day) counter is never consulted, so the `INV-` series
      * stays exactly where it was and the capability can be switched back off
      * without leaving a gap.
+     *
+     * The SHOP, not the owner: the capability is the whole gate and there is no
+     * per-user permission behind it, so `req` is not passed and not wanted. See
+     * the "who may do it" note in utils/invoiceNo.util.js.
      *
      * Resolved here, beside `resolveSaleDate` and for the same reason: the
      * whole body is inside `runInTransaction`, so a gate that runs before
@@ -449,7 +453,6 @@ class SaleService {
      */
     const customInvoiceNo = resolveCustomInvoiceNo({
       raw: rawInvoiceNo,
-      req,
       shop: req?.shop,
     });
     // The wall-clock moment this invoice was actually typed. Kept apart from

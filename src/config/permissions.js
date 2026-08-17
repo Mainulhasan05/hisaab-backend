@@ -33,17 +33,12 @@ const MODULES = {
   // ringing sales. It is NOT implied by `update` either — `update` is recording
   // a payment against a due invoice, which changes no line and no stock.
   //
-  // `invoice_no` is choosing the invoice's own number instead of taking the
-  // generated one. Separate from `create` for the same reason as the three
-  // above, and NOT granted by any preset — unlike `backdate` and `revise`,
-  // which widened to the counter because the person standing there is the one
-  // who knows. Which series the shop's paper runs on is the owner's, so it
-  // starts owner-only and an owner who wants to delegate grants it explicitly.
-  // Inert without `features.customInvoiceNo`, the way `discount` is without
-  // `features.lineDiscount`. Enforced inside `createSale` via
-  // `utils/invoiceNo.util.resolveCustomInvoiceNo`, not at the door — a sale
-  // that names no number is the ordinary case and must never be refused.
-  sales:         { key: 'sales',         label: 'বিক্রয়',            labelEn: 'Sales',           actions: ['view', 'create', 'update', 'delete', 'view_profit', 'discount', 'backdate', 'revise', 'invoice_no'] },
+  // There is deliberately NO `invoice_no` action here, and there used to be —
+  // see DEPRECATED_ACTIONS below. Typing the shop's own invoice number is gated
+  // by `features.customInvoiceNo` alone, because the number is copied off a
+  // carbon copy the customer is already holding rather than chosen at the till.
+  // The long form of the argument is in `utils/invoiceNo.util.js`.
+  sales:         { key: 'sales',         label: 'বিক্রয়',            labelEn: 'Sales',           actions: ['view', 'create', 'update', 'delete', 'view_profit', 'discount', 'backdate', 'revise'] },
   customers:     { key: 'customers',     label: 'কাস্টমার',          labelEn: 'Customers',       actions: ['view', 'create', 'update', 'delete'] },
   // A purchase record IS cost data (unit prices, invoice totals, dues), so
   // `view` alone only reveals *that* a purchase happened — supplier, date,
@@ -107,10 +102,38 @@ const ACTION_LABELS = {
   discount:      { label: 'ছাড় দেওয়া',      labelEn: 'Give discount' },
   backdate:      { label: 'আগের তারিখে বিক্রি', labelEn: 'Backdate a sale' },
   revise:        { label: 'বিক্রয় সংশোধন',   labelEn: 'Revise a sale' },
-  invoice_no:    { label: 'নিজে ইনভয়েস নম্বর দেওয়া', labelEn: 'Set the invoice number' },
   cancel:        { label: 'বাতিল',           labelEn: 'Cancel' },
   publish:       { label: 'প্রকাশ',          labelEn: 'Publish' },
 };
+
+/**
+ * Actions that WERE real and are not any more — accepted from a client and
+ * ignored, never stored, never rendered.
+ *
+ * `findUnknownPermissionKeys` exists to reject typos, and retiring an action
+ * turns every client still sending it into a typo. The roles screen builds its
+ * payload from `/roles/matrix`, so a tab that was open when the new build went
+ * out still posts the retired key — and would have its entire role save refused
+ * with "অজানা অনুমতি: sales.invoice_no", naming a switch the owner cannot see
+ * and did not touch. Refusing the save teaches nobody anything; the grant it
+ * carries has no meaning left either way.
+ *
+ * `mergePermissions` already drops these on its own, because it iterates MODULES
+ * rather than the input — so a retired flag left on an existing Role document
+ * disappears the next time that role is saved, and is read by nothing before
+ * then.
+ *
+ *   sales.invoice_no — retired 2026-08-17. Typing the shop's own invoice number
+ *     is now gated by `features.customInvoiceNo` alone. Widening it to the
+ *     presets was the alternative and it fixes only the presets: a shop's own
+ *     custom roles, and every role made afterwards, would still be without it.
+ */
+const DEPRECATED_ACTIONS = Object.freeze({
+  sales: Object.freeze(['invoice_no']),
+});
+
+const isDeprecatedAction = (modKey, action) =>
+  DEPRECATED_ACTIONS[modKey]?.includes(action) === true;
 
 /**
  * Serializable matrix for clients — the roles UI must render from this,
@@ -151,6 +174,9 @@ const mergePermissions = (base, input) => {
 /**
  * Collect module/action keys in `input` that don't exist in the matrix,
  * so the API can reject typos instead of silently dropping them.
+ *
+ * Retired actions (DEPRECATED_ACTIONS) are NOT unknown: they are tolerated and
+ * dropped, because a client still sending one is out of date rather than wrong.
  */
 const findUnknownPermissionKeys = (input) => {
   const unknown = [];
@@ -162,9 +188,9 @@ const findUnknownPermissionKeys = (input) => {
     }
     if (actions && typeof actions === 'object') {
       for (const action of Object.keys(actions)) {
-        if (!MODULES[modKey].actions.includes(action)) {
-          unknown.push(`${modKey}.${action}`);
-        }
+        if (MODULES[modKey].actions.includes(action)) continue;
+        if (isDeprecatedAction(modKey, action)) continue;
+        unknown.push(`${modKey}.${action}`);
       }
     }
   }

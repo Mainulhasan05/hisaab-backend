@@ -387,9 +387,14 @@ const shopSchema = new mongoose.Schema({
     // atomic counter, and a posted `invoiceNo` is REFUSED rather than ignored,
     // so a number the owner typed can never differ from the one printed.
     //
-    // Three axes, as with `lineDiscount`: the platform sells the capability,
-    // the owner grants `sales.invoice_no` to whoever may use it, and the
-    // `{shop, invoiceNo}` unique index is what actually guarantees uniqueness.
+    // TWO axes, and unlike `lineDiscount` there is no permission among them:
+    // the platform sells the capability, and the `{shop, invoiceNo}` unique
+    // index is what actually guarantees uniqueness. This flag is the whole
+    // gate — once it is on, anyone who may ring up a sale may number it, because
+    // the number is copied off the customer's carbon copy rather than chosen at
+    // the till. See `utils/invoiceNo.util.js` for the full argument, and note
+    // that `sales.invoice_no` was retired for it (config/permissions.js
+    // DEPRECATED_ACTIONS).
     // Numbering is never handed to the client — only the CHOICE of number is.
     //
     // Off again = the `INV-` series resumes exactly where it stopped, because a

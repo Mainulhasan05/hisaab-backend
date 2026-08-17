@@ -189,10 +189,11 @@ const FEATURES = Object.freeze({
       'generated INV-<branch>-<date>-#### one — for a trader copying from a ' +
       'manual invoice book, or carrying an existing series across. Uniqueness ' +
       'is still enforced per shop, so a number already used is refused. ' +
-      'Bounded by the separate `sales.invoice_no` permission, which is ' +
-      'owner-only until the owner grants it. Off = the number is generated as ' +
-      'before and a typed one is refused; a typed number never advances the ' +
-      'generated series, so the switch is reversible.',
+      'This switch is the WHOLE gate: there is no staff permission behind it, ' +
+      'so once it is on, anyone in the shop who can ring up a sale can number ' +
+      'it. Off = the number is generated as before and a typed one is refused; ' +
+      'a typed number never advances the generated series, so the switch is ' +
+      'reversible.',
     /**
      * NO PREREQUISITES, and none of the existing keys is a sensible one.
      *

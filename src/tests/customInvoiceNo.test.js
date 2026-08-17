@@ -10,24 +10,29 @@
  *      absent case would refuse every sale on the platform. This is the
  *      tripwire, not a regression test.
  *
- *   B. THE TWO GATES. The capability the platform sells and the permission the
- *      owner grants, checked independently and in that order. Both are
- *      REGRESSIONS in the weak sense — `resolveCustomInvoiceNo` did not exist,
- *      so there is nothing in the old code for them to fail against.
+ *   B. THE GATE — SINGULAR. `features.customInvoiceNo` and nothing else. This
+ *      group is a REGRESSION in the strong sense: there were two gates, and the
+ *      second one — a `sales.invoice_no` permission granted by no preset — meant
+ *      a shop that had been sold the capability still saw no box unless the
+ *      owner made a second grant in a second screen. The tests that pinned the
+ *      403 are inverted here on purpose, and the "no permission of any kind"
+ *      case is the one that used to fail.
  *
  *   C. THE STRING. What may be stored on a document that gets printed on 58mm
  *      paper, texted, searched with a regex and read back by a human comparing
  *      it to a carbon copy. `~` is the one that carries real weight: it is what
  *      `reviseSale` renames a superseded invoice with, and that trick is only
- *      safe while no real number contains one.
+ *      safe while no real number contains one. Untouched by the gate change —
+ *      authority was never what bounded this feature, and now it is all that
+ *      does.
  *
  *   D. WIRING — GUARDS. That the Joi schema carries `invoiceNo`, that the
- *      capability is registered, and that no preset hands the permission out.
- *      Cheap, and D catches the failure that is invisible from the outside:
- *      `validate.middleware` runs with `stripUnknown: true`, so a field missing
- *      from the schema is DELETED before the service sees it — the owner would
- *      type `A-1043`, get `INV-MAIN-20260816-0004`, and no error would be
- *      raised anywhere.
+ *      capability is registered, and that the retired permission stays retired
+ *      without breaking the clients still sending it. Cheap, and D catches the
+ *      failure that is invisible from the outside: `validate.middleware` runs
+ *      with `stripUnknown: true`, so a field missing from the schema is DELETED
+ *      before the service sees it — the owner would type `A-1043`, get
+ *      `INV-MAIN-20260816-0004`, and no error would be raised anywhere.
  *
  * Deliberately NOT here: that a duplicate number is actually refused. That is
  * the `{shop, invoiceNo}` unique index doing its job inside MongoDB, and a
@@ -37,6 +42,7 @@
  * stop retrying when the number was chosen rather than generated.
  */
 
+const fs = require('fs');
 const mongoose = require('mongoose');
 
 const {
@@ -48,6 +54,9 @@ const {
   MODULES,
   ACTION_LABELS,
   ROLE_PRESETS,
+  buildPermissions,
+  mergePermissions,
+  findUnknownPermissionKeys,
 } = require('../config/permissions');
 const {
   FEATURES,
@@ -68,41 +77,30 @@ const plainShop = () => ({ _id: id(), features: {} });
 /** A shop cached before the flag existed — `features` is undefined entirely. */
 const legacyShop = () => ({ _id: id() });
 
-const ownerReq = (shop) => ({ shop, user: { isOwner: true } });
-/** A seller explicitly granted `sales.invoice_no`. */
-const grantedReq = (shop) => ({
-  shop,
-  user: {
-    isOwner: false,
-    permissions: { sales: { view: true, create: true, invoice_no: true } },
-  },
-});
-/** May sell, may not choose the number — the default for every staff role. */
-const plainCashierReq = (shop) => ({
-  shop,
-  user: { isOwner: false, permissions: { sales: { view: true, create: true } } },
-});
+/**
+ * There are deliberately NO request fixtures. `resolveCustomInvoiceNo` takes no
+ * `req` — who is asking is not one of its inputs, and B pins that structurally
+ * so a permission cannot quietly grow back.
+ */
 
 describe('A. nothing named — invariant guards', () => {
   test.each([
     ['undefined', undefined],
     ['null', null],
     ['empty string', ''],
-  ])('%s returns null and throws nothing, for the OWNER of an enabled shop', (_l, raw) => {
-    const shop = enabledShop();
-    expect(resolveCustomInvoiceNo({ raw, req: ownerReq(shop), shop })).toBeNull();
+  ])('%s returns null and throws nothing, in an ENABLED shop', (_l, raw) => {
+    expect(resolveCustomInvoiceNo({ raw, shop: enabledShop() })).toBeNull();
   });
 
   test.each([
     ['undefined', undefined],
     ['null', null],
     ['empty string', ''],
-  ])('%s returns null for a cashier in a shop WITHOUT the capability', (_l, raw) => {
+  ])('%s returns null in a shop WITHOUT the capability', (_l, raw) => {
     // The one that matters. Every ordinary POS payload on the platform takes
-    // this path, and either gate running before the absent check would refuse
+    // this path, and the gate running before the absent check would refuse
     // every sale in every shop.
-    const shop = plainShop();
-    expect(resolveCustomInvoiceNo({ raw, req: plainCashierReq(shop), shop })).toBeNull();
+    expect(resolveCustomInvoiceNo({ raw, shop: plainShop() })).toBeNull();
   });
 
   test('a shop cached before the flag existed still sells', () => {
@@ -110,69 +108,71 @@ describe('A. nothing named — invariant guards', () => {
     // the capability reads off — but the absent-number path never consults it.
     const shop = legacyShop();
     expect(shopHasFeature(shop, 'customInvoiceNo')).toBe(false);
-    expect(resolveCustomInvoiceNo({ raw: undefined, req: plainCashierReq(shop), shop })).toBeNull();
+    expect(resolveCustomInvoiceNo({ raw: undefined, shop })).toBeNull();
   });
 
-  test('no request and no shop at all (a script or seeder) is not a violation', () => {
+  test('no shop at all (a script or seeder) is not a violation', () => {
     expect(resolveCustomInvoiceNo({ raw: undefined })).toBeNull();
   });
 });
 
-describe('B. the two gates', () => {
+describe('B. the gate — the capability, and nothing else', () => {
   test('a shop WITHOUT the capability is refused 400 — not silently ignored', () => {
     // The whole argument for refusing: the invoice is a physical object. A
     // number typed and quietly replaced puts the customer's copy and the shop's
     // book permanently out of step, and nobody finds out for months.
-    expect.assertions(3);
-    const shop = plainShop();
+    expect.assertions(2);
     try {
-      resolveCustomInvoiceNo({ raw: 'A-1043', req: ownerReq(shop), shop });
+      resolveCustomInvoiceNo({ raw: 'A-1043', shop: plainShop() });
     } catch (err) {
       expect(err.statusCode).toBe(400);
       expect(err.messageBn).toContain('চালু নেই');
-      expect(err.messageBn).toBeTruthy();
     }
   });
 
-  test('the capability is checked BEFORE the permission', () => {
-    // Order matters for the message: an owner of a shop without the capability
-    // must be told the shop lacks it, not that they lack permission — they
-    // would then go looking in the roles screen for a switch that is not there.
-    expect.assertions(2);
-    const shop = plainShop();
+  test('a shop cached before the flag existed is refused too — fails closed', () => {
+    expect.assertions(1);
     try {
-      resolveCustomInvoiceNo({ raw: 'A-1043', req: plainCashierReq(shop), shop });
+      resolveCustomInvoiceNo({ raw: 'A-1043', shop: legacyShop() });
     } catch (err) {
       expect(err.statusCode).toBe(400);
-      expect(err.statusCode).not.toBe(403);
     }
   });
 
-  test('capability on, but a cashier WITHOUT `sales.invoice_no` is refused 403', () => {
-    expect.assertions(2);
-    const shop = enabledShop();
-    try {
-      resolveCustomInvoiceNo({ raw: 'A-1043', req: plainCashierReq(shop), shop });
-    } catch (err) {
-      expect(err.statusCode).toBe(403);
-      expect(err.messageBn).toContain('অনুমতি');
-    }
+  test('capability on — the number is taken, whoever is asking', () => {
+    // THE REGRESSION. This is the shape that used to 403: a shop that had been
+    // sold the capability, and a seller holding no `sales.invoice_no` grant
+    // because no preset ever handed one out. The owner had to make a second
+    // grant, in the roles screen, before the box the shop was promised appeared.
+    expect(resolveCustomInvoiceNo({ raw: 'A-1043', shop: enabledShop() })).toBe('A-1043');
   });
 
-  test('capability on and the permission granted — the number is taken', () => {
+  test('a `req` from an out-of-date caller is ignored, not honoured', () => {
+    // Nothing should still be passing one, but if something is, it must not
+    // resurrect the gate by accident — least of all a `false` that reads like a
+    // deliberate denial.
     const shop = enabledShop();
-    expect(resolveCustomInvoiceNo({ raw: 'A-1043', req: grantedReq(shop), shop })).toBe('A-1043');
+    const value = resolveCustomInvoiceNo({
+      raw: 'A-1043',
+      shop,
+      req: { shop, user: { isOwner: false, permissions: { sales: { invoice_no: false } } } },
+    });
+    expect(value).toBe('A-1043');
   });
 
-  test('the owner needs no explicit grant', () => {
-    const shop = enabledShop();
-    expect(resolveCustomInvoiceNo({ raw: 'A-1043', req: ownerReq(shop), shop })).toBe('A-1043');
+  test('the util cannot consult permissions — structurally', () => {
+    // Pinned on the source rather than on behaviour, because the failure being
+    // prevented is someone reintroducing the check for a reason that sounds good
+    // in isolation. If it belongs anywhere it is a route guard, not here.
+    const source = fs.readFileSync(require.resolve('../utils/invoiceNo.util'), 'utf8');
+    expect(source).not.toMatch(/require\(['"]\.\.\/middleware\/permission\.middleware['"]\)/);
+    expect(source).not.toMatch(/hasPermission\s*\(/);
   });
 });
 
 describe('C. the string', () => {
   const shop = enabledShop();
-  const ok = (raw) => resolveCustomInvoiceNo({ raw, req: ownerReq(shop), shop });
+  const ok = (raw) => resolveCustomInvoiceNo({ raw, shop });
   const rejected = (raw) => {
     try {
       ok(raw);
@@ -204,7 +204,9 @@ describe('C. the string', () => {
   });
 
   test.each([
-    ['control characters', 'A-104 3'],
+    // An escape, not a literal byte, and NOT `\t`: normalisation collapses
+    // whitespace runs to a legal space, so a tab here would pass vacuously.
+    ['control characters', 'A-104' + '\x01' + '3'],
     ['a zero-width joiner', 'A-10‍43'],
     ['an RTL override', 'A-‮1043'],
     ['a null byte', 'A-1043 '],
@@ -245,10 +247,7 @@ describe('C. the string', () => {
     // Uniqueness is the unique index's job, decided on the insert, and a
     // read-then-write check here would be raceable by two tills in the same
     // millisecond. Pinned structurally: the module requires no model.
-    const source = require('fs').readFileSync(
-      require.resolve('../utils/invoiceNo.util'),
-      'utf8'
-    );
+    const source = fs.readFileSync(require.resolve('../utils/invoiceNo.util'), 'utf8');
     expect(source).not.toMatch(/require\(['"]\.\.\/models/);
     // Calls, not the words — the header explains at length why uniqueness is
     // NOT checked here, so a prose match would fail on its own documentation.
@@ -313,21 +312,56 @@ describe('D. wiring', () => {
     expect(FEATURES.customInvoiceNo.unavailable).toBeUndefined();
   });
 
-  test('`sales.invoice_no` is a real action with a label, separate from `create`', () => {
-    expect(MODULES.sales.actions).toContain('invoice_no');
-    expect(ACTION_LABELS.invoice_no).toBeDefined();
-    // It renders in the roles matrix from this alone — no frontend change.
-    expect(ACTION_LABELS.invoice_no.label).toBeTruthy();
+  test('the admin-panel copy says the switch is the whole gate', () => {
+    // This description IS the operator-facing text (`getShopFeatures` serves it
+    // verbatim). It used to promise a permission behind the switch, which is
+    // what sent operators and owners looking for a second one.
+    expect(FEATURES.customInvoiceNo.description).not.toMatch(/invoice_no/);
+    expect(FEATURES.customInvoiceNo.description).toMatch(/no staff permission/i);
   });
 
-  test('NO preset grants it — it starts owner-only', () => {
-    // Unlike `backdate` and `revise`, which widened to the counter because the
-    // person standing there is the one who knows. Which series the shop's paper
-    // runs on is not that kind of decision, so an owner who wants to delegate
-    // grants it explicitly in the roles screen.
+  test('`sales.invoice_no` is retired — not an action, not a label', () => {
+    expect(MODULES.sales.actions).not.toContain('invoice_no');
+    expect(ACTION_LABELS.invoice_no).toBeUndefined();
+    // So it renders in no roles matrix, and no preset can grant what the matrix
+    // does not define — `buildPermissionsFromConfig` builds from MODULES.
     for (const [name, preset] of Object.entries(ROLE_PRESETS)) {
-      expect([name, preset.permissions.sales?.invoice_no === true]).toEqual([name, false]);
+      expect([name, preset.permissions.sales?.invoice_no]).toEqual([name, undefined]);
     }
+  });
+
+  test('a stale client still sending it is tolerated, not refused', () => {
+    // The roles screen builds its payload from `/roles/matrix`, so a tab open
+    // across the deploy still posts the retired key. Refusing the whole role
+    // save with "অজানা অনুমতি" names a switch the owner cannot see and did not
+    // touch — and the grant it carries has no meaning left either way.
+    expect(findUnknownPermissionKeys({ sales: { invoice_no: true } })).toEqual([]);
+    // The tolerance is one named key, not a hole: a real typo still fails.
+    expect(findUnknownPermissionKeys({ sales: { invoice_nope: true } }))
+      .toEqual(['sales.invoice_nope']);
+    expect(findUnknownPermissionKeys({ sales: { invoice_no: true }, nosuch: { view: true } }))
+      .toEqual(['nosuch']);
+  });
+
+  test('and the retired grant is dropped rather than stored', () => {
+    // `mergePermissions` iterates MODULES, not the input, so a retired flag on
+    // an existing Role document disappears the next time that role is saved.
+    const merged = mergePermissions(buildPermissions(false), {
+      sales: { invoice_no: true, create: true },
+    });
+    expect(merged.sales.invoice_no).toBeUndefined();
+    // And the rest of the payload is unharmed by the tolerated key sitting in it.
+    expect(merged.sales.create).toBe(true);
+  });
+
+  test('createSale passes the shop and NOT the request', () => {
+    // The capability lives on the shop; who is asking is no longer an input. A
+    // `req` reappearing in this call is the first symptom of the gate returning.
+    const source = fs.readFileSync(require.resolve('../services/sale.service'), 'utf8');
+    const call = source.match(/resolveCustomInvoiceNo\(\{[\s\S]*?\}\)/)?.[0];
+    expect(call).toBeTruthy();
+    expect(call).toMatch(/shop:\s*req\?\.shop/);
+    expect(call).not.toMatch(/^\s*req,\s*$/m);
   });
 
   test('createSale stops retrying when the number was chosen, not generated', () => {
@@ -336,10 +370,7 @@ describe('D. wiring', () => {
     // string three times and then reports the third failure — and the duplicate
     // has to surface as INVOICE_NO_TAKEN, which is what tells the offline queue
     // this 409 will never resolve on its own.
-    const source = require('fs').readFileSync(
-      require.resolve('../services/sale.service'),
-      'utf8'
-    );
+    const source = fs.readFileSync(require.resolve('../services/sale.service'), 'utf8');
     expect(source).toMatch(/const chosen = forceInvoiceNo \|\| customInvoiceNo/);
     expect(source).toMatch(/!chosen && attempt < maxRetries - 1/);
     expect(source).toMatch(/INVOICE_NO_TAKEN/);
