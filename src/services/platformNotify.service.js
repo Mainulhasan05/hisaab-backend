@@ -30,11 +30,13 @@
 
 const AdminTelegramLink = require('../models/AdminTelegramLink.model');
 const { ALERT_KEYS } = require('../models/AdminTelegramLink.model');
+const Shop = require('../models/Shop.model');
+const ShopCategory = require('../models/ShopCategory.model');
 const telegramService = require('./telegram.service');
 const cacheService = require('./cache.service');
 const logger = require('../utils/logger.util');
-const { escapeHtml, formatMoney, formatCount } = require('../utils/telegramFormat.util');
-const { getBangladeshTimeStr } = require('../utils/bdTime.util');
+const { escapeHtml, formatMoney, formatCount, formatDate } = require('../utils/telegramFormat.util');
+const { getBangladeshTimeStr, toBangladeshDateStr } = require('../utils/bdTime.util');
 
 /**
  * How long the resolved login cooldown is cached.
@@ -45,6 +47,25 @@ const { getBangladeshTimeStr } = require('../utils/bdTime.util');
  * "I just changed a setting" tolerates.
  */
 const COOLDOWN_LOOKUP_CACHE_S = 60;
+
+/**
+ * Ceiling on the two enrichment reads behind the signup alert (shop type name,
+ * platform shop count).
+ *
+ * Neither is worth waiting on. They decorate a message whose essential content
+ * — who registered, from what number — is already in hand, so a struggling
+ * database costs a line of detail rather than the alert itself.
+ */
+const LOOKUP_TIMEOUT_MS = 3000;
+
+/**
+ * Plan keys as an operator reads them. Unknown keys fall through to the raw
+ * value, so adding a plan degrades to English rather than to a blank line.
+ */
+const PLAN_LABELS = {
+  trial: 'ট্রায়াল',
+  paid: 'পেইড',
+};
 
 /** Failed-password burst detection. */
 const FAILED_LOGIN = {
@@ -169,27 +190,114 @@ class PlatformNotifyService {
     this._dispatch('newShop', async () => {
       if (!(await this._hasAudience())) return;
 
-      const trialEnd = shop?.subscription?.expiresAt || shop?.subscription?.trialEndsAt || null;
+      const sub = shop?.subscription || {};
+      const billing = shop?.billing || {};
+      const trialEnd = sub.expiresAt || sub.trialEndsAt || null;
 
+      // Everything the operator would otherwise open the console to look up.
+      // Blank fields are dropped rather than printed as "—": registration only
+      // requires a name and a phone, so on a minimal signup half of these do
+      // not exist and a column of dashes reads as broken data.
       const lines = [
         '🎉 <b>নতুন দোকান রেজিস্টার হয়েছে!</b>',
         '',
         `🏪 <b>${escapeHtml(shop?.name || '—')}</b>`,
-        `👤 ${escapeHtml(user?.name || '—')}`,
-        `📞 <code>${escapeHtml(user?.phone || '—')}</code>`,
       ];
 
-      if (shop?.shopType) lines.push(`🏷️ ধরন: ${escapeHtml(shop.shopType)}`);
-      if (shop?.address?.district) lines.push(`📍 ${escapeHtml(shop.address.district)}`);
-      if (shop?.slug) lines.push(`🔗 <code>${escapeHtml(shop.slug)}</code>`);
-      if (trialEnd) {
-        lines.push(`⏳ ট্রায়াল শেষ: ${escapeHtml(new Date(trialEnd).toISOString().slice(0, 10))}`);
+      const typeLabel = await this._shopTypeLabel(shop);
+      if (typeLabel) lines.push(`🏷️ ধরন: ${escapeHtml(typeLabel)}`);
+
+      const address = this._shopAddress(shop);
+      if (address) lines.push(`📍 ${escapeHtml(address)}`);
+
+      // The shop's own number is worth showing only when it differs from the
+      // owner's — on most signups it is defaulted to the owner's phone, and
+      // the same number printed twice is noise.
+      if (shop?.phone && shop.phone !== user?.phone) {
+        lines.push(`☎️ দোকান: <code>${escapeHtml(shop.phone)}</code>`);
       }
+
+      lines.push(
+        '',
+        `👤 মালিক: <b>${escapeHtml(user?.name || '—')}</b>`,
+        `📞 <code>${escapeHtml(user?.phone || '—')}</code>`
+      );
+
+      const plan = [];
+      if (sub.plan) plan.push(`💳 প্ল্যান: ${escapeHtml(PLAN_LABELS[sub.plan] || sub.plan)}`);
+      if (sub.trialDays) plan.push(`🎁 ট্রায়াল: ${formatCount(sub.trialDays)} দিন`);
+      if (trialEnd) plan.push(`⏳ মেয়াদ শেষ: ${escapeHtml(formatDate(toBangladeshDateStr(trialEnd)))}`);
+      if (billing.monthlyPrice != null) plan.push(`💰 মাসিক: ${formatMoney(billing.monthlyPrice)}`);
+      if (plan.length) lines.push('', ...plan);
+
+      const refs = [];
+      if (shop?.slug) refs.push(`🔗 <code>${escapeHtml(shop.slug)}</code>`);
+      if (shop?._id) refs.push(`🆔 <code>${escapeHtml(String(shop._id))}</code>`);
+      if (refs.length) lines.push('', ...refs);
+
+      // The growth number, in the same message. A signup alert that also says
+      // "that makes 118" is the whole reason to read it on a lock screen.
+      const total = await this._shopCount();
+      if (total !== null) lines.push('', `📊 প্ল্যাটফর্মে মোট দোকান: <b>${formatCount(total)}</b>`);
 
       lines.push('', `🕒 ${getBangladeshTimeStr()} · ${this._origin(req)}`);
 
       await telegramService.broadcastToAdmins(ALERT_KEYS.NEW_SHOP, lines.join('\n'));
     });
+  }
+
+  /**
+   * A readable shop type.
+   *
+   * `Shop.type` stores the category KEY ("grocery", "cloth"), which is what the
+   * signup form submitted and not what a human reads. The admin-managed
+   * `ShopCategory` rows carry the Bengali name, so it is resolved there and
+   * falls back to the raw key — a lookup miss must degrade to a slightly uglier
+   * alert, never to a missing one.
+   *
+   * `shop.shopType` is accepted too because that is the field name the
+   * registration payload uses; a caller passing the raw request body instead of
+   * the saved document should not silently lose the field.
+   */
+  async _shopTypeLabel(shop) {
+    const key = shop?.type || shop?.shopType || null;
+    if (!key) return null;
+
+    try {
+      const category = await ShopCategory.findOne({ key })
+        .select('name')
+        .maxTimeMS(LOOKUP_TIMEOUT_MS)
+        .lean();
+      return category?.name || key;
+    } catch {
+      return key;
+    }
+  }
+
+  /**
+   * `Shop.address` is a free-text string. Historic callers and the storefront
+   * pass an object, so both shapes are flattened here rather than at four call
+   * sites.
+   */
+  _shopAddress(shop) {
+    const address = shop?.address;
+    if (!address) return null;
+    if (typeof address === 'string') return address.trim() || null;
+
+    return (
+      [address.line1, address.area, address.thana, address.district, address.city]
+        .filter(Boolean)
+        .join(', ') || null
+    );
+  }
+
+  /** Total shops on the platform, or null if the count is unavailable. */
+  async _shopCount() {
+    try {
+      return await Shop.estimatedDocumentCount({ maxTimeMS: LOOKUP_TIMEOUT_MS });
+    } catch {
+      return null;
+    }
   }
 
   // ────────────────────────────────────────────────────────────────────────

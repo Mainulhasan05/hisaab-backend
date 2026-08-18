@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const { ADMIN_ROLES } = require('../config/constants');
+const { ADMIN_ROLES, ADMIN_JWT_EXPIRES_IN } = require('../config/constants');
 const { normalizePhone } = require('../utils/phone.util');
 
 const adminSchema = new mongoose.Schema({
@@ -114,7 +114,7 @@ adminSchema.methods.generateToken = function() {
       isAdmin: true
     },
     process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
+    { expiresIn: ADMIN_JWT_EXPIRES_IN }
   );
 };
 

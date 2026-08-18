@@ -11,7 +11,8 @@ const {
   setAdminTokenCookie,
   clearUserTokenCookie,
   clearAdminTokenCookie,
-  COOKIE_NAMES
+  COOKIE_NAMES,
+  setRefreshTokenCookie,
 } = require('../utils/cookie.util');
 
 /**
@@ -135,12 +136,24 @@ const refreshToken = asyncHandler(async (req, res) => {
 
   setUserTokenCookie(res, result.accessToken);
   if (res.cookie) {
-    res.cookie('refreshToken', result.refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-    });
+    /**
+     * Hand-rolled options here were wrong in two ways that only showed up in
+     * production:
+     *
+     *   1. `sameSite: 'lax'` — hardcoded, while every other cookie in this app
+     *      uses `'none'` in production because the frontend and the API are on
+     *      different origins. A Lax cookie is NOT sent on a cross-site request,
+     *      so the refresh token was unusable in exactly the deployment it was
+     *      written for. It worked locally (same-site) and silently did nothing
+     *      live.
+     *   2. a hardcoded 7-day maxAge next to a token signed for a different
+     *      length — the pair of clocks this module exists to keep in step.
+     *
+     * `setRefreshTokenCookie` derives both from USER_SESSION_DAYS and shares
+     * `getCookieOptions` with every other cookie, so there is one definition of
+     * "how our cookies are set" rather than one per call site.
+     */
+    setRefreshTokenCookie(res, result.refreshToken);
   }
 
   return ApiResponse.success(res, {

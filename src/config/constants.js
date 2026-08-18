@@ -3,7 +3,59 @@
  * Central place for all constant values used across the application
  */
 
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * SESSION LIFETIMES — how long a signed-in browser stays signed in
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * ── WHY THESE ARE HERE AND NOT FOUR SEPARATE process.env READS ──────────────
+ *
+ * A session has TWO clocks and they must agree:
+ *
+ *   1. the JWT's own `expiresIn`  — the server stops trusting the token
+ *   2. the cookie's `maxAge`      — the browser stops sending it
+ *
+ * Whichever is SHORTER is the real session length, and nothing anywhere reports
+ * the mismatch. Before this, the two were set in six different places from three
+ * different sources: `JWT_EXPIRES_IN`, `JWT_ACCESS_EXPIRES_IN`, a hardcoded
+ * `'30d'` fallback in each of `Admin.generateToken`, `User.generateAccessToken`,
+ * `User.generateRefreshToken` and `admin.service.login`, plus a hardcoded
+ * `maxAgeDays = 30` in `cookie.util` and a hardcoded `7 * 24 * 60 * 60 * 1000`
+ * on the refresh cookie. Any one of them edited alone silently shortens or
+ * lengthens the session, and the symptom — "it logs me out" — points at none of
+ * them.
+ *
+ * So: one number per audience, and both clocks are derived from it.
+ *
+ * ── THE TWO AUDIENCES ARE DIFFERENT ON PURPOSE ──────────────────────────────
+ *
+ * ADMIN is the platform console — it can suspend shops, impersonate users and
+ * read every tenant's data. A shorter session bounds the damage from a laptop
+ * left open at a desk. 7 days is the floor the operator asked for ("at least 1
+ * day") with a wide margin, so nobody is signing in daily.
+ *
+ * USER is a shopkeeper or their staff, on a phone, at a counter, all day. Being
+ * signed out mid-sale is not a security win — it is a queue. A week.
+ *
+ * Both are env-overridable so tightening admin to a true 24 hours is a config
+ * change and not a deploy: set `ADMIN_SESSION_DAYS=1`.
+ */
+const readDays = (raw, fallback) => {
+  const n = parseInt(raw, 10);
+  // A malformed or non-positive value must never mean "expire immediately".
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+const ADMIN_SESSION_DAYS = readDays(process.env.ADMIN_SESSION_DAYS, 7);
+const USER_SESSION_DAYS = readDays(process.env.USER_SESSION_DAYS, 7);
+
 module.exports = {
+  ADMIN_SESSION_DAYS,
+  USER_SESSION_DAYS,
+  /** `expiresIn` strings for jwt.sign, derived so they cannot drift from the cookies. */
+  ADMIN_JWT_EXPIRES_IN: `${ADMIN_SESSION_DAYS}d`,
+  USER_JWT_EXPIRES_IN: `${USER_SESSION_DAYS}d`,
+
   // Admin Roles
   ADMIN_ROLES: {
     SUPER_ADMIN: 'super_admin',

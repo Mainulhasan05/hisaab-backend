@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const { USER_JWT_EXPIRES_IN } = require('../config/constants');
 const { normalizePhone } = require('../utils/phone.util');
 
 /**
@@ -226,7 +227,7 @@ userSchema.methods.generateAccessToken = function() {
   }
 
   return jwt.sign(payload, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || process.env.JWT_EXPIRES_IN || '30d'
+    expiresIn: USER_JWT_EXPIRES_IN
   });
 };
 
@@ -243,7 +244,7 @@ userSchema.methods.generateRefreshToken = function() {
   };
 
   return jwt.sign(payload, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || process.env.JWT_EXPIRES_IN || '30d'
+    expiresIn: USER_JWT_EXPIRES_IN
   });
 };
 

@@ -20,7 +20,7 @@ const PlatformSetting = require('../models/PlatformSetting.model');
 const mongoose = require('mongoose');
 const { getBangladeshTodayRange, getBangladeshTodayStr } = require('../utils/bdTime.util');
 const { resolveDailyLimit } = require('../utils/aiQuota.util');
-const { AUDIT_ACTIONS, AI_DAILY_MESSAGE_LIMIT } = require('../config/constants');
+const { AUDIT_ACTIONS, AI_DAILY_MESSAGE_LIMIT, ADMIN_JWT_EXPIRES_IN } = require('../config/constants');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { AppError } = require('../middleware/error.middleware');
@@ -88,7 +88,7 @@ class AdminService {
     const token = jwt.sign(
       { id: admin._id, role: admin.role, isAdmin: true },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
+      { expiresIn: ADMIN_JWT_EXPIRES_IN }
     );
 
     return {
