@@ -15,6 +15,7 @@ const Product = require('../models/Product.model');
 const { buildDateMatch } = require('../utils/reportScope.util');
 const { isBranchCustomerScope } = require('../utils/branchScope.util');
 const { quantizeMoney } = require('../utils/quantity.util');
+const { paidAtMatch, PAID_AT_EXPR } = require('../utils/paymentDate.util');
 const { PAYMENT_TYPES } = require('../config/constants');
 
 /**
@@ -303,7 +304,11 @@ class DetailedReportService {
         { $group: { _id: '$customer', total: { $sum: '$total' } } },
       ]),
       Payment.aggregate([
-        { $match: { ...scope, createdAt: before } },
+        // Effective date throughout this file — a backdated বাকি আদায় has to
+        // land on the same side of the statement's opening line as it does in
+        // the খতিয়ান, or the opening balance and the entries disagree by
+        // exactly that payment.
+        { $match: { ...scope, ...paidAtMatch(before) } },
         {
           $group: {
             _id: '$customer',
@@ -363,8 +368,8 @@ class DetailedReportService {
         .sort({ createdAt: 1 })
         .limit(MAX_ROWS_PER_COLLECTION)
         .lean(),
-      Payment.find({ ...scope, ...dated })
-        .select('customer amount method type notes createdAt')
+      Payment.find({ ...scope, ...paidAtMatch(range) })
+        .select('customer amount method type notes createdAt paidAt')
         .sort({ createdAt: 1 })
         .limit(MAX_ROWS_PER_COLLECTION)
         .lean(),
@@ -422,7 +427,7 @@ class DetailedReportService {
       const isRefund = p.type === PAYMENT_TYPES.REFUND;
       push(p.customer, {
         type: isRefund ? 'refund' : 'payment',
-        date: p.createdAt,
+        date: p.paidAt || p.createdAt,
         label: isRefund
           ? 'ফেরত (নগদ প্রদান)'
           : (p.type === PAYMENT_TYPES.DUE_COLLECTION ? 'বাকি আদায়' : 'পেমেন্ট'),
@@ -656,7 +661,7 @@ class DetailedReportService {
         },
       ]),
       Payment.aggregate([
-        { $match: { ...paymentScope, createdAt: before } },
+        { $match: { ...paymentScope, ...paidAtMatch(before) } },
         { $lookup: { from: 'purchases', localField: 'purchase', foreignField: '_id', as: 'p' } },
         { $unwind: '$p' },
         { $match: { 'p.supplier': { $in: ids } } },
@@ -703,7 +708,7 @@ class DetailedReportService {
         },
       ]),
       Payment.aggregate([
-        { $match: { ...paymentScope, ...(range ? { createdAt: range } : {}) } },
+        { $match: { ...paymentScope, ...paidAtMatch(range) } },
         { $lookup: { from: 'purchases', localField: 'purchase', foreignField: '_id', as: 'p' } },
         { $unwind: '$p' },
         // The cap comes AFTER the supplier filter, deliberately. Capping first
@@ -721,6 +726,7 @@ class DetailedReportService {
             method: 1,
             notes: 1,
             createdAt: 1,
+            paidAt: PAID_AT_EXPR,
           },
         },
       ]),
@@ -767,7 +773,7 @@ class DetailedReportService {
     for (const q of payments) {
       push(q.supplier, {
         type: 'payment',
-        date: q.createdAt,
+        date: q.paidAt || q.createdAt,
         label: q.invoiceNo ? `পরিশোধ (${q.invoiceNo})` : 'পরিশোধ',
         ref: q.invoiceNo || null,
         method: q.method || null,

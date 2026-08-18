@@ -7,13 +7,31 @@ const adminMediaController = require('../controllers/adminMedia.controller');
 const adminLandingController = require('../controllers/adminLanding.controller');
 const billingController = require('../controllers/billing.controller');
 const platformSmsController = require('../controllers/platformSms.controller');
+const adminTelegramController = require('../controllers/adminTelegram.controller');
+const adminSecurityController = require('../controllers/adminSecurity.controller');
 const { protect, adminOnly } = require('../middleware/auth.middleware');
 const { upload, handleUploadError } = require('../middleware/upload.middleware');
-const { smsLimiter } = require('../middleware/rateLimiter.middleware');
+const { smsLimiter, passwordResetLimiter } = require('../middleware/rateLimiter.middleware');
 
 // Public admin routes
 router.post('/login', adminController.login);
 router.post('/logout', adminController.logout);
+
+// ── Admin lockout recovery ─────────────────────────────────────────────────
+//
+// Public by necessity: the whole premise is an admin who cannot sign in. Safe
+// to expose because the SMS code goes to the FOUNDER's number regardless of
+// what the caller types, so knowing an admin's phone buys nothing — see
+// adminSecurity.service.js.
+//
+// `passwordResetLimiter` rather than `authLimiter` for the reason the shop-side
+// forgot-password flow gives: one honest recovery costs three requests, and
+// sharing a limiter with login would 429 the recovery flow on the screen people
+// reach precisely because they are already stuck. The controls that matter are
+// keyed on the admin account and live in the service.
+router.post('/forgot-password', passwordResetLimiter, adminSecurityController.requestPasswordReset);
+router.post('/forgot-password/verify', passwordResetLimiter, adminSecurityController.verifyPasswordReset);
+router.post('/forgot-password/reset', passwordResetLimiter, adminSecurityController.completePasswordReset);
 
 // Protected admin routes (require admin authentication)
 // protect: verifies token and sets req.isAdmin
@@ -258,6 +276,34 @@ router.get('/sms/broadcast/:id', platformSmsController.getBroadcast);
 router.get('/telegram/logs', adminController.getTelegramLogs);
 router.get('/telegram/links', adminController.getTelegramLinks);
 router.get('/telegram/stats', adminController.getTelegramStats);
+
+// ── The operator's OWN alert channel ───────────────────────────────────────
+//
+// Distinct from the three routes above, which report on what shop owners
+// receive. These configure what the person reading this console receives:
+// signups, logins, security events and the daily platform pulse.
+//
+// `/alerts/*` rather than `/telegram/*` because the channel is the mechanism,
+// not the subject — a second transport later (WhatsApp is on the roadmap) would
+// slot in behind the same paths rather than needing a parallel set.
+router.get('/alerts/status', adminTelegramController.getStatus);
+router.get('/alerts/link-token', adminTelegramController.getLinkToken);
+router.post('/alerts/unlink', adminTelegramController.unlink);
+router.put('/alerts/preferences', adminTelegramController.updatePreferences);
+router.post('/alerts/test', adminTelegramController.sendTest);
+router.post('/alerts/pulse', adminTelegramController.sendPulseNow);
+
+// ── Admin's own password, behind an SMS code to the founder ────────────────
+//
+// Three steps, mirroring the shop-user reset: request (proves the current
+// password), verify (spends the code for a single-use token), change (spends
+// the token). `smsLimiter` guards the one step that costs a message; the
+// service's own per-admin throttle is the control that actually protects the
+// founder's phone from being buried.
+router.get('/security/password/destination', adminSecurityController.getDestination);
+router.post('/security/password/request', smsLimiter, adminSecurityController.requestPasswordChange);
+router.post('/security/password/verify', adminSecurityController.verifyPasswordChange);
+router.post('/security/password/change', adminSecurityController.completePasswordChange);
 
 const shopCategoryController = require('../controllers/shopCategory.controller');
 

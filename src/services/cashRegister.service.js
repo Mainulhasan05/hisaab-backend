@@ -9,6 +9,7 @@ const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const { branchFilter, requireBranch, isAllBranchesView } = require('../utils/branchScope.util');
 const { toBangladeshDateStr, getBangladeshDayRange, endOfBangladeshDay } = require('../utils/bdTime.util');
+const { paidAtMatch } = require('../utils/paymentDate.util');
 
 class CashRegisterService {
   /**
@@ -134,7 +135,14 @@ class CashRegisterService {
             method: 'cash',
             type: { $in: ['due_collection', 'sale_payment'] },
             atCheckout: { $ne: true },
-            createdAt: { $gte: start, $lte: end },
+            // The EFFECTIVE date, not when the row was written. A বাকি আদায়
+            // backdated to a day whose register is already closed belongs to
+            // that day's book and must not land in today's expected closing —
+            // exactly how `Expense.date` and `Purchase.date` already behave
+            // below. Closed registers are settled records and are deliberately
+            // never recalculated, so the backdated money simply does not move
+            // any till figure; it moves the reports, which is what it is for.
+            ...paidAtMatch({ $gte: start, $lte: end }),
           },
         },
         { $group: { _id: null, total: { $sum: '$amount' } } },
@@ -175,7 +183,7 @@ class CashRegisterService {
             ...branchMatch,
             method: 'cash',
             type: 'refund',
-            createdAt: { $gte: start, $lte: end },
+            ...paidAtMatch({ $gte: start, $lte: end }),
           },
         },
         { $group: { _id: null, total: { $sum: '$amount' } } },
@@ -203,7 +211,7 @@ class CashRegisterService {
             ...branchMatch,
             method: 'cash',
             type: 'purchase_payment',
-            createdAt: { $gte: start, $lte: end },
+            ...paidAtMatch({ $gte: start, $lte: end }),
           },
         },
         { $group: { _id: null, total: { $sum: '$amount' } } },

@@ -28,6 +28,11 @@ const {
   buildVariantCostUpdate,
   blendedCost,
 } = require('../utils/costing.util');
+const {
+  parseSellingPrice,
+  buildSellingPriceUpdate,
+  buildSellingPriceRestore,
+} = require('../utils/purchasePrice.util');
 const { toMoney } = require('../utils/invoiceMath.util');
 
 class PurchaseService {
@@ -235,6 +240,24 @@ class PurchaseService {
       }
       const itemTotal = quantizeMoney(quantity * unitPrice);
 
+      // ── The new retail price, if the shopkeeper set one ──────────────────
+      //
+      // Optional by design. Empty, null, or 0 all mean "leave the shelf price
+      // alone" — a cleared number input posts 0, and writing ৳0 as a price
+      // because someone emptied a box would hand the goods away for free. The
+      // same reading `packSellingPrice` and `wholesalePrice` already use.
+      //
+      // Anything NON-empty is validated hard rather than coerced, exactly like
+      // `unitPrice` above: a malformed price silently becoming NaN → 0 is how
+      // a shop ends up selling at nothing, and this figure is written straight
+      // onto the product where every future sale reads it.
+      //
+      // Quoted per BASE unit even on a pack line. The cost box flips to the
+      // supplier's per-pack rate because that is what the bill says; the retail
+      // price does not, because that is what the customer pays and what
+      // `Product.sellingPrice` has always meant.
+      const sellingPrice = parseSellingPrice(item.sellingPrice, product.name);
+
       // A variant line must name a variant that exists. Without this the id
       // falls through to the stock write, whose `arrayFilters` match nothing,
       // and `bulkWrite` reports success for a delivery that increased no stock
@@ -266,6 +289,9 @@ class PurchaseService {
         packQuantity: line.packQuantity || undefined,
         unitPrice,
         packUnitPrice: packUnitPrice || undefined,
+        // Null when the line left the price alone, which keeps the stored
+        // document identical to what a shop that never uses this posts.
+        sellingPrice: sellingPrice ?? undefined,
         total: itemTotal,
         // The delivery's own batch details. These were read straight off the
         // raw `item` at the stock-write below and never stored, so the expiry a
@@ -333,6 +359,11 @@ class PurchaseService {
     // plain array would persist nothing.
     const costSnapshots = new Map();
 
+    // Same idea for the retail price, kept in its own map because the two move
+    // independently: a line can re-blend the cost without touching the price
+    // (the usual case) or set a price on a delivery received at zero cost.
+    const priceSnapshots = new Map();
+
     for (const [itemIndex, item] of preparedItems.entries()) {
       const product = purchaseProductMap.get(String(item.product));
       // Validation above already threw on an unresolvable product; this guard
@@ -384,6 +415,47 @@ class PurchaseService {
           if (variant) variant.buyingPrice = costAfter;
         } else {
           product.buyingPrice = costAfter;
+        }
+      }
+
+      // ── The new retail price ────────────────────────────────────────────
+      //
+      // A plain `$set`, not a blend. Cost is an average of what the shop paid
+      // over time; a price is a decision, and the shopkeeper just made it. The
+      // last one entered is the right one.
+      //
+      // A variant line prices only its own variant — a ২ কেজি packet and a ৫০০
+      // গ্রাম packet do not share a price, and writing the parent's field for a
+      // variant product would set a number nothing reads.
+      //
+      // `sellingPriceBefore` is snapshotted for the same reason `costBefore`
+      // is: so `cancelPurchase` can tell whether the price it would restore is
+      // still the one this delivery wrote.
+      const isVariantLine = Boolean(item.variantId && product.hasVariants);
+      const priceOp = buildSellingPriceUpdate({
+        productId: product._id,
+        variantId: item.variantId,
+        hasVariants: product.hasVariants,
+        sellingPrice: item.sellingPrice,
+      });
+
+      if (priceOp) {
+        const previousPrice = isVariantLine
+          ? (findVariant(product, item.variantId)?.sellingPrice ?? null)
+          : (product.sellingPrice ?? null);
+
+        purchaseStockOps.push(priceOp);
+        priceSnapshots.set(itemIndex, { sellingPriceBefore: previousPrice });
+
+        // Keep the in-memory document in step, so a SECOND line for the same
+        // product in one delivery snapshots against the first line's result
+        // rather than against the pre-delivery price — the same reason the cost
+        // blend above writes back onto `product`.
+        if (isVariantLine) {
+          const variant = findVariant(product, item.variantId);
+          if (variant) variant.sellingPrice = item.sellingPrice;
+        } else {
+          product.sellingPrice = item.sellingPrice;
         }
       }
 
@@ -503,12 +575,21 @@ class PurchaseService {
     // Record what this delivery did to each shelf's cost basis. Without it a
     // cancellation has no way to know whether the cost it would be reversing is
     // still the one this purchase set — see `cancelPurchase`.
-    if (costSnapshots.size > 0) {
+    if (costSnapshots.size > 0 || priceSnapshots.size > 0) {
       for (const [index, snapshot] of costSnapshots) {
         const line = purchase.items[index];
         if (!line) continue;
         line.costBefore = snapshot.costBefore;
         line.costAfter = snapshot.costAfter;
+      }
+      // A product that had no price at all before (never sold, priced for the
+      // first time here) records `null` rather than 0, so the cancellation path
+      // can tell "there was no price" from "the price was zero" and restore
+      // the absence rather than inventing a free product.
+      for (const [index, snapshot] of priceSnapshots) {
+        const line = purchase.items[index];
+        if (!line) continue;
+        line.sellingPriceBefore = snapshot.sellingPriceBefore ?? undefined;
       }
       await purchase.save(sessionOpt);
     }
@@ -663,6 +744,41 @@ class PurchaseService {
               },
             });
           }
+        }
+      }
+
+      // ── Put the retail price back, but only if it is still ours ──────────
+      //
+      // Same ownership test as the cost above, and it matters more here: a
+      // price is something a person chose, and silently reverting a choice
+      // someone made after this delivery — on the product form, or on a later
+      // purchase — would be worse than leaving a price that is merely stale.
+      //
+      // `sellingPriceBefore` absent means this line never wrote a price, so
+      // there is nothing to undo. `null` means the product had no price before
+      // it, and the reversal restores that absence with `$unset` rather than
+      // writing 0 — a ৳0 price sells the goods for nothing, which is not what
+      // "there was no price" meant.
+      const cancelIsVariantLine = Boolean(item.variantId && product.hasVariants);
+      const restoreOp = buildSellingPriceRestore({
+        productId: product._id,
+        variantId: item.variantId,
+        hasVariants: product.hasVariants,
+        sellingPrice: item.sellingPrice,
+        sellingPriceBefore: item.sellingPriceBefore,
+        currentPrice: cancelIsVariantLine
+          ? (findVariant(product, item.variantId)?.sellingPrice ?? null)
+          : (product.sellingPrice ?? null),
+      });
+
+      if (restoreOp) {
+        cancelStockOps.push(restoreOp);
+        const before = item.sellingPriceBefore ?? undefined;
+        if (cancelIsVariantLine) {
+          const variant = findVariant(product, item.variantId);
+          if (variant) variant.sellingPrice = before;
+        } else {
+          product.sellingPrice = before;
         }
       }
 

@@ -22,6 +22,7 @@ const { invalidateUserAuthCache } = require('../utils/authCache.util');
 const { toBengaliNumber } = require('../utils/bengali.util');
 const logger = require('../utils/logger.util');
 const metaCapi = require('./metaCapi.service');
+const platformNotify = require('./platformNotify.service');
 
 /**
  * Timings for the forgot-password flow. Gathered here rather than inlined
@@ -189,6 +190,10 @@ class AuthService {
 
     // Generate token
     const token = user.generateToken();
+
+    // Tell the founder, over Telegram, before any dashboard could show it.
+    // Not awaited: an alert is never worth delaying — or failing — a signup.
+    platformNotify.newShop({ shop, user, req });
 
     // Meta Conversions API — the phone isn't verified yet, so this is a Lead.
     // Non-blocking; the returned id is echoed to the browser so its Pixel event
@@ -383,6 +388,15 @@ class AuthService {
           req
         }).catch(() => {});
 
+        // Counted, not sent. One wrong password is a typo; the notifier only
+        // speaks once a burst forms. See platformNotify.failedLogin.
+        platformNotify.failedLogin({
+          phone: normalizedPhone,
+          name: user.name,
+          shopName: user.shop?.name || null,
+          req,
+        });
+
         throw new AppError(
           'Invalid phone number or password',
           'ফোন নম্বর বা পাসওয়ার্ড ভুল',
@@ -430,6 +444,13 @@ class AuthService {
           entity: { type: 'auth', id: candidates[0]._id, name: candidates[0].name },
           req
         }).catch(() => {});
+
+        platformNotify.failedLogin({
+          phone: normalizedPhone,
+          name: candidates[0].name,
+          shopName: candidates[0].shop?.name || null,
+          req,
+        });
 
         throw new AppError(
           'Invalid phone number or password',
@@ -547,8 +568,24 @@ class AuthService {
       }
     }
 
-    // Update last login
-    await user.updateLastLogin();
+    // Update last login, and learn whether this device has been seen before.
+    // The verdict is what turns a routine "someone logged in" alert into
+    // "someone logged in FROM SOMEWHERE NEW", which is the version worth a
+    // notification at 11pm.
+    const loginContext = await user.updateLastLogin({
+      ip: req?.ip || null,
+      userAgent: req?.headers?.['user-agent'] || null,
+    });
+
+    // Founder alert. Not awaited — see platformNotify's header. A failure here
+    // must never turn a successful login into an error.
+    platformNotify.userLogin({
+      user,
+      shop,
+      req,
+      isFirstLogin: loginContext.isFirstLogin,
+      isNewDevice: loginContext.isNewDevice,
+    });
 
     // Log action
     await AuditLog.log({
@@ -1123,6 +1160,11 @@ class AuthService {
     }
 
     await admin.updateLastLogin();
+
+    // Always announced, never collapsed. There are a handful of these a week
+    // and an admin login the founder did not perform is the worst event this
+    // system can have.
+    platformNotify.adminLogin({ admin, req });
 
     // Log action
     await AuditLog.log({

@@ -3,6 +3,9 @@ const axios = require('axios');
 
 const TelegramLink = require('../models/TelegramLink.model');
 const TelegramLinkToken = require('../models/TelegramLinkToken.model');
+const AdminTelegramLink = require('../models/AdminTelegramLink.model');
+const AdminTelegramLinkToken = require('../models/AdminTelegramLinkToken.model');
+const Admin = require('../models/Admin.model');
 const NotificationLog = require('../models/NotificationLog.model');
 const Shop = require('../models/Shop.model');
 const AuditLog = require('../models/AuditLog.model');
@@ -217,8 +220,23 @@ class TelegramService {
 
   async _handleStart(chatId, from, tokenArg) {
     // A bare /start carries no identity. Never let a stranger link by guessing:
-    // the only way in is a token minted for a signed-in owner.
+    // the only way in is a token minted for a signed-in owner or admin.
     if (!tokenArg) {
+      // Operator channels are reported first: an admin sending /start is asking
+      // about the channel that matters most, and it is the rarer case, so a
+      // shop-worded reply here would read as "your admin link is gone".
+      const adminLinks = await AdminTelegramLink.findActiveByChatId(chatId).populate('admin', 'name');
+      if (adminLinks.length) {
+        await this.safeSend(
+          chatId,
+          '🛡️ <b>হিসাব প্ল্যাটফর্ম অ্যালার্ট</b> চালু আছে।\n\n' +
+          'নতুন দোকান, লগইন ও নিরাপত্তা সংক্রান্ত খবর এখানেই আসবে।\n' +
+          'পরিবর্তন করতে: অ্যাডমিন প্যানেল → Alerts।',
+          { eventType: 'system', adminId: adminLinks[0].admin?._id || adminLinks[0].admin }
+        );
+        return;
+      }
+
       const existing = await TelegramLink.findActiveByChatId(chatId).populate('shop', 'name');
       if (existing.length) {
         const names = existing.map((l) => escapeHtml(l.shop?.name || 'দোকান')).join(', ');
@@ -244,6 +262,15 @@ class TelegramService {
 
     const linkToken = await TelegramLinkToken.consumeToken(tokenArg);
     if (!linkToken) {
+      // Not a shop token. Try the operator collection before declaring the link
+      // dead — the two are minted from different consoles and are deliberately
+      // not interchangeable, so "unknown here" is not "unknown".
+      const adminToken = await AdminTelegramLinkToken.consumeToken(tokenArg);
+      if (adminToken) {
+        await this._completeAdminLink(chatId, from, adminToken);
+        return;
+      }
+
       await this.safeSend(
         chatId,
         '⚠️ এই লিংকের মেয়াদ শেষ বা এটি আগেই ব্যবহার হয়েছে।\n\n' +
@@ -322,6 +349,99 @@ class TelegramService {
     logger.info(`Telegram: linked shop ${link.shop} to chat ${chatId}`);
   }
 
+  /**
+   * Finish an operator link after the admin's deep-link token was spent.
+   *
+   * Mirrors the shop path deliberately — same relink-vs-create branch, same
+   * "capture the old chat id BEFORE overwriting" ordering, same
+   * preferences-are-untouched rule. An operator who disconnected and came back
+   * expects their alert switches and pulse time to still be theirs.
+   */
+  async _completeAdminLink(chatId, from, adminToken) {
+    const admin = await Admin.findById(adminToken.admin).select('name role phone').lean();
+
+    if (!admin) {
+      // The account was deleted between minting and pressing Start. The token
+      // is already spent, so there is nothing to roll back — just say so rather
+      // than creating a channel pointing at nothing.
+      await this.safeSend(
+        chatId,
+        '⚠️ এই অ্যাডমিন অ্যাকাউন্টটি আর নেই। নতুন করে চেষ্টা করুন।',
+        { eventType: 'system' }
+      );
+      return;
+    }
+
+    const telegramFields = {
+      telegramChatId: String(chatId),
+      telegramUserId: String(from.id || chatId),
+      telegramUsername: from.username || null,
+      telegramFirstName: from.first_name || null,
+    };
+
+    const existing = await AdminTelegramLink.findOne({ admin: adminToken.admin });
+
+    let link;
+    if (existing) {
+      const previousChatId = existing.telegramChatId;
+      const wasActive = existing.isActive;
+
+      Object.assign(existing, telegramFields);
+      existing.isActive = true;
+      existing.unlinkedAt = null;
+      existing.linkedAt = existing.linkedAt || new Date();
+      existing.linkHistory.push({
+        action: 'relinked',
+        at: new Date(),
+        metadata: { previousChatId, wasActive },
+      });
+      link = await existing.save();
+    } else {
+      link = await AdminTelegramLink.create({
+        admin: adminToken.admin,
+        ...telegramFields,
+        linkedAt: new Date(),
+        linkHistory: [{ action: 'linked', at: new Date(), metadata: {} }],
+      });
+    }
+
+    await this.safeSend(
+      chatId,
+      `🛡️ <b>হিসাব প্ল্যাটফর্ম অ্যালার্ট</b> চালু হলো!\n\n` +
+      `👤 ${escapeHtml(admin.name)} · <code>${escapeHtml(admin.phone)}</code>\n\n` +
+      'এখন থেকে এখানে পাবেন:\n' +
+      '🆕 নতুন দোকান রেজিস্ট্রেশন\n' +
+      '🔑 ইউজার লগইন\n' +
+      '🚨 নিরাপত্তা সতর্কতা (নতুন ডিভাইস, ভুল পাসওয়ার্ড)\n' +
+      `📊 প্রতিদিন <b>${formatTime(link.preferences.pulseTime)}</b>-এ প্ল্যাটফর্ম রিপোর্ট\n\n` +
+      '⚙️ কোনটা চালু থাকবে সেটি ঠিক করুন: অ্যাডমিন প্যানেল → Alerts।',
+      { eventType: 'link_success', adminId: link.admin }
+    );
+
+    // The notifier caches "is anyone listening" for a minute, and this link was
+    // made from TELEGRAM, not from the console — so nothing in the API layer
+    // has had a chance to drop that cache. Without this, the operator connects,
+    // watches the confirmation arrive, and then sees nothing at all for the
+    // next minute, which is indistinguishable from it not working.
+    //
+    // Required lazily: `platformNotify` requires THIS module at load time, so a
+    // top-level require here would be a cycle and would resolve to a
+    // half-initialised object. By the time this line runs, both are complete.
+    require('./platformNotify.service')
+      .invalidateCache()
+      .catch(() => {});
+
+    // Platform-level, so it goes to the audit trail with no shop attached —
+    // `AuditLog.log` treats an `admin` actor as a platform action.
+    AuditLog.log({
+      admin: link.admin,
+      action: AUDIT_ACTIONS.ADMIN_TELEGRAM_LINK.en,
+      description: `প্ল্যাটফর্ম অ্যালার্ট চ্যানেল যুক্ত হয়েছে${from.username ? ` (@${from.username})` : ''}`,
+    }).catch(() => {});
+
+    logger.info(`Telegram: linked admin ${link.admin} to chat ${chatId}`);
+  }
+
   async _replyUnknown(chatId) {
     await this.safeSend(
       chatId,
@@ -341,14 +461,16 @@ class TelegramService {
    * Returns the Telegram message id on success and null on failure, so callers
    * branch on a value instead of wrapping every call in try/catch.
    *
-   * `logMeta` carries { eventType, shopId, userId } so the admin panel can
-   * filter the audit trail by shop.
+   * `logMeta` carries { eventType, shopId, userId, adminId } so the admin panel
+   * can filter the audit trail by shop — or, for platform alerts which have no
+   * shop, by the operator they went to.
    */
   async safeSend(chatId, html, logMeta = {}) {
     const meta = {
       eventType: logMeta.eventType || 'system',
       shopId: logMeta.shopId || null,
       userId: logMeta.userId || null,
+      adminId: logMeta.adminId || null,
     };
 
     if (!this.enabled) {
@@ -385,8 +507,18 @@ class TelegramService {
         // re-attempting a dead chat every night forever.
         if (reason) {
           this._log({ ...meta, chatId, message: html, status: 'blocked', error: error.message });
-          const count = await TelegramLink.deactivateByChatId(chatId, reason).catch(() => 0);
-          logger.warn(`Telegram: chat ${chatId} unreachable (${reason}) — deactivated ${count} link(s)`);
+          // Both collections, not just the shop one. A chat id is a chat id —
+          // if the operator blocks the bot, retrying their alerts forever is the
+          // same waste as retrying an owner's digest, and leaving the admin
+          // channel "active" would make the console claim alerts are flowing.
+          const [shopCount, adminCount] = await Promise.all([
+            TelegramLink.deactivateByChatId(chatId, reason).catch(() => 0),
+            AdminTelegramLink.deactivateByChatId(chatId, reason).catch(() => 0),
+          ]);
+          logger.warn(
+            `Telegram: chat ${chatId} unreachable (${reason}) — ` +
+            `deactivated ${shopCount} shop link(s), ${adminCount} admin link(s)`
+          );
           return null;
         }
 
@@ -432,10 +564,11 @@ class TelegramService {
    * turn a delivered message into a failed one, and the caller has already
    * moved on.
    */
-  _log({ eventType, shopId, userId, chatId, message, status, error = null, providerMessageId = null }) {
+  _log({ eventType, shopId, userId, adminId, chatId, message, status, error = null, providerMessageId = null }) {
     NotificationLog.create({
       shop: shopId,
       user: userId,
+      admin: adminId || null,
       channel: 'telegram',
       eventType,
       destination: String(chatId),
@@ -495,6 +628,96 @@ class TelegramService {
     );
 
     return true;
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Operator channel (platform admins)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Mint a single-use deep link for a signed-in platform admin.
+   *
+   * Same 32-byte base64url shape as the shop token — Telegram caps the /start
+   * payload at 64 characters and allows only [A-Za-z0-9_-] — but written to a
+   * different collection, so a token that grants the whole platform's figures
+   * can never be spent as if it granted one shop's.
+   */
+  async createAdminLinkToken(adminId) {
+    if (!this.enabled) return null;
+
+    const token = crypto.randomBytes(32).toString('base64url');
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await AdminTelegramLinkToken.create({ token, admin: adminId, expiresAt });
+
+    return {
+      deepLink: `https://t.me/${this.botUsername}?start=${token}`,
+      botUsername: this.botUsername,
+      expiresIn: 600,
+    };
+  }
+
+  /**
+   * Disconnect an operator channel, and say so in Telegram itself.
+   *
+   * The confirmation matters more here than on the shop side: alerts are the
+   * only thing this channel ever sends, so silence after a disconnect is
+   * indistinguishable from silence because nothing has happened.
+   */
+  async unlinkAdmin(adminId) {
+    const link = await AdminTelegramLink.findOne({ admin: adminId, isActive: true });
+    if (!link) return false;
+
+    link.isActive = false;
+    link.unlinkedAt = new Date();
+    link.linkHistory.push({ action: 'unlinked', at: new Date(), metadata: {} });
+    await link.save();
+
+    await this.safeSend(
+      link.telegramChatId,
+      '🔕 প্ল্যাটফর্ম অ্যালার্ট বন্ধ করা হয়েছে।\n\n' +
+      'নতুন দোকান, লগইন বা নিরাপত্তা সংক্রান্ত কোনো খবর আর এখানে আসবে না।\n' +
+      'আবার চালু করতে: অ্যাডমিন প্যানেল → Alerts।',
+      { eventType: 'unlink_notice', adminId }
+    );
+
+    return true;
+  }
+
+  /**
+   * Fan one alert out to every operator channel that has opted into `alertKey`.
+   *
+   * Returns the number of channels the message actually reached.
+   *
+   * Never throws and never rejects: every caller is a hot path — a login, a
+   * registration, a password change — and an alert failing must not fail the
+   * thing it was reporting on. Callers are expected to invoke this WITHOUT
+   * awaiting, or with `.catch(() => {})`.
+   *
+   * Sends are sequential rather than parallel. The audience is a handful of
+   * operators, so there is nothing to gain from concurrency, and serialising
+   * keeps a burst of logins from stacking N parallel Telegram calls per event.
+   */
+  async broadcastToAdmins(alertKey, html, { eventType = 'platform_alert' } = {}) {
+    if (!this.enabled) return 0;
+
+    const links = await AdminTelegramLink.find({
+      isActive: true,
+      [`preferences.${alertKey}`]: true,
+    })
+      .select('admin telegramChatId')
+      .lean();
+
+    let delivered = 0;
+    for (const link of links) {
+      const messageId = await this.safeSend(link.telegramChatId, html, {
+        eventType,
+        adminId: link.admin,
+      });
+      if (messageId) delivered += 1;
+    }
+
+    return delivered;
   }
 }
 

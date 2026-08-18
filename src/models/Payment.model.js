@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const { PAYMENT_METHODS, PAYMENT_TYPES } = require('../config/constants');
 const { immutableGuard } = require('../utils/immutableGuard.util');
 const { getBangladeshDayRange, toBangladeshDateStr } = require('../utils/bdTime.util');
+const { paidAtMatch } = require('../utils/paymentDate.util');
 
 const paymentSchema = new mongoose.Schema({
   shop: {
@@ -77,6 +78,29 @@ const paymentSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  /**
+   * When the money actually changed hands.
+   *
+   * `createdAt` answers "when was this typed in", which is an audit question
+   * and stays exactly that. This answers "which day's books does it belong
+   * to", which is the reporting question — and until this field existed the
+   * two were forced to be the same answer.
+   *
+   * They routinely are not. A customer pays at the counter on Saturday; the
+   * entry gets made on Monday when someone next has the phone. Saturday's
+   * collection total read short, Monday's read over, and there was no way to
+   * record what really happened. `Expense.date` and `Purchase.date` have
+   * always allowed this; `Payment` was the odd one out.
+   *
+   * Defaulted, so nothing that does not care has to pass it. Every date-ranged
+   * reader goes through `paymentDate.util` — rows written before this field
+   * existed have no value here and must still be found by their `createdAt`,
+   * which for them is the same day anyway.
+   */
+  paidAt: {
+    type: Date,
+    default: Date.now
+  },
   transactionId: {
     type: String,
     trim: true
@@ -102,6 +126,7 @@ const paymentSchema = new mongoose.Schema({
 
 // Indexes - Optimized for scalability
 paymentSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Main listing with branch
+paymentSchema.index({ shop: 1, branch: 1, paidAt: -1 }); // Date-ranged reads (cash register, reports) on the effective date
 paymentSchema.index({ shop: 1, customer: 1, createdAt: -1 }); // Customer payment history
 paymentSchema.index({ shop: 1, sale: 1 }); // Sale payments lookup
 paymentSchema.index({ shop: 1, purchase: 1 }, { sparse: true }); // Purchase payments
@@ -114,9 +139,11 @@ paymentSchema.virtual('isRefund').get(function() {
 
 // Static: Get payments summary
 paymentSchema.statics.getPaymentsSummary = async function(shopId, startDate, endDate) {
+  // Bucketed on the effective date, so a backdated বাকি আদায় lands in the
+  // period it was actually collected in rather than the one it was typed in.
   const match = {
     shop: new mongoose.Types.ObjectId(shopId),
-    createdAt: { $gte: startDate, $lte: endDate }
+    ...paidAtMatch({ $gte: startDate, $lte: endDate })
   };
 
   const summary = await this.aggregate([
@@ -175,7 +202,7 @@ paymentSchema.statics.getDailyCollection = async function(shopId, date) {
     {
       $match: {
         shop: new mongoose.Types.ObjectId(shopId),
-        createdAt: { $gte: startOfDay, $lte: endOfDay }
+        ...paidAtMatch({ $gte: startOfDay, $lte: endOfDay })
       }
     },
     {

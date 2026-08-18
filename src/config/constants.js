@@ -206,6 +206,20 @@ module.exports = {
     TELEGRAM_LINK: { en: 'telegram_link', bn: 'টেলিগ্রাম সংযুক্ত' },
     TELEGRAM_UNLINK: { en: 'telegram_unlink', bn: 'টেলিগ্রাম সংযোগ বন্ধ' },
 
+    // Platform operator channel + admin credential changes.
+    //
+    // Registered here rather than passed as `actionBn` at each call site for
+    // the reason AuditLog.model.js gives: a hand-passed label is how one action
+    // ends up with two different Bengali names depending on which service
+    // happened to write the row. These are the rows an operator reads when
+    // answering "who changed the platform password", so they must be findable
+    // under one name.
+    ADMIN_TELEGRAM_LINK: { en: 'admin_telegram_link', bn: 'প্ল্যাটফর্ম অ্যালার্ট সংযুক্ত' },
+    ADMIN_TELEGRAM_UNLINK: { en: 'admin_telegram_unlink', bn: 'প্ল্যাটফর্ম অ্যালার্ট বন্ধ' },
+    ADMIN_ALERT_PREFS_UPDATE: { en: 'admin_alert_prefs_update', bn: 'অ্যালার্ট সেটিংস আপডেট' },
+    ADMIN_PASSWORD_OTP_SENT: { en: 'admin_password_otp_sent', bn: 'অ্যাডমিন পাসওয়ার্ড কোড পাঠানো' },
+    ADMIN_PASSWORD_CHANGED: { en: 'admin_password_changed', bn: 'অ্যাডমিন পাসওয়ার্ড পরিবর্তন' },
+
     // Image storage (R2 pool). Registered here so the audit screen shows a
     // Bengali label instead of the raw key — see AuditLog.statics.log.
     STORAGE_ENABLED: { en: 'storage_enabled', bn: 'ছবি সংরক্ষণ চালু' },

@@ -26,6 +26,7 @@ const { invalidateShopAuthCache, invalidateBranchCache } = require('../utils/aut
 const { resolveSubscription } = require('../utils/subscriptionState.util');
 const { refuseDeletion } = require('../utils/deletionDisabled.util');
 const { KEYS, getTTL } = require('../config/cacheKeys');
+const platformNotify = require('./platformNotify.service');
 const {
   FEATURES,
   FEATURE_KEYS,
@@ -56,7 +57,11 @@ const dayBoundary = (value, edge) => {
 
 class AdminService {
   // Admin login
-  async login(phone, password) {
+  //
+  // `req` is optional and used only to describe the login in the founder's
+  // Telegram alert — where it came from, on what. Left optional so the
+  // seeders and any script that signs in programmatically keep working.
+  async login(phone, password, req = null) {
     const admin = await Admin.findOne({ phone, isActive: true }).select('+password');
     if (!admin) {
       throw new AppError('ফোন নম্বর বা পাসওয়ার্ড সঠিক নয়', 'Invalid credentials', 401);
@@ -64,12 +69,17 @@ class AdminService {
 
     const isMatch = await bcrypt.compare(password, admin.password);
     if (!isMatch) {
+      // Counted per phone; the notifier speaks only once a burst forms. An
+      // admin console being guessed at is worth waking someone for.
+      platformNotify.failedLogin({ phone, name: admin.name, req });
       throw new AppError('ফোন নম্বর বা পাসওয়ার্ড সঠিক নয়', 'Invalid credentials', 401);
     }
 
     // Update last login
     admin.lastLogin = new Date();
     await admin.save();
+
+    platformNotify.adminLogin({ admin, req });
 
     // Generate token
     const token = jwt.sign(

@@ -13,6 +13,8 @@ const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.u
 const { resolveWholesaleFlag } = require('../utils/pricing.util');
 const { toMoney } = require('../utils/invoiceMath.util');
 const { quantizeMoney } = require('../utils/quantity.util');
+const { resolvePaidAt } = require('../utils/paymentDate.util');
+const { toBangladeshDateStr } = require('../utils/bdTime.util');
 const mongoose = require('mongoose');
 
 /** Escape user input before it reaches $regex — raw input is a ReDoS vector. */
@@ -1100,6 +1102,14 @@ class CustomerService {
       const sessionOpt = session ? { session } : {};
       const { method, transactionId, notes } = paymentData;
 
+    // When the customer actually handed the money over. Absent means now,
+    // which is what every existing caller sends. `date` is accepted as an
+    // alias because that is what the purchase and expense forms call the same
+    // control, and a shopkeeper-facing API that needs two names for one idea is
+    // a bug waiting to be filed. Refuses a future date and anything unparseable
+    // — see `resolvePaidAt`.
+    const paidAt = resolvePaidAt({ raw: paymentData.paidAt ?? paymentData.date, req });
+
     // Coerced and bounded before anything reads it. The only check below was
     // `amount > due`, which a NEGATIVE amount passes — and a negative collection
     // ran the ledger backwards: `totalPaid` down, `totalDue` UP, plus a negative
@@ -1158,6 +1168,7 @@ class CustomerService {
       method: method || 'cash',
       transactionId,
       type: 'due_collection',
+      paidAt,
       notes,
       receivedBy: userId,
     }], sessionOpt);
@@ -1190,7 +1201,11 @@ class CustomerService {
       user: userId,
       customer: customer._id,
       action: 'due_collection',
-      description: `Collected ৳${amount} from ${customer.name} (${customer.phone})`,
+      // The collection date rides in the description because it is the one
+      // thing about this row a reader cannot recover from `createdAt` — and a
+      // backdated collection is exactly the entry someone will later want to
+      // know was backdated, and by whom.
+      description: `Collected ৳${amount} from ${customer.name} (${customer.phone}) on ${toBangladeshDateStr(paidAt)}`,
       entity: {
         type: 'customer',
         id: customer._id,
@@ -1248,7 +1263,7 @@ class CustomerService {
         .sort({ createdAt: 1 })
         .lean(),
       Payment.find(scope)
-        .select('amount method type sale createdAt notes')
+        .select('amount method type sale createdAt paidAt notes')
         .sort({ createdAt: 1 })
         .lean(),
       DueAdjustment.find(scope)
@@ -1310,7 +1325,12 @@ class CustomerService {
       entries.push({
         _id: String(p._id),
         type: isRefund ? 'refund' : 'payment',
-        date: p.createdAt,
+        // The day the money moved, not the day it was typed. The merge below
+        // sorts on this, so a বাকি আদায় backdated to last Tuesday sits between
+        // last Tuesday's invoices — which is the whole point of the খতিয়ান.
+        // `sort({ createdAt })` above only orders the fetch; the real ordering
+        // is the in-memory one, so no index changes hands here.
+        date: p.paidAt || p.createdAt,
         label: isRefund
           ? 'ফেরত (নগদ প্রদান)'
           : (p.type === 'due_collection' ? 'বাকি আদায়' : 'পেমেন্ট'),
@@ -1395,8 +1415,14 @@ class CustomerService {
         .skip(skip)
         .limit(parseInt(limit))
         .lean(),
+      // Newest-first on the effective date, so a backdated collection sits with
+      // the day it belongs to rather than jumping to the top of the list.
+      // A row written before `paidAt` existed sorts as null, i.e. last — which
+      // is where it belongs anyway, being older than everything that has one.
+      // `scripts/backfill-payment-paid-at.js` stamps them and removes the
+      // caveat entirely.
       Payment.find(scope)
-        .sort({ createdAt: -1 })
+        .sort({ paidAt: -1, createdAt: -1 })
         .skip(skip)
         .limit(parseInt(limit))
         .lean(),

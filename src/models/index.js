@@ -76,7 +76,17 @@ module.exports = {
   ReturnCounter: require('./ReturnCounter.model'),
   TelegramLink: require('./TelegramLink.model'),
   TelegramLinkToken: require('./TelegramLinkToken.model'),
-  NotificationLog: require('./NotificationLog.model')
+  NotificationLog: require('./NotificationLog.model'),
+
+  // The operator's own alert channel and the step-up challenge behind admin
+  // password changes. Registered here for the reason the comment above gives:
+  // `sync-indexes` only ships indexes for models listed in this file, and both
+  // of these carry a unique index plus a TTL that production cannot do without
+  // — the challenge's `{admin, purpose}` unique is what stops a double-tapped
+  // "send code" from minting two live codes.
+  AdminTelegramLink: require('./AdminTelegramLink.model'),
+  AdminTelegramLinkToken: require('./AdminTelegramLinkToken.model'),
+  AdminSecurityChallenge: require('./AdminSecurityChallenge.model')
 };
 
 

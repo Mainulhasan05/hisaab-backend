@@ -15,7 +15,25 @@ const mongoose = require('mongoose');
  */
 
 const NOTIFICATION_CHANNELS = ['telegram'];
-const NOTIFICATION_EVENTS = ['daily_summary', 'link_success', 'unlink_notice', 'system', 'order_placed'];
+
+/**
+ * The `platform_*` events go to the OPERATOR's own channel
+ * (`AdminTelegramLink`), not to a shop owner. They are listed here rather than
+ * in a separate collection because the question the admin panel asks of this
+ * log — "was it delivered, and if not why" — is identical for both audiences,
+ * and `shop: null` already distinguishes them at a glance.
+ */
+const NOTIFICATION_EVENTS = [
+  'daily_summary',
+  'link_success',
+  'unlink_notice',
+  'system',
+  'order_placed',
+  /** Founder alert: signup, login, security, admin activity. */
+  'platform_alert',
+  /** The operator's own once-a-day platform report. */
+  'platform_pulse',
+];
 const NOTIFICATION_STATUS = ['sent', 'failed', 'blocked'];
 
 const notificationLogSchema = new mongoose.Schema(
@@ -29,6 +47,21 @@ const notificationLogSchema = new mongoose.Schema(
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
+      default: null,
+      index: true,
+    },
+
+    /**
+     * The platform admin this went to, for `platform_*` events.
+     *
+     * A separate field rather than overloading `user`: `user` is a ref to the
+     * shop-user collection, and pointing it at an Admin id would make every
+     * `.populate('user')` in the panel silently resolve to null while the row
+     * still looked attributed.
+     */
+    admin: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Admin',
       default: null,
       index: true,
     },

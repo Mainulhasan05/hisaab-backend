@@ -9,6 +9,7 @@ const logger = require('./utils/logger.util');
 
 const { startSyncJob, stopSyncJob } = require('./jobs/userActivitySync.job');
 const { startDigestJob, stopDigestJob } = require('./jobs/dailyDigest.job');
+const { startPulseJob, stopPulseJob } = require('./jobs/platformPulse.job');
 const {
   startStorageMaintenanceJob,
   stopStorageMaintenanceJob,
@@ -187,6 +188,13 @@ async function start() {
     telegramService.initialize().catch((err) => logger.warn(`Telegram init error: ${err.message}`));
     startDigestJob();
 
+    // The operator's own daily report. Same tick-every-minute, claim-then-send
+    // shape as the shop digest, and primary-worker-only for the same reason:
+    // the claim makes a duplicate send impossible, so N workers would be waste
+    // rather than breakage — but waste that re-runs a platform-wide aggregation
+    // N times a minute, forever.
+    startPulseJob();
+
     // Hourly R2 pool repair: hands back byte reservations leaked by crashed
     // uploads and resets the monthly Class A/B counters. Without it a killed
     // process permanently shrinks a bucket's usable capacity, and the symptom
@@ -247,6 +255,7 @@ async function shutdown(code = 0) {
   try {
     stopSyncJob();
     stopDigestJob();
+    stopPulseJob();
     stopStorageMaintenanceJob();
     telegramService.shutdown();
 

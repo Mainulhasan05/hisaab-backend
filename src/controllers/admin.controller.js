@@ -7,7 +7,9 @@ const { refuseDeletion } = require('../utils/deletionDisabled.util');
 // Admin login
 exports.login = asyncHandler(async (req, res) => {
   const { phone, password } = req.body;
-  const result = await adminService.login(phone, password);
+  // `req` is passed for the founder's Telegram alert only — it describes where
+  // the login came from. See adminService.login.
+  const result = await adminService.login(phone, password, req);
 
   // Clear user token cookie if exists (prevent cookie conflict)
   clearUserTokenCookie(res);

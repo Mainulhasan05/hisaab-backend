@@ -17,6 +17,7 @@ const {
 // Imported rather than redeclared: report.service.js and audit.service.js bucket
 // on the same constant, and this file's day keys are compared against theirs.
 const { BD_TZ } = require('../utils/bdTime.util');
+const { paidAtMatch } = require('../utils/paymentDate.util');
 
 // A month of a busy shop's item lines lands well inside this. `truncated` in the
 // response tells the caller when it did not, so the UI can say so out loud
@@ -430,7 +431,10 @@ class StaffReportService {
         {
           $match: (() => {
             const m = { ...baseMatch(shopId, branchId), type: PAYMENT_TYPES.DUE_COLLECTION };
-            if (scope.dateMatch) m.createdAt = scope.dateMatch;
+            // Credited to the day the money was collected, not the day it was
+            // keyed in — otherwise a staff member who catches up on a week of
+            // entries every Friday shows a spike on Friday and nothing before.
+            Object.assign(m, paidAtMatch(scope.dateMatch));
             return m;
           })(),
         },

@@ -113,6 +113,38 @@ const purchaseItemSchema = new mongoose.Schema({
   costAfter: {
     type: Number,
     min: [0, 'ক্রয় মূল্য ০ এর কম হতে পারবে না']
+  },
+  // ── What this line did to the shelf's RETAIL price ─────────────────────────
+  //
+  // A delivery at a new cost is the moment the retail price gets reconsidered —
+  // the supplier's rate went up, so the shelf price goes up with it. Until now
+  // the two were separate errands: record the purchase here, then go find each
+  // product and edit its price. In practice the second errand did not happen,
+  // and shops sold new stock at last season's price against a cost basis that
+  // `costing.util` had already moved. The margin was wrong and nothing said so.
+  //
+  // Optional, and absent on most lines. Empty means "leave the price alone",
+  // which is the old behaviour exactly and what a top-up delivery at the same
+  // rate wants. Only a positive figure writes.
+  //
+  // Per BASE unit, like `unitPrice` beside it — one meaning per column is what
+  // lets every existing margin report read this without learning what a pack is.
+  sellingPrice: {
+    type: Number,
+    min: [0, 'বিক্রয় মূল্য ০ এর কম হতে পারবে না']
+  },
+  // What the product's price was immediately before this line changed it.
+  //
+  // The same guard `costBefore` provides, for the same reason: a cancellation
+  // must be able to tell whether the price it would be putting back is still
+  // the one this delivery set. If a later delivery — or the product form — has
+  // moved it on, that change owns the number and reversing past it would
+  // silently discard a price the shopkeeper deliberately chose.
+  //
+  // Set only when `sellingPrice` above actually wrote something.
+  sellingPriceBefore: {
+    type: Number,
+    min: [0, 'বিক্রয় মূল্য ০ এর কম হতে পারবে না']
   }
 }, { _id: true });
 

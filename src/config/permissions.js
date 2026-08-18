@@ -39,7 +39,17 @@ const MODULES = {
   // carbon copy the customer is already holding rather than chosen at the till.
   // The long form of the argument is in `utils/invoiceNo.util.js`.
   sales:         { key: 'sales',         label: 'বিক্রয়',            labelEn: 'Sales',           actions: ['view', 'create', 'update', 'delete', 'view_profit', 'discount', 'backdate', 'revise'] },
-  customers:     { key: 'customers',     label: 'কাস্টমার',          labelEn: 'Customers',       actions: ['view', 'create', 'update', 'delete'] },
+  // `backdate` here is dating a বাকি আদায় to the day the money actually came
+  // in, and it is the SAME authority `sales.backdate` describes for exactly the
+  // same reason: moving a collection between days moves it between report
+  // periods and between cash drawers, so whoever can do it can also paper over
+  // a discrepancy in yesterday's till. Not implied by `update` — recording a
+  // payment dated today changes no day but today's.
+  //
+  // Enforced inside `collectDuePayment` via `utils/paymentDate.util`, never at
+  // the door: the collect-due form always posts a date, and a date of TODAY is
+  // not backdating. A gate at the route would 403 every ordinary collection.
+  customers:     { key: 'customers',     label: 'কাস্টমার',          labelEn: 'Customers',       actions: ['view', 'create', 'update', 'delete', 'backdate'] },
   // A purchase record IS cost data (unit prices, invoice totals, dues), so
   // `view` alone only reveals *that* a purchase happened — supplier, date,
   // invoice no, quantities. The money is behind `view_cost`.
@@ -100,7 +110,8 @@ const ACTION_LABELS = {
   view_profit:   { label: 'লাভ দেখা',       labelEn: 'View profit' },
   manual_adjust: { label: 'স্টক সমন্বয়',    labelEn: 'Adjust stock' },
   discount:      { label: 'ছাড় দেওয়া',      labelEn: 'Give discount' },
-  backdate:      { label: 'আগের তারিখে বিক্রি', labelEn: 'Backdate a sale' },
+  // Shared by `sales` and `customers`, so the label names neither.
+  backdate:      { label: 'আগের তারিখ দেওয়া', labelEn: 'Backdate an entry' },
   revise:        { label: 'বিক্রয় সংশোধন',   labelEn: 'Revise a sale' },
   cancel:        { label: 'বাতিল',           labelEn: 'Cancel' },
   publish:       { label: 'প্রকাশ',          labelEn: 'Publish' },
@@ -238,7 +249,7 @@ const ROLE_PRESETS = {
       products:      ['view', 'create', 'update', 'view_cost'],
       categories:    ['view', 'create', 'update'],
       sales:         ['view', 'create', 'update', 'view_profit', 'discount', 'backdate', 'revise'],
-      customers:     ['view', 'create', 'update'],
+      customers:     ['view', 'create', 'update', 'backdate'],
       purchases:     ['view', 'create', 'update', 'view_cost'],
       suppliers:     ['view', 'create', 'update'],
       expenses:      ['view', 'create', 'update'],
@@ -292,7 +303,7 @@ const ROLE_PRESETS = {
       // granting it to the person at the till is granting them the minutes
       // after printing, not the life of the sale.
       sales:         ['view', 'create', 'update', 'discount', 'backdate', 'revise'],
-      customers:     ['view', 'create', 'update'],
+      customers:     ['view', 'create', 'update', 'backdate'],
       // `purchases` and `suppliers` were deliberately dropped: the purchase
       // ledger is raw buying-price data, so granting it here handed a cashier
       // every cost figure despite products.view_cost being off.
@@ -353,7 +364,7 @@ const ROLE_PRESETS = {
  * created with. To roll a change out to shops that already exist, bump this and
  * add a PRESET_UPGRADES entry.
  */
-const PRESET_VERSION = 6;
+const PRESET_VERSION = 7;
 
 /**
  * Additive grants applied once per role, in version order.
@@ -495,6 +506,34 @@ const PRESET_UPGRADES = [
     grants: {
       manager: { sales: ['revise'] },
       cashier: { sales: ['revise'] },
+    },
+  },
+  {
+    version: 7,
+    /**
+     * Backdating a বাকি আদায় to the day the money actually came in.
+     *
+     * The same case as `backdate` on sales at version 5, one desk over: the
+     * customer pays at the counter on Saturday and the entry gets made on
+     * Monday, and until now Monday was the only date the row could ever carry.
+     * A payment row is immutable by design, so there was no correcting it
+     * afterwards either — the money simply landed on the wrong day forever.
+     *
+     * Aimed at the same two roles for the same reason: the person who took the
+     * cash is the one who knows which day it was. Salesperson and
+     * inventory_manager are left out, as with `discount`, `backdate` and
+     * `revise`.
+     *
+     * No feature flag behind it — these roles gain a real ability at next
+     * login. What bounds it: a collection can never be dated into the future or
+     * before the shop existed, choosing TODAY is not backdating and needs no
+     * permission at all, and every collection writes a `due_collection` audit
+     * entry naming the date claimed beside the wall-clock `createdAt` of the
+     * row itself.
+     */
+    grants: {
+      manager: { customers: ['backdate'] },
+      cashier: { customers: ['backdate'] },
     },
   },
 ];

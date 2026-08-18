@@ -99,6 +99,53 @@ router.get('/admin/me', async (req, res) => {
 
 router.get('/me', softProtect, authController.getMe);
 
+/**
+ * 404 for auth paths this router does not have — BEFORE the blanket `protect`.
+ *
+ * ── WHY THIS EXISTS ─────────────────────────────────────────────────────────
+ *
+ * `router.use(protect)` below has no path, so it matches EVERYTHING that got
+ * this far. That is deliberate and stays: it is deny-by-default, so a route
+ * added underneath is protected even if whoever adds it forgets to say so.
+ * Attaching `protect` per route instead would invert that — one forgotten
+ * middleware and a route is silently public, which is the worse mistake.
+ *
+ * The cost of the blanket gate is that a path which does NOT exist also reaches
+ * it, and is answered with:
+ *
+ *     401 { messageBn: 'এই রিসোর্স অ্যাক্সেস করতে লগইন করুন' }
+ *
+ * That is a lie, and an expensive one. It cost a morning when /forgot-password
+ * was live in the code but not yet on the deployed server: the API told the
+ * client to log in, on the one endpoint whose entire purpose is serving people
+ * who CANNOT log in. Nothing in the response hinted the route was simply
+ * absent. A 404 says that in one word.
+ *
+ * So: match the request against this router's own registered routes first, on
+ * path AND method, and 404 what does not exist. Everything real still falls
+ * through to `protect`, so the security posture is unchanged — only the answer
+ * for things that were never there.
+ *
+ * Read off `router.stack` rather than a hand-kept list, because a hand-kept
+ * list is a second place to forget. `layer.regexp` is what Express matches
+ * with, so parameterised paths (`/user/:id`) keep working here too.
+ */
+const rejectUnknownAuthPath = (req, res, next) => {
+  const method = req.method.toLowerCase();
+  const exists = router.stack.some(
+    (layer) => layer.route && layer.regexp?.test(req.path) && layer.route.methods[method]
+  );
+
+  if (exists) return next();
+
+  return ApiResponse.notFound(res, {
+    message: `Cannot ${req.method} /api/auth${req.path}`,
+    messageBn: 'এই ঠিকানাটি পাওয়া যায়নি'
+  });
+};
+
+router.use(rejectUnknownAuthPath);
+
 // Protected routes
 router.use(protect);
 
