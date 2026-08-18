@@ -403,6 +403,23 @@ const shopSchema = new mongoose.Schema({
     customInvoiceNo: {
       type: Boolean,
       default: false
+    },
+    // One typed or dictated sentence — "আজ দোকান ভাড়া ৫০০০, বিদ্যুৎ বিল ১২০০" —
+    // becomes several DRAFT expense rows, each matched to one of the shop's own
+    // categories, which a person then confirms.
+    //
+    // The AI never writes. `Expense` carries `immutableGuard`, so a wrong row
+    // can only be voided and the void is permanent and visible; an unattended
+    // model writing into that ledger is a defect with no undo. See
+    // AI_EXPENSE_PLAN.md I-1.
+    //
+    // Bounded by a per-BRANCH daily message allowance (`ai.dailyMessageLimit`
+    // above, default 5). Off = no AI box on the expenses page and the parse
+    // route 404s; expenses already created this way are ordinary expenses and
+    // are kept, so the switch is reversible.
+    aiExpense: {
+      type: Boolean,
+      default: false
     }
   },
 
@@ -496,6 +513,43 @@ const shopSchema = new mongoose.Schema({
     // still answerable after they clean up — useful when negotiating a quota.
     peakUsedBytes: { type: Number, default: 0, min: 0 },
     lastRecalculatedAt: { type: Date, default: null }
+  },
+
+  /**
+   * AI: how many messages this shop's branches may each send per day.
+   *
+   * ── THE ALLOWANCE IS PER BRANCH, THE SETTING IS PER SHOP ───────────────────
+   *
+   * One number, negotiated once with the shop, applied to EACH of its branches
+   * independently. The counter lives in `ShopAiUsage`, keyed `{shop, branch}`.
+   * A three-branch shop on the default therefore gets five messages at each of
+   * three counters, not five shared between them.
+   *
+   * A shared pool would mean the busy branch spends the quiet branches'
+   * allowance before they open their shutters, and nothing on the quiet
+   * branch's screen would explain why its AI stopped working. Single-branch
+   * shops never notice the distinction — `req.branchId` is null for them and
+   * there is exactly one counter.
+   *
+   * ── THREE DISTINCT STATES, AND THEY ARE NOT INTERCHANGEABLE ────────────────
+   *   features.aiExpense false  the shop was never given the capability.
+   *                             Parse → 404 (the route does not exist for them)
+   *   dailyMessageLimit: 0      it has the feature, and an allowance of nothing.
+   *                             Parse → 429 "আজকের বার্তা শেষ"
+   *   dailyMessageLimit: null   it has the feature and follows the platform
+   *                             default (PlatformSetting, seeded from
+   *                             AI_DAILY_MESSAGE_LIMIT = 5).
+   *
+   * `null` is the default rather than a literal 5 for the reason
+   * `storage.quotaMb` gives: a number written onto every shop means raising the
+   * platform default later lifts nobody and needs a migration.
+   *
+   * Read this ONLY via `utils/aiQuota.util.resolveDailyLimit`.
+   */
+  ai: {
+    dailyMessageLimit: { type: Number, default: null, min: 0, max: 200 },
+    limitSetAt: { type: Date, default: null },
+    limitSetBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin', default: null }
   }
 }, {
   timestamps: true,

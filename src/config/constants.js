@@ -281,5 +281,74 @@ module.exports = {
   DEFAULT_SETTINGS: {
     CURRENCY: 'BDT',
     LOW_STOCK_THRESHOLD: 5
-  }
+  },
+
+  /**
+   * How many AI messages one BRANCH may send per Bangladesh day, by default.
+   *
+   * Deliberately small: every message is a real Gemini call against a shared
+   * free-tier pool, and five is comfortably more than a shop that logs its
+   * expenses once at closing time needs.
+   *
+   * ── THIS IS THE ONLY PLACE THE NUMBER 5 IS WRITTEN ────────────────────────
+   *
+   * `PlatformSetting.defaultAiDailyMessageLimit` defaults to it, and
+   * `aiQuota.util.resolveDailyLimit` falls back to it if that document cannot
+   * be read. `Shop.ai.dailyMessageLimit` is `null` by default and NOT 5 — a
+   * literal on every shop means raising the platform default later lifts
+   * nobody. Same reasoning `Shop.storage.quotaMb` already committed to.
+   *
+   * Per-shop overrides are set by the platform admin and always win.
+   */
+  AI_DAILY_MESSAGE_LIMIT: 5,
+
+  /**
+   * Model preference order, best first.
+   *
+   * ── WHY A LIST AND NOT ONE NAME ────────────────────────────────────────────
+   *
+   * This used to be the single string 'gemini-1.5-flash', and Google retired it.
+   * The whole feature returned "models/gemini-1.5-flash is not found for API
+   * version v1beta" — from a constant that was correct on the day it was
+   * written and silently wrong afterwards, with no signal until a shopkeeper hit
+   * it. Google retires models on their own schedule and this backend deploys
+   * manually, so ANY single hardcoded name is a scheduled outage.
+   *
+   * `gemini.service.resolveModel` asks the key which models it can actually
+   * reach (`ListModels`, the same call that already validates a key on
+   * creation), then takes the first entry here that appears in that list. An
+   * unknown future model is picked up by the fallback rule below without a code
+   * change; a retired one simply stops being offered and the next preference
+   * wins.
+   *
+   * Flash tiers first, deliberately: expense extraction is a short structured
+   * task, the free tier is generous on flash and stingy on pro, and pro's extra
+   * reasoning buys nothing when the output is a fixed JSON schema.
+   */
+  GEMINI_MODEL_PREFERENCES: [
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-2.0-flash-001',
+    'gemini-flash-latest',
+    'gemini-2.5-flash-lite',
+    'gemini-2.0-flash-lite',
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-latest',
+  ],
+
+  /**
+   * Used only when ListModels cannot be reached at all (network down mid-call).
+   * Not authoritative — `resolveModel` prefers what the key actually reports.
+   */
+  GEMINI_DEFAULT_MODEL: 'gemini-2.0-flash',
+
+  /**
+   * Substring that marks any model usable for text generation. Google's
+   * ListModels reports `supportedGenerationMethods` per model; embedding and
+   * image models do not carry this one and must never be picked.
+   */
+  GEMINI_GENERATE_METHOD: 'generateContent',
+
+  /** Hard ceiling on rows one AI message may produce. See aiExpense.service. */
+  AI_MAX_EXPENSE_LINES: 20
 };

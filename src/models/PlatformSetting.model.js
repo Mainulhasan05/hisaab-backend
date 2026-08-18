@@ -11,7 +11,12 @@
  */
 
 const mongoose = require('mongoose');
-const { TRIAL_PERIOD_DAYS, SUBSCRIPTION_PRICE, SUBSCRIPTION_WARNING_DAYS } = require('../config/constants');
+const {
+  TRIAL_PERIOD_DAYS,
+  SUBSCRIPTION_PRICE,
+  SUBSCRIPTION_WARNING_DAYS,
+  AI_DAILY_MESSAGE_LIMIT,
+} = require('../config/constants');
 
 /**
  * One SMS pack, as offered in the allocation sheet.
@@ -197,6 +202,54 @@ const platformSettingSchema = new mongoose.Schema({
    */
   platformMediaUsedBytes: { type: Number, default: 0, min: 0 },
   platformMediaFileCount: { type: Number, default: 0, min: 0 },
+
+  // ── AI (Gemini pool) ──────────────────────────────────────────────────────
+  // See AI_EXPENSE_PLAN.md. Per-shop overrides live on `Shop.ai` and always
+  // win, exactly as `Shop.billing` and `Shop.storage` override the figures
+  // above.
+
+  /**
+   * How many AI messages ONE BRANCH may send per Bangladesh day when the shop
+   * has no negotiated figure of its own.
+   *
+   * Branch-wise, not shop-wise: the counter is keyed `{shop, branch}` (see
+   * ShopAiUsage.model.js), so a three-branch shop on the default gets five
+   * messages at each counter rather than five shared between them. A shared
+   * pool would mean the busiest branch spends the quiet branches' allowance
+   * before they open, and neither of them can see why.
+   *
+   * `Shop.ai.dailyMessageLimit` is `null` by default so raising this lifts
+   * every shop that has not been individually negotiated — the same
+   * relationship `defaultStorageQuotaMb` has with `Shop.storage.quotaMb`.
+   */
+  defaultAiDailyMessageLimit: { type: Number, default: AI_DAILY_MESSAGE_LIMIT, min: 0 },
+
+  /**
+   * How `gemini.service` picks a key for the next AI call.
+   *
+   *   least_used  — fewest requests today. Identical to round-robin while every
+   *                 account has the same daily limit, and still correct once one
+   *                 of them is upgraded.
+   *   round_robin — strict rotation by least-recently-used.
+   *
+   * Deliberately the same enum, the same default and the same reasoning as
+   * `storageStrategy` above: least_used is better, round_robin is kept because
+   * it is the behaviour people expect to be able to ask for.
+   */
+  geminiStrategy: {
+    type: String,
+    enum: ['least_used', 'round_robin'],
+    default: 'least_used',
+  },
+
+  /**
+   * Model override for the whole pool. `null` = `GEMINI_DEFAULT_MODEL`.
+   *
+   * Here rather than hardcoded in the service so moving to a newer flash model
+   * is a settings change and not a deploy — the backend deploy is manual, and
+   * a model retirement should not need one.
+   */
+  geminiModel: { type: String, default: null },
 
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },
 }, {

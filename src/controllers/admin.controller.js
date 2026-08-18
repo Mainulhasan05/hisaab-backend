@@ -413,6 +413,48 @@ exports.setShopFeature = asyncHandler(async (req, res) => {
   });
 });
 
+// ── AI message allowance ───────────────────────────────────────────────────
+//
+// The LIMIT is per shop; the COUNTER is per branch. This returns both — the
+// negotiated (or inherited) number, and where each branch stands against it
+// today — because an operator asked "why is their AI not working" needs to see
+// which branch ran out, not a shop-wide average that is true of nobody.
+exports.getShopAi = asyncHandler(async (req, res) => {
+  const result = await adminService.getShopAi(req.params.id);
+  return ApiResponse.success(res, { data: result });
+});
+
+// `dailyMessageLimit: null` clears the override back to the platform default.
+// That distinction has to be expressible or an operator who typed 20 can never
+// get back to "follows the default" — they would type 5 and silently pin that
+// shop to a number that stops tracking the platform.
+exports.setShopAiLimit = asyncHandler(async (req, res) => {
+  const result = await adminService.setShopAiLimit(
+    req.params.id,
+    req.admin._id,
+    req.body.dailyMessageLimit
+  );
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'AI limit updated',
+    messageBn: result.isOverridden
+      ? `দৈনিক এআই বার্তার সীমা ${result.effectiveLimit} করা হয়েছে`
+      : 'প্ল্যাটফর্ম ডিফল্ট সীমা প্রয়োগ করা হয়েছে',
+  });
+});
+
+// Support action: zero one branch's counter today. Deliberately per branch —
+// resetting the whole shop because one till had a bad afternoon hands the other
+// branches a second allowance they never asked for.
+exports.resetShopAiUsage = asyncHandler(async (req, res) => {
+  const result = await adminService.resetShopAiUsage(req.params.id, req.body?.branchId || null);
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'AI usage reset',
+    messageBn: 'আজকের এআই ব্যবহারের হিসাব রিসেট করা হয়েছে',
+  });
+});
+
 // Get shop branches
 exports.getShopBranches = asyncHandler(async (req, res) => {
   const branches = await adminService.getShopBranches(req.params.id);

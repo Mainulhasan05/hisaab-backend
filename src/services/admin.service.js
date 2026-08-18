@@ -15,9 +15,12 @@ const PlatformPayment = require('../models/PlatformPayment.model');
 const Product = require('../models/Product.model');
 const Branch = require('../models/Branch.model');
 const HeldCart = require('../models/HeldCart.model');
+const ShopAiUsage = require('../models/ShopAiUsage.model');
+const PlatformSetting = require('../models/PlatformSetting.model');
 const mongoose = require('mongoose');
-const { getBangladeshTodayRange } = require('../utils/bdTime.util');
-const { AUDIT_ACTIONS } = require('../config/constants');
+const { getBangladeshTodayRange, getBangladeshTodayStr } = require('../utils/bdTime.util');
+const { resolveDailyLimit } = require('../utils/aiQuota.util');
+const { AUDIT_ACTIONS, AI_DAILY_MESSAGE_LIMIT } = require('../config/constants');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { AppError } = require('../middleware/error.middleware');
@@ -2731,6 +2734,172 @@ class AdminService {
     await cacheService.bumpShopCacheVersion(shopId, 0);
 
     return shop.toObject();
+  }
+
+  /**
+   * The AI allowance picture for one shop: the number, and where each of its
+   * branches stands against it today.
+   *
+   * ── WHY THIS RETURNS A ROW PER BRANCH ──────────────────────────────────────
+   *
+   * The limit is negotiated per shop and the counter runs per branch
+   * (ShopAiUsage.model.js explains why). An operator answering "their AI stopped
+   * working" needs to see WHICH branch ran out — a shop-wide total would be an
+   * average that is true of no branch, and would send them to look at the wrong
+   * till.
+   *
+   * Branches with no counter document appear at 0 rather than being omitted.
+   * A branch that has never used the feature and a branch that has used none of
+   * its allowance today are the same thing to the person reading this screen,
+   * and a missing row reads as a bug.
+   */
+  async getShopAi(shopId) {
+    const shop = await Shop.findById(shopId).select('name features ai multiBranchEnabled').lean();
+    if (!shop) {
+      throw new AppError('Shop not found', 'দোকান পাওয়া যায়নি', 404);
+    }
+
+    const [effectiveLimit, settings, branches, counters] = await Promise.all([
+      resolveDailyLimit(shop),
+      PlatformSetting.current().catch(() => null),
+      Branch.find({ shop: shopId, isActive: true }).select('name').lean(),
+      ShopAiUsage.find({ shop: shopId }).lean(),
+    ]);
+
+    const dayKey = getBangladeshTodayStr();
+    const byBranch = new Map(
+      counters.map((c) => [c.branch ? String(c.branch) : 'null', c])
+    );
+
+    const usageRow = (id, name) => {
+      const c = byBranch.get(id === null ? 'null' : String(id));
+      // A stale dayKey means the branch has not used it TODAY. Reporting the
+      // stored number would show yesterday's spend as today's.
+      const usedToday = c && c.dayKey === dayKey ? c.usedToday : 0;
+      return {
+        branch: id === null ? null : String(id),
+        branchName: name,
+        usedToday,
+        remaining: Math.max(0, effectiveLimit - usedToday),
+        totalRequests: c?.totalRequests || 0,
+        lastUsedAt: c?.lastUsedAt || null,
+      };
+    };
+
+    // Single-branch shops count against a null branch — that is what
+    // `req.branchId` is for them — so the list is one row named for the shop.
+    const usage = shop.multiBranchEnabled && branches.length
+      ? branches.map((b) => usageRow(b._id, b.name))
+      : [usageRow(null, shop.name)];
+
+    return {
+      shop: { _id: String(shop._id), name: shop.name },
+      enabled: shop.features?.aiExpense === true,
+      // null = following the platform default. The panel needs to tell that
+      // apart from a typed number that happens to equal it.
+      dailyMessageLimit: typeof shop.ai?.dailyMessageLimit === 'number'
+        ? shop.ai.dailyMessageLimit
+        : null,
+      isOverridden: typeof shop.ai?.dailyMessageLimit === 'number',
+      effectiveLimit,
+      platformDefault: settings?.defaultAiDailyMessageLimit ?? AI_DAILY_MESSAGE_LIMIT,
+      limitSetAt: shop.ai?.limitSetAt || null,
+      dayKey,
+      usage,
+    };
+  }
+
+  /**
+   * Set — or clear — this shop's AI message allowance.
+   *
+   * `null` clears the override so the shop follows the platform default again.
+   * Without an explicit way to express that, an operator who once typed 20 can
+   * only get back by typing today's default as a literal, which silently pins
+   * the shop to a number that stops tracking the platform for ever after. Same
+   * reasoning as `Shop.storage.quotaMb`, and the panel exposes it as a
+   * "প্ল্যাটফর্ম ডিফল্ট ব্যবহার করুন" button rather than an empty field the
+   * operator has to guess at.
+   *
+   * @param {string} shopId
+   * @param {string} adminId
+   * @param {number|null} limit
+   */
+  async setShopAiLimit(shopId, adminId, limit) {
+    const shop = await Shop.findById(shopId);
+    if (!shop) {
+      throw new AppError('Shop not found', 'দোকান পাওয়া যায়নি', 404);
+    }
+
+    // `null`, `''` and `undefined` all mean "follow the platform default" —
+    // an empty input box is the panel's way of saying it, and treating an empty
+    // string as 0 would silently switch the shop off instead.
+    const clearing = limit === null || limit === undefined || limit === '';
+    const value = clearing ? null : Number(limit);
+
+    if (!clearing && (!Number.isInteger(value) || value < 0 || value > 200)) {
+      throw new AppError(
+        'dailyMessageLimit must be an integer between 0 and 200, or null',
+        'দৈনিক সীমা ০ থেকে ২০০ এর মধ্যে একটি পূর্ণসংখ্যা হতে হবে',
+        400
+      );
+    }
+
+    const previous = typeof shop.ai?.dailyMessageLimit === 'number'
+      ? shop.ai.dailyMessageLimit
+      : null;
+
+    shop.ai = {
+      ...(shop.ai?.toObject ? shop.ai.toObject() : shop.ai || {}),
+      dailyMessageLimit: value,
+      limitSetAt: new Date(),
+      limitSetBy: adminId,
+    };
+    // `ai` is a nested plain object like `features`; without this Mongoose can
+    // miss the mutation and return 200 having saved nothing.
+    shop.markModified('ai');
+    await shop.save();
+
+    await AuditLog.log({
+      shop: shopId,
+      admin: adminId,
+      action: 'shop_ai_limit_set',
+      description: clearing
+        ? `"${shop.name}" দোকানের এআই সীমা প্ল্যাটফর্ম ডিফল্টে ফিরিয়ে আনা হয়েছে`
+        : `"${shop.name}" দোকানের দৈনিক এআই বার্তার সীমা ${value} করা হয়েছে (প্রতি শাখায়)`,
+      entity: { type: 'shop', id: shop._id, name: shop.name },
+      changes: {
+        before: { 'ai.dailyMessageLimit': previous },
+        after: { 'ai.dailyMessageLimit': value },
+      },
+    });
+
+    // The limit is read from `req.shop`, which is served from the auth cache.
+    // Without this the new number does not apply until every session expires.
+    await invalidateShopAuthCache(shopId);
+
+    return this.getShopAi(shopId);
+  }
+
+  /**
+   * Zero one branch's counter for today. A support action, not a routine one.
+   *
+   * Per branch rather than per shop: resetting the whole shop because one till
+   * had a bad afternoon hands every other branch a second allowance nobody
+   * asked for, and the operator would have no way to tell afterwards that they
+   * had done it.
+   */
+  async resetShopAiUsage(shopId, branchId = null) {
+    const shop = await Shop.findById(shopId).select('name').lean();
+    if (!shop) {
+      throw new AppError('Shop not found', 'দোকান পাওয়া যায়নি', 404);
+    }
+
+    await ShopAiUsage.updateOne(
+      { shop: shopId, branch: branchId || null },
+      { $set: { usedToday: 0, dayKey: getBangladeshTodayStr() } }
+    );
+
+    return this.getShopAi(shopId);
   }
 
   /**

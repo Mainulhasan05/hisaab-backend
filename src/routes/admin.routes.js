@@ -60,6 +60,13 @@ router.patch('/shops/:id/customer-scope', adminController.setCustomerScope);
 // with a method per verb. New capabilities need no route change at all.
 router.get('/shops/:id/features', adminController.getShopFeatures);
 router.patch('/shops/:id/features/:key', adminController.setShopFeature);
+// AI message allowance. Distinct from the `aiExpense` capability toggle above,
+// the same way storage quota is distinct from `features.productImages`: the
+// toggle decides whether the shop has the feature, this decides how much of it
+// they get. The LIMIT is per shop; the COUNTER the GET reports is per branch.
+router.get('/shops/:id/ai', adminController.getShopAi);
+router.patch('/shops/:id/ai', adminController.setShopAiLimit);
+router.post('/shops/:id/ai/reset', adminController.resetShopAiUsage);
 // Which storefront templates this shop may pick from. Distinct from the
 // capability toggle above: `features.storefront` decides whether the shop has a
 // website at all, this decides which designs it may choose. The GET reports
@@ -324,6 +331,11 @@ router.get('/gemini-keys', geminiKeyController.getAllKeys);
 router.post('/gemini-keys', geminiKeyController.createKey);
 router.put('/gemini-keys/:id', geminiKeyController.updateKey);
 // No DELETE — retire a key with PUT { isActive: false }.
+// Re-ask Google what every key can serve. The button to press after a model
+// retirement — `generateContent` self-heals one key at a time when a shopkeeper
+// hits the 404, this repairs the whole pool before anyone does.
+// Declared BEFORE `/:id/test`, or "refresh-models" is matched as an :id.
+router.post('/gemini-keys/refresh-models', geminiKeyController.refreshModels);
 router.post('/gemini-keys/:id/test', geminiKeyController.testKey);
 router.post('/gemini-keys/:id/reset', geminiKeyController.resetUsage);
 router.post('/gemini-keys/test-prompt', geminiKeyController.testPrompt);

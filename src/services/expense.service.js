@@ -4,6 +4,7 @@ const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { endOfBangladeshDay, getBangladeshTodayRange, getBangladeshMonthRange, toBangladeshMonthStr } = require('../utils/bdTime.util');
 const { branchFilter, requireBranch, branchMatch } = require('../utils/branchScope.util');
+const { AI_MAX_EXPENSE_LINES } = require('../config/constants');
 
 class ExpenseService {
   // Get all expenses with filtering, pagination
@@ -89,7 +90,7 @@ class ExpenseService {
     });
 
     if (!categoryDoc) {
-      throw new AppError('ক্যাটাগরি পাওয়া যায়নি', 'Expense category not found', 404);
+      throw new AppError('Expense category not found', 'ক্যাটাগরি পাওয়া যায়নি', 404);
     }
 
     const expense = await Expense.create({
@@ -130,6 +131,97 @@ class ExpenseService {
     return expense;
   }
 
+  /**
+   * Create several expenses in one request.
+   *
+   * ── NOT ATOMIC, AND IT SAYS SO ─────────────────────────────────────────────
+   *
+   * There is not a single `startSession` in this codebase — no service uses
+   * Mongo transactions, and adding the first one here would mean a deployment
+   * requirement (a replica set) that the rest of the app does not have. So this
+   * loops and reports per row: three created, one failed, and the response
+   * names which one and why.
+   *
+   * That is the honest contract. Wrapping the loop in language that implies
+   * all-or-nothing would be worse than the loop — a shopkeeper told "failed"
+   * who actually has three new rows in their book will enter them again.
+   *
+   * The UI's job is to keep the failed rows on screen with their reason
+   * attached, so retrying re-sends only those.
+   *
+   * ── WHY IT REUSES createExpense ROW BY ROW ─────────────────────────────────
+   *
+   * `insertMany` would be one round trip instead of N, and would skip the
+   * category-belongs-to-this-shop check, the branch stamp, and the audit row.
+   * Twenty documents is not the bottleneck worth breaking those for; the AI
+   * path in particular MUST re-validate every category server-side, because the
+   * ids it carries came back from a language model.
+   *
+   * @param {string} shopId
+   * @param {string} userId
+   * @param {Array}  rows    at most AI_MAX_EXPENSE_LINES entries
+   * @param {Object} req
+   * @param {string} source  'ai' | 'manual' — recorded on the batch audit row
+   */
+  async createBulk(shopId, userId, rows, req, source = 'manual') {
+    if (!Array.isArray(rows) || rows.length === 0) {
+      throw new AppError('No expenses provided', 'কোনো খরচ পাওয়া যায়নি', 400);
+    }
+    if (rows.length > AI_MAX_EXPENSE_LINES) {
+      throw new AppError(
+        `At most ${AI_MAX_EXPENSE_LINES} expenses per request`,
+        `একসাথে সর্বোচ্চ ${AI_MAX_EXPENSE_LINES}টি খরচ যোগ করা যায়`,
+        400
+      );
+    }
+
+    const created = [];
+    const failed = [];
+
+    for (let i = 0; i < rows.length; i += 1) {
+      try {
+        // Sequential, not Promise.all. These all write AuditLog rows and touch
+        // the same shop; twenty parallel writes buy milliseconds and make the
+        // failure report non-deterministic about which rows landed.
+        const expense = await this.createExpense(shopId, userId, rows[i], req);
+        created.push(expense);
+      } catch (err) {
+        failed.push({
+          index: i,
+          reason: err?.messageBn || err?.message || 'খরচটি যোগ করা যায়নি',
+        });
+      }
+    }
+
+    // One row for the batch, on top of the per-expense ones createExpense
+    // already writes. Without it the activity feed shows five unrelated entries
+    // and nothing explains that they arrived together, or that a model drafted
+    // them.
+    if (created.length > 0) {
+      const total = created.reduce((sum, e) => sum + e.amount, 0);
+      await AuditLog.create({
+        shop: shopId,
+        branch: req ? requireBranch(req) : null,
+        user: userId,
+        action: 'expense_bulk_create',
+        actionBn: 'একসাথে একাধিক খরচ যোগ',
+        description: `Added ${created.length} expenses (৳${total}) via ${source}`,
+        descriptionBn: `${created.length}টি খরচ একসাথে যোগ (৳${total})${source === 'ai' ? ' — এআই থেকে' : ''}`,
+        entity: { type: 'expense', name: `${created.length} expenses` },
+        changes: { after: { count: created.length, total, source } },
+      }).catch(() => {
+        // The expenses are already written. A failed summary row must not turn
+        // a successful batch into an error the shopkeeper sees.
+      });
+    }
+
+    return {
+      created,
+      failed,
+      summary: { ok: created.length, failed: failed.length, total: rows.length },
+    };
+  }
+
   // Update expense
   async updateExpense(shopId, userId, expenseId, updateData, req = null) {
     const expense = await Expense.findOne(branchFilter(req, { _id: expenseId, shop: shopId }));
@@ -147,7 +239,7 @@ class ExpenseService {
         isActive: true,
       });
       if (!categoryDoc) {
-        throw new AppError('ক্যাটাগরি পাওয়া যায়নি', 'Expense category not found', 404);
+        throw new AppError('Expense category not found', 'ক্যাটাগরি পাওয়া যায়নি', 404);
       }
       updateData.categoryName = categoryDoc.name;
     }

@@ -204,6 +204,38 @@ const FEATURES = Object.freeze({
      */
     requires: [],
   },
+  aiExpense: {
+    bn: 'এআই খরচ এন্ট্রি',
+    en: 'AI expense entry',
+    description:
+      'Lets the shop type or dictate one sentence — "আজ দোকান ভাড়া ৫০০০, ' +
+      'বিদ্যুৎ বিল ১২০০" — and get several draft expense rows back, each ' +
+      'matched to one of the shop\'s OWN categories. The AI never writes: every ' +
+      'row is confirmed by a person on a preview screen first, because an ' +
+      'expense is an immutable ledger row and a wrong one can only be voided, ' +
+      'never removed. Bounded by a daily message allowance counted PER BRANCH ' +
+      '(default 5, set per shop by the platform admin). Off = no AI box on the ' +
+      'expenses page and the parse route 404s; expenses already created this ' +
+      'way are ordinary expenses and are kept, so the switch is reversible.',
+    /**
+     * NO PREREQUISITES.
+     *
+     * Not `requiresStorage` — it writes no bytes, and making it storage-backed
+     * would mean turning a shop's photo storage off also took away their
+     * expense entry, which has nothing to do with it. That is exactly the
+     * mistake `landingPages` documents avoiding.
+     *
+     * And no feature prerequisite either: expenses and expense categories exist
+     * for every shop on the platform from the day it registers. There is
+     * nothing to switch on first.
+     *
+     * What it DOES depend on is the platform having at least one working Gemini
+     * key. That is not a per-shop capability, so it is not expressible here —
+     * an exhausted pool is a 503 at request time with its own Bangla copy, the
+     * same way an SMS send fails when the platform's gateway float runs out.
+     */
+    requires: [],
+  },
 });
 
 /**

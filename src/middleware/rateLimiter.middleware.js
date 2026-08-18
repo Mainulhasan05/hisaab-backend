@@ -262,11 +262,42 @@ const telegramLinkLimiter = rateLimit({
   }
 });
 
+/**
+ * AI parse limiter — 10 requests per minute.
+ *
+ * ── THIS IS NOT THE REAL CONTROL ───────────────────────────────────────────
+ *
+ * The per-branch daily allowance (`Shop.ai.dailyMessageLimit`, default 5) is
+ * what actually bounds this feature, and it is enforced in the controller with
+ * an atomic reservation. This limiter exists so a client stuck in a retry loop
+ * is refused at the door rather than three `findOneAndUpdate`s deep — each of
+ * those calls does real work before deciding the branch is out.
+ *
+ * Set well ABOVE the daily allowance on purpose: a shopkeeper who genuinely has
+ * five messages must be able to spend all five in one sitting without meeting a
+ * limiter, or the two controls disagree about what the allowance means and the
+ * one nobody documented wins.
+ */
+const aiParseLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  store: new HybridStore('rl:ai:'),
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    return ApiResponse.tooManyRequests(res, {
+      message: 'Too many AI requests, please slow down.',
+      messageBn: 'একসাথে অনেকবার চেষ্টা করা হয়েছে, একটু পরে আবার করুন।'
+    });
+  }
+});
+
 module.exports = {
   apiLimiter,
   authLimiter,
   passwordResetLimiter,
   smsLimiter,
+  aiParseLimiter,
   storefrontLimiter,
   isPublicStorefrontPath,
   telegramLinkLimiter

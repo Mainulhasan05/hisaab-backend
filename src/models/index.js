@@ -37,6 +37,11 @@ module.exports = {
   SMSQuota: require('./SMSQuota.model'),
   ShopCategory: require('./ShopCategory.model'),
   GeminiKey: require('./GeminiKey.model'),
+  // Per-BRANCH daily AI message counter. Registered here or `sync-indexes`
+  // never ships the unique `{shop, branch}` key to production, where autoIndex
+  // is off — and without it the three-step `reserve` can race two counters into
+  // existence for one branch and silently double its allowance.
+  ShopAiUsage: require('./ShopAiUsage.model'),
   // The R2 storage pool. One document per Cloudflare bucket; see
   // services/storage.service.js for how one is chosen per upload.
   R2Account: require('./R2Account.model'),
