@@ -334,6 +334,83 @@ describe('message safety', () => {
   });
 });
 
+/**
+ * The footer's address line.
+ *
+ * Every one of these alerts exists so an operator can answer "was that me?",
+ * and the address is the only part of the message that answers it. It read
+ * `127.0.0.1` on every alert in production: `req.ip` falls back to the socket
+ * address when the proxy sends no `x-forwarded-for`, and the header fallback
+ * written to catch that sat behind a `||` that could never be reached.
+ */
+describe('origin address', () => {
+  const send = (req) => {
+    platformNotify.userLogin({ user, shop, req });
+    return settle();
+  };
+  const lastBody = () => telegramService.broadcastToAdmins.mock.calls[0][1];
+
+  it('falls through a loopback socket address to the resolved one', async () => {
+    // What the request really looks like behind nginx: the socket is loopback
+    // and the truth is in the header the middleware already read.
+    await send({
+      ip: '::ffff:127.0.0.1',
+      context: { ip: '203.0.113.9' },
+      headers: { 'x-real-ip': '203.0.113.9', 'user-agent': 'Mozilla/5.0 (Linux; Android 13)' },
+    });
+
+    expect(lastBody()).toContain('203.0.113.9');
+    expect(lastBody()).not.toContain('127.0.0.1');
+  });
+
+  it('reads the proxy headers itself when the request skipped the middleware', async () => {
+    // A job or a test double has no `req.context`. `x-real-ip` is the header
+    // Express's own `trust proxy` never looks at.
+    await send({ ip: '127.0.0.1', headers: { 'x-real-ip': '198.51.100.7' } });
+    expect(lastBody()).toContain('198.51.100.7');
+  });
+
+  it('strips the IPv4-mapped prefix a dual-stack socket adds', async () => {
+    await send({ ip: '::ffff:203.0.113.42', headers: {} });
+    expect(lastBody()).toContain('203.0.113.42');
+    expect(lastBody()).not.toContain('::ffff:');
+  });
+
+  it('keeps the address Express vouches for over a client-supplied one', async () => {
+    // `trust proxy` makes `req.ip` the entry a client cannot push into — a
+    // request forging `X-Forwarded-For: 1.2.3.4` has it shifted left and
+    // ignored, while `getClientIP` would read exactly that forged first entry.
+    // On "your password just changed, from here", an attacker-chosen address is
+    // worse than no address.
+    await send({
+      ip: '203.0.113.9',
+      context: { ip: '1.2.3.4' },
+      headers: { 'x-forwarded-for': '1.2.3.4, 203.0.113.9' },
+    });
+
+    expect(lastBody()).toContain('203.0.113.9');
+    expect(lastBody()).not.toContain('1.2.3.4');
+  });
+
+  it('skips a private proxy hop the way it skips loopback', async () => {
+    // Two hops with only the inner one translated: the socket shows the LAN
+    // address of the proxy, which answers "which machine", not "who".
+    await send({ ip: '10.0.0.5', context: { ip: '198.51.100.22' }, headers: {} });
+    expect(lastBody()).toContain('198.51.100.22');
+    expect(lastBody()).not.toContain('10.0.0.5');
+  });
+
+  it('says the proxy is misconfigured rather than printing loopback', async () => {
+    // Nothing forwarded a client address, so there is no address to show.
+    // Printing 127.0.0.1 is what let this go unnoticed — it looks like data.
+    await send({ ip: '127.0.0.1', headers: {} });
+
+    const body = lastBody();
+    expect(body).not.toContain('127.0.0.1');
+    expect(body).toContain('প্রক্সি ঠিকানা পাঠাচ্ছে না');
+  });
+});
+
 describe('device recognition', () => {
   /** A user document with save() stubbed — this is model logic, not persistence. */
   function stubUser() {

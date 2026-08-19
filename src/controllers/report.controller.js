@@ -184,6 +184,11 @@ exports.getCustomerStatement = asyncHandler(async (req, res) => {
       ...req.query,
       withDueOnly: req.query.withDueOnly === 'true',
       includeEmpty: req.query.includeEmpty === 'true',
+      // Opt-in goods detail. Parsed here rather than passed through raw for the
+      // same reason as the two above: `req.query` hands the service the STRING
+      // 'false', which is truthy, and the statement would quietly carry item
+      // lines for every party on a run that asked not to.
+      withItems: req.query.withItems === 'true',
     },
     req
   );
@@ -205,6 +210,11 @@ exports.getSupplierStatement = asyncHandler(async (req, res) => {
       ...req.query,
       withDueOnly: req.query.withDueOnly === 'true',
       includeEmpty: req.query.includeEmpty === 'true',
+      // Opt-in goods detail. Parsed here rather than passed through raw for the
+      // same reason as the two above: `req.query` hands the service the STRING
+      // 'false', which is truthy, and the statement would quietly carry item
+      // lines for every party on a run that asked not to.
+      withItems: req.query.withItems === 'true',
     },
     req
   );

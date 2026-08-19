@@ -179,6 +179,11 @@ const PROFIT_KEYS = new Set([
 const COST_KEYS = new Set([
   'buyingPrice', 'unitCost', 'totalCost', 'totalBuyingValue', 'inventoryValue',
   'comboCost', 'comboCostMin', 'buyingPriceMin',
+  // The pack rate on a supplier-statement goods line — "৳১,২০০ per বস্তা". The
+  // per-base-unit figure beside it is already `unitCost` above; leaving its
+  // pack twin unlisted would let anyone divide by `packSize` and read the cost
+  // this set exists to withhold.
+  'packUnitCost',
 ]);
 
 function isPlainObject(val) {

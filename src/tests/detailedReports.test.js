@@ -18,7 +18,17 @@
  *      cash on delivery would otherwise get a statement claiming it owes for
  *      every delivery it ever settled.
  *
- *   4. The stock report's money columns are named the keys `sanitizeReport`
+ *   4. Goods detail is opt-in and adds NO key when it is off. It multiplies the
+ *      payload by roughly ten, so a default run has to be the payload it always
+ *      was — not merely one with the same numbers in it.
+ *
+ *   5. A purchase line's rate IS the shop's buying price, so the goods lines on
+ *      a SUPPLIER statement carry it under names `sanitizeReport` strips. Named
+ *      `unitPrice`/`total` like their source fields, they would hand anyone
+ *      with plain `reports.view` the cost of every product the shop has ever
+ *      bought.
+ *
+ *   6. The stock report's money columns are named the keys `sanitizeReport`
  *      strips. A rename to something more readable (`costValue`,
  *      `potentialProfit`) sails straight past the sanitiser and hands a cashier
  *      the shop's margin on every line.
@@ -177,6 +187,50 @@ describe('customer statement', () => {
     expect(quiet.statements).toHaveLength(0);
   });
 
+  it('adds no items key at all when goods detail was not asked for', async () => {
+    stubCustomerData({
+      sales: [{ customer: CUSTOMER, invoiceNo: 'INV-4', total: 500, createdAt: d('2026-08-04') }],
+    });
+
+    const report = await service.getCustomerStatements(SHOP, RANGE, null);
+    // `toHaveProperty` and not `items === undefined`: a key present and empty
+    // still ships on every entry of every statement in the shop, which is the
+    // cost this flag exists to avoid.
+    expect(report.statements[0].entries[0]).not.toHaveProperty('items');
+  });
+
+  it('hangs the invoice lines under the invoice when asked, and selects no cost', async () => {
+    const items = [
+      { productName: 'চাল', quantity: 5, unit: 'kg', unitPrice: 60, total: 300 },
+    ];
+    stubCustomerData({
+      sales: [{
+        customer: CUSTOMER, invoiceNo: 'INV-5', total: 300,
+        createdAt: d('2026-08-04'), items,
+      }],
+    });
+    const select = jest.fn().mockReturnThis();
+    jest.spyOn(Sale, 'find').mockReturnValue({
+      select, sort: () => ({ limit: () => ({ lean: () => Promise.resolve([{
+        customer: CUSTOMER, invoiceNo: 'INV-5', total: 300,
+        createdAt: d('2026-08-04'), items,
+      }]) }) }),
+    });
+
+    const report = await service.getCustomerStatements(
+      SHOP, { ...RANGE, withItems: true }, null
+    );
+
+    expect(report.statements[0].entries[0].items).toEqual(items);
+
+    // The projection must never ask for `buyingPrice`. It sits beside
+    // `unitPrice` on the same sub-document, so a lazy `.select('items')` would
+    // pull the shop's cost into a customer-facing document.
+    const projection = select.mock.calls[0][0];
+    expect(projection).toContain('items.productName');
+    expect(projection).not.toContain('buyingPrice');
+  });
+
   it('surfaces the stored due beside the computed one rather than reconciling them', async () => {
     // A gap means a write path updated one book and not the other. Hiding it
     // behind the computed figure is how that goes unnoticed for months.
@@ -288,6 +342,61 @@ describe('supplier statement', () => {
     await service.getSupplierStatements(SHOP, { ...RANGE, withDueOnly: true }, null);
 
     expect(find.mock.calls[0][0]).toMatchObject({ totalDue: { $gt: 0 } });
+  });
+
+  it('names every money field on a goods line a key the cost sanitiser strips', async () => {
+    // The trap this defends: a purchase line's rate is the shop's buying price
+    // for that product. `sanitizeReport` is a denylist over field NAMES, so a
+    // line shipped as `unitPrice`/`total` — the names on the source document —
+    // walks straight past it and hands anyone holding plain `reports.view` the
+    // cost of everything the shop buys. Same rule as the stock report's
+    // columns, and the same test.
+    const MONEY = ['unitCost', 'packUnitCost', 'totalCost'];
+    for (const key of MONEY) {
+      expect(COST_KEYS.has(key)).toBe(true);
+    }
+
+    stubSupplierData({
+      purchases: [{
+        supplier: SUPPLIER, invoiceNo: 'PUR-4', totalAmount: 1200,
+        paidAtPurchase: 0, date: d('2026-08-11'), itemCount: 1,
+        items: [{
+          productName: 'সয়াবিন তেল', quantity: 10, unit: 'litre',
+          unitCost: 120, totalCost: 1200,
+        }],
+      }],
+    });
+
+    const report = await service.getSupplierStatements(
+      SHOP, { ...RANGE, withItems: true }, null
+    );
+    const [item] = report.statements[0].entries[0].items;
+
+    // Nothing money-shaped may reach the line under a name outside that set.
+    const priced = Object.keys(item).filter((k) => /price|cost|total|amount/i.test(k));
+    expect(priced.sort()).toEqual(['totalCost', 'unitCost']);
+    expect(priced.every((k) => COST_KEYS.has(k))).toBe(true);
+  });
+
+  it('leaves the derived counter-settlement line free of goods', async () => {
+    // The bill and the money handed over on delivery are two entries built from
+    // ONE purchase. Attaching the items to both would print every product twice
+    // — once under the bill, once under the payment that settled it.
+    stubSupplierData({
+      purchases: [{
+        supplier: SUPPLIER, invoiceNo: 'PUR-5', totalAmount: 900,
+        paidAtPurchase: 900, date: d('2026-08-12'), itemCount: 1,
+        items: [{ productName: 'চিনি', quantity: 3, unitCost: 300, totalCost: 900 }],
+      }],
+    });
+
+    const report = await service.getSupplierStatements(
+      SHOP, { ...RANGE, withItems: true }, null
+    );
+    const [bill, settlement] = report.statements[0].entries;
+
+    expect(bill.items).toHaveLength(1);
+    expect(settlement).not.toHaveProperty('items');
   });
 
   it('adds a pre-software payable from the opening-due ledger', async () => {

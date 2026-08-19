@@ -110,6 +110,99 @@ function applyRunningBalance(entries, opening) {
 /** Sum a numeric key over rows. */
 const sumBy = (rows, key) => quantizeMoney(rows.reduce((acc, r) => acc + (r[key] || 0), 0));
 
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE GOODS LINES (`withItems`)
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * A statement answers "what does Rahim owe me". `withItems` answers the
+ * question the shopkeeper gets asked next — "কী মাল নিয়েছি?" — by hanging the
+ * invoice's own lines under its ledger row.
+ *
+ * OFF BY DEFAULT, and that is not timidity. A 200-party month is ~20k item
+ * objects; loading that into every routine run would make the ordinary
+ * statement several megabytes on a phone. The flag is a checkbox on the report
+ * screen, and with it off every query, response and printed page is byte-for-
+ * byte what it was before this existed.
+ *
+ * ── Why the field names are what they are ────────────────────────────────────
+ *
+ * Sale and return lines keep the SOURCE document's names — `quantity`, `unit`,
+ * `saleUnit`, `packSize`, `unitPrice`, `agreedUnitPrice`. That is what lets the
+ * client render them through `describeLineUnits` / the invoice's own rate rule
+ * with no translation layer, so a statement line and the invoice line it came
+ * from cannot drift apart.
+ *
+ * Purchase lines rename the money: `unitPrice` → `unitCost`, `total` →
+ * `totalCost`, `packUnitPrice` → `packUnitCost`. A purchase line's rate IS the
+ * product's buying price, and these are the exact keys `sanitizeReport` strips
+ * for a user without `products.view_cost`. Left under their original names they
+ * would sail straight past the sanitiser and hand a stock clerk the shop's cost
+ * on every product it ever bought — the same trap the stock report's column
+ * naming avoids. The quantities, product names, batches and expiry dates
+ * survive the strip, which is the useful half for anyone checking a delivery.
+ *
+ * `buyingPrice` is never selected on a sale line and `comboComponents` is not
+ * carried at all: a combo prints as the one line the customer bought, marked
+ * `itemType: 'combo'`. Its components are a stock-movement record, they carry
+ * per-component costs, and they are not what the customer was billed for.
+ */
+
+/** Sale/return item sub-paths to select. `buyingPrice` is deliberately absent. */
+const SALE_ITEM_FIELDS = [
+  'productName', 'productCode', 'variantAttributes', 'quantity', 'unit',
+  'saleUnit', 'packUnit', 'packSize', 'packQuantity',
+  'unitPrice', 'packUnitPrice', 'agreedUnitPrice', 'discount', 'total', 'itemType',
+];
+
+/** The same list as a `find().select()` fragment, e.g. `items.productName …`. */
+const saleItemSelect = (path = 'items') =>
+  SALE_ITEM_FIELDS.map((f) => `${path}.${f}`).join(' ');
+
+/** The same list as an aggregation `$project`, e.g. `{ 'items.unit': 1, … }`. */
+const saleItemProject = (path = 'items') =>
+  Object.fromEntries(SALE_ITEM_FIELDS.map((f) => [`${path}.${f}`, 1]));
+
+/**
+ * A purchase line, cost-renamed. Written as a `$map` because the purchase
+ * entries already come from an aggregation, and shaping it there keeps
+ * `costBefore` / `costAfter` / `sellingPriceBefore` off the wire entirely
+ * rather than fetching them and dropping them afterwards.
+ */
+const PURCHASE_ITEM_MAP = {
+  $map: {
+    input: { $ifNull: ['$items', []] },
+    as: 'it',
+    in: {
+      productName: '$$it.productName',
+      productCode: '$$it.productCode',
+      variantLabel: '$$it.variantLabel',
+      quantity: '$$it.quantity',
+      unit: '$$it.unit',
+      purchaseUnit: '$$it.purchaseUnit',
+      packUnit: '$$it.packUnit',
+      packSize: '$$it.packSize',
+      packQuantity: '$$it.packQuantity',
+      batchNumber: '$$it.batchNumber',
+      expiryDate: '$$it.expiryDate',
+      unitCost: '$$it.unitPrice',
+      packUnitCost: '$$it.packUnitPrice',
+      totalCost: '$$it.total',
+    },
+  },
+};
+
+/**
+ * Spread onto an entry: `{ items }` when there are some, nothing at all when
+ * there are not.
+ *
+ * The empty case must add NO key. With `withItems` off — the default, and every
+ * run the report screen makes until someone ticks the box — the entry has to be
+ * byte-identical to what it was before this feature, or the "default statement
+ * is unchanged" claim above is only true of the numbers and not of the payload.
+ */
+const itemsField = (items) => (Array.isArray(items) && items.length > 0 ? { items } : {});
+
 class DetailedReportService {
   // ───────────────────────────────────────────────────────────────────────────
   // 1. CUSTOMER STATEMENT OF ACCOUNT
@@ -137,6 +230,7 @@ class DetailedReportService {
       customerId = null,
       withDueOnly = false,
       includeEmpty = false,
+      withItems = false,
     } = options;
 
     const limit = clampLimit(options.limit, DEFAULT_PARTIES, MAX_PARTIES);
@@ -164,7 +258,7 @@ class DetailedReportService {
 
     const [openings, entriesByCustomer] = await Promise.all([
       this._customerOpeningBalances(scope, rangeStart),
-      this._customerRangeEntries(scope, range),
+      this._customerRangeEntries(scope, range, withItems),
     ]);
 
     const statements = [];
@@ -359,12 +453,12 @@ class DetailedReportService {
    * statement whose closing balance disagrees with the খতিয়ান tab they can open
    * on the same screen.
    */
-  async _customerRangeEntries(scope, range) {
+  async _customerRangeEntries(scope, range, withItems = false) {
     const dated = range ? { createdAt: range } : {};
 
     const [sales, payments, adjustments, returns] = await Promise.all([
       Sale.find({ ...scope, status: { $ne: 'cancelled' }, ...dated })
-        .select('customer invoiceNo total createdAt')
+        .select(`customer invoiceNo total createdAt${withItems ? ` ${saleItemSelect()}` : ''}`)
         .sort({ createdAt: 1 })
         .limit(MAX_ROWS_PER_COLLECTION)
         .lean(),
@@ -387,6 +481,7 @@ class DetailedReportService {
         {
           $project: {
             customer: 1, returnNo: 1, totalAmount: 1, refundMethod: 1, effectiveDate: 1,
+            ...(withItems ? saleItemProject() : {}),
           },
         },
       ]),
@@ -409,6 +504,7 @@ class DetailedReportService {
         ref: s.invoiceNo,
         debit: s.total || 0,
         credit: 0,
+        ...itemsField(s.items),
       });
     }
 
@@ -420,6 +516,7 @@ class DetailedReportService {
         ref: r.returnNo,
         debit: 0,
         credit: r.totalAmount || 0,
+        ...itemsField(r.items),
       });
     }
 
@@ -480,6 +577,7 @@ class DetailedReportService {
       supplierId = null,
       withDueOnly = false,
       includeEmpty = false,
+      withItems = false,
     } = options;
 
     const limit = clampLimit(options.limit, DEFAULT_PARTIES, MAX_PARTIES);
@@ -513,7 +611,7 @@ class DetailedReportService {
 
     const [openings, entriesBySupplier] = await Promise.all([
       this._supplierOpeningBalances({ purchaseScope, paymentScope, adjustmentScope, ids, rangeStart }),
-      this._supplierRangeEntries({ purchaseScope, paymentScope, adjustmentScope, ids, range }),
+      this._supplierRangeEntries({ purchaseScope, paymentScope, adjustmentScope, ids, range, withItems }),
     ]);
 
     const statements = [];
@@ -680,7 +778,7 @@ class DetailedReportService {
     return balances;
   }
 
-  async _supplierRangeEntries({ purchaseScope, paymentScope, adjustmentScope, ids, range }) {
+  async _supplierRangeEntries({ purchaseScope, paymentScope, adjustmentScope, ids, range, withItems = false }) {
     const [purchases, payments, adjustments] = await Promise.all([
       Purchase.aggregate([
         { $match: { ...purchaseScope, ...(range ? { date: range } : {}) } },
@@ -701,6 +799,7 @@ class DetailedReportService {
             totalAmount: 1,
             date: 1,
             itemCount: { $size: { $ifNull: ['$items', []] } },
+            ...(withItems ? { items: PURCHASE_ITEM_MAP } : {}),
             paidAtPurchase: {
               $subtract: [{ $ifNull: ['$paid', 0] }, { $sum: '$laterPayments.amount' }],
             },
@@ -753,6 +852,7 @@ class DetailedReportService {
         itemCount: p.itemCount || 0,
         debit: p.totalAmount || 0,
         credit: 0,
+        ...itemsField(p.items),
       });
 
       // The cash-on-delivery leg. Same date as the bill and ranked after it, so
