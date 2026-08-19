@@ -395,7 +395,7 @@ describe('origin address', () => {
   it('skips a private proxy hop the way it skips loopback', async () => {
     // Two hops with only the inner one translated: the socket shows the LAN
     // address of the proxy, which answers "which machine", not "who".
-    await send({ ip: '10.0.0.5', context: { ip: '198.51.100.22' }, headers: {} });
+    await send({ ip: '10.0.0.5', headers: { 'x-real-ip': '198.51.100.22' } });
     expect(lastBody()).toContain('198.51.100.22');
     expect(lastBody()).not.toContain('10.0.0.5');
   });

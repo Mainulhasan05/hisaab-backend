@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { resolveClientIp } = require('../utils/clientIp.util');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const { getAuditMetadata, getActor } = require('../utils/requestStore.util');
 
@@ -205,14 +206,24 @@ auditLogSchema.statics.log = async function({
   // Add metadata from request with proxy-aware IP extraction
   if (req) {
     const userAgentStr = req.get ? req.get('User-Agent') : req.headers?.['user-agent'] || '';
-    const rawIp = req.headers?.['x-forwarded-for']?.split(',')[0]?.trim() ||
-                  req.ip ||
-                  req.connection?.remoteAddress ||
-                  req.socket?.remoteAddress ||
-                  '127.0.0.1';
 
+    /*
+     * ── Why this is not the header chain it used to be ──────────────────────
+     *
+     * It read `x-forwarded-for` first — the one entry a client can write for
+     * itself — then `req.ip`, and never looked at `x-real-ip` at all. Behind a
+     * proxy that sets only `X-Real-IP`, every candidate but the last missed and
+     * `req.ip` returned the socket address, so the trail recorded
+     * `::ffff:127.0.0.1` for every action in the system. The literal
+     * `'127.0.0.1'` default at the end of the chain made that indistinguishable
+     * from a genuine local request.
+     *
+     * `undefined` now, when there is nothing to record. The pre('validate')
+     * hook below fills a missing ip from the ambient request context, which
+     * resolves it the same way — so a blank here is a retry, not a gap.
+     */
     logData.metadata = {
-      ip: rawIp,
+      ip: resolveClientIp(req) || undefined,
       userAgent: userAgentStr,
       browser: extractBrowser(userAgentStr),
       os: extractOS(userAgentStr),

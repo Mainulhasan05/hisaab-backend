@@ -5,31 +5,23 @@
  */
 
 const { runWithContext } = require('../utils/requestStore.util');
+const { resolveClientIp } = require('../utils/clientIp.util');
 
 /**
- * Extract real client IP considering proxies
+ * Extract real client IP considering proxies.
+ *
+ * The resolution itself lives in `utils/clientIp.util.js` — the audit trail,
+ * the SMS origin log and the founder alerts all need the same answer, and three
+ * hand-rolled header chains is how they came to disagree. This walked
+ * `x-forwarded-for` FIRST, taking the entry a client can put there itself, and
+ * never consulted `req.ip` unless no header was present at all; see the long
+ * note in the util for why the order is now the other way round.
+ *
+ * `'unknown'` rather than null on the way out: `req.context.ip` has always been
+ * a string and several readers store it directly.
  */
 function getClientIP(req) {
-  // Check various headers for real IP (behind proxies/load balancers)
-  const forwardedFor = req.headers['x-forwarded-for'];
-  if (forwardedFor) {
-    // x-forwarded-for can contain multiple IPs, first one is the client
-    return forwardedFor.split(',')[0].trim();
-  }
-
-  const realIP = req.headers['x-real-ip'];
-  if (realIP) {
-    return realIP;
-  }
-
-  // Cloudflare
-  const cfConnectingIP = req.headers['cf-connecting-ip'];
-  if (cfConnectingIP) {
-    return cfConnectingIP;
-  }
-
-  // Default to connection remote address
-  return req.ip || req.connection?.remoteAddress || 'unknown';
+  return resolveClientIp(req) || 'unknown';
 }
 
 /**

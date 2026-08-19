@@ -37,7 +37,7 @@ const cacheService = require('./cache.service');
 const logger = require('../utils/logger.util');
 const { escapeHtml, formatMoney, formatCount, formatDate } = require('../utils/telegramFormat.util');
 const { getBangladeshTimeStr, toBangladeshDateStr } = require('../utils/bdTime.util');
-const { getClientIP } = require('../middleware/requestContext.middleware');
+const { resolveClientIp, isInternalAddress } = require('../utils/clientIp.util');
 
 /**
  * How long the resolved login cooldown is cached.
@@ -83,21 +83,6 @@ const FAILED_LOGIN = {
   /** After firing, stay quiet about this phone for this long. */
   MUTE_AFTER_ALERT_S: 60 * 60,
 };
-
-/**
- * Is this address the server itself, or a hop on the way to it?
- *
- * Loopback, the RFC1918 private ranges, link-local and IPv6 unique-local. An
- * address in any of them was put on the request by our own infrastructure, so
- * it answers "which machine did this arrive on", not "who was it". Anything
- * else — including a public address we cannot vouch for — is a client address
- * and is shown.
- */
-function isInternalAddress(ip) {
-  return /^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip)
-    || ip === '::1'
-    || /^(fc|fd|fe80)/i.test(ip);
-}
 
 class PlatformNotifyService {
   /**
@@ -500,53 +485,25 @@ class PlatformNotifyService {
   }
 
   /**
-   * The address the request actually came from.
+   * The address to print in the footer, or a line saying why there is none.
    *
-   * ── Why this is not just `req.ip` ────────────────────────────────────────
+   * The resolution is `utils/clientIp.util.js` — shared with the audit trail so
+   * the two records of the same event cannot disagree, which is what makes "the
+   * alert says X, check the audit log" a usable instruction.
    *
-   * It was, with `req.headers['x-forwarded-for']` behind a `||` as a fallback —
-   * and that fallback was unreachable. `req.ip` is never falsy on a real
-   * Express request: with no trusted `x-forwarded-for` to resolve, it returns
-   * the SOCKET address, which behind a reverse proxy on the same host is
-   * `::ffff:127.0.0.1`. So every alert footer read as a login from the server
-   * itself, and the branch written to prevent exactly that never ran.
-   *
-   * ── Why `req.ip` is still tried FIRST ────────────────────────────────────
-   *
-   * Because when it works it is the only one of the three that cannot be
-   * forged. `app.set('trust proxy', 1)` makes Express drop the hop nearest the
-   * server and take the entry to its left, so a client that sends its own
-   * `X-Forwarded-For: 1.2.3.4` has that value pushed left and ignored.
-   * `getClientIP` takes the FIRST entry of the same header, which is precisely
-   * the one the client controls. On a security alert — "your password just
-   * changed, from here" — an address the attacker chose is worse than none.
-   *
-   * So the order is: the value Express vouches for, then the resolved context
-   * the audit log stores, then a direct header read for a request that never
-   * passed through requestContext.middleware (a job, a test double). Each is
-   * skipped while it points at this machine or a proxy hop rather than at a
-   * client, which is what makes the fallback chain reachable at all.
-   *
-   * Consulting the headers matters because Express's `trust proxy` reads ONLY
-   * `x-forwarded-for`. A proxy that sets just `X-Real-IP` — a very ordinary
-   * nginx config — leaves `req.ip` on loopback with the truth sitting in a
-   * header beside it.
-   *
-   * ── Loopback is reported, not printed ────────────────────────────────────
-   *
-   * If every candidate is internal, the proxy is forwarding no client address
-   * at all and there is nothing to show. Printing `127.0.0.1` is how this went
-   * unnoticed for as long as it did: it looks like an answer. Saying so instead
-   * turns a silent misconfiguration into a line the operator can act on.
+   * What is decided HERE is presentation. An internal address is the server
+   * talking about itself: it means the proxy forwarded no client address at
+   * all, and printing `127.0.0.1` is how that went unnoticed for as long as it
+   * did — it looks like an answer. Saying so instead turns a silent
+   * misconfiguration into a line the operator can act on. The audit trail makes
+   * the opposite choice and stores the loopback, because a log is a record and
+   * a record with a hole in it is worse than one with a dull value.
    */
   _clientIp(req) {
-    for (const candidate of [req.ip, req.context?.ip, getClientIP(req)]) {
-      // `::ffff:203.0.113.9` is an IPv4 address arriving over a dual-stack
-      // socket. The prefix is noise on a phone screen.
-      const ip = String(candidate || '').trim().replace(/^::ffff:/i, '');
-      if (ip && ip !== 'unknown' && !isInternalAddress(ip)) return ip;
-    }
-    return '— (প্রক্সি ঠিকানা পাঠাচ্ছে না)';
+    const ip = resolveClientIp(req);
+    if (!ip) return '— (ঠিকানা পাওয়া যায়নি)';
+    if (isInternalAddress(ip)) return '— (প্রক্সি ঠিকানা পাঠাচ্ছে না)';
+    return ip;
   }
 
   /** Coarse device label. Enough to tell a phone from a desktop; nothing more. */
