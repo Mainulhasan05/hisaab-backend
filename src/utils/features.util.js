@@ -236,6 +236,36 @@ const FEATURES = Object.freeze({
      */
     requires: [],
   },
+  fundAccounts: {
+    bn: 'অ্যাকাউন্ট ও ফান্ড',
+    en: 'Fund accounts',
+    description:
+      'Named places the shop\'s money sits — the cash box, each bank account, ' +
+      'each bKash/Nagad number — every one carrying its own balance, plus ' +
+      'transfers between them and the MFS/bank charges those transfers cost. ' +
+      'Cash boxes are per BRANCH; bank, MFS and card accounts are shared ' +
+      'shop-wide. Off = the shop sees what it always has: a payment METHOD on ' +
+      'each row and a balance for the cash drawer alone. Opening balances are ' +
+      'typed in by the owner, never inferred. See FUND_ACCOUNT_PLAN.md.',
+    /**
+     * NO PREREQUISITES, and one non-obvious consequence.
+     *
+     * Every collection this reads from — sales, purchases, expenses, payments —
+     * exists for every shop from day one, so there is nothing to switch on
+     * first.
+     *
+     * The consequence: this is NOT a pure read-path switch, which most entries
+     * here are. Turning it on creates accounts and starts moving balances;
+     * turning it off must therefore leave those rows alone rather than
+     * pretending they never happened. In particular a transfer already recorded
+     * keeps affecting the cash register after the flag goes off — the money did
+     * leave the drawer, and making it reappear because a capability was
+     * withdrawn would be a worse lie than the one the flag was hiding. The flag
+     * gates the WRITE surface; it never gates the truth of data already
+     * written. See FUND_ACCOUNT_PLAN.md Phase 3.
+     */
+    requires: [],
+  },
 });
 
 /**

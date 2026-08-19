@@ -42,6 +42,20 @@ const expenseSchema = new mongoose.Schema({
     enum: Object.values(PAYMENT_METHODS),
     default: PAYMENT_METHODS.CASH
   },
+  /**
+   * Which PaymentAccount the money left. `paymentMethod` above says how; this
+   * says from where. Null for a shop without `features.fundAccounts`, and for
+   * every expense written before this field existed.
+   *
+   * A VOIDED expense returns the money to this account — `voidExpense` applies
+   * the opposite delta. That is why the void path is not merely a flag flip
+   * once accounts are on.
+   */
+  account: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PaymentAccount',
+    default: null
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

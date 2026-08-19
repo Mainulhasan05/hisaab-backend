@@ -57,6 +57,27 @@ const MODULES = {
   suppliers:     { key: 'suppliers',     label: 'সরবরাহকারী',        labelEn: 'Suppliers',       actions: ['view', 'create', 'update', 'delete'] },
   expenses:      { key: 'expenses',      label: 'খরচ',               labelEn: 'Expenses',        actions: ['view', 'create', 'update', 'delete'] },
   cash_register: { key: 'cash_register', label: 'ক্যাশ রেজিস্টার',    labelEn: 'Cash Register',   actions: ['view', 'create', 'update'] },
+  // Fund accounts — where the shop's money sits. Inert unless
+  // `features.fundAccounts` is on, exactly as `storefront`'s actions are inert
+  // without that capability: the matrix describes what a role MAY do and the
+  // capability decides whether the screen exists at all.
+  //
+  // `transfer` is separate from `create` for the same reason `sales.discount`
+  // is separate from `sales.create`. Creating an account is bookkeeping —
+  // typing a name and a bank. Moving ৳60,000 from the drawer to the bank is
+  // spending authority over the shop's actual money, and an owner must be able
+  // to grant one without the other.
+  //
+  // There is deliberately NO `delete`. An account is soft-closed, never
+  // removed: sales, purchases, expenses and payments point at it, and a
+  // dangling reference turns settled history unreadable. Closing rides on
+  // `update`, which is what it is.
+  //
+  // `openingBalance` is OWNER-ONLY and is not an action here — it is a FIELD
+  // gate enforced in the service, the same shape as `Customer.openingDue` and
+  // `isWholesale` (I-7). It sets the origin of every figure the account will
+  // ever show, so it must not be reachable by handing someone `update`.
+  accounts:      { key: 'accounts',      label: 'অ্যাকাউন্ট ও ফান্ড',  labelEn: 'Fund Accounts',   actions: ['view', 'create', 'update', 'transfer'] },
   reports:       { key: 'reports',       label: 'রিপোর্ট',            labelEn: 'Reports',         actions: ['view', 'view_profit'] },
   settings:      { key: 'settings',      label: 'সেটিংস',            labelEn: 'Settings',        actions: ['view', 'update'] },
   sms:           { key: 'sms',           label: 'এসএমএস',            labelEn: 'SMS',             actions: ['view', 'create'] },
@@ -265,6 +286,11 @@ const ROLE_PRESETS = {
       // the owner's decision, the same way `isWholesale` is.
       online_orders: ['view', 'create', 'update', 'cancel'],
       storefront:    ['view', 'update'],
+      // Maintaining the shop's accounts is bookkeeping and sits with the
+      // manager. `transfer` is withheld: moving the day's takings from the
+      // drawer to the bank is spending authority over real money, and it stays
+      // with the owner unless they hand it over deliberately.
+      accounts:      ['view', 'create', 'update'],
     }),
   },
   // Runs the counter: sells, takes payment against dues, handles walk-in
@@ -321,6 +347,11 @@ const ROLE_PRESETS = {
       // A cashier taking a Facebook order over the phone is doing counter work
       // by another name — same person, same judgement as ringing up a sale.
       online_orders: ['view', 'create', 'update'],
+      // No `accounts` grant, and that does NOT stop a cashier taking payment
+      // into a named account. Picking where the money goes rides on
+      // `sales.create` via the names-only `/accounts/options` surface; this
+      // module is the ADMIN screen, where the balances are. A shop that wants
+      // its cashier reading the bank balance grants it deliberately.
     }),
   },
   // Sell and check stock, nothing else. No reports, no purchase ledger, no
@@ -338,6 +369,9 @@ const ROLE_PRESETS = {
       sms:           ['view', 'create'],
       stock:         ['view'],
       stock_transfers: ['view'],
+      // No `accounts` grant — see the cashier. Floor staff can say which
+      // account took the money without being able to read what is in it, which
+      // is the whole point of keeping the picker off this module.
     }),
   },
   // Builds the catalogue and receives stock, so it needs buying prices — but
@@ -364,7 +398,7 @@ const ROLE_PRESETS = {
  * created with. To roll a change out to shops that already exist, bump this and
  * add a PRESET_UPGRADES entry.
  */
-const PRESET_VERSION = 7;
+const PRESET_VERSION = 8;
 
 /**
  * Additive grants applied once per role, in version order.
@@ -534,6 +568,37 @@ const PRESET_UPGRADES = [
     grants: {
       manager: { customers: ['backdate'] },
       cashier: { customers: ['backdate'] },
+    },
+  },
+  {
+    version: 8,
+    /**
+     * Fund accounts — reading the shop's account list, and maintaining it.
+     *
+     * Inert in every shop without `features.fundAccounts`, which is all of them
+     * on the day this ships. That is what makes it safe to grant platform-wide
+     * rather than shop by shop, and it is the same argument version 3 made for
+     * the online panel and version 4 for line discounts.
+     *
+     * MANAGER ONLY, and the omissions are the interesting part.
+     *
+     * Cashier and salesperson are left out — as they are from every upgrade
+     * since v3 — and here it costs them nothing. Taking payment into a named
+     * account rides on `sales.create` through the names-only
+     * `/accounts/options` surface; this module is the admin screen, where the
+     * balances live. So the till keeps working and nobody silently gains the
+     * ability to read what is in the shop's bank account.
+     *
+     * `transfer` reaches NOBODY. Moving the day's takings out of the drawer is
+     * spending authority over real money and it stays with the owner until they
+     * hand it over on purpose — which is the entire reason it is a separate
+     * action rather than part of `update`.
+     *
+     * Grants only, as ever — an owner who has already narrowed the manager role
+     * keeps their decision.
+     */
+    grants: {
+      manager: { accounts: ['view', 'create', 'update'] },
     },
   },
 ];

@@ -16,6 +16,7 @@ const expenseRoutes = require('./expense.routes');
 const supplierRoutes = require('./supplier.routes');
 const purchaseRoutes = require('./purchase.routes');
 const cashRegisterRoutes = require('./cashRegister.routes');
+const paymentAccountRoutes = require('./paymentAccount.routes');
 const salesReturnRoutes = require('./salesReturn.routes');
 const heartbeatRoutes = require('./heartbeat.routes');
 const contactRoutes = require('./contact.routes');
@@ -60,6 +61,9 @@ router.use('/expenses', expenseRoutes);
 router.use('/suppliers', supplierRoutes);
 router.use('/purchases', purchaseRoutes);
 router.use('/cash-register', cashRegisterRoutes);
+// Fund accounts. Gated end-to-end on `features.fundAccounts` inside the router
+// itself, so a shop without the capability 404s on every verb.
+router.use('/accounts', paymentAccountRoutes);
 router.use('/sales-returns', salesReturnRoutes);
 router.use('/heartbeat', heartbeatRoutes);
 router.use('/contact', contactRoutes);

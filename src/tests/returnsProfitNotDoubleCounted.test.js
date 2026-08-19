@@ -36,6 +36,7 @@ const Sale = require('../models/Sale.model');
 const Expense = require('../models/Expense.model');
 const SalesReturn = require('../models/SalesReturn.model');
 const Purchase = require('../models/Purchase.model');
+const AccountTransfer = require('../models/AccountTransfer.model');
 const cacheService = require('../services/cache.service');
 const reportService = require('../services/report.service');
 
@@ -82,6 +83,10 @@ beforeEach(() => {
     { totalReturns: 400, totalProfitLoss: RETURN_PROFIT_LOSS, count: 1 },
   ]);
 
+  // No transfers: the shop in this fixture has no fund accounts, so the MFS /
+  // bank charge line is ৳0 and `netProfit` is unchanged — which is exactly what
+  // these tests assert about it.
+  jest.spyOn(AccountTransfer, 'aggregate').mockResolvedValue([]);
   jest.spyOn(Purchase, 'aggregate').mockResolvedValue([
     { totalPurchases: 0, totalPaid: 0, totalDue: 0, count: 0 },
   ]);

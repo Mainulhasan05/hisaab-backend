@@ -27,6 +27,8 @@ const Payment = require('../models/Payment.model');
 const Expense = require('../models/Expense.model');
 const Purchase = require('../models/Purchase.model');
 const CashRegister = require('../models/CashRegister.model');
+const PaymentAccount = require('../models/PaymentAccount.model');
+const AccountTransfer = require('../models/AccountTransfer.model');
 const cashRegisterService = require('../services/cashRegister.service');
 const { getBangladeshDayRange, toBangladeshDateStr } = require('../utils/bdTime.util');
 
@@ -40,6 +42,16 @@ function stubAggregates() {
   jest.spyOn(Expense, 'aggregate').mockResolvedValue([]);
   jest.spyOn(Purchase, 'aggregate').mockResolvedValue([]);
   jest.spyOn(Payment, 'aggregate').mockImplementation(payment);
+  // Fund accounts (FUND_ACCOUNT_PLAN Phase 3). The till now also asks which
+  // cash accounts it is answerable for, and sums the transfers into and out of
+  // them — banking the day's takings has to leave the drawer.
+  //
+  // Stubbed EMPTY here on purpose: that is the shape of a shop without
+  // `features.fundAccounts`, which is every shop these tests describe. An empty
+  // account list must make both transfer aggregations no-ops, which is what
+  // keeps the register byte-identical for them (I-1).
+  jest.spyOn(PaymentAccount, 'find').mockReturnValue({ lean: () => Promise.resolve([]) });
+  jest.spyOn(AccountTransfer, 'aggregate').mockResolvedValue([]);
   return payment;
 }
 

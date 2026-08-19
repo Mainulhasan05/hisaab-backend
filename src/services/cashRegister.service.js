@@ -4,6 +4,8 @@ const Sale = require('../models/Sale.model');
 const Payment = require('../models/Payment.model');
 const Expense = require('../models/Expense.model');
 const Purchase = require('../models/Purchase.model');
+const AccountTransfer = require('../models/AccountTransfer.model');
+const PaymentAccount = require('../models/PaymentAccount.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
@@ -34,6 +36,24 @@ class CashRegisterService {
     const shopOid = new mongoose.Types.ObjectId(shopId);
     const branchMatch = branchId ? { branch: new mongoose.Types.ObjectId(branchId) } : {};
 
+    /**
+     * The cash accounts this till is answerable for.
+     *
+     * A transfer names ACCOUNTS, not methods, so the register has to know which
+     * of them is its own drawer before it can tell "banked the takings" from
+     * "moved money between two bank accounts", which is none of its business.
+     *
+     * Empty for every shop without `features.fundAccounts` — they hold no
+     * accounts at all — and an empty list makes both aggregations below match
+     * nothing and return 0. That is I-1 by construction rather than by a flag
+     * check: the register renders exactly as it always has.
+     */
+    const cashAccounts = await PaymentAccount.find(
+      { shop: shopOid, type: 'cash', ...(branchId ? branchMatch : {}) },
+      { _id: 1 }
+    ).lean();
+    const cashAccountIds = cashAccounts.map((a) => a._id);
+
     const [
       cashSales,
       cashDueCollections,
@@ -41,6 +61,8 @@ class CashRegisterService {
       cashPurchases,
       cashRefunds,
       cashSupplierPayments,
+      transfersIn,
+      transfersOut,
     ] = await Promise.all([
       // ── Cash taken at the counter ────────────────────────────────────────
       //
@@ -216,6 +238,38 @@ class CashRegisterService {
         },
         { $group: { _id: null, total: { $sum: '$amount' } } },
       ]),
+
+      // ── Money banked, or otherwise moved OUT of the drawer ───────────────
+      //
+      // `amountOut` is what left this account. The charge on a transfer is the
+      // gap between `amountOut` and `amountIn`, and it is NOT the drawer's
+      // problem — the fee is taken on the other side of the counter. The drawer
+      // is short by exactly what was handed over.
+      //
+      // Bounded by `date`, the day the money actually moved, not `createdAt` —
+      // the same rule `Payment.paidAt` follows, and for the same reason: a
+      // Thursday deposit entered on Saturday belongs to Thursday's till.
+      cashAccountIds.length === 0 ? Promise.resolve([]) : AccountTransfer.aggregate([
+        {
+          $match: {
+            shop: shopOid,
+            toAccount: { $in: cashAccountIds },
+            date: { $gte: start, $lte: end },
+          },
+        },
+        { $group: { _id: null, total: { $sum: '$amountIn' } } },
+      ]),
+
+      cashAccountIds.length === 0 ? Promise.resolve([]) : AccountTransfer.aggregate([
+        {
+          $match: {
+            shop: shopOid,
+            fromAccount: { $in: cashAccountIds },
+            date: { $gte: start, $lte: end },
+          },
+        },
+        { $group: { _id: null, total: { $sum: '$amountOut' } } },
+      ]),
     ]);
 
     return {
@@ -227,6 +281,11 @@ class CashRegisterService {
       // register already renders.
       purchases: (cashPurchases[0]?.total || 0) + (cashSupplierPayments[0]?.total || 0),
       refunds: cashRefunds[0]?.total || 0,
+      // Cash walked INTO the drawer from a bank or an MFS account, and cash
+      // walked OUT to one. Both zero for a shop that has never recorded a
+      // transfer.
+      transfersIn: transfersIn[0]?.total || 0,
+      transfersOut: transfersOut[0]?.total || 0,
     };
   }
 
@@ -300,9 +359,11 @@ class CashRegisterService {
     // Update auto-calculated fields (preserve manual 'other' entries)
     register.cashIn.sales = flows.sales;
     register.cashIn.dueCollections = flows.dueCollections;
+    register.cashIn.transfers = flows.transfersIn;
     register.cashOut.expenses = flows.expenses;
     register.cashOut.purchases = flows.purchases;
     register.cashOut.refunds = flows.refunds;
+    register.cashOut.transfers = flows.transfersOut;
 
     await register.save();
 
@@ -365,9 +426,11 @@ class CashRegisterService {
     const flows = await this._calculateCashFlows(shopId, start, end, branchId);
     register.cashIn.sales = flows.sales;
     register.cashIn.dueCollections = flows.dueCollections;
+    register.cashIn.transfers = flows.transfersIn;
     register.cashOut.expenses = flows.expenses;
     register.cashOut.purchases = flows.purchases;
     register.cashOut.refunds = flows.refunds;
+    register.cashOut.transfers = flows.transfersOut;
     await register.save();
 
     // Audit log
@@ -430,9 +493,11 @@ class CashRegisterService {
     const flows = await this._calculateCashFlows(shopId, start, end, branchId);
     register.cashIn.sales = flows.sales;
     register.cashIn.dueCollections = flows.dueCollections;
+    register.cashIn.transfers = flows.transfersIn;
     register.cashOut.expenses = flows.expenses;
     register.cashOut.purchases = flows.purchases;
     register.cashOut.refunds = flows.refunds;
+    register.cashOut.transfers = flows.transfersOut;
 
     await register.save();
 
@@ -489,9 +554,11 @@ class CashRegisterService {
     const flows = await this._calculateCashFlows(shopId, start, end, branchId);
     register.cashIn.sales = flows.sales;
     register.cashIn.dueCollections = flows.dueCollections;
+    register.cashIn.transfers = flows.transfersIn;
     register.cashOut.expenses = flows.expenses;
     register.cashOut.purchases = flows.purchases;
     register.cashOut.refunds = flows.refunds;
+    register.cashOut.transfers = flows.transfersOut;
 
     register.actualClosing = actualClosing;
     register.status = 'closed';
@@ -635,9 +702,11 @@ class CashRegisterService {
     const flows = await this._calculateCashFlows(shopId, start, end, branchId);
     register.cashIn.sales = flows.sales;
     register.cashIn.dueCollections = flows.dueCollections;
+    register.cashIn.transfers = flows.transfersIn;
     register.cashOut.expenses = flows.expenses;
     register.cashOut.purchases = flows.purchases;
     register.cashOut.refunds = flows.refunds;
+    register.cashOut.transfers = flows.transfersOut;
 
     await register.save();
 

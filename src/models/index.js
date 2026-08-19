@@ -31,6 +31,28 @@ module.exports = {
   PlatformPayment: require('./PlatformPayment.model'),
   SubscriptionEvent: require('./SubscriptionEvent.model'),
   PlatformSetting: require('./PlatformSetting.model'),
+  // Where the shop's own money sits — the cash box, each bank account, each
+  // bKash/Nagad number — each carrying its own balance. Registered here or
+  // `sync-indexes` never ships the unique {shop, branch, name} key to
+  // production, where autoIndex is off, and two accounts with the same name can
+  // then exist in one branch with nothing to say which one a payment meant.
+  PaymentAccount: require('./PaymentAccount.model'),
+  // Money moving between two of the above — banking the takings, cashing out
+  // bKash. Registered here or `sync-indexes` never ships the per-shop unique
+  // `transferNo` key to production, where autoIndex is off, and two transfers
+  // can then share a number with nothing to tell them apart.
+  AccountTransfer: require('./AccountTransfer.model'),
+  // The atomic sequence behind that number. Registered for the same reason —
+  // its unique `{shop}` key is what stops two concurrent transfers being handed
+  // the same sequence, which is the race `ReturnCounter` was created to end.
+  AccountTransferCounter: require('./AccountTransferCounter.model'),
+  // Owner deposits and withdrawals, loans, corrections — money that moves a
+  // balance and never touches profit. Registered here or `sync-indexes` never
+  // ships its `{shop, account, date}` index and the money-position screen falls
+  // back to a collection scan on every load.
+  AccountEntry: require('./AccountEntry.model'),
+  // "The statement says X, the app says Y." Same reason.
+  AccountReconciliation: require('./AccountReconciliation.model'),
   StockTransaction: require('./StockTransaction.model'),
   AuditLog: require('./AuditLog.model'),
   SMSLog: require('./SMSLog.model'),

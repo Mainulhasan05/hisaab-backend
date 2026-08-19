@@ -9,6 +9,7 @@ const { AppError } = require('../middleware/error.middleware');
 const { branchFilter, requireBranch, isBranchCustomerScope } = require('../utils/branchScope.util');
 const { normalizePhone } = require('../utils/phone.util');
 const { runInTransaction } = require('../utils/transaction.util');
+const paymentAccountService = require('./paymentAccount.service');
 const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.util');
 const { resolveWholesaleFlag } = require('../utils/pricing.util');
 const { toMoney } = require('../utils/invoiceMath.util');
@@ -1157,6 +1158,15 @@ class CustomerService {
       throw new AppError('পেমেন্টের পরিমাণ বাকির চেয়ে বেশি', 'Payment amount exceeds due balance', 400);
     }
 
+    // Which fund account the money came into. Named by the caller, or resolved
+    // from the method's default so an older client that posts a bare
+    // `method: 'bkash'` still books the money somewhere real. Null throughout
+    // for a shop without `features.fundAccounts`, which makes the delta below a
+    // no-op (I-1).
+    const account = paymentData.account
+      ? (await paymentAccountService.assertUsableAccount(shopId, paymentData.account, req))._id
+      : await paymentAccountService.resolveAccountForMethod(req?.shop || { _id: shopId }, method || 'cash', req);
+
     // Create payment record. `branch` is required: cashRegister._calculateCashFlows
     // matches due collections by branch, so an untagged payment is invisible to
     // every branch's till and understates expected closing (FEATURE_AUDIT.md H-6).
@@ -1166,12 +1176,24 @@ class CustomerService {
       customer: customerId,
       amount,
       method: method || 'cash',
+      account,
       transactionId,
       type: 'due_collection',
       paidAt,
       notes,
       receivedBy: userId,
     }], sessionOpt);
+
+    // Money in. `atCheckout` is false on this row by default, which is what
+    // tells `recalc-account-balances.js` to count it here rather than assume it
+    // was already counted as a sale leg — the same discriminator the cash
+    // register depends on.
+    await paymentAccountService.applyAccountDelta({
+      shop: shopId,
+      account,
+      amount,
+      session: session || null,
+    });
 
     // Update customer balance — the shop-wide rollup is maintained in both
     // modes, so the flag stays a read-path switch with nothing to migrate.

@@ -189,6 +189,23 @@ const salesReturnSchema = new mongoose.Schema({
     type: String,
     enum: Object.values(PAYMENT_METHODS)
   },
+  /**
+   * Which PaymentAccount the refund was actually paid out of.
+   *
+   * Covers both moments this document can part with money: a same-day cash
+   * refund (`paymentMethod`) and the later settlement of a store credit
+   * (`settlementMethod`). One field for both because an account can only be
+   * debited once per return — whichever of the two happened, this is where the
+   * money came from.
+   *
+   * Null for an `adjustment` refund, which moves no cash at all, and for every
+   * shop without `features.fundAccounts`.
+   */
+  account: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PaymentAccount',
+    default: null
+  },
   // Required. A return moves stock back in and money back out, and six months
   // later "why" is the only thing that separates a damaged delivery from a
   // sizing problem from a staff member quietly reversing their own sales. It

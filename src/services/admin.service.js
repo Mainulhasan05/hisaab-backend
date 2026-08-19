@@ -2355,6 +2355,30 @@ class AdminService {
       backfilled[Model.modelName] = total;
     }
 
+    /**
+     * `PaymentAccount` is deliberately NOT in the list above, and this is the
+     * one collection where the blanket back-fill would be actively wrong.
+     *
+     * A blanket `$set: { branch: defaultBranch }` would tag every BANK account
+     * and every bKash number to the Main Branch. Those are shared shop-wide by
+     * design (FUND_ACCOUNT_PLAN D-3) and carry `branch: null` on purpose — the
+     * shop has one bank account, not one per counter. Stamping them would hide
+     * every one of them from every other branch the moment a second branch
+     * existed, and the money paid from them would have nowhere to go.
+     *
+     * The §9.4 warning that untagged rows "become invisible" does not apply
+     * here either: `accountScope.util.accountFilter` matches
+     * `$or: [{branch: null}, {branch: active}]`, so a shared account stays
+     * visible from everywhere by construction. It is precisely the CASH boxes
+     * that need tagging, because a drawer belongs to a counter.
+     */
+    const PaymentAccount = require('../models/PaymentAccount.model');
+    const cashBoxes = await PaymentAccount.updateMany(
+      { shop: shopId, branch: null, type: 'cash' },
+      { $set: { branch: defaultBranch._id } }
+    );
+    backfilled[PaymentAccount.modelName] = cashBoxes.modifiedCount;
+
     // 3. Assign all non-owner staff to the default branch
     const staffResult = await User.updateMany(
       { shop: shopId, isOwner: false, branch: null },

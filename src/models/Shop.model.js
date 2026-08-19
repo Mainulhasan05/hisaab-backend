@@ -420,6 +420,19 @@ const shopSchema = new mongoose.Schema({
     aiExpense: {
       type: Boolean,
       default: false
+    },
+    // Named places money sits — bank accounts, bKash numbers, the cash box —
+    // each carrying its own balance, plus transfers between them. Off = the
+    // shop sees exactly what it always has: a payment METHOD on each row and a
+    // balance for the cash drawer alone. See FUND_ACCOUNT_PLAN.md.
+    //
+    // Most shops do not need this. A single counter taking cash and bKash has
+    // one drawer and one number, and asking them to pick an account on every
+    // sale is a tax on the majority for the benefit of the few — the same
+    // reasoning that gates `packaging` and `wholesale`.
+    fundAccounts: {
+      type: Boolean,
+      default: false
     }
   },
 

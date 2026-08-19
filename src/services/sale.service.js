@@ -11,6 +11,7 @@ const AuditLog = require('../models/AuditLog.model');
 const InvoiceCounter = require('../models/InvoiceCounter.model');
 const { AppError } = require('../middleware/error.middleware');
 const cacheService = require('./cache.service');
+const paymentAccountService = require('./paymentAccount.service');
 const logger = require('../utils/logger.util');
 const { branchFilter, requireBranch, getBranchCode, wrongBranchError } = require('../utils/branchScope.util');
 const { normalizePhone } = require('../utils/phone.util');
@@ -490,6 +491,37 @@ class SaleService {
     } else if (paid > 0) {
       // Legacy single-method: auto-create payments array for consistency
       payments = [{ method: paymentMethod, amount: paid }];
+    }
+
+    /**
+     * Resolve each leg to a fund account.
+     *
+     * ── Why this is here and not in the POS payload ─────────────────────────
+     *
+     * A shop WITHOUT `features.fundAccounts` sends no `account` on any leg, and
+     * `resolveAccountForMethod` returns null for it without so much as a query
+     * — so every leg below stays null and `applyAccountDelta` is a no-op. I-1
+     * holds by construction: the flag-off path is byte-identical to what it was.
+     *
+     * A shop WITH the capability may still send a bare `method`, because the
+     * account picker is opt-in per screen and an older client will not have it.
+     * Falling back to that method's default account is what lets the capability
+     * be adopted without every form being rewritten first.
+     *
+     * `assertUsableAccount` on the named ones because visibility is not
+     * authority — an owner in All-Branches can SEE every branch's drawer and
+     * must not be able to ring a Dhaka sale into the Chittagong one.
+     */
+    for (const leg of payments) {
+      if (leg.account) {
+        await paymentAccountService.assertUsableAccount(shopId, leg.account, req);
+      } else {
+        leg.account = await paymentAccountService.resolveAccountForMethod(
+          req?.shop || { _id: shopId },
+          leg.method,
+          req
+        );
+      }
     }
 
     // Helper to safely extract a string ObjectId from item.productId or item.product (string, ObjectId, or object)
@@ -1619,10 +1651,45 @@ class SaleService {
         customer: customer?._id,
         amount: paid,
         method: paymentMethod,
+        // The LARGEST leg's account, matching `method` right above it. This row
+        // is the invoice's payment history, not the balance mover — the legs
+        // below are what actually move money, one account each. Naming the
+        // dominant one here keeps the two fields telling the same story rather
+        // than one saying `bkash` and the other pointing at the cash box.
+        account: payments.find((leg) => leg.method === paymentMethod)?.account || null,
         type: 'sale_payment',
         atCheckout: true,
         receivedBy: userId,
       }], sessionOpt);
+    }
+
+    /**
+     * Move the money, leg by leg.
+     *
+     * ── Why the legs and not the `Payment` row above ────────────────────────
+     *
+     * That row carries ONE method for the whole `paid`, which on a split
+     * invoice is only the largest leg — crediting a bKash account with ৳1000
+     * when ৳400 of it went into the drawer. The legs are the only place the
+     * split truth lives, so they are what moves the balances. This is the same
+     * distinction `report.service` got wrong for the method breakdown, and the
+     * cash register got right.
+     *
+     * The checkout flag set on the row above is what keeps
+     * `recalc-account-balances.js` from counting this money twice: the script
+     * sums these legs and skips every `Payment` row carrying that flag.
+     *
+     * Inside `sessionOpt`, deliberately. A balance moved outside the transaction
+     * that moved the money it describes survives a rollback the money did not —
+     * the sale would vanish and the ৳1000 would still be in the drawer.
+     */
+    for (const leg of payments) {
+      await paymentAccountService.applyAccountDelta({
+        shop: shopId,
+        account: leg.account,
+        amount: Number(leg.amount) || 0,
+        session: sessionOpt.session || null,
+      });
     }
 
     // Update shop statistics
@@ -2302,6 +2369,39 @@ class SaleService {
         customer: sale.customer,
         branch: sale.branch,
       }, session);
+    }
+
+    /**
+     * Take the money back out of the accounts it went into.
+     *
+     * ── Why this is leg-by-leg and reads the SALE, not the payload ──────────
+     *
+     * `createSale` credited one account per leg. The reversal has to debit the
+     * same ones, in the same amounts, or the balances keep money the shop no
+     * longer has — and it will not show up as an error anywhere. It will show up
+     * months later as a bank balance that has never matched the statement, which
+     * is exactly how `variants[].stock` drifted from `product.stock`.
+     *
+     * `sale.payments[]` carries the accounts the money actually went to, which
+     * is why the field is stored per leg rather than resolved again here: a
+     * default account can be changed between the sale and its cancellation, and
+     * re-resolving would credit today's default with money that went into
+     * yesterday's.
+     *
+     * Money collected AFTER checkout is deliberately not touched here. Those are
+     * `Payment` rows with `atCheckout: false`, they are reversed on their own
+     * paths, and a cancelled invoice with a later collection against it is
+     * already refused above by the returns guard.
+     *
+     * Inside the transaction, like every other reversal in this block.
+     */
+    for (const leg of (sale.payments || [])) {
+      await paymentAccountService.applyAccountDelta({
+        shop: shopId,
+        account: leg.account,
+        amount: -(Number(leg.amount) || 0),
+        session: session || null,
+      });
     }
 
     // Update sale status

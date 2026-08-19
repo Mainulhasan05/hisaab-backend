@@ -10,6 +10,7 @@ const { branchFilter, requireBranch } = require('../utils/branchScope.util');
 const { endOfBangladeshDay, getBangladeshTodayRange, getBangladeshMonthRange, toBangladeshMonthStr } = require('../utils/bdTime.util');
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
+const paymentAccountService = require('./paymentAccount.service');
 const {
   // `parseQuantity` is reached through `resolveLineQuantity` now, so the pack
   // branch and the loose branch cannot validate a quantity two different ways.
@@ -120,6 +121,7 @@ class PurchaseService {
     return await runInTransaction(async (session) => {
       const sessionOpt = session ? { session } : {};
       const { items, supplier, paid, paymentMethod, date, notes } = purchaseData;
+      const rawPayments = Array.isArray(purchaseData.payments) ? purchaseData.payments : [];
 
     if (!items || items.length === 0) {
       throw new AppError('কমপক্ষে একটি পণ্য যোগ করুন', 'At least one item is required', 400);
@@ -308,6 +310,49 @@ class PurchaseService {
     // Generate invoice number
     const invoiceNo = await Purchase.generateInvoiceNo(shopId);
 
+    /**
+     * Split payment on a purchase — ৳1,50,000 by bank and ৳50,000 in cash, in
+     * one entry, each leg naming where the money left from and what reference
+     * it left behind.
+     *
+     * ── Derived exactly the way `createSale` derives its own ─────────────────
+     *
+     * `paid` becomes the sum of the legs and `paymentMethod` becomes the
+     * LARGEST leg, so every existing reader keeps working: the purchase list
+     * filter, the cash register's `paymentMethod: 'cash'` query, the reports.
+     * The pre-save hook that recalculates `due` and `status` reads `paid`, and
+     * `paid` still means what it always did.
+     *
+     * A caller that sends no `payments[]` gets the legacy single-method array
+     * built for it, which is what makes every existing client keep working
+     * unchanged — again mirroring `createSale`.
+     */
+    let paidAmount = parseFloat(paid) || 0;
+    let primaryMethod = paymentMethod || 'cash';
+    let payments = rawPayments;
+
+    if (payments.length > 0) {
+      paidAmount = quantizeMoney(payments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0));
+      primaryMethod = payments.reduce((max, p) => (Number(p.amount) > Number(max.amount) ? p : max), payments[0]).method;
+    } else if (paidAmount > 0 && primaryMethod !== 'credit') {
+      // `credit` is the absence of a payment, not a place money sits, so it
+      // never becomes a leg — and an unpaid purchase must not debit anything.
+      payments = [{ method: primaryMethod, amount: paidAmount }];
+    }
+
+    // Resolve each leg to a fund account. Null throughout for a shop without
+    // `features.fundAccounts` (I-1); a named account is checked against the
+    // caller's branch because visibility is not authority.
+    for (const leg of payments) {
+      if (leg.account) {
+        await paymentAccountService.assertUsableAccount(shopId, leg.account, req);
+      } else {
+        leg.account = await paymentAccountService.resolveAccountForMethod(
+          req?.shop || { _id: shopId }, leg.method, req
+        );
+      }
+    }
+
     // Create purchase
     const branchId = req ? requireBranch(req) : null;
     const [purchase] = await Purchase.create([{
@@ -318,12 +363,25 @@ class PurchaseService {
       supplierName,
       items: preparedItems,
       totalAmount,
-      paid: parseFloat(paid) || 0,
-      paymentMethod: paymentMethod || 'cash',
+      paid: paidAmount,
+      paymentMethod: primaryMethod,
+      payments,
       date: date ? new Date(date) : new Date(),
       notes: notes?.trim(),
       createdBy: userId,
     }], sessionOpt);
+
+    // Money out, leg by leg — the bank account drops ৳1,50,000 and the cash box
+    // drops ৳50,000, from this one entry. Inside the transaction that created
+    // the purchase, so a rollback takes the balances with it.
+    for (const leg of payments) {
+      await paymentAccountService.applyAccountDelta({
+        shop: shopId,
+        account: leg.account,
+        amount: -(Number(leg.amount) || 0),
+        session: session || null,
+      });
+    }
 
     // Increase stock for each item. Stock lives on the product document, which
     // belongs to exactly one branch — the separate per-branch stock ledger is
@@ -909,6 +967,32 @@ class PurchaseService {
       }, session);
     }
 
+    /**
+     * Put the money back into the accounts it left.
+     *
+     * Reads `purchase.payments[]` — the accounts the money ACTUALLY left from —
+     * rather than re-resolving the method's default, because a shop can change
+     * which account is the default between buying and cancelling, and
+     * re-resolving would credit today's account with money that came out of
+     * yesterday's.
+     *
+     * Empty for purchases written before split payments existed and for shops
+     * without the capability, in which case this loop does nothing at all.
+     *
+     * Payments recorded LATER against this purchase (`recordPayment`) are not
+     * unwound here — those are `Payment` rows with their own accounts, and a
+     * cancelled purchase carrying settled supplier payments is a case the
+     * supplier ledger above already declines to net out.
+     */
+    for (const leg of (purchase.payments || [])) {
+      await paymentAccountService.applyAccountDelta({
+        shop: shopId,
+        account: leg.account,
+        amount: Number(leg.amount) || 0,
+        session: session || null,
+      });
+    }
+
     purchase.status = 'cancelled';
     await purchase.save(sessionOpt);
 
@@ -965,7 +1049,17 @@ class PurchaseService {
   }
   // Record payment for a purchase
   async recordPayment(shopId, userId, purchaseId, paymentData, req = null) {
-    const { method = 'cash', notes } = paymentData;
+    /**
+     * `reference` and `transactionId` were dropped on the floor.
+     *
+     * The `Payment` model has carried both fields since it was written; this
+     * method simply never accepted them, so a ৳2,00,000 bank transfer to a
+     * supplier was recorded as the word `bank` — no cheque number, no transfer
+     * reference, nothing to match against the bank statement when the supplier
+     * says the money never arrived. That is the single most consequential
+     * payment a shop makes and it was the least traceable.
+     */
+    const { method = 'cash', notes, reference, transactionId } = paymentData;
     // Coerced before the comparisons below. The `<= 0` guard was already here
     // and correct, but a string amount slipped past it into `purchase.paid +=`,
     // where `0 + '500'` concatenates rather than adds.
@@ -1003,15 +1097,34 @@ class PurchaseService {
     // above already restricts a branch to paying its own purchases, so the two
     // are the same in normal use — but an owner in All-Branches has no active
     // branch, and the debt belongs to whichever branch bought the goods.
+    // Which fund account the money left. Attributed like `branch` below — to
+    // the account the caller names, or the method's default. Null for a shop
+    // without `features.fundAccounts` (I-1).
+    const account = paymentData.account
+      ? (await paymentAccountService.assertUsableAccount(shopId, paymentData.account, req))._id
+      : await paymentAccountService.resolveAccountForMethod(req?.shop || { _id: shopId }, method, req);
+
     const payment = await Payment.create({
       shop: shopId,
       branch: purchase.branch || null,
       purchase: purchaseId,
       amount,
       method,
+      account,
+      reference,
+      transactionId,
       type: 'purchase_payment',
       notes,
       receivedBy: userId,
+    });
+
+    // Money out. `atCheckout` is false by default on this row, which is what
+    // tells `recalc-account-balances.js` to count it here rather than assume it
+    // was already counted as a purchase leg.
+    await paymentAccountService.applyAccountDelta({
+      shop: shopId,
+      account,
+      amount: -amount,
     });
 
     // Update supplier balance if applicable

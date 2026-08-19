@@ -1,6 +1,7 @@
 const Expense = require('../models/Expense.model');
 const ExpenseCategory = require('../models/ExpenseCategory.model');
 const AuditLog = require('../models/AuditLog.model');
+const paymentAccountService = require('./paymentAccount.service');
 const { AppError } = require('../middleware/error.middleware');
 const { endOfBangladeshDay, getBangladeshTodayRange, getBangladeshMonthRange, toBangladeshMonthStr } = require('../utils/bdTime.util');
 const { branchFilter, requireBranch, branchMatch } = require('../utils/branchScope.util');
@@ -93,6 +94,16 @@ class ExpenseService {
       throw new AppError('Expense category not found', 'ক্যাটাগরি পাওয়া যায়নি', 404);
     }
 
+    // Which fund account the money left. Named by the caller, or the method's
+    // default so a form that has not been updated still books the money
+    // somewhere real. Null throughout for a shop without
+    // `features.fundAccounts`, which makes the delta below a no-op (I-1).
+    const account = expenseData.account
+      ? (await paymentAccountService.assertUsableAccount(shopId, expenseData.account, req))._id
+      : await paymentAccountService.resolveAccountForMethod(
+          req?.shop || { _id: shopId }, paymentMethod || 'cash', req
+        );
+
     const expense = await Expense.create({
       shop: shopId,
       branch: req ? requireBranch(req) : null,
@@ -102,7 +113,20 @@ class ExpenseService {
       description,
       date: date || new Date(),
       paymentMethod: paymentMethod || 'cash',
+      account,
       createdBy: userId,
+    });
+
+    // Money out.
+    //
+    // Not inside a transaction, because `createExpense` never opened one — the
+    // Expense document is the only row it writes. If that changes, this must
+    // move inside it: a balance moved outside the transaction that moved the
+    // money it describes survives a rollback the money did not.
+    await paymentAccountService.applyAccountDelta({
+      shop: shopId,
+      account,
+      amount: -(Number(amount) || 0),
     });
 
     // Populate for response
@@ -244,8 +268,49 @@ class ExpenseService {
       updateData.categoryName = categoryDoc.name;
     }
 
+    /**
+     * Editing an expense moves money, and the balance has to move with it.
+     *
+     * `Object.assign` below writes whatever the payload holds — including
+     * `amount` and `account`. Before fund accounts that was harmless: nothing
+     * downstream held a running total. Now it is exactly the shape of the
+     * `variants[].stock` drift — an edit path that updates one book and not the
+     * other, silently, with the damage only visible months later when a bank
+     * balance has never once matched the statement.
+     *
+     * So the old figure is reversed and the new one applied, both through the
+     * one sanctioned writer. Correct when only the amount changes (৳500 → ৳800
+     * on the same account nets to −৳300), when only the account changes (the
+     * whole amount moves from one to the other), and when both do.
+     *
+     * Read BEFORE the assign, or the "before" figures are already the new ones.
+     */
+    const priorAmount = Number(expense.amount) || 0;
+    const priorAccount = expense.account;
+
+    if ('account' in updateData && updateData.account) {
+      await paymentAccountService.assertUsableAccount(shopId, updateData.account, req);
+    }
+
     Object.assign(expense, updateData);
     await expense.save();
+
+    // A voided expense has already been given back, so re-applying the delta
+    // here would credit the account twice. Editing one is not a normal flow —
+    // the schema hides voided rows from this lookup by default — but the guard
+    // costs nothing and the failure would be invisible.
+    if (!expense.isVoided) {
+      await paymentAccountService.applyAccountDelta({
+        shop: shopId,
+        account: priorAccount,
+        amount: priorAmount,
+      });
+      await paymentAccountService.applyAccountDelta({
+        shop: shopId,
+        account: expense.account,
+        amount: -(Number(expense.amount) || 0),
+      });
+    }
 
     await expense.populate('category', 'name icon');
     await expense.populate('createdBy', 'name');
@@ -303,6 +368,21 @@ class ExpenseService {
     expense.voidedBy = userId;
     expense.voidReason = reason || '';
     await expense.save();
+
+    // The money comes back. A void is the ONLY way an expense can be undone —
+    // the row is immutable and `deleteExpense` was removed for that reason — so
+    // this is the one place the account has to be made whole again. Skipping it
+    // would leave the balance permanently short by every retracted expense,
+    // which is the precise shape of the `variants[].stock` drift: a reversal
+    // path that knew about one book and not the other.
+    //
+    // `recalc-account-balances.js` excludes voided rows for the same reason, so
+    // the two agree.
+    await paymentAccountService.applyAccountDelta({
+      shop: shopId,
+      account: expense.account,
+      amount: Number(expense.amount) || 0,
+    });
 
     await AuditLog.create({
       shop: shopId,

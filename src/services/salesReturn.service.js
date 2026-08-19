@@ -4,6 +4,7 @@ const Product = require('../models/Product.model');
 const Customer = require('../models/Customer.model');
 const CustomerBalance = require('../models/CustomerBalance.model');
 const Payment = require('../models/Payment.model');
+const paymentAccountService = require('./paymentAccount.service');
 const StockTransaction = require('../models/StockTransaction.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
@@ -251,9 +252,30 @@ class SalesReturnService {
     const returnNo = await SalesReturn.generateReturnNo(shopId);
 
     // 7. Create SalesReturn document
+    /**
+     * Which fund account this refund will come out of.
+     *
+     * Resolved BEFORE the document is written so it can be stored on it in one
+     * pass — a post-hoc assignment would need a second `save()` inside the
+     * transaction for a field that was knowable all along.
+     *
+     * Only a CASH refund moves money. An `adjustment` writes down the
+     * customer's due, and an unsettled `store_credit` moves nothing at all
+     * until `settleRefund` pays it — which is the entire reason `refundStatus`
+     * exists. So the other two methods leave this null and debit nothing.
+     */
+    const refundAccount = refundMethod === 'cash'
+      ? (returnData.account
+          ? (await paymentAccountService.assertUsableAccount(shopId, returnData.account, req))._id
+          : await paymentAccountService.resolveAccountForMethod(
+              req?.shop || { _id: shopId }, paymentMethod || 'cash', req
+            ))
+      : null;
+
     const [salesReturn] = await SalesReturn.create([{
       shop: shopId,
       branch: branchId,
+      account: refundAccount,
       returnNo,
       sale: sale._id,
       invoiceNo: sale.invoiceNo,
@@ -603,11 +625,20 @@ class SalesReturnService {
         customer: sale.customer,
         amount: totalRefundAmount,
         method: paymentMethod || 'cash',
+        account: refundAccount,
         type: 'refund',
         reference: returnNo,
         notes: `মাল ফেরত: ${returnNo}`,
         receivedBy: userId,
       }], sessionOpt);
+
+      // Money out — the shop has handed cash back across the counter.
+      await paymentAccountService.applyAccountDelta({
+        shop: shopId,
+        account: refundAccount,
+        amount: -(Number(totalRefundAmount) || 0),
+        session: session || null,
+      });
 
       // Adjust customer totals for cash refund
       if (sale.customer) {
@@ -928,6 +959,14 @@ class SalesReturnService {
       const method = data.settlementMethod || 'cash';
       const amount = Number(salesReturn.totalAmount) || 0;
 
+      // The store credit is being paid out now, so this is the moment an
+      // account is debited — not when the return was recorded, which moved no
+      // money. `refundStatus` is what separates the two, and it is why that
+      // field exists.
+      const settleAccount = data.account
+        ? (await paymentAccountService.assertUsableAccount(shopId, data.account, req))._id
+        : await paymentAccountService.resolveAccountForMethod(req?.shop || { _id: shopId }, method, req);
+
       await Payment.create([{
         shop: shopId,
         branch: salesReturn.branch,
@@ -935,11 +974,22 @@ class SalesReturnService {
         customer: salesReturn.customer,
         amount,
         method,
+        account: settleAccount,
         type: 'refund',
         reference: salesReturn.returnNo,
         notes: `বকেয়া ফেরত পরিশোধ: ${salesReturn.returnNo}`,
         receivedBy: userId,
       }], sessionOpt);
+
+      await paymentAccountService.applyAccountDelta({
+        shop: shopId,
+        account: settleAccount,
+        amount: -amount,
+        session: session || null,
+      });
+      salesReturn.account = settleAccount;
+      // Saved by the `refundStatus = 'settled'` write further down — this
+      // document is already being persisted, so the field rides along.
 
       // Mirrors the cash branch of `createReturn` exactly. `totalPurchases` was
       // NOT reduced when the store-credit return was created — only a cash or

@@ -6,6 +6,7 @@ const Payment = require('../models/Payment.model');
 const Expense = require('../models/Expense.model');
 const SalesReturn = require('../models/SalesReturn.model');
 const Purchase = require('../models/Purchase.model');
+const AccountTransfer = require('../models/AccountTransfer.model');
 const CashRegister = require('../models/CashRegister.model');
 const Branch = require('../models/Branch.model');
 const User = require('../models/User.model');
@@ -767,14 +768,64 @@ class ReportService {
         },
       ]),
 
-      // 2. Sales by payment method
+      // 2. Money taken at the counter, by payment method
+      //
+      // ── Grouped on the LEGS, not on `paymentMethod` ──────────────────────
+      //
+      // `Sale.paymentMethod` is not "how this invoice was paid". On a split
+      // invoice `createSale` sets it to whichever leg was LARGEST (see
+      // sale.service `payments.reduce(...)`), while `total` stays the whole
+      // invoice. Grouping the two together therefore reported the entire
+      // invoice under one method and ৳0 under the others:
+      //
+      //   ৳400 cash + ৳600 bKash  →  bkash ৳1000, cash ৳0
+      //
+      // `cashRegister.service._calculateCashFlows` spotted this trap and reads
+      // the legs; this report did not, so the till and the daily summary
+      // disagreed about the same day by the whole split amount.
+      //
+      // ── Why `total` is gone from the output ──────────────────────────────
+      //
+      // There is no such thing as "invoice value by method" once an invoice can
+      // span methods — the ৳1000 above belongs to neither bucket. The honest
+      // figure, and the one the card was always read as showing, is money
+      // RECEIVED through each method. `count` is now legs, not invoices, for
+      // the same reason.
+      //
+      // ── The fallback ─────────────────────────────────────────────────────
+      //
+      // `payments[]` is auto-filled for single-method sales, so it is populated
+      // on everything written since split payments shipped. Sales older than
+      // that have an empty array and are reconstructed from
+      // `paymentMethod` + `paid` — which for a single-method sale is exactly
+      // right. `paid` can include money collected against the invoice AFTER
+      // checkout, so a pre-split sale later settled from বাকি reads slightly
+      // high in the method split of the day it was RAISED. Only reachable for
+      // sales predating the feature, and never for the current day.
       Sale.aggregate([
         { $match: { ...this._baseMatch(shopId, branchId), status: { $ne: 'cancelled' }, ...dateMatch } },
         {
+          $project: {
+            legs: {
+              $cond: [
+                { $gt: [{ $size: { $ifNull: ['$payments', []] } }, 0] },
+                '$payments',
+                {
+                  $cond: [
+                    { $gt: [{ $ifNull: ['$paid', 0] }, 0] },
+                    [{ method: '$paymentMethod', amount: '$paid' }],
+                    [],
+                  ],
+                },
+              ],
+            },
+          },
+        },
+        { $unwind: '$legs' },
+        {
           $group: {
-            _id: '$paymentMethod',
-            total: { $sum: '$total' },
-            paid: { $sum: '$paid' },
+            _id: '$legs.method',
+            total: { $sum: { $ifNull: ['$legs.amount', 0] } },
             count: { $sum: 1 },
           },
         },
@@ -1133,6 +1184,7 @@ class ReportService {
       purchaseAgg,
       dailySales,
       dailyExpenses,
+      transferCharges,
     ] = await Promise.all([
       // 1. Sales: revenue, COGS, profit, count
       Sale.aggregate([
@@ -1312,6 +1364,30 @@ class ReportService {
         },
         { $sort: { _id: 1 } },
       ]),
+
+      // 8. What the shop paid to move its own money — the MFS and bank fees.
+      //
+      // `$subtract` on the two sides of each transfer, summed. The charge is
+      // never stored: `amountOut - amountIn` is the only definition that cannot
+      // drift from the figures it is computed from, which is the same rule the
+      // grand balance total follows.
+      //
+      // Bounded by `date` — the day the money moved, not the day it was typed.
+      AccountTransfer.aggregate([
+        {
+          $match: {
+            shop: shopObjId,
+            ...(branchId ? { branch: new mongoose.Types.ObjectId(branchId) } : {}),
+            ...(dateQuery ? { date: dateQuery } : {}),
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: { $subtract: ['$amountOut', '$amountIn'] } },
+          },
+        },
+      ]),
     ]);
 
     const sales = salesAgg[0] || {
@@ -1360,7 +1436,27 @@ class ReportService {
      * much of the month walked back through the door, and cannot read that off
      * a profit figure it has already been removed from.
      */
-    const netProfit = sales.totalProfit - expenses.totalExpenses;
+    /**
+     * What the shop paid to move its own money.
+     *
+     * A bKash cash-out costs ~1.85%; a shop turning over ৳5 lakh a month
+     * through MFS is handing over ~৳9,000 that appeared in no report anywhere.
+     * It is a genuine cost of trading, so it belongs in `netProfit`.
+     *
+     * ── Why it is NOT an expense row ─────────────────────────────────────────
+     *
+     * Writing an `Expense` for each charge would be double counting: the
+     * transfer already debits the from-account by the full `amountOut`, and the
+     * cash register already sums `amountOut` as cash leaving the drawer. The
+     * charge is the gap between the two sides of one movement, not a third
+     * movement, so it is summed here from the transfers themselves.
+     *
+     * Zero for every shop without `features.fundAccounts` — they have no
+     * transfers — so `netProfit` is unchanged for them (I-1).
+     */
+    const charges = transferCharges[0]?.total || 0;
+
+    const netProfit = sales.totalProfit - expenses.totalExpenses - charges;
 
     // Merge daily sales and expenses into a single chart dataset
     const dailyMap = new Map();
@@ -1388,6 +1484,12 @@ class ReportService {
       grossProfit: sales.totalProfit,
       totalExpenses: expenses.totalExpenses,
       returnsLoss: returns.totalProfitLoss,
+      // Reported on its own line rather than folded into `totalExpenses`.
+      // "I spent ৳40,000 running the shop" and "I paid ৳9,000 to move my own
+      // money around" are different management problems: the second is usually
+      // fixable by banking less often or using a different channel, and merging
+      // it into expenses hides that it is fixable at all.
+      transferCharges: charges,
       netProfit,
 
       // Details

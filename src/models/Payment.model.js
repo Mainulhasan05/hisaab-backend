@@ -101,6 +101,22 @@ const paymentSchema = new mongoose.Schema({
     type: Date,
     default: Date.now
   },
+  /**
+   * Which PaymentAccount this money moved through.
+   *
+   * `method` says HOW (`bkash`); this says WHERE (which bKash number). The two
+   * are not redundant — a shop can hold three accounts answering to one method,
+   * which is the entire reason fund accounts exist.
+   *
+   * Null for every row written before this field existed and for every shop
+   * without `features.fundAccounts`. `applyAccountDelta` treats a null account
+   * as a no-op, so those rows cost nothing and break nothing.
+   */
+  account: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PaymentAccount',
+    default: null
+  },
   transactionId: {
     type: String,
     trim: true

@@ -309,6 +309,24 @@ const saleSchema = new mongoose.Schema({
     },
     reference: {
       type: String // MFS transaction ID, card auth code, etc.
+    },
+    /**
+     * Which PaymentAccount this leg's money went INTO.
+     *
+     * Per LEG, not per invoice, and that is the whole point: a ৳400 cash +
+     * ৳600 bKash sale puts ৳400 in the drawer and ৳600 in a bKash number, and
+     * an invoice-level field could only ever name one of them. `Sale.payments[]`
+     * has always been the only place the split truth lives — this is what
+     * finally connects it to a balance.
+     *
+     * Null for every sale written before this field existed and for every shop
+     * without `features.fundAccounts`, so nothing may read it without falling
+     * back to `method`. I-1: a flag-off shop's POS never sends the key.
+     */
+    account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'PaymentAccount',
+      default: null
     }
   }],
   status: {

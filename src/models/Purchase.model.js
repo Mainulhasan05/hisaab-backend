@@ -201,6 +201,67 @@ const purchaseSchema = new mongoose.Schema({
     enum: ['cash', 'bkash', 'nagad', 'card', 'bank', 'credit'],
     default: 'cash'
   },
+  /**
+   * Split payment on a PURCHASE — one leg per method, each naming where the
+   * money left from and what reference it left behind.
+   *
+   * ── Why buying was not the mirror of selling, and had to become one ────────
+   *
+   * A sale has been settleable ৳400 cash + ৳600 bKash since split payments
+   * shipped. A purchase could not: `paymentMethod` above is ONE string covering
+   * the whole of `paid`, so "৳1,50,000 went by bank transfer and I handed over
+   * ৳50,000 in cash" — an ordinary way to pay a supplier — had no shape to be
+   * recorded in. The shopkeeper picked whichever was bigger and the other half
+   * was simply mislabelled.
+   *
+   * `reference` is the second half of the problem and the sharper one. A
+   * ৳2,00,000 bank transfer was recorded as the word `bank`: no cheque number,
+   * no transfer reference, nothing to match against the bank statement when the
+   * supplier says they never received it. `Payment` has carried `reference` and
+   * `transactionId` fields all along — `purchase.service.recordPayment` simply
+   * never accepted them.
+   *
+   * ── What stays the same, deliberately ─────────────────────────────────────
+   *
+   * `paymentMethod` remains, and remains the LARGEST leg, derived exactly the
+   * way `createSale` derives `Sale.paymentMethod`. Every existing reader — the
+   * purchase list filter, the cash register's `paymentMethod: 'cash'` query,
+   * the reports — keeps working untouched. `paid` remains the sum of the legs,
+   * so the pre-save hook that recalculates `due` and `status` is not involved
+   * in any of this.
+   *
+   * Empty for every purchase written before this field existed, and for every
+   * shop without `features.fundAccounts` — which is why nothing may read it
+   * without falling back to `paymentMethod` + `paid`.
+   */
+  payments: [{
+    method: {
+      type: String,
+      enum: ['cash', 'bkash', 'nagad', 'card', 'bank'],
+      required: true
+    },
+    amount: {
+      type: Number,
+      required: true,
+      min: [0, 'পেমেন্ট ০ এর কম হতে পারবে না']
+    },
+    // Which PaymentAccount the money left. Null for a shop without the
+    // capability — the leg still records the method, which is what the shop
+    // had before and loses nothing.
+    account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'PaymentAccount',
+      default: null
+    },
+    // Cheque number · bank transfer reference · bKash TrxID. Free text on
+    // purpose: it is copied off whatever the other party gave, and validating
+    // it would reject the real thing.
+    reference: {
+      type: String,
+      trim: true,
+      maxlength: [100, 'রেফারেন্স ১০০ অক্ষরের বেশি হতে পারবে না']
+    }
+  }],
   date: {
     type: Date,
     default: Date.now

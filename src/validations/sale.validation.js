@@ -132,6 +132,22 @@ const payment = Joi.object({
   }),
   amount: money.required().messages({ 'any.required': 'পেমেন্টের পরিমাণ দিন' }),
   reference: Joi.string().trim().max(100).allow('', null),
+  /**
+   * Which fund account this leg's money went into.
+   *
+   * Absent for every shop without `features.fundAccounts` — the picker does not
+   * render, so the key is never sent, and the payload stays byte-identical to
+   * what it has always been (I-1). Empty string is accepted and means "let the
+   * server resolve this method's default", which is what a picker left on its
+   * first option sends.
+   *
+   * Validated as a 24-char hex id here so a malformed one is a 400 with Bengali
+   * copy rather than a cast error out of the middle of `createSale`.
+   */
+  account: Joi.string().length(24).hex().allow('', null).messages({
+    'string.length': 'অ্যাকাউন্ট সঠিক নয়',
+    'string.hex': 'অ্যাকাউন্ট সঠিক নয়',
+  }),
 });
 
 const createSale = Joi.object({
