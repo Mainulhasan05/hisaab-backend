@@ -105,6 +105,17 @@ function discountAmountFor(subtotal, discount, discountType) {
  * money back and leaves the obligation alone, so only the adjustment term
  * reduces what is owed.
  *
+ * `ledgerSettled` is the third and last way a due comes down: money collected
+ * against the customer's খাতা as a whole rather than against this invoice by
+ * name — বাকি আদায় on the customer page, or the surplus settled at a later
+ * checkout. It is DELIBERATELY not folded into `paid`, for the same reason
+ * `returnedAdjustment` is not: `paid` means "tendered at or against this
+ * invoice", and `cancelSale` unwinds exactly `-sale.paid` from the customer's
+ * ledger. Folding a ৳2,200 khata collection into a ৳7,000 invoice's `paid`
+ * would make cancelling that invoice claw back ৳2,200 the customer really did
+ * hand over, and the `Payment{type:'due_collection'}` row would survive to
+ * prove it. Three terms, three meanings, one subtraction.
+ *
  * @param {Object} input
  * @param {number} input.subtotal            sum of line totals
  * @param {*} [input.discount]               invoice-level discount, raw
@@ -113,6 +124,7 @@ function discountAmountFor(subtotal, discount, discountType) {
  * @param {*} [input.deliveryCharge]
  * @param {*} [input.paid]
  * @param {*} [input.returnedAdjustment]
+ * @param {*} [input.ledgerSettled]
  * @returns {{
  *   subtotal: number,
  *   discountAmount: number,
@@ -141,10 +153,62 @@ function computeInvoiceTotals(input = {}) {
   // what crossed the counter, not claiming the customer overpaid; the change
   // goes back in the drawer and the invoice is settled in full.
   const paid = Math.min(toMoney(input.paid), total);
-  const returnedAdjustment = Math.min(toMoney(input.returnedAdjustment), total);
-  const due = quantizeMoney(Math.max(0, total - paid - returnedAdjustment));
+  const { ledgerSettled, due } = settlementFor({
+    total,
+    paid,
+    returnedAdjustment: input.returnedAdjustment,
+    ledgerSettled: input.ledgerSettled,
+  });
 
-  return { subtotal, discountAmount, tax, deliveryCharge, merchandise, total, paid, due };
+  return {
+    subtotal, discountAmount, tax, deliveryCharge, merchandise, total, paid,
+    ledgerSettled, due,
+  };
+}
+
+/**
+ * The two non-tendered reductions and the due that survives them.
+ *
+ * Split out of `computeInvoiceTotals` because it is the only part of the invoice
+ * arithmetic that `dueSettlement.reallocateCustomerInvoices` needs, and it is
+ * the only part it can compute: the allocator walks a customer's invoices to
+ * move ONE number on each, and loading every line item of every invoice just to
+ * re-derive a `subtotal` that has not changed would make a hot path
+ * proportional to basket size for no gain.
+ *
+ * The alternative — the allocator doing `total - paid - …` inline — is the
+ * mistake `invoiceMath.util` exists to prevent. Two call sites, one definition,
+ * extracted rather than copied.
+ *
+ * `capped` reports whether the stored `ledgerSettled` had to be trimmed, which
+ * is how the allocator learns that a return has shrunk an invoice and freed
+ * khata money that belongs on the next one.
+ *
+ * @param {Object} p
+ * @param {number} p.total                the invoice total, already derived
+ * @param {number} p.paid                 tendered at or against this invoice
+ * @param {*} [p.returnedAdjustment]      return settled against the due
+ * @param {*} [p.ledgerSettled]           khata money allocated here
+ * @returns {{returnedAdjustment: number, ledgerSettled: number, due: number, capped: boolean}}
+ */
+function settlementFor({ total, paid, returnedAdjustment: rawAdj, ledgerSettled: rawLedger }) {
+  const returnedAdjustment = Math.min(toMoney(rawAdj), total);
+
+  // Bounded by what is actually left after the other two terms, not by `total`.
+  // The allocator never hands over more than this, but the clamp has to hold
+  // here as well: a stored `ledgerSettled` from before a return was recorded
+  // would otherwise drive `due` below zero, and `Math.max(0, …)` would hide it
+  // by silently writing off the difference.
+  const headroom = Math.max(0, quantizeMoney(total - paid - returnedAdjustment));
+  const wanted = toMoney(rawLedger);
+  const ledgerSettled = Math.min(wanted, headroom);
+
+  return {
+    returnedAdjustment,
+    ledgerSettled,
+    due: quantizeMoney(Math.max(0, headroom - ledgerSettled)),
+    capped: wanted > headroom,
+  };
 }
 
 /**
@@ -191,16 +255,25 @@ function clampPaymentLegs(payments, cap) {
  * recomputed away — the same guard `Sale` and `Purchase` already carried
  * separately.
  *
+ * `settled` is anything that has come off the obligation without being tendered
+ * at this invoice — khata money allocated here (`ledgerSettled`) and returns
+ * taken against the due (`returnedAdjustment`). It only affects the
+ * partial/unpaid split, and it has to: an invoice a customer has paid ৳2,000
+ * towards through বাকি আদায় is not "unpaid", and telling the shopkeeper it is
+ * is how they end up chasing money they have already banked. Optional, so
+ * `Purchase` and every existing caller keep the two-term behaviour they had.
+ *
  * @param {Object} input
  * @param {number} input.due
  * @param {number} input.paid
+ * @param {number} [input.settled]  non-tendered reductions, if any
  * @param {string} [input.current]  the document's existing status
  * @returns {string}
  */
-function statusFor({ due, paid, current }) {
+function statusFor({ due, paid, settled = 0, current }) {
   if (current === 'cancelled') return 'cancelled';
   if (due <= 0) return 'completed';
-  return paid > 0 ? 'partial' : 'unpaid';
+  return (paid > 0 || settled > 0) ? 'partial' : 'unpaid';
 }
 
 module.exports = {
@@ -208,6 +281,7 @@ module.exports = {
   toMoney,
   discountAmountFor,
   computeInvoiceTotals,
+  settlementFor,
   clampPaymentLegs,
   statusFor,
 };

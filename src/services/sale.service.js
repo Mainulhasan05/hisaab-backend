@@ -1515,6 +1515,9 @@ class SaleService {
 
     let dueSettled = 0;
     let settleAmount = 0;
+    // Filled by the settlement block far below; see its note. Declared here so
+    // the return can reach it whether or not anything was actually settled.
+    let dueAllocations = [];
 
     if (carryDueSnapshot) {
       // A revision is not a new money event. It rewrites the basket of an
@@ -1803,6 +1806,18 @@ class SaleService {
         await Sale.updateOne({ _id: sale._id }, { $set: { dueSettled } }, sessionOpt);
         sale.dueSettled = dueSettled;
       }
+
+      /**
+       * Which OLD invoices this settlement closed, carried back to the till.
+       *
+       * Not persisted — it is a fact about the collection, not about this
+       * invoice, and `reallocateCustomerInvoices` can re-derive it at any time.
+       * But the cashier is standing at the counter with the customer in front
+       * of them, and "৳2,200 জমা — HFG202600403 পরিশোধ হয়েছে" is checkable
+       * against the paper in the customer's hand in a way that a ledger total
+       * silently dropping by ৳2,200 never is.
+       */
+      dueAllocations = settled.allocations || [];
     }
 
     // Create payment record if paid amount > 0.
@@ -2022,6 +2037,18 @@ class SaleService {
     // Invalidate related caches
     this.invalidateCache(shopId).catch(() => {}); // Non-blocking
 
+    /**
+     * Which old invoices the checkout settlement closed, ridden back to the POS
+     * on the sale document.
+     *
+     * Set non-strict so it survives `toJSON` without a schema migration, and
+     * simply absent on every sale that settled nothing. Not persisted, because
+     * it is not a fact about THIS invoice — see the note where it is filled in.
+     */
+    if (dueAllocations.length > 0) {
+      sale.set('dueAllocations', dueAllocations, { strict: false });
+    }
+
     return sale;
     }, internalOptions.session ? { session: internalOptions.session } : {});
   }
@@ -2138,6 +2165,17 @@ class SaleService {
           branch: claimed.branch,
           paid: amount,
           due: -amount,
+        }, session);
+
+        // Settling an invoice directly SHRINKS what it can absorb from the
+        // khata pool, so any allocation already sitting on it may now overflow.
+        // Concretely: a ৳7,000 invoice carrying ৳4,200 of khata money is paid
+        // ৳4,200 by hand — without this, the invoice would show ৳4,200 of
+        // allocation it no longer has room for, and the pre-save clamp would
+        // quietly discard it instead of moving it to the next open invoice.
+        await dueSettlementService.reallocateCustomerInvoices({
+          shopId,
+          customerId: claimed.customer,
         }, session);
       }
 
@@ -2545,6 +2583,30 @@ class SaleService {
         customer: sale.customer,
         branch: sale.branch,
       }, session);
+
+      // ── Khata money that was sitting on this invoice has to go somewhere ────
+      //
+      // A cancelled invoice is not a receivable, so any `ledgerSettled` it was
+      // carrying is now unallocated — and the collection that produced it is
+      // untouched, as it must be: the customer really did hand the money over
+      // and its `Payment{due_collection}` row is immutable.
+      //
+      // Left alone, that money would simply stop reducing anything and the
+      // shop's invoice book would re-inflate by the cancelled invoice's share.
+      // The reallocator is a full recompute, so calling it here moves the freed
+      // amount onto the customer's next-oldest open invoice with no reversal
+      // arithmetic of its own to get wrong. Cheap and correct beats clever.
+      //
+      // NOTE for the reader chasing `-sale.paid` above: that unwinds only what
+      // was tendered AT this invoice. Khata money is deliberately not in `paid`
+      // — see the `ledgerSettled` note on `Sale` — so cancelling cannot claw
+      // back a collection the customer actually made.
+      // `branchScoped` deliberately omitted — `cancelSale` takes no `req`, so
+      // the reallocator resolves the shop's book mode itself. See its note.
+      await dueSettlementService.reallocateCustomerInvoices({
+        shopId,
+        customerId: sale.customer,
+      }, session);
     }
 
     /**
@@ -2926,6 +2988,30 @@ class SaleService {
           },
         },
       }).catch((err) => logger.error(`Audit log (sale_revise) failed: ${err.message}`));
+
+      /**
+       * ── Put the khata money back where it belongs, now the replacement exists ─
+       *
+       * A revision is cancel-then-recreate. The cancellation inside it already
+       * ran the reallocator — but at that moment the replacement invoice did
+       * not exist yet, so any `ledgerSettled` the original was carrying was
+       * spread over the customer's OTHER open invoices, or left unallocated
+       * because there were none.
+       *
+       * Either way the replacement is born at `ledgerSettled: 0` while the
+       * collection that paid for it is still in the pool, and the invoice book
+       * re-inflates by exactly that amount — the original bug, arriving through
+       * the one door that closes and reopens an invoice in a single request.
+       *
+       * The recompute is idempotent, so running it a second time inside the same
+       * transaction costs one aggregate and writes only what actually moved.
+       */
+      if (revised.customer) {
+        await dueSettlementService.reallocateCustomerInvoices({
+          shopId,
+          customerId: revised.customer,
+        }, session);
+      }
 
       return revised;
     });

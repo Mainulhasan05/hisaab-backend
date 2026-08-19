@@ -451,6 +451,55 @@ const saleSchema = new mongoose.Schema({
     default: 0,
     min: [0, 'সমন্বয় ০ এর কম হতে পারবে না']
   },
+  /**
+   * How much of this invoice's due was cleared by money collected against the
+   * customer's খাতা rather than against this invoice by name.
+   *
+   * ── The bug this field exists to end ──────────────────────────────────────
+   *
+   * There are two ways a shop takes money off a receivable, and until this
+   * field only one of them was honest about it:
+   *
+   *   - `recordPayment` — "৳2,000 against invoice HFG202600403". Moves
+   *     `paid`, re-derives `due` and `status`. Correct, always was.
+   *   - `dueSettlement.settleCustomerDue` — বাকি আদায় on the customer page, and
+   *     the surplus settled at a later checkout. Moved `Customer.totalDue` and
+   *     the `CustomerBalance` rows and wrote a `Payment{due_collection}` row,
+   *     and touched NO invoice at all.
+   *
+   * So the customer's page read ৳0 owed while the invoice that created the
+   * debt sat at `due: 4200, status: 'partial'` forever. That is not cosmetic:
+   * ten aggregations across `report.service`, `staffReport.service` and
+   * `sale.service` sum `$due` as "মোট বাকি", and every one of them kept
+   * counting money the shop had already collected and banked.
+   *
+   * ── Why a separate term and not `paid` ────────────────────────────────────
+   *
+   * `paid` means "tendered at or against THIS invoice", and `cancelSale`
+   * unwinds precisely `-sale.paid` from the customer's ledger. A khata
+   * collection folded into `paid` would therefore be clawed back off the
+   * customer when the invoice it happened to land on was cancelled — money
+   * they really did hand over, with the `due_collection` row still sitting
+   * there to prove it. `returnedAdjustment` is a separate term for the same
+   * reason and this sits beside it: `due = total − paid − returnedAdjustment
+   * − ledgerSettled`.
+   *
+   * ── Why it is DERIVED, never `$inc`-ed ────────────────────────────────────
+   *
+   * This is an ALLOCATION, not an event. Both sides of it move on their own:
+   * collections arrive, invoices get cancelled, revised, returned against.
+   * Incremental deltas across four services would drift exactly the way the
+   * two collection paths above drifted. So it is recomputed from scratch —
+   * `Σ due_collection` spread over the customer's open invoices oldest-first —
+   * by `dueSettlement.reallocateCustomerInvoices`, which is idempotent and
+   * therefore self-healing: any invoice it touches ends up right regardless of
+   * what it was before. Nothing else may write this field.
+   */
+  ledgerSettled: {
+    type: Number,
+    default: 0,
+    min: [0, 'খাতা সমন্বয় ০ এর কম হতে পারবে না']
+  },
   // Accumulated `SalesReturn.profitReduction`. Subtracted from the item-derived
   // profit below, so a returned line stops counting as earnings.
   returnedProfit: {
@@ -560,6 +609,11 @@ saleSchema.pre('save', function(next) {
     // and left the customer still owing ৳700 in `Customer.totalDue` with
     // nothing on the invoice to explain it.
     returnedAdjustment: this.returnedAdjustment,
+    // Money collected against the customer's খাতা and allocated here by
+    // `dueSettlement.reallocateCustomerInvoices`. Carried through the hook for
+    // the same reason `returnedAdjustment` is: saving this document for an
+    // unrelated reason must not silently re-open a due that has been paid.
+    ledgerSettled: this.ledgerSettled,
   });
 
   this.subtotal = totals.subtotal;
@@ -568,6 +622,11 @@ saleSchema.pre('save', function(next) {
   this.deliveryCharge = totals.deliveryCharge;
   this.total = totals.total;
   this.paid = totals.paid;
+  // Written back from the clamp, not left as sent. If a return has since eaten
+  // into what this invoice can absorb, the stored allocation is stale and the
+  // reallocator will move the excess to another invoice on its next pass — but
+  // until it does, the figure on the document must not exceed what it covers.
+  this.ledgerSettled = totals.ledgerSettled;
   this.due = totals.due;
 
   // Calculate profit, net of anything returned. Quantized per line before
@@ -583,8 +642,15 @@ saleSchema.pre('save', function(next) {
   }, 0);
   this.profit = quantizeMoney(itemsProfit - totals.discountAmount - (this.returnedProfit || 0));
 
-  // Set payment status unless the sale has been explicitly cancelled.
-  this.status = statusFor({ due: this.due, paid: this.paid, current: this.status });
+  // Set payment status unless the sale has been explicitly cancelled. `settled`
+  // carries the two non-tendered reductions, so an invoice brought partway down
+  // by বাকি আদায় reads 'partial' rather than 'unpaid'.
+  this.status = statusFor({
+    due: this.due,
+    paid: this.paid,
+    settled: quantizeMoney((this.ledgerSettled || 0) + (this.returnedAdjustment || 0)),
+    current: this.status,
+  });
 
   next();
 });

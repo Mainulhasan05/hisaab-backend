@@ -11,6 +11,7 @@ const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const { branchFilter, requireBranch } = require('../utils/branchScope.util');
 const saleService = require('./sale.service');
+const dueSettlementService = require('./dueSettlement.service');
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
 const {
@@ -547,9 +548,26 @@ class SalesReturnService {
       (sale.returnedAdjustment || 0) + (refundMethod === 'adjustment' ? totalRefundAmount : 0)
     );
 
+    // `ledgerSettled` is the third due-reducing term (see `invoiceMath.util`):
+    // khata money already allocated onto this invoice. Omitting it here would
+    // re-open a due the shop has collected the moment anything is returned —
+    // the same class of bug this term was added to fix, arriving through the
+    // returns door instead.
+    //
+    // It is capped rather than trusted, because a return SHRINKS what this
+    // invoice can absorb: an invoice carrying ৳4,200 of allocation that is then
+    // adjusted down to a ৳3,000 obligation is holding ৳1,200 that belongs on
+    // some other invoice. Capping it here keeps the document self-consistent;
+    // `reallocateCustomerInvoices` below moves the freed ৳1,200 where it goes.
+    const newLedgerSettled = Math.min(
+      sale.ledgerSettled || 0,
+      Math.max(0, quantizeMoney((sale.total || 0) - (sale.paid || 0) - newReturnedAdjustment))
+    );
     const newDue = Math.max(
       0,
-      quantizeMoney((sale.total || 0) - (sale.paid || 0) - newReturnedAdjustment)
+      quantizeMoney(
+        (sale.total || 0) - (sale.paid || 0) - newReturnedAdjustment - newLedgerSettled
+      )
     );
     const newProfit = quantizeMoney(
       (sale.profit || 0) + (sale.returnedProfit || 0) - newReturnedProfit
@@ -586,7 +604,11 @@ class SalesReturnService {
         newStatus = 'cancelled';
       } else if (newDue === 0) {
         newStatus = 'completed';
-      } else if ((sale.paid || 0) > 0) {
+      } else if ((sale.paid || 0) > 0 || newLedgerSettled > 0) {
+        // Khata money allocated here counts towards 'partial' for the same
+        // reason tendered money does — see `statusFor`. Without it an invoice
+        // the customer has paid ৳2,000 against through বাকি আদায় goes back to
+        // reading 'unpaid' the moment anything is returned.
         newStatus = 'partial';
       } else {
         newStatus = 'unpaid';
@@ -597,6 +619,7 @@ class SalesReturnService {
       returnedAmount: newReturnedAmount,
       returnedAdjustment: newReturnedAdjustment,
       returnedProfit: newReturnedProfit,
+      ledgerSettled: newLedgerSettled,
       profit: newProfit,
       due: newDue,
       status: newStatus,
@@ -700,6 +723,24 @@ class SalesReturnService {
       }, session);
     }
     // store_credit: no financial changes, just recorded
+
+    // ── Re-spread the khata pool over what the invoices can now hold ─────────
+    //
+    // A return changes BOTH sides of the allocation: an `adjustment` refund eats
+    // into this invoice's obligation directly, and a cash refund reduces the
+    // customer's purchases and therefore their due. Either way the ceiling
+    // `newLedgerSettled` was capped against has moved, and any amount squeezed
+    // off this invoice belongs on the next open one rather than nowhere.
+    //
+    // Runs for every refund method, including `store_credit`: that one moves no
+    // money today, but it is the pass that costs nothing and the recompute is
+    // idempotent, so a no-op here is genuinely a no-op.
+    if (sale.customer) {
+      await dueSettlementService.reallocateCustomerInvoices({
+        shopId,
+        customerId: sale.customer,
+      }, session);
+    }
 
     // 11. Audit log
     await AuditLog.create({

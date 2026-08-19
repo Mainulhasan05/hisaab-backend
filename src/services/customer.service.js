@@ -1127,7 +1127,7 @@ class CustomerService {
     // `dueSettlement.service`. That is not indirection for its own sake: the POS
     // settles dues at checkout too, and two implementations of those six steps
     // would drift into a book that never reconciles. See that file's header.
-    const { payment, amount } = await dueSettlementService.settleCustomerDue(
+    const { payment, amount, allocations } = await dueSettlementService.settleCustomerDue(
       {
         shopId,
         userId,
@@ -1175,7 +1175,16 @@ class CustomerService {
       amount,
     });
 
-    return { customer, payment };
+    /**
+     * `allocations` is which invoices this money actually closed.
+     *
+     * Returned because "your due went from ৳4,200 to ৳2,200" is a figure the
+     * shopkeeper has to take on trust, and "HFG202600403 পরিশোধ হয়েছে" is one
+     * they can check against the paper in the customer's hand. The screen that
+     * takes the money is the only place this is cheap to show — afterwards it
+     * has to be reconstructed from two collections and an allocation order.
+     */
+    return { customer, payment, allocations };
     });
   }
 
@@ -1845,51 +1854,27 @@ class CustomerService {
       result.push(...[...byCustomer.values()].sort((x, y) => y.totalDue - x.totalDue));
     }
 
-    // ── Money already collected ──────────────────────────────────────────────
+    // ── Money already collected: netted at the SOURCE now, not here ──────────
     //
-    // `collectDuePayment` reduces `Customer.totalDue` and the branch rows, but
-    // it is not tied to an invoice and so never touches `Sale.due`. This report
-    // is built from `Sale.due` plus `DueAdjustment.amount`, which means every
-    // ৳ collected against a due stayed in the aging buckets forever: a shop that
-    // invoiced ৳50,000 and collected ৳50,000 read ৳0 on every other screen and
-    // ৳50,000 here, aging into the red bucket. Two screens, same question,
-    // opposite answers — and this is the screen a shop chases customers from.
+    // This report used to re-subtract every `Payment{type:'due_collection'}`
+    // from its own buckets, oldest-first, because khata collections reduced
+    // `Customer.totalDue` and the branch rows but never touched `Sale.due` — so
+    // a shop that invoiced ৳50,000 and collected ৳50,000 read ৳0 on every other
+    // screen and ৳50,000 here, aging into the red bucket.
     //
-    // Applied oldest-bucket-first, the same order `CustomerBalance.settleDue`
-    // allocates cash in, so what the aging shows outstanding is what the ledger
-    // actually still holds against that customer.
-    const payMatch = {
-      shop: new mongoose.Types.ObjectId(shopId),
-      type: 'due_collection',
-      customer: { $ne: null },
-    };
-    if (isBranchCustomerScope(req)) {
-      payMatch.branch = new mongoose.Types.ObjectId(req.branchId);
-    }
-
-    const collected = await Payment.aggregate([
-      { $match: payMatch },
-      { $group: { _id: '$customer', paid: { $sum: '$amount' } } },
-      { $match: { paid: { $gt: 0 } } },
-    ]);
-
-    if (collected.length > 0) {
-      const paidById = new Map(collected.map((p) => [String(p._id), p.paid]));
-      for (const row of result) {
-        let remaining = paidById.get(String(row._id)) || 0;
-        if (remaining <= 0) continue;
-
-        for (const bucket of ['due60plus', 'due31to60', 'due0to30']) {
-          if (remaining <= 0) break;
-          const take = Math.min(remaining, row[bucket] || 0);
-          row[bucket] = round2((row[bucket] || 0) - take);
-          remaining = round2(remaining - take);
-        }
-        // Never below zero: an over-collection is a credit, and this report
-        // answers "what is still owed", not "what is the net position".
-        row.totalDue = round2(Math.max(0, row.due0to30 + row.due31to60 + row.due60plus));
-      }
-    }
+    // That was a patch on ONE of the ten readers that sum `Sale.due`; the other
+    // nine stayed wrong, and this one only looked right because the same money
+    // was being subtracted twice in two different places to cancel out once.
+    //
+    // The root cause is fixed — `dueSettlement.reallocateCustomerInvoices` now
+    // allocates every collection onto the invoices that hold the debt, so
+    // `Sale.due` is the truth and the buckets above are already net. Re-running
+    // the subtraction here would now deduct the same collection a SECOND time
+    // and under-report what the shop is owed, which on this screen means
+    // debtors quietly dropping off the chase list.
+    //
+    // Deliberately deleted rather than left behind a flag: two subtractions with
+    // one of them conditionally disabled is the state that produced the bug.
 
     // A customer settled in full is no longer aging — leaving them at ৳0 would
     // pad the list with rows a shop has nothing to chase on.

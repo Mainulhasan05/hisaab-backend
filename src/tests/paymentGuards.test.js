@@ -67,6 +67,12 @@ beforeEach(() => {
   jest.spyOn(Customer, 'findByIdAndUpdate').mockResolvedValue({});
   jest.spyOn(CustomerBalance, 'applyDelta').mockResolvedValue({});
   jest.spyOn(CustomerBalance, 'settleDue').mockResolvedValue([]);
+  // The allocation pool. Empty, so `reallocateCustomerInvoices` short-circuits
+  // before it reads a shop or an invoice — these suites pin the ROLLUP writes,
+  // and the allocation onto invoices has its own suite
+  // (`dueCollectionHitsInvoices.test.js`). Unstubbed it would reach for a real
+  // database and hang the whole file on a 5s timeout.
+  jest.spyOn(Payment, 'aggregate').mockResolvedValue([]);
 });
 afterEach(() => jest.restoreAllMocks());
 
