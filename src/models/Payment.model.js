@@ -19,6 +19,43 @@ const paymentSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Sale'
   },
+  /**
+   * The invoice this collection was taken DURING — not the one it settles.
+   *
+   * ── Why this is not `sale` ────────────────────────────────────────────────
+   *
+   * A customer carrying ৳2,200 on the খাতা buys ৳500 of goods and hands over
+   * ৳2,700. That is two money events in one visit: a ৳500 sale, and a ৳2,200
+   * collection against invoices that are already closed. `sale` means "this
+   * money settles THIS invoice", and this money does not — it settles older
+   * ones, allocated oldest-first by `CustomerBalance.settleDue` exactly as a
+   * walk-in বাকি আদায় is.
+   *
+   * Writing the checkout invoice into `sale` instead would be wrong in three
+   * places at once, and only one of them is cosmetic:
+   *
+   *   1. `reviseBlockedReason` refuses to revise any invoice carrying a
+   *      `Payment{sale, atCheckout: false}` — its definition of "money arrived
+   *      after checkout". Every settle-at-checkout invoice would become
+   *      unrevisable seconds after it was rung up.
+   *   2. `cancelSale`'s guards read `Payment{sale}` to decide what a
+   *      cancellation is allowed to touch.
+   *   3. The invoice's own payment history would show ৳2,700 against a ৳500
+   *      bill.
+   *
+   * `atCheckout` deliberately stays FALSE on these rows. That flag means
+   * "already counted inside `Sale.payments[]`", and this money is not in there
+   * — the legs carry the ৳500 only. False is what makes the cash register
+   * count the ৳2,200 into the drawer, which is where it physically is.
+   *
+   * Null on every ordinary collection and on every row written before this
+   * field existed, so nothing may read it without falling back.
+   */
+  viaSale: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Sale',
+    default: null
+  },
   purchase: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Purchase'
@@ -145,6 +182,10 @@ paymentSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Main listing with
 paymentSchema.index({ shop: 1, branch: 1, paidAt: -1 }); // Date-ranged reads (cash register, reports) on the effective date
 paymentSchema.index({ shop: 1, customer: 1, createdAt: -1 }); // Customer payment history
 paymentSchema.index({ shop: 1, sale: 1 }); // Sale payments lookup
+// "Was a due settled at this checkout?" — asked one sale at a time by the sale
+// detail page and the invoice footer. Sparse: null on every row but the few
+// that actually rode along with a sale.
+paymentSchema.index({ shop: 1, viaSale: 1 }, { sparse: true });
 paymentSchema.index({ shop: 1, purchase: 1 }, { sparse: true }); // Purchase payments
 paymentSchema.index({ type: 1, createdAt: -1 }); // Admin subscription-payment queries (no shop predicate)
 

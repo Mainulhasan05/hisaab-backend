@@ -39,12 +39,58 @@ describe('every money path resolves an account', () => {
     ['sale.service.js', 'createSale — the checkout legs'],
     ['purchase.service.js', 'createPurchase and recordPayment'],
     ['expense.service.js', 'createExpense'],
-    ['customer.service.js', 'collectDuePayment'],
+    ['dueSettlement.service.js', 'settleCustomerDue — every due collection'],
     ['salesReturn.service.js', 'createReturn and settleRefund'],
   ])('%s calls the account service (%s)', (mod) => {
     const source = read(mod);
     expect(source).toContain("require('./paymentAccount.service')");
     expect(source).toContain('applyAccountDelta');
+  });
+});
+
+/**
+ * A due collection now has TWO entry points — বাকি আদায় on the customer page
+ * and surplus settled at the till — and exactly one implementation underneath.
+ *
+ * That is the whole point of the extraction, so these guard the delegation
+ * rather than the arithmetic. Coverage moved: `customer.service.js` no longer
+ * names `applyAccountDelta` itself, and a future change that quietly re-inlines
+ * either path would pass every other test in this file while reintroducing the
+ * drift the shared module exists to prevent.
+ */
+describe('both due-collection paths go through the one ledger write', () => {
+  it('collectDuePayment delegates instead of writing the ledger itself', () => {
+    const source = read('customer.service.js');
+    expect(source).toContain("require('./dueSettlement.service')");
+    expect(source).toContain('settleCustomerDue');
+    // The tell-tale of a re-inlined copy: this method has no business creating
+    // a payment row or touching an account balance of its own any more.
+    const body = methodBody(source, 'async collectDuePayment(');
+    expect(body).not.toContain('applyAccountDelta');
+    expect(body).not.toContain('Payment.create');
+  });
+
+  it('createSale settles a khata through the same module', () => {
+    const source = read('sale.service.js');
+    expect(source).toContain("require('./dueSettlement.service')");
+    const body = methodBody(source, 'async createSale(');
+    expect(body).toContain('settleCustomerDue');
+    // Tagged as the visit it rode in on, never as the invoice it settles. A
+    // `sale` ref here would make every settling invoice unrevisable — see the
+    // note on `Payment.viaSale`.
+    expect(body).toContain('viaSale: sale._id');
+  });
+
+  it('the settlement is a due_collection, not a larger sale payment', () => {
+    // Merging it into `sale.paid` overstates the day's revenue and breaks
+    // `Customer.deriveDue`; the type is what keeps the two events apart in
+    // every report and in the cash register.
+    const source = read('dueSettlement.service.js');
+    expect(source).toContain("type: 'due_collection'");
+    // `atCheckout` must stay false even at checkout: this money is NOT inside
+    // `Sale.payments[]`, so the register has to count it here or the drawer
+    // reads short by every khata settled at the till.
+    expect(source).not.toContain('atCheckout: true');
   });
 });
 

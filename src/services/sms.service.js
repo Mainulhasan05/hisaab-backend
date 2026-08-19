@@ -1706,6 +1706,28 @@ class SMSService {
           return;
         }
 
+        /**
+         * What the customer still owes the shop once this visit is settled.
+         *
+         * Derived from the invoice's own SNAPSHOTS rather than read live off
+         * the customer document, and that is deliberate: a receipt describes
+         * one transaction at one moment. Between the sale committing and this
+         * background send firing, another branch can collect, a return can
+         * settle, or the same customer can buy again — and a live read would
+         * text them a balance that has nothing to do with the slip in their
+         * hand.
+         *
+         * `previousDue` is absent on sales written before the snapshots
+         * existed, which is exactly the set of sales that can never have
+         * settled anything, so the fallback is unreachable in practice and
+         * harmless when it is not.
+         */
+        const dueSettled = saleDoc?.dueSettled || 0;
+        const totalDueAfter = Math.max(
+          0,
+          (saleDoc?.previousDue || 0) - dueSettled + (saleDoc?.due ?? saleData.due ?? 0)
+        );
+
         // Built from the shared template so the till's preview and this message
         // cannot disagree — see smsTemplates.util.js.
         const message = buildSaleReceipt({
@@ -1713,6 +1735,10 @@ class SMSService {
           total: saleData.total,
           paid: saleData.paid,
           due: saleData.due,
+          // Adds two lines to the receipt ONLY when a খাতা was actually settled
+          // at this checkout; an ordinary receipt is unchanged to the byte.
+          dueSettled,
+          totalDue: totalDueAfter,
           shopName: shop.name,
         });
 

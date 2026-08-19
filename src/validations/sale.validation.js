@@ -181,6 +181,34 @@ const createSale = Joi.object({
   paymentMethod: Joi.string().valid(...Object.values(PAYMENT_METHODS)),
   payments: Joi.array().items(payment).max(10),
 
+  /**
+   * Clear part of the customer's existing খাতা with money tendered at this
+   * checkout — a customer owing ৳2,200 who buys ৳500 of goods and hands over
+   * ৳2,700.
+   *
+   * NOT part of `paid`, and the two must never be conflated: this is a
+   * separate `due_collection` against invoices that are already closed, while
+   * `paid` is what settles THIS one. `computeInvoiceTotals` clamps `paid` to
+   * the total precisely so an overpayment cannot become a credit, and this
+   * field is what gives the surplus somewhere honest to go instead.
+   *
+   * Optional at every level. Absent from every ordinary checkout, from the
+   * offline re-sync, and from every client older than the feature — which is
+   * what keeps it inert rather than a payload change the whole field has to
+   * take at once.
+   *
+   * `amount` is bounded here only as a number; the real ceiling is the
+   * customer's outstanding due, which only the server can know and which
+   * `createSale` refuses to exceed rather than trimming to fit.
+   */
+  dueSettlement: Joi.object({
+    amount: money.required().messages({
+      'any.required': 'জমার পরিমাণ দিন',
+    }),
+    method: Joi.string().valid(...Object.values(PAYMENT_METHODS)),
+    account: Joi.string().trim().allow('', null),
+  }).allow(null),
+
   notes: Joi.string().trim().max(500).allow('', null).messages({
     'string.max': 'নোট ৫০০ অক্ষরের বেশি হতে পারবে না',
   }),

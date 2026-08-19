@@ -10,6 +10,9 @@ const { branchFilter, requireBranch, isBranchCustomerScope } = require('../utils
 const { normalizePhone } = require('../utils/phone.util');
 const { runInTransaction } = require('../utils/transaction.util');
 const paymentAccountService = require('./paymentAccount.service');
+// The shared ledger write for "money reduces a customer's due". Shared with the
+// POS checkout path, which settles dues out of surplus tendered at the till.
+const dueSettlementService = require('./dueSettlement.service');
 const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.util');
 const { resolveWholesaleFlag } = require('../utils/pricing.util');
 const { toMoney } = require('../utils/invoiceMath.util');
@@ -1100,7 +1103,6 @@ class CustomerService {
   // Record due payment
   async collectDuePayment(shopId, userId, customerId, paymentData, req) {
     return await runInTransaction(async (session) => {
-      const sessionOpt = session ? { session } : {};
       const { method, transactionId, notes } = paymentData;
 
     // When the customer actually handed the money over. Absent means now,
@@ -1111,20 +1113,6 @@ class CustomerService {
     // — see `resolvePaidAt`.
     const paidAt = resolvePaidAt({ raw: paymentData.paidAt ?? paymentData.date, req });
 
-    // Coerced and bounded before anything reads it. The only check below was
-    // `amount > due`, which a NEGATIVE amount passes — and a negative collection
-    // ran the ledger backwards: `totalPaid` down, `totalDue` UP, plus a negative
-    // cash-in row that the register subtracted from the drawer. There is no Joi
-    // schema on the customer routes, so this is the boundary.
-    const amount = toMoney(paymentData.amount);
-    if (amount <= 0) {
-      throw new AppError(
-        'Payment amount must be greater than 0',
-        'পেমেন্টের পরিমাণ ০ এর বেশি হতে হবে',
-        400
-      );
-    }
-
     const customer = await Customer.findOne({ _id: customerId, shop: shopId }).session(session || null);
     if (!customer) {
       throw new AppError('কাস্টমার পাওয়া যায়নি', 'Customer not found', 404);
@@ -1133,89 +1121,29 @@ class CustomerService {
     const branchId = req ? requireBranch(req) : null;
     const branchScoped = isBranchCustomerScope(req);
 
-    // Validate against whichever book this shop keeps.
-    //
-    // In branch scope this MUST be the branch figure. Validating against the
-    // shop-wide total would let a branch collect ৳5,000 against a due that
-    // exists only at another branch — the collecting branch would go negative
-    // and the owing branch would stay overstated, permanently, with no error.
-    let branchBalance = null;
-    if (branchScoped) {
-      branchBalance = await CustomerBalance.findOne(
-        { shop: shopId, customer: customerId, branch: branchId },
-        null,
-        sessionOpt
-      );
-      const branchDue = branchBalance?.totalDue || 0;
-      if (amount > branchDue) {
-        throw new AppError(
-          'Payment amount exceeds this branch\'s due balance',
-          'পেমেন্টের পরিমাণ এই শাখার বাকির চেয়ে বেশি',
-          400
-        );
-      }
-    } else if (amount > customer.totalDue) {
-      throw new AppError('পেমেন্টের পরিমাণ বাকির চেয়ে বেশি', 'Payment amount exceeds due balance', 400);
-    }
-
-    // Which fund account the money came into. Named by the caller, or resolved
-    // from the method's default so an older client that posts a bare
-    // `method: 'bkash'` still books the money somewhere real. Null throughout
-    // for a shop without `features.fundAccounts`, which makes the delta below a
-    // no-op (I-1).
-    const account = paymentData.account
-      ? (await paymentAccountService.assertUsableAccount(shopId, paymentData.account, req))._id
-      : await paymentAccountService.resolveAccountForMethod(req?.shop || { _id: shopId }, method || 'cash', req);
-
-    // Create payment record. `branch` is required: cashRegister._calculateCashFlows
-    // matches due collections by branch, so an untagged payment is invisible to
-    // every branch's till and understates expected closing (FEATURE_AUDIT.md H-6).
-    const [payment] = await Payment.create([{
-      shop: shopId,
-      branch: branchId,
-      customer: customerId,
-      amount,
-      method: method || 'cash',
-      account,
-      transactionId,
-      type: 'due_collection',
-      paidAt,
-      notes,
-      receivedBy: userId,
-    }], sessionOpt);
-
-    // Money in. `atCheckout` is false on this row by default, which is what
-    // tells `recalc-account-balances.js` to count it here rather than assume it
-    // was already counted as a sale leg — the same discriminator the cash
-    // register depends on.
-    await paymentAccountService.applyAccountDelta({
-      shop: shopId,
-      account,
-      amount,
-      session: session || null,
-    });
-
-    // Update customer balance — the shop-wide rollup is maintained in both
-    // modes, so the flag stays a read-path switch with nothing to migrate.
-    //
-    // Quantized per write, mirroring `CustomerBalance.settleDue` below and
-    // `Customer.addPayment`. Unrounded, a customer who pays their book off in
-    // instalments settles at 1e-13 rather than 0 and never leaves the বাকি list
-    // (`totalDue: { $gt: 0 }`), with nothing left to pay that could clear them.
-    customer.totalPaid = quantizeMoney(customer.totalPaid + amount);
-    customer.totalDue = quantizeMoney(customer.totalDue - amount);
-    await customer.save(sessionOpt);
-
-    // A due collection is not tied to an invoice, so it is allocated to the
-    // branches that actually hold the debt — collecting branch first, then
-    // oldest. In branch scope the check above guarantees it all lands on the
-    // collecting branch.
-    await CustomerBalance.settleDue({
-      shop: shopId,
-      customer: customerId,
-      preferBranch: branchId,
-      amount,
-    }, session);
+    // Coercing the amount, validating it against the right book, writing the
+    // `due_collection` row, moving the fund account, reducing `Customer.totalDue`
+    // and allocating the same reduction across the branch rows all now live in
+    // `dueSettlement.service`. That is not indirection for its own sake: the POS
+    // settles dues at checkout too, and two implementations of those six steps
+    // would drift into a book that never reconciles. See that file's header.
+    const { payment, amount } = await dueSettlementService.settleCustomerDue(
+      {
+        shopId,
+        userId,
+        customer,
+        amount: paymentData.amount,
+        branchId,
+        branchScoped,
+        method,
+        rawAccount: paymentData.account,
+        paidAt,
+        transactionId,
+        notes,
+        req,
+      },
+      session
+    );
 
     // Create audit log with request metadata & customer reference
     await AuditLog.log({

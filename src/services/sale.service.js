@@ -12,8 +12,18 @@ const InvoiceCounter = require('../models/InvoiceCounter.model');
 const { AppError } = require('../middleware/error.middleware');
 const cacheService = require('./cache.service');
 const paymentAccountService = require('./paymentAccount.service');
+// The shared ledger write for "money reduces a customer's due" — the same one
+// the customer page's বাকি আদায় goes through. See its header for why a second
+// implementation here was not an option.
+const dueSettlementService = require('./dueSettlement.service');
 const logger = require('../utils/logger.util');
-const { branchFilter, requireBranch, getBranchCode, wrongBranchError } = require('../utils/branchScope.util');
+const {
+  branchFilter,
+  requireBranch,
+  getBranchCode,
+  wrongBranchError,
+  isBranchCustomerScope,
+} = require('../utils/branchScope.util');
 const { normalizePhone } = require('../utils/phone.util');
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
@@ -378,6 +388,7 @@ class SaleService {
       forceCreatedAt = null,
       revisedFrom = null,
       revision = 0,
+      carryDueSnapshot = null,
     } = internalOptions;
     // The quoted price wins over every pricing rule, including wholesale —
     // an online order is billed at what the customer was shown.
@@ -409,7 +420,21 @@ class SaleService {
       courierName,
       shippingAddress,
       saleDate: rawSaleDate,
-      invoiceNo: rawInvoiceNo
+      invoiceNo: rawInvoiceNo,
+      /**
+       * Settle part of the customer's existing খাতা at this checkout.
+       *
+       * `{ amount, method?, account?, }` — and it is EXPLICIT on purpose. The
+       * obvious alternative was to infer it from surplus tendered (paid ৳2,700
+       * on a ৳500 bill, so clear ৳2,200 of debt), and that is exactly wrong:
+       * a cashier who fat-fingers `2700` for `270` would silently write down
+       * a debt nobody paid, with no prompt and no way to notice. The POS asks,
+       * and only what the cashier confirmed arrives here.
+       *
+       * Absent on every ordinary sale, from every older client, and from the
+       * offline queue — so this whole feature is inert unless asked for (I-1).
+       */
+      dueSettlement: rawDueSettlement = null
     } = saleData;
     const customerId = rawCustomerId || rawCustomer;
 
@@ -1461,6 +1486,76 @@ class SaleService {
       if (localRow?.localName) finalCustomerName = localRow.localName;
     }
 
+    // ── The খাতা as it stands, read BEFORE this sale touches it ─────────────
+    //
+    // Two things need this figure and both need it from HERE rather than after
+    // the rollup: the invoice's "পূর্বের বাকি" line (a snapshot, because
+    // deriving it live rewrites every reprint — see `Sale.previousDue`) and the
+    // ceiling on how much of that debt this checkout is allowed to settle.
+    //
+    // Read in whichever book the shop keeps, so the figure the invoice prints
+    // and the figure the settlement is validated against are the same number.
+    const branchCustomerScope = isBranchCustomerScope(req);
+    let previousDue = customer
+      ? await dueSettlementService.readCollectableDue(
+          {
+            shopId,
+            customerId: customer._id,
+            branchId,
+            branchScoped: branchCustomerScope,
+            // Already loaded, and read here BEFORE the rollup moves it — which
+            // is what makes handing it over safe. Saves a round trip on every
+            // checkout for a known customer at a single-branch shop, which is
+            // most checkouts on the platform.
+            customerDoc: customer,
+          },
+          session
+        )
+      : null;
+
+    let dueSettled = 0;
+    let settleAmount = 0;
+
+    if (carryDueSnapshot) {
+      // A revision is not a new money event. It rewrites the basket of an
+      // invoice already rung up, and the collection that rode in with the
+      // original is untouched by that — it settled OTHER invoices and lives on
+      // as its own immutable `Payment` row, which `cancelSale` deliberately
+      // does not sweep. So the replacement inherits both snapshots verbatim
+      // rather than re-reading a book that has moved since.
+      previousDue = carryDueSnapshot.previousDue;
+      dueSettled = carryDueSnapshot.dueSettled || 0;
+    } else if (rawDueSettlement && !revisedFrom) {
+      // A walk-in has no খাতা to settle, so there is nothing this money could
+      // be applied to. Refused rather than ignored: dropping it silently would
+      // hand back ৳2,200 the shopkeeper believes they just collected, and the
+      // only trace would be a customer who never asks for it again.
+      if (!customer) {
+        throw new AppError(
+          'Cannot settle a due without a customer on the sale',
+          'কাস্টমার ছাড়া আগের বাকি জমা নেওয়া যাবে না',
+          400
+        );
+      }
+
+      settleAmount = toMoney(rawDueSettlement.amount);
+
+      // Refused, never silently trimmed. The cashier is standing in front of
+      // the customer with the money already counted out: if the খাতা moved
+      // between loading the till and pressing sell — another branch collected,
+      // a return settled — quietly applying less than was handed over leaves
+      // the difference unaccounted for and tells nobody. An error at the till
+      // is recoverable; a silent shortfall in the book is not.
+      if (settleAmount > (previousDue || 0)) {
+        throw new AppError(
+          `Due settlement of ${settleAmount} exceeds the outstanding due of ${previousDue || 0}`,
+          `আগের বাকি এখন ৳${previousDue || 0} — জমার পরিমাণ ঠিক করে আবার চেষ্টা করুন`,
+          400
+        );
+      }
+      dueSettled = settleAmount;
+    }
+
     // Create sale with retry for invoice number collision
     let sale;
     const maxRetries = 3;
@@ -1541,6 +1636,14 @@ class SaleService {
            * a no-migration change: absent means "never revised", everywhere.
            */
           ...(revisedFrom ? { revisedFrom, revision } : {}),
+          /**
+           * The খাতা snapshots. Spread rather than assigned so a walk-in with no
+           * customer record leaves `previousDue` ABSENT — readers have to tell
+           * "owed nothing" (0) apart from "we did not record it" (undefined),
+           * and every sale written before this field existed is the latter.
+           */
+          ...(previousDue === null || previousDue === undefined ? {} : { previousDue }),
+          dueSettled,
         }], sessionOpt);
         sale = newSale;
         break; // Success — exit retry loop
@@ -1627,6 +1730,79 @@ class SaleService {
         count: 1,
         lastPurchase: purchasedAt,
       }, session);
+    }
+
+    /**
+     * Settle the old খাতা — as its OWN money event, never as a larger `paid`.
+     *
+     * ── Why the two are not merged ──────────────────────────────────────────
+     *
+     * A ৳500 sale and a ৳2,200 debt collection are different kinds of thing: one
+     * is revenue, one is a receivable coming off the book. Folding the second
+     * into `sale.paid` looks tempting — one number, one row — and breaks four
+     * things at once, none of them loudly:
+     *
+     *   1. The day's SALES read ৳2,700 instead of ৳500. Every report, every
+     *      profit percentage and every staff target inherits that.
+     *   2. `Customer.totalPaid` gains ৳2,200 with no purchase behind it, so
+     *      `Customer.deriveDue` — purchases + opening − paid — can never
+     *      reconcile again.
+     *   3. A sales return allocates its refund PROPORTIONALLY against the
+     *      invoice's own figures, so a return on this ৳500 bill would refund
+     *      against ৳2,700.
+     *   4. `computeInvoiceTotals` clamps `paid` to the total precisely so an
+     *      overpayment cannot become a credit; unclamping it here would restore
+     *      the bug that file was written to end.
+     *
+     * Kept separate, everything already works: the drawer holds ৳500 of sale
+     * legs plus a ৳2,200 `due_collection`, and the `atCheckout` discriminator
+     * keeps the cash register from counting either twice.
+     *
+     * Ordered AFTER the rollup above deliberately. The rollup adds this
+     * invoice's own due to the customer; the settlement was already bounded
+     * against `previousDue`, read before any of it, so the ceiling is the debt
+     * the customer walked in with and not one this sale just created.
+     */
+    if (settleAmount > 0 && customer) {
+      const settled = await dueSettlementService.settleCustomerDue({
+        shopId,
+        userId,
+        customer,
+        amount: settleAmount,
+        branchId,
+        branchScoped: branchCustomerScope,
+        // The invoice's dominant method unless the cashier named another — a
+        // customer can settle the খাতা in cash while paying the bill by bKash.
+        method: rawDueSettlement.method || paymentMethod,
+        rawAccount: rawDueSettlement.account || null,
+        /**
+         * Dated to the sale it rode in on, not to now.
+         *
+         * `paidAt` is what every daily-collection figure and the cash register
+         * bucket on, so a backdated invoice must carry a backdated collection
+         * — otherwise entering Thursday's sale on Saturday puts the goods in
+         * Thursday's books and the money in Saturday's.
+         */
+        paidAt: occurredAt,
+        viaSale: sale._id,
+        req,
+      }, session);
+
+      /**
+       * Only if the two disagree — which they should not, since both figures
+       * come from the same `toMoney`. This is the assertion that the number
+       * printed on the invoice is the number the `Payment` row actually moved.
+       *
+       * `updateOne` rather than `sale.save()`: saving re-runs `pre('save')`,
+       * which re-derives `paid`, `due`, `status` and `profit` from the items.
+       * Idempotent today, but this write exists to record one figure the hook
+       * knows nothing about. Same reason `reviseSale` renames by update.
+       */
+      if (settled.amount !== dueSettled) {
+        dueSettled = settled.amount;
+        await Sale.updateOne({ _id: sale._id }, { $set: { dueSettled } }, sessionOpt);
+        sale.dueSettled = dueSettled;
+      }
     }
 
     // Create payment record if paid amount > 0.
@@ -2681,6 +2857,25 @@ class SaleService {
         forceCreatedAt: original.createdAt,
         revisedFrom: original._id,
         revision: nextRevision,
+        /**
+         * The খাতা snapshots travel with the invoice number.
+         *
+         * A revision rewrites the BASKET. It does not un-collect money: the
+         * ৳2,200 that rode in with the original settled invoices that were
+         * already closed, and it survives as its own immutable `Payment` row —
+         * `cancelSale` sweeps `Sale.payments[]` and rows keyed on `sale`,
+         * and a settlement is neither (see `Payment.viaSale`).
+         *
+         * So the replacement must inherit both figures rather than re-derive
+         * them. Re-deriving would read a book the original has already moved
+         * and print "পূর্বের বাকি ৳0 / জমা ৳0" on the reprint of an invoice
+         * whose customer is holding paper that says ৳2,200 — the exact
+         * rewriting-history failure the snapshots exist to prevent.
+         */
+        carryDueSnapshot: {
+          previousDue: original.previousDue,
+          dueSettled: original.dueSettled || 0,
+        },
       });
 
       // Written after the create, because until now there was nothing to point

@@ -286,6 +286,46 @@ const saleSchema = new mongoose.Schema({
     default: 0,
     min: [0, 'বাকি ০ এর কম হতে পারবে না']
   },
+  // ── The খাতা, as it stood at this checkout ────────────────────────────────
+  //
+  // Both are SNAPSHOTS, for the same reason `items[].unit` and
+  // `items[].productName` are, and the invoice is why they had to exist.
+  //
+  // The printed A4 invoice has always carried a "পূর্বের বাকি / বর্তমান বাকি /
+  // টোটাল বাকি" block, and it derived the first figure LIVE:
+  // `customer.totalDue - sale.due`. That is a rewriting-history bug of exactly
+  // the kind the unit snapshot exists to prevent — reprint an invoice a month
+  // later, after the customer has bought twice more and paid once, and the
+  // "পূর্বের বাকি" on the reprint disagrees with the copy in the customer's
+  // hand. Nothing was wrong at the moment of printing, so nobody ever caught it.
+  //
+  // Settling a due at checkout made that bug impossible to live with rather
+  // than merely wrong: with the old debt cleared, the live derivation prints
+  // পূর্বের বাকি ৳0 and the receipt silently denies the ৳2,200 the customer
+  // just handed over.
+  //
+  // Absent on every sale written before these existed, so readers MUST fall
+  // back to the live derivation for history. `previousDue: 0` and
+  // `previousDue: undefined` are different answers — the first is a customer
+  // who owed nothing, the second is a sale from before we recorded it.
+
+  /** The customer's due immediately BEFORE this sale, in whichever book the
+   *  shop keeps (branch figure under separate books, shop-wide under shared).
+   *  Null for a walk-in with no customer record. */
+  previousDue: {
+    type: Number,
+    default: undefined,
+    min: [0, 'আগের বাকি ০ এর কম হতে পারবে না']
+  },
+  /** How much of `previousDue` was cleared by surplus tendered at THIS
+   *  checkout. The money itself is a `Payment{type:'due_collection'}` row
+   *  carrying `viaSale`, never part of `paid` below — see that field's note
+   *  on why the two must not be merged. */
+  dueSettled: {
+    type: Number,
+    default: 0,
+    min: [0, 'জমা ০ এর কম হতে পারবে না']
+  },
   profit: {
     type: Number,
     default: 0

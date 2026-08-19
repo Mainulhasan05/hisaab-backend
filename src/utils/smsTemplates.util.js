@@ -68,9 +68,31 @@ const gsmSafeShopName = (shopName) => {
  * The shop name signs off at the bottom only. It used to head the message as
  * well, so every receipt named the shop twice — wasted characters in a message
  * that is billed by 160-character segment.
+ * ── The two extra lines, and why they are conditional ──────────────────────
+ *
+ * When a customer settles part of their খাতা out of surplus tendered at the
+ * till, the receipt has to say so. Without it the message reads "Due:Tk0" on a
+ * ৳500 bill the customer just handed ৳2,700 for — a receipt that silently
+ * denies the ৳2,200 collection, over the one channel the customer actually
+ * reads. The alternative, firing buildPaymentReceipt as a second message,
+ * bills the shop twice for one visit.
+ *
+ * "Due:" stays the INVOICE's own due; "Total due:" is what the customer still
+ * owes the shop after the visit. On a settling sale both are usually 0, and
+ * printing them either side of the settled line is what stops the ৳2,200
+ * reading like a third, unexplained figure.
+ *
+ * Emitted only when something was actually settled, so an ordinary receipt is
+ * byte-for-byte what it was before this existed — no shop's segment count
+ * moves for a feature it does not use.
  */
-const buildSaleReceipt = ({ invoiceNo, total, paid, due, shopName }) =>
-  `Inv:${invoiceNo}\nTotal:Tk${formatSmsAmount(total)}\nPaid:Tk${formatSmsAmount(paid)}\nDue:Tk${formatSmsAmount(due)}\nThanks for visiting\n- ${gsmSafeShopName(shopName)}`;
+const buildSaleReceipt = ({ invoiceNo, total, paid, due, dueSettled = 0, totalDue = 0, shopName }) => {
+  const settled = Number(dueSettled) || 0;
+  const settledLines = settled > 0
+    ? `\nOld due paid:Tk${formatSmsAmount(settled)}\nTotal due:Tk${formatSmsAmount(totalDue)}`
+    : '';
+  return `Inv:${invoiceNo}\nTotal:Tk${formatSmsAmount(total)}\nPaid:Tk${formatSmsAmount(paid)}\nDue:Tk${formatSmsAmount(due)}${settledLines}\nThanks for visiting\n- ${gsmSafeShopName(shopName)}`;
+};
 
 /**
  * Payment receipt — sent when a due is collected, either against a specific
