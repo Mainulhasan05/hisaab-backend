@@ -65,10 +65,21 @@ const paymentAccountSchema = new mongoose.Schema({
     trim: true,
     maxlength: [80, 'নাম ৮০ অক্ষরের বেশি হতে পারবে না']
   },
+  /**
+   * `courier` is money someone else is holding for us — see COD_PLAN.md.
+   *
+   * It belongs in this enum rather than in a collection of its own because a
+   * courier holding ৳70,000 of COD IS "a place the shop's money actually sits",
+   * which is what this model is for. It has a balance, money moves in and out
+   * of it, and the owner wants to see it beside the drawer and the bank. A
+   * parallel model would need its own balance writer, its own reconciliation
+   * and its own line on the money-position screen, all doing what these
+   * already do.
+   */
   type: {
     type: String,
     enum: {
-      values: ['cash', 'bank', 'mfs', 'card', 'other'],
+      values: ['cash', 'bank', 'mfs', 'card', 'courier', 'other'],
       message: 'অবৈধ অ্যাকাউন্টের ধরন'
     },
     required: [true, 'অ্যাকাউন্টের ধরন নির্বাচন করুন']
@@ -194,7 +205,14 @@ paymentAccountSchema.index({ shop: 1, method: 1, isDefault: 1 });
 // 'ক্যাশ বাক্স' — which is the normal case, not an edge one.
 paymentAccountSchema.index({ shop: 1, branch: 1, name: 1 }, { unique: true });
 
-/** Cash boxes belong to a counter; everything else belongs to the business. */
+/**
+ * Cash boxes belong to a counter; everything else belongs to the business.
+ *
+ * That includes `courier`: a courier serves the shop, not a branch, and a
+ * parcel dispatched from Dhaka may be settled against the same account as one
+ * from Chittagong. The rule needed no change to accommodate them, which is the
+ * check that they were modelled in the right place.
+ */
 paymentAccountSchema.virtual('isShared').get(function () {
   return this.type !== 'cash';
 });

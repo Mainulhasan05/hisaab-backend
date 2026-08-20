@@ -49,7 +49,11 @@ const stubProductFind = (docs) =>
 beforeEach(() => {
   jest.spyOn(Product, 'deleteOne').mockResolvedValue({ deletedCount: 1 });
   jest.spyOn(StockTransaction, 'deleteMany').mockResolvedValue({ deletedCount: 3 });
-  jest.spyOn(Sale, 'deleteOne').mockResolvedValue({ deletedCount: 1 });
+  // The driver handle, not `Sale.deleteOne`. The service deliberately reaches
+  // beneath Mongoose here because `immutableGuard` blocks the model method —
+  // see the note at that call site. Stubbing the model method instead is what
+  // hid a live 403 for as long as this test has existed.
+  jest.spyOn(Sale.collection, 'deleteOne').mockResolvedValue({ deletedCount: 1 });
 });
 
 afterEach(() => jest.restoreAllMocks());
@@ -182,9 +186,38 @@ describe('cancelled invoices', () => {
     });
 
     expect(result.summary.purged).toBe(1);
-    // deleteOne per document — immutableGuard rejects deleteMany on Sale, so a
-    // bulk call would 403 and abort the whole purge.
-    expect(Sale.deleteOne).toHaveBeenCalledWith({ _id: 'S1' });
+    // One call per document, through the driver handle. `Sale.deleteOne` is
+    // guarded and would 403 the whole purge — this assertion is what keeps
+    // someone from "simplifying" it back.
+    expect(Sale.collection.deleteOne).toHaveBeenCalledWith({ _id: 'S1' });
+  });
+
+  it('does not reach for the guarded model method', async () => {
+    // The regression. Against the old code this purge threw 403 before
+    // returning, and the suite never noticed because `Sale.deleteOne` was
+    // mocked out from under the guard.
+    const guarded = jest.spyOn(Sale, 'deleteOne');
+    allowStepUp();
+    stubProductFind([{ _id: P1, name: 'x', shop: SHOP }]);
+    linksWithCancelled();
+    jest.spyOn(Sale, 'find').mockReturnValue({
+      select: () => ({ lean: async () => [{ _id: 'S1', invoiceNo: 'INV-1' }] }),
+    });
+
+    await adminService.purgeProducts(ADMIN, {
+      productIds: [String(P1)],
+      password: 'ok',
+      purgeCancelledInvoices: true,
+    });
+
+    expect(guarded).not.toHaveBeenCalled();
+  });
+
+  it('the guard really does refuse the model method', async () => {
+    // Pins the premise the call site rests on. If `immutableGuard` ever stops
+    // covering the query form, the raw-driver detour becomes unnecessary and
+    // this test says so.
+    await expect(Sale.deleteOne({ _id: 'S1' })).rejects.toMatchObject({ statusCode: 403 });
   });
 });
 

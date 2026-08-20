@@ -1063,15 +1063,36 @@ class AdminService {
           continue;
         }
 
-        // `deleteOne` per document: immutableGuard blocks `deleteMany` on Sale,
-        // so a bulk call would throw 403 and abort the whole purge.
+        // ── Why the raw collection, and not `Sale.deleteOne` ─────────────
+        //
+        // This line used to read `Sale.deleteOne({ _id })` with a comment
+        // asserting that only `deleteMany` was guarded. That was wrong:
+        // `immutableGuard` registers `pre('deleteOne')` for BOTH the document
+        // and the query form, so this threw 403 and aborted the entire purge
+        // the moment `purgeCancelledInvoices` was used against a product with
+        // any cancelled invoice.
+        //
+        // It went unnoticed because `productPurge.test.js` mocks
+        // `Sale.deleteOne`, so the assertion checked the call shape and never
+        // reached the middleware — the exact hazard AGENT_WORKFLOW §7.2 names.
+        //
+        // The guard is correct and stays. What was missing is that this ONE
+        // caller is a deliberate, admin-only, step-up-authenticated purge of
+        // invoices that are already cancelled — the same standing exception
+        // `StockTransaction.deleteMany` below carries. `.collection` is the
+        // driver handle beneath Mongoose, so it bypasses schema middleware by
+        // construction rather than by an option any caller could set.
+        //
+        // Marked, and `adminNoDelete.test.js` scans for the marker: a new
+        // destructive line without it still fails the build. Do not copy the
+        // marker to widen the hole.
         const cancelled = await Sale.find({
           'items.product': new mongoose.Types.ObjectId(id),
           status: 'cancelled',
         }).select('_id invoiceNo').lean();
 
         for (const sale of cancelled) {
-          await Sale.deleteOne({ _id: sale._id });
+          await Sale.collection.deleteOne({ _id: sale._id }); // admin-purge:reviewed
         }
       }
 

@@ -44,6 +44,7 @@ const {
   clampPaymentLegs,
   statusFor,
   toMoney,
+  resolveTaxRate,
 } = require('../utils/invoiceMath.util');
 const { priceTierFor, sellingPriceFor, hasWholesalePrice } = require('../utils/pricing.util');
 const { resolveLineRate } = require('../utils/lineDiscount.util');
@@ -389,6 +390,7 @@ class SaleService {
       revisedFrom = null,
       revision = 0,
       carryDueSnapshot = null,
+      forceTaxRate = null,
     } = internalOptions;
     // The quoted price wins over every pricing rule, including wholesale —
     // an online order is billed at what the customer was shown.
@@ -1410,11 +1412,30 @@ class SaleService {
     // Now both call `computeInvoiceTotals` and neither does money arithmetic of
     // its own, so the invoice and the ledger cannot drift apart again. See the
     // header of invoiceMath.util.js.
+    //
+    // ── VAT comes from the SHOP, never from the payload ──────────────────────
+    //
+    // `tax` is still destructured above and still passed, but from here it is
+    // only reachable by a shop with no configured rate — `taxAmountFor`
+    // discards it the moment one applies. That is deliberate: the amount of VAT
+    // on a document a customer keeps must not be something a client can choose,
+    // and this route has no Joi bound on the figure.
+    //
+    // `taxEnabled` is a separate switch from a non-zero `taxRate` because both
+    // states are real: a shop that has switched VAT off for now keeps the rate
+    // it typed, and must bill nothing until it switches back on.
     const totals = computeInvoiceTotals({
       subtotal,
       discount,
       discountType,
       tax,
+      // A revision inherits the ORIGINAL invoice's rate rather than today's.
+      // The goods were sold under the rate that was configured then, and a
+      // shop that has since moved from 5% to 15% must not re-bill a past
+      // purchase at the new one — the customer would be asked for money they
+      // were never quoted. Same argument as `forceCreatedAt` beside it: a
+      // revision corrects an invoice, it does not re-date or re-price it.
+      taxRate: forceTaxRate != null ? forceTaxRate : resolveTaxRate(req?.shop),
       deliveryCharge,
       paid,
     });
@@ -1604,6 +1625,9 @@ class SaleService {
           discount: toMoney(discount),
           discountType,
           tax: totals.tax,
+          // Snapshotted so the receipt can say "ভ্যাট (১৫%)" and go on saying it
+          // after the shop changes its rate. See the field's note on `Sale`.
+          taxRate: totals.taxRate,
           total,
           paid,
           due,
@@ -2069,10 +2093,17 @@ class SaleService {
   // and `createReturn` already do), and the sale is claimed with a conditional
   // `updateOne` whose filter re-asserts the due. Losing that race is a 409, not
   // a silent overwrite.
-  async recordPayment(shopId, userId, saleId, paymentData, branchId = null) {
+  /**
+   * `req` is appended LAST and defaulted, so every existing call site keeps
+   * working unchanged. It is needed only to resolve a fund account —
+   * `assertUsableAccount` and `resolveAccountForMethod` both scope by branch
+   * through `accountScope.util`, and neither can be given a bare shop id.
+   */
+  async recordPayment(shopId, userId, saleId, paymentData, branchId = null, req = null, internalOptions = {}) {
+    const { skipReceiptSms = false } = internalOptions;
     return await runInTransaction(async (session) => {
       const sessionOpt = session ? { session } : {};
-      const { method, transactionId, notes } = paymentData;
+      const { method, transactionId, notes, account: rawAccount } = paymentData;
 
       // Coerced and bounded before anything reads it. `amount` arrives from a
       // route with no Joi schema, and the only check here used to be
@@ -2132,6 +2163,35 @@ class SaleService {
       const claimed = await Sale.findById(sale._id).session(session || null);
       await claimed.save(sessionOpt);
 
+      /**
+       * Which fund account this money landed in.
+       *
+       * This path had none. `createSale` names an account per leg,
+       * `dueSettlement` names one, `expense` and `purchase` name one — and
+       * `recordPayment`, the path a shopkeeper uses to settle an invoice from
+       * its own detail page, wrote a `Payment` with `account: null` and moved
+       * no balance. So money genuinely arriving in the bank never reached the
+       * bank's figure, and FUND_ACCOUNT_PLAN Phase 2's "every money path names
+       * an account" was true of every path but this one.
+       *
+       * It went unnoticed because `recalc-account-balances.js` matches on
+       * `account: accountId`, so rows carrying null are not counted and no
+       * DRIFT is reported — the checker and the writer were wrong in the same
+       * direction.
+       *
+       * Named by the caller, or resolved from the method's default so an
+       * existing client posting a bare `method: 'bkash'` books the money
+       * somewhere real. Null throughout for a shop without
+       * `features.fundAccounts`, which makes the delta below a no-op (I-1).
+       */
+      const account = rawAccount
+        ? (await paymentAccountService.assertUsableAccount(shopId, rawAccount, req))._id
+        : await paymentAccountService.resolveAccountForMethod(
+            req?.shop || { _id: shopId },
+            method || 'cash',
+            req
+          );
+
       // Create payment record. `atCheckout` stays false: this is money arriving
       // AFTER the sale, which is precisely what the cash register's
       // due-collection bucket is for.
@@ -2142,11 +2202,20 @@ class SaleService {
         customer: claimed.customer,
         amount,
         method: method || 'cash',
+        account,
         transactionId,
         type: 'sale_payment',
         notes,
         receivedBy: userId,
       }], sessionOpt);
+
+      // Money in. Zero-effect when `account` is null.
+      await paymentAccountService.applyAccountDelta({
+        shop: shopId,
+        account,
+        amount,
+        session: session || null,
+      });
 
       // Update customer balance if applicable
       if (claimed.customer) {
@@ -2198,8 +2267,12 @@ class SaleService {
         },
       }], sessionOpt);
 
-      // Send payment receipt SMS (non-blocking — runs in background)
-      if (claimed.customer) {
+      // Send payment receipt SMS (non-blocking — runs in background).
+      //
+      // Suppressed for a courier handover: the customer has NOT paid anything,
+      // the parcel has merely left the shop, and "আপনি ৳2,400 পরিশোধ করেছেন" is
+      // both untrue and alarming when it arrives days before delivery.
+      if (claimed.customer && !skipReceiptSms) {
         const SMSService = require('./sms.service');
         SMSService.sendPaymentReceiptAsync(shopId, userId, {
           customerId: claimed.customer,
@@ -2211,6 +2284,235 @@ class SaleService {
       this.invalidateCache(shopId).catch(() => {}); // Non-blocking
 
       return { sale: claimed, payment };
+    });
+  }
+
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════
+   * COD — the money that is with someone else
+   * ═══════════════════════════════════════════════════════════════════════════
+   *
+   * A ৳2,400 COD parcel used to be booked as ৳2,400 of CUSTOMER debt, because
+   * `order.service.confirmOrder` calls `createSale` with `paid: 0` and the
+   * customer is created from the phone number. That is wrong twice over: the
+   * customer owes nothing until the parcel reaches them, and the money that is
+   * genuinely owed to the shop is owed by the COURIER, who is holding it.
+   *
+   * Everything downstream inherited it — the বাকি list, `Customer.totalDue`,
+   * due-aging and the due-reminder SMS all chased people whose parcel had not
+   * arrived.
+   *
+   * ── The mechanism, and why it needed nothing new ─────────────────────────
+   *
+   * `PaymentAccount` already defines itself as "a place the shop's money
+   * actually sits". A courier holding ৳70,000 of COD is exactly that, so a
+   * courier is a `PaymentAccount` of `type: courier` and the handover is an
+   * ordinary `Payment` naming it. Settlement later is an `AccountTransfer`
+   * whose `charge` — the gap between what the courier owed and what they paid
+   * — is the courier fee, and `report.service` ALREADY sums transfer charges
+   * into `netProfit` as a genuine cost of trading.
+   *
+   * Three existing mechanisms, each doing the job it was built for. See
+   * COD_PLAN.md.
+   */
+
+  /**
+   * Hand a parcel to a courier: the COD amount stops being the customer debt
+   * and becomes that courier balance.
+   *
+   * Deliberately a thin wrapper over `recordPayment` rather than a second money
+   * path: that method already carries the atomic `due >= amount` claim, the
+   * customer-ledger pair that keeps I-4, the khata reallocation and the audit
+   * entry. Reimplementing any of it here is how the two would drift.
+   */
+  async dispatchToCourier(shopId, userId, { saleId, account }, req = null) {
+    if (!account) {
+      throw new AppError(
+        'A courier account is required',
+        'কোন কুরিয়ার নিয়েছে তা নির্বাচন করুন',
+        400
+      );
+    }
+
+    const courier = await paymentAccountService.assertUsableAccount(shopId, account, req);
+    if (courier.type !== 'courier') {
+      // A bank account is a place money sits too, but handing a parcel to it is
+      // meaningless. Refusing here keeps every courier balance answerable to
+      // "what is in transit" rather than to whatever was picked.
+      throw new AppError(
+        'That account is not a courier',
+        'এই অ্যাকাউন্টটি কুরিয়ার নয়',
+        400
+      );
+    }
+
+    const sale = await Sale.findOne({ _id: saleId, shop: shopId });
+    if (!sale) throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
+    if (sale.courier) {
+      throw new AppError(
+        'This parcel is already with a courier',
+        'এই পার্সেলটি ইতিমধ্যে একটি কুরিয়ারের কাছে আছে',
+        409
+      );
+    }
+    if ((sale.due || 0) <= 0) {
+      // Nothing to collect — a prepaid parcel. It still ships; it just carries
+      // no money for the courier to hold, so there is no leg to write.
+      throw new AppError(
+        'This invoice has nothing left to collect',
+        'এই বিলে আদায়ের মতো কিছু বাকি নেই',
+        400
+      );
+    }
+
+    const { sale: updated, payment } = await this.recordPayment(
+      shopId,
+      userId,
+      saleId,
+      {
+        amount: sale.due,
+        method: 'courier',
+        account: courier._id,
+        notes: `কুরিয়ারে হস্তান্তর: ${courier.name}`,
+      },
+      sale.branch || null,
+      req,
+      // No receipt SMS. Telling a customer they have paid ৳2,400 when their
+      // parcel has only just left the shop is both untrue and alarming.
+      { skipReceiptSms: true }
+    );
+
+    // The ref is what carries the money; `courierName` stays the print
+    // snapshot. See the field note on `Sale`.
+    await Sale.updateOne(
+      { _id: sale._id, shop: shopId },
+      { $set: { courier: courier._id, courierName: courier.name } }
+    );
+
+    return { sale: updated, payment, courier };
+  }
+
+  /**
+   * The parcel came back. Take the money back off the courier.
+   *
+   * RTO runs 15–40% in Bangladeshi e-commerce, so this is a routine event, not
+   * an exception path. It is a SEPARATE step from cancelling or returning the
+   * sale, deliberately: the parcel physically coming back and the invoice being
+   * voided are two different facts, and a shop that gets a parcel back may well
+   * re-dispatch it rather than cancel.
+   *
+   * A counter `Payment{type: refund}` rather than an edit — `Payment` is an
+   * immutable ledger (`immutableGuard`), and `recalc-account-balances.js`
+   * already counts refunds against an account as money out. So the checker
+   * needed no change: the reversal is expressed in rows it already understood.
+   */
+  async undispatchFromCourier(shopId, userId, { saleId, reason = '' }, req = null) {
+    return await runInTransaction(async (session) => {
+      const sessionOpt = session ? { session } : {};
+
+      const sale = await Sale.findOne({ _id: saleId, shop: shopId }).session(session || null);
+      if (!sale) throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
+      if (!sale.courier) {
+        throw new AppError(
+          'This parcel is not with a courier',
+          'এই পার্সেলটি কোনো কুরিয়ারের কাছে নেই',
+          400
+        );
+      }
+
+      const courierId = sale.courier;
+
+      // What the courier is actually holding for THIS parcel: the leg written
+      // at dispatch, less anything already reversed. Read from the rows rather
+      // than assumed to be `sale.paid`, which also carries money taken at
+      // checkout — a part-prepaid COD parcel would otherwise claw back the
+      // customer own advance as well.
+      const legs = await Payment.find({
+        shop: shopId,
+        sale: sale._id,
+        account: courierId,
+        method: 'courier',
+      }).select('amount type').session(session || null).lean();
+
+      const held = quantizeMoney(legs.reduce(
+        (sum, leg) => sum + (leg.type === 'refund' ? -(leg.amount || 0) : (leg.amount || 0)),
+        0
+      ));
+      if (held <= 0) {
+        throw new AppError(
+          'Nothing is held against this parcel',
+          'এই পার্সেলে কুরিয়ারের কাছে কোনো টাকা নেই',
+          400
+        );
+      }
+
+      // 1. The invoice goes back to owing. `save()` re-derives `due`, `status`
+      //    and `profit` from the accumulators — the same reason `recordPayment`
+      //    re-reads and saves rather than patching those by hand.
+      sale.paid = Math.max(0, quantizeMoney((sale.paid || 0) - held));
+      sale.courier = null;
+      await sale.save(sessionOpt);
+
+      // 2. The counter-row.
+      await Payment.create([{
+        shop: shopId,
+        branch: sale.branch || null,
+        sale: sale._id,
+        customer: sale.customer,
+        amount: held,
+        method: 'courier',
+        account: courierId,
+        type: 'refund',
+        reference: sale.invoiceNo,
+        notes: reason ? `পার্সেল ফেরত: ${reason}` : 'পার্সেল ফেরত এসেছে',
+        receivedBy: userId,
+      }], sessionOpt);
+
+      // 3. The courier is no longer holding it.
+      await paymentAccountService.applyAccountDelta({
+        shop: shopId,
+        account: courierId,
+        amount: -held,
+        session: session || null,
+      });
+
+      // 4. Both customer books, by the same arithmetic, in this transaction.
+      //    I-4: quantizing or clamping one and not the other is exactly how the
+      //    two drift apart.
+      if (sale.customer) {
+        const customer = await Customer.findById(sale.customer).session(session || null);
+        if (customer) {
+          customer.totalPaid = quantizeMoney((customer.totalPaid || 0) - held);
+          customer.totalDue = Customer.deriveDue(customer);
+          await customer.save(sessionOpt);
+        }
+
+        await CustomerBalance.applyDelta({
+          shop: shopId,
+          customer: sale.customer,
+          branch: sale.branch,
+          paid: -held,
+        }, session);
+        await CustomerBalance.recomputeDue({
+          shop: shopId,
+          customer: sale.customer,
+          branch: sale.branch,
+        }, session);
+      }
+
+      await AuditLog.create([{
+        shop: shopId,
+        user: userId,
+        action: 'courier_undispatch',
+        actionBn: 'পার্সেল ফেরত',
+        description: `Parcel for ${sale.invoiceNo} returned from courier. Released ৳${held}.`,
+        descriptionBn: `${sale.invoiceNo} এর পার্সেল কুরিয়ার থেকে ফেরত। ৳${held} ছাড়া হয়েছে।`,
+        entity: { type: 'sale', id: sale._id, name: sale.invoiceNo },
+        changes: { before: { courier: String(courierId) }, after: { courier: null } },
+      }], sessionOpt);
+
+      this.invalidateCache(shopId).catch(() => {});
+      return { sale, released: held };
     });
   }
 
@@ -2264,6 +2566,29 @@ class SaleService {
     // caught by the guard above — only the partial case fell through, which is
     // why this went unnoticed. The remedy is to return the rest, not to cancel:
     // a return is the reversal that knows what has already been reversed.
+    /**
+     * A parcel a courier is still holding cannot be voided behind their back.
+     *
+     * `cancelSale` reverses `sale.payments[]` — the CHECKOUT legs — and
+     * deliberately does not touch post-checkout `Payment` rows, which are
+     * reversed on their own paths. A courier leg is one of those, so cancelling
+     * here would leave the courier balance holding money for an invoice that no
+     * longer exists, and `recalc-account-balances.js` would report the drift
+     * with no write path to blame.
+     *
+     * The right sequence is the one that matches the physical world: the parcel
+     * comes back (`undispatchFromCourier`), and THEN the invoice is voided. So
+     * this refuses, and says which step is missing rather than failing
+     * mysteriously.
+     */
+    if (sale.courier) {
+      throw new AppError(
+        'This parcel is still with a courier — record its return first',
+        'পার্সেলটি এখনো কুরিয়ারের কাছে আছে — আগে ফেরত এসেছে বলে রেকর্ড করুন',
+        409
+      );
+    }
+
     if ((sale.returnedAmount || 0) > 0) {
       throw new AppError(
         'This sale has returns against it — return the remaining items instead of cancelling.',
@@ -2919,6 +3244,8 @@ class SaleService {
         forceCreatedAt: original.createdAt,
         revisedFrom: original._id,
         revision: nextRevision,
+        // See the note at the `taxRate` line in `computeInvoiceTotals`' call.
+        forceTaxRate: original.taxRate || 0,
         /**
          * The খাতা snapshots travel with the invoice number.
          *

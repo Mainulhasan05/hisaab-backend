@@ -271,6 +271,29 @@ const saleSchema = new mongoose.Schema({
     default: 0,
     min: [0, 'ট্যাক্স ০ এর কম হতে পারবে না']
   },
+  /**
+   * The VAT percentage this invoice was billed at.
+   *
+   * A SNAPSHOT, for the same reason `items[].unit` is one: it is read off
+   * `Shop.settings.taxRate` at checkout and frozen. A shop that later moves
+   * from 5% to 15% must not rewrite the tax line of every invoice it has
+   * already handed a customer — and without this field the receipt would have
+   * to print the live setting, which is exactly that rewriting-history bug.
+   *
+   * It is also what lets a return refund the RIGHT proportion of VAT months
+   * later, rather than the rate that happens to be configured on the day the
+   * goods come back.
+   *
+   * `0` on every invoice from a shop that does not charge VAT, and on every row
+   * written before the feature was finished — so nothing may treat a zero here
+   * as "unknown". Zero means no VAT was charged, which is the truth for all of
+   * them.
+   */
+  taxRate: {
+    type: Number,
+    default: 0,
+    min: [0, 'ভ্যাট হার ০ এর কম হতে পারবে না']
+  },
   total: {
     type: Number,
     required: true,
@@ -540,6 +563,28 @@ const saleSchema = new mongoose.Schema({
   courierName: {
     type: String
   },
+  /**
+   * WHICH courier is holding this parcel's money.
+   *
+   * `courierName` above is free text and stays exactly as it is — it is what
+   * gets printed, and shops type it inconsistently ("Steadfast", "steadfast",
+   * "স্টেডফাস্ট"). Matching money on it would either split one courier into
+   * three accounts or merge two real ones, the same argument
+   * `PaymentAccount.accountNumber` makes about never being a key.
+   *
+   * This ref is what carries the money. When a parcel is dispatched against a
+   * courier account, the COD amount stops being the customer's debt and becomes
+   * that courier's balance — see COD_PLAN.md §4.
+   *
+   * Null for every POS sale, every own-rider delivery, and every shop without
+   * `features.fundAccounts`. Null means "nobody else is holding this money",
+   * which for all of them is the truth.
+   */
+  courier: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PaymentAccount',
+    default: null
+  },
   shippingAddress: {
     type: String
   },
@@ -595,6 +640,11 @@ saleSchema.pre('save', function(next) {
     discount: this.discount,
     discountType: this.discountType,
     tax: this.tax,
+    // When set, the tax figure above is IGNORED and derived from this rate
+    // against the merchandise base — see `taxAmountFor`. Zero for every shop
+    // that does not charge VAT, which falls through to `this.tax` and leaves
+    // every historical invoice byte-identical.
+    taxRate: this.taxRate,
     deliveryCharge: this.deliveryCharge,
     paid: this.paid,
     // `due` and `profit` both carry the returns terms, so that saving the
@@ -619,6 +669,7 @@ saleSchema.pre('save', function(next) {
   this.subtotal = totals.subtotal;
   this.discountAmount = totals.discountAmount;
   this.tax = totals.tax;
+  this.taxRate = totals.taxRate;
   this.deliveryCharge = totals.deliveryCharge;
   this.total = totals.total;
   this.paid = totals.paid;

@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { immutableGuard } = require('../utils/immutableGuard.util');
 const AccountTransferCounter = require('./AccountTransferCounter.model');
 
 /**
@@ -147,6 +148,14 @@ accountTransferSchema.pre('validate', async function (next) {
   }
   next();
 });
+
+/**
+ * Same guard as `AccountEntry` above, and one degree worse: a transfer moved
+ * TWO balances, and the cash register reads it from both ends to decide what
+ * the drawer should hold. Deleting one leaves both accounts wrong and the till
+ * expecting money that was banked.
+ */
+accountTransferSchema.plugin(immutableGuard, { modelName: 'AccountTransfer' });
 
 const AccountTransfer = mongoose.model('AccountTransfer', accountTransferSchema);
 

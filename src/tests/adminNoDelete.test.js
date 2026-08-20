@@ -251,7 +251,12 @@ describe('no destructive code remains where the admin can reach it', () => {
       .filter((f) => f.endsWith('.js'))
       .map((f) => [f, fs.readFileSync(path.join(dir, f), 'utf8')]);
 
-  const DESTRUCTIVE = /\.(deleteMany|findByIdAndDelete|findOneAndDelete|findByIdAndRemove)\s*\(/;
+  // `.collection.deleteOne` / `.collection.deleteMany` are the driver handles
+  // beneath Mongoose and bypass schema middleware — `immutableGuard` cannot see
+  // them. That makes them MORE dangerous than the model methods, not less, so
+  // they belong in this scan. `purgeProducts` holds the one reviewed use.
+  const DESTRUCTIVE =
+    /\.(deleteMany|findByIdAndDelete|findOneAndDelete|findByIdAndRemove)\s*\(|\.collection\.delete(One|Many)\s*\(/;
 
   /**
    * The one sanctioned exception: `purgeProducts` clearing a purged product's
@@ -274,7 +279,7 @@ describe('no destructive code remains where the admin can reach it', () => {
    * written before the first destructive call (`product_purge_begin`).
    */
   const REVIEWED = /\/\/\s*admin-purge:reviewed\s*$/;
-  const MAX_REVIEWED = 1;
+  const MAX_REVIEWED = 2;
 
   it('admin service and controller contain no UNREVIEWED hard-delete call', () => {
     for (const [name, src] of [
@@ -289,9 +294,16 @@ describe('no destructive code remains where the admin can reach it', () => {
     }
   });
 
-  it('keeps the reviewed-exception list to a single line', () => {
+  it('keeps the reviewed-exception list to two lines', () => {
     // If this number ever climbs, the allowance has become a loophole and the
     // whole approach needs revisiting rather than the number being bumped.
+    //
+    // It went 1 → 2 when `purgeProducts`' cancelled-invoice branch moved from
+    // `Sale.deleteOne` to `Sale.collection.deleteOne`. That was not a new
+    // deletion: the old line was already deleting invoices in intent and
+    // throwing 403 in fact, because `immutableGuard` covers the query form of
+    // `deleteOne` and the call site's comment claimed it did not. The line
+    // became visible to this scan, which is where it should always have been.
     const src = fs.readFileSync(path.join(__dirname, '../services/admin.service.js'), 'utf8');
     const marked = src.split('\n').filter((l) => REVIEWED.test(l.trimEnd()));
     expect(marked).toHaveLength(MAX_REVIEWED);

@@ -5,6 +5,7 @@ const Payment = require('../models/Payment.model');
 const Expense = require('../models/Expense.model');
 const Purchase = require('../models/Purchase.model');
 const AccountTransfer = require('../models/AccountTransfer.model');
+const AccountEntry = require('../models/AccountEntry.model');
 const PaymentAccount = require('../models/PaymentAccount.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
@@ -63,6 +64,7 @@ class CashRegisterService {
       cashSupplierPayments,
       transfersIn,
       transfersOut,
+      ownerMovements,
     ] = await Promise.all([
       // ── Cash taken at the counter ────────────────────────────────────────
       //
@@ -270,6 +272,44 @@ class CashRegisterService {
         },
         { $group: { _id: null, total: { $sum: '$amountOut' } } },
       ]),
+
+      // ── The owner's own money, in or out of the drawer ───────────────────
+      //
+      // An `owner_withdrawal` against a cash account IS money leaving the box.
+      // `applyAccountDelta` already knows that and moves the balance; the
+      // register did not, so the till read short by exactly the draw — the
+      // failure `AccountEntry` exists to prevent, reproduced one layer up.
+      //
+      // Scoped to `cashAccountIds`, not to `branch`: an entry's `branch` is
+      // where it was RECORDED, and a shared bank account carries `branch: null`
+      // whichever counter typed it. The account is what says whether the money
+      // came out of this drawer. Same reasoning as the transfers above.
+      //
+      // Both directions in one pass — `$cond` on `direction` rather than two
+      // aggregations, because unlike a transfer (which names two accounts and
+      // must be read from each end) an entry names one, so one scan answers
+      // both questions.
+      //
+      // Bounded by `date`, the day the money moved. `AccountEntry.date` carries
+      // the same effective-date rule as `Payment.paidAt` and `Expense.date`,
+      // and for the same reason: a Thursday draw entered on Saturday belongs to
+      // Thursday's till.
+      cashAccountIds.length === 0 ? Promise.resolve([]) : AccountEntry.aggregate([
+        {
+          $match: {
+            shop: shopOid,
+            account: { $in: cashAccountIds },
+            date: { $gte: start, $lte: end },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            in: { $sum: { $cond: [{ $eq: ['$direction', 'in'] }, '$amount', 0] } },
+            out: { $sum: { $cond: [{ $eq: ['$direction', 'out'] }, '$amount', 0] } },
+          },
+        },
+      ]),
     ]);
 
     return {
@@ -286,7 +326,38 @@ class CashRegisterService {
       // transfer.
       transfersIn: transfersIn[0]?.total || 0,
       transfersOut: transfersOut[0]?.total || 0,
+      // Owner deposits and loans taken in; owner draws and loans repaid out.
+      // Both zero for a shop that has never recorded an entry.
+      ownerIn: ownerMovements[0]?.in || 0,
+      ownerOut: ownerMovements[0]?.out || 0,
     };
+  }
+
+  /**
+   * Copy the derived flows onto a register document.
+   *
+   * These seven assignments were written out FIVE times in this file — in
+   * `getTodayRegister`, `openRegister`, `updateRegister`, `closeRegister` and
+   * `reopenRegister`. Adding the two owner buckets meant editing all five, and
+   * a call site missed is a call site whose `expectedClosing` silently omits a
+   * bucket the other four include. The same drift `invoiceMath.util` was
+   * extracted to prevent, in the same shape: two copies of one arithmetic.
+   *
+   * `other` / `otherNote` are deliberately NOT touched — they are the manual
+   * boxes, and overwriting what the shopkeeper typed is the one thing a
+   * recalculation must never do.
+   */
+  _applyFlows(register, flows) {
+    register.cashIn.sales = flows.sales;
+    register.cashIn.dueCollections = flows.dueCollections;
+    register.cashIn.transfers = flows.transfersIn;
+    register.cashIn.owner = flows.ownerIn;
+    register.cashOut.expenses = flows.expenses;
+    register.cashOut.purchases = flows.purchases;
+    register.cashOut.refunds = flows.refunds;
+    register.cashOut.transfers = flows.transfersOut;
+    register.cashOut.owner = flows.ownerOut;
+    return register;
   }
 
   // Get today's register (find or create, auto-calculate)
@@ -357,13 +428,7 @@ class CashRegisterService {
     const flows = await this._calculateCashFlows(shopId, start, end, branchId);
 
     // Update auto-calculated fields (preserve manual 'other' entries)
-    register.cashIn.sales = flows.sales;
-    register.cashIn.dueCollections = flows.dueCollections;
-    register.cashIn.transfers = flows.transfersIn;
-    register.cashOut.expenses = flows.expenses;
-    register.cashOut.purchases = flows.purchases;
-    register.cashOut.refunds = flows.refunds;
-    register.cashOut.transfers = flows.transfersOut;
+    this._applyFlows(register, flows);
 
     await register.save();
 
@@ -424,13 +489,7 @@ class CashRegisterService {
 
     // Calculate live cash flows
     const flows = await this._calculateCashFlows(shopId, start, end, branchId);
-    register.cashIn.sales = flows.sales;
-    register.cashIn.dueCollections = flows.dueCollections;
-    register.cashIn.transfers = flows.transfersIn;
-    register.cashOut.expenses = flows.expenses;
-    register.cashOut.purchases = flows.purchases;
-    register.cashOut.refunds = flows.refunds;
-    register.cashOut.transfers = flows.transfersOut;
+    this._applyFlows(register, flows);
     await register.save();
 
     // Audit log
@@ -491,13 +550,7 @@ class CashRegisterService {
 
     // Recalculate auto fields
     const flows = await this._calculateCashFlows(shopId, start, end, branchId);
-    register.cashIn.sales = flows.sales;
-    register.cashIn.dueCollections = flows.dueCollections;
-    register.cashIn.transfers = flows.transfersIn;
-    register.cashOut.expenses = flows.expenses;
-    register.cashOut.purchases = flows.purchases;
-    register.cashOut.refunds = flows.refunds;
-    register.cashOut.transfers = flows.transfersOut;
+    this._applyFlows(register, flows);
 
     await register.save();
 
@@ -552,13 +605,7 @@ class CashRegisterService {
 
     // Final recalculation before closing
     const flows = await this._calculateCashFlows(shopId, start, end, branchId);
-    register.cashIn.sales = flows.sales;
-    register.cashIn.dueCollections = flows.dueCollections;
-    register.cashIn.transfers = flows.transfersIn;
-    register.cashOut.expenses = flows.expenses;
-    register.cashOut.purchases = flows.purchases;
-    register.cashOut.refunds = flows.refunds;
-    register.cashOut.transfers = flows.transfersOut;
+    this._applyFlows(register, flows);
 
     register.actualClosing = actualClosing;
     register.status = 'closed';
@@ -700,13 +747,7 @@ class CashRegisterService {
 
     // Recalculate cash flows
     const flows = await this._calculateCashFlows(shopId, start, end, branchId);
-    register.cashIn.sales = flows.sales;
-    register.cashIn.dueCollections = flows.dueCollections;
-    register.cashIn.transfers = flows.transfersIn;
-    register.cashOut.expenses = flows.expenses;
-    register.cashOut.purchases = flows.purchases;
-    register.cashOut.refunds = flows.refunds;
-    register.cashOut.transfers = flows.transfersOut;
+    this._applyFlows(register, flows);
 
     await register.save();
 

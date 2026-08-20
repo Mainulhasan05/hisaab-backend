@@ -1613,8 +1613,39 @@ class ProductService {
       productName: product.name,
       productCode: product.code,
       variantId: variantId || null,
-      type: type === 'set' ? 'adjustment' : (qty > 0 ? 'purchase' : 'adjustment'),
-      quantity: type === 'set' ? quantize(newStock - previousStock, stkUnit) : qty,
+      /**
+       * Always `adjustment`, and always the SIGNED delta. Both halves of this
+       * line were wrong, in ways that pulled against each other.
+       *
+       * ── `type` ────────────────────────────────────────────────────────────
+       *
+       * It read `qty > 0 ? 'purchase' : 'adjustment'`, so a shopkeeper adding
+       * stock by hand produced a movement labelled a PURCHASE. There is no
+       * supplier, no bill, no cost and no `Purchase` document behind it —
+       * `reference.type` on the very next line says `'manual'`, which is the
+       * truth the label contradicted. The stock ledger claimed goods had been
+       * bought that nobody ever billed the shop for.
+       *
+       * ── `quantity` ────────────────────────────────────────────────────────
+       *
+       * Direction used to be carried by the label: `'purchase'` meant up,
+       * `'adjustment'` meant down, and the figure itself was unsigned. Every
+       * other writer in the codebase stores a signed quantity — `sale` writes
+       * `-item.quantity`, and the schema says so ("Can be negative for stock
+       * out"). So a manual subtract of 5 stored `+5` while a sale of 5 stored
+       * `-5`, and the ledger's own arithmetic
+       *
+       *     previousStock + quantity === newStock
+       *
+       * held for every movement in the system except this one.
+       *
+       * Fixing `type` alone would have made it worse, not better: with both
+       * directions labelled `adjustment` and the figure still unsigned, a
+       * recount up and a recount down would be indistinguishable. The two
+       * changes are one change.
+       */
+      type: 'adjustment',
+      quantity: quantize(newStock - previousStock, stkUnit),
       previousStock,
       newStock,
       reference: {

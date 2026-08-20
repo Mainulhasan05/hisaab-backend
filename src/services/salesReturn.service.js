@@ -25,7 +25,7 @@ const {
 } = require('../utils/quantity.util');
 const { restoreBatches, batchWriteOp } = require('../utils/batch.util');
 const { findComponentVariant } = require('../utils/combo.util');
-const { discountAmountFor, toMoney } = require('../utils/invoiceMath.util');
+const { discountAmountFor, toMoney, taxAmountFor } = require('../utils/invoiceMath.util');
 
 // The invoice-level discount in taka, from the same bounded definition the sale
 // itself was totalled with. This used to repeat the arithmetic unbounded: a
@@ -249,6 +249,27 @@ class SalesReturnService {
       totalProfitReduction = quantizeMoney(totalProfitReduction + itemProfitLoss);
     }
 
+    /**
+     * The VAT coming back with the goods, and the two figures that follow.
+     *
+     * `taxRefund` is the invoice's OWN rate applied to the merchandise being
+     * returned — `sale.taxRate`, snapshotted at checkout, not the rate the shop
+     * happens to be configured at today. A shop that moved from 5% to 15% last
+     * month must refund the 5% it actually charged.
+     *
+     * `refundTotal` is what the customer is owed: goods plus the tax on them.
+     * It is what every MONEY path below moves — the refund `Payment`, the fund
+     * account debit, `Customer.totalPurchases` (which accumulates `sale.total`,
+     * VAT included, so it has to come off the same way) and the due write-down.
+     *
+     * `totalRefundAmount` stays merchandise-only and keeps its one job: feeding
+     * `Sale.returnedAmount`, which is compared against the invoice's
+     * merchandise base to decide whether everything has come back. See the note
+     * on that comparison, and on `SalesReturn.totalAmount`.
+     */
+    const taxRefund = taxAmountFor(totalRefundAmount, 0, sale.taxRate);
+    const refundTotal = quantizeMoney(totalRefundAmount + taxRefund);
+
     // 6. Generate return number
     const returnNo = await SalesReturn.generateReturnNo(shopId);
 
@@ -285,6 +306,7 @@ class SalesReturnService {
       customerPhone: sale.customerPhone,
       items: processedItems,
       totalAmount: totalRefundAmount,
+      taxRefund,
       profitReduction: totalProfitReduction,
       refundMethod,
       paymentMethod: refundMethod === 'cash' ? (paymentMethod || 'cash') : undefined,
@@ -545,7 +567,10 @@ class SalesReturnService {
     const newReturnedAmount = quantizeMoney((sale.returnedAmount || 0) + totalRefundAmount);
     const newReturnedProfit = quantizeMoney((sale.returnedProfit || 0) + totalProfitReduction);
     const newReturnedAdjustment = quantizeMoney(
-      (sale.returnedAdjustment || 0) + (refundMethod === 'adjustment' ? totalRefundAmount : 0)
+      // VAT-inclusive: the due this writes down was billed with the tax on it,
+      // so settling a return against the খাতা has to clear the tax as well or
+      // the customer keeps owing the VAT on goods they handed back.
+      (sale.returnedAdjustment || 0) + (refundMethod === 'adjustment' ? refundTotal : 0)
     );
 
     // `ledgerSettled` is the third due-reducing term (see `invoiceMath.util`):
@@ -646,7 +671,9 @@ class SalesReturnService {
         branch: branchId,
         sale: sale._id,
         customer: sale.customer,
-        amount: totalRefundAmount,
+        // Goods plus their VAT — what actually crosses the counter. The
+        // merchandise-only figure would hand back less than the customer paid.
+        amount: refundTotal,
         method: paymentMethod || 'cash',
         account: refundAccount,
         type: 'refund',
@@ -659,7 +686,7 @@ class SalesReturnService {
       await paymentAccountService.applyAccountDelta({
         shop: shopId,
         account: refundAccount,
-        amount: -(Number(totalRefundAmount) || 0),
+        amount: -(Number(refundTotal) || 0),
         session: session || null,
       });
 
@@ -667,8 +694,12 @@ class SalesReturnService {
       if (sale.customer) {
         await Customer.findByIdAndUpdate(sale.customer, {
           $inc: {
-            totalPurchases: -totalRefundAmount,
-            totalPaid: -totalRefundAmount,
+            // `totalPurchases` accumulates `sale.total`, which carries the VAT,
+            // so the reversal has to carry it too — otherwise the tax on
+            // returned goods stays on the customer's ledger as a purchase they
+            // made and money they paid, forever.
+            totalPurchases: -refundTotal,
+            totalPaid: -refundTotal,
           },
         }, sessionOpt);
         // Recalculate due
@@ -690,8 +721,8 @@ class SalesReturnService {
           shop: shopId,
           customer: sale.customer,
           branch: sale.branch,
-          purchases: -totalRefundAmount,
-          paid: -totalRefundAmount,
+          purchases: -refundTotal,
+          paid: -refundTotal,
         }, session);
         await CustomerBalance.recomputeDue({
           shop: shopId,
@@ -703,7 +734,7 @@ class SalesReturnService {
       // Reduce customer's totalPurchases → recalc due
       const customer = await Customer.findById(sale.customer).session(session || null);
       if (customer) {
-        customer.totalPurchases = quantizeMoney(customer.totalPurchases - totalRefundAmount);
+        customer.totalPurchases = quantizeMoney(customer.totalPurchases - refundTotal);
         // Shared formula — carries the `openingDue` term, and quantizes. See the
         // note at the cash-refund branch above.
         customer.totalDue = Customer.deriveDue(customer);
@@ -714,7 +745,10 @@ class SalesReturnService {
         shop: shopId,
         customer: sale.customer,
         branch: sale.branch,
-        purchases: -totalRefundAmount,
+        // Mirrors `customer.totalPurchases` above to the paisa. The two books
+        // must move by the SAME arithmetic — I-4 — and a VAT term applied to
+        // one and not the other is precisely how they drift.
+        purchases: -refundTotal,
       }, session);
       await CustomerBalance.recomputeDue({
         shop: shopId,
@@ -749,8 +783,8 @@ class SalesReturnService {
       user: userId,
       action: AUDIT_ACTIONS.SALES_RETURN_CREATE.en,
       actionBn: AUDIT_ACTIONS.SALES_RETURN_CREATE.bn,
-      description: `Sales return ${returnNo} for invoice ${sale.invoiceNo}. Amount: ৳${totalRefundAmount}. Method: ${refundMethod}`,
-      descriptionBn: `মাল ফেরত ${returnNo}, ইনভয়েস ${sale.invoiceNo}। পরিমাণ: ৳${totalRefundAmount}`,
+      description: `Sales return ${returnNo} for invoice ${sale.invoiceNo}. Amount: ৳${refundTotal}. Method: ${refundMethod}`,
+      descriptionBn: `মাল ফেরত ${returnNo}, ইনভয়েস ${sale.invoiceNo}। পরিমাণ: ৳${refundTotal}`,
       entity: {
         type: 'sales_return',
         id: salesReturn._id,
@@ -761,6 +795,8 @@ class SalesReturnService {
           returnNo,
           saleInvoice: sale.invoiceNo,
           totalAmount: totalRefundAmount,
+          taxRefund,
+          refundTotal,
           refundMethod,
           items: processedItems.map(i => `${i.productName} x${i.quantity}`).join(', '),
         },
@@ -998,7 +1034,10 @@ class SalesReturnService {
       }
 
       const method = data.settlementMethod || 'cash';
-      const amount = Number(salesReturn.totalAmount) || 0;
+      // Goods plus their VAT — the same figure the cash branch of
+      // `createReturn` hands over. Paying out `totalAmount` alone would settle
+      // a store credit for less than the customer was credited.
+      const amount = Number(salesReturn.refundTotal) || 0;
 
       // The store credit is being paid out now, so this is the moment an
       // account is debited — not when the return was recorded, which moved no

@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { immutableGuard } = require('../utils/immutableGuard.util');
 
 /**
  * Money that is not trade.
@@ -125,6 +126,21 @@ accountEntrySchema.statics.directionFor = function (type) {
 accountEntrySchema.virtual('signedAmount').get(function () {
   return this.direction === 'out' ? -(this.amount || 0) : (this.amount || 0);
 });
+
+/**
+ * Same guard as `Payment` and `Expense`, for the same reason.
+ *
+ * `applyAccountDelta` has already moved `PaymentAccount.balance` by this
+ * amount, and the balance is stored rather than derived. Deleting the row makes
+ * the account permanently wrong by exactly the entry, and
+ * `recalc-account-balances.js` — the checker that exists so drift is findable —
+ * would then report the *correct* balance as drifted, because the row it
+ * re-derives from is gone.
+ *
+ * An `adjustment` in the opposite direction is the sanctioned way to undo one.
+ * That is a fact, and it stays in the খতিয়ান.
+ */
+accountEntrySchema.plugin(immutableGuard, { modelName: 'AccountEntry' });
 
 const AccountEntry = mongoose.model('AccountEntry', accountEntrySchema);
 

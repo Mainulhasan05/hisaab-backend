@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { immutableGuard } = require('../utils/immutableGuard.util');
 const { PAYMENT_METHODS } = require('../config/constants');
 
 const returnItemSchema = new mongoose.Schema({
@@ -128,10 +129,57 @@ const salesReturnSchema = new mongoose.Schema({
     required: [true, 'ফেরতের পণ্য যোগ করুন'],
     validate: [arr => arr.length > 0, 'অন্তত একটি পণ্য ফেরত দিতে হবে']
   },
+  /**
+   * The MERCHANDISE refunded — line refunds net of the invoice discount, and
+   * deliberately NOT including the VAT below.
+   *
+   * It is the figure `Sale.returnedAmount` accumulates, and `salesReturn
+   * .service` compares that running total against the invoice's own
+   * merchandise base to decide "is this sale fully returned?". Folding VAT in
+   * here would make a fully-returned invoice look OVER-returned by the tax and
+   * the comparison would never be like for like again — the exact bug that
+   * comparison was rewritten to fix when it was measured against `total`.
+   */
   totalAmount: {
     type: Number,
     required: true,
     min: [0, 'মোট ০ এর কম হতে পারবে না']
+  },
+  /**
+   * The VAT coming back with the goods.
+   *
+   * Zero for every shop that does not charge VAT, and for every return raised
+   * before the tax feature was finished — so nothing may read a zero here as
+   * "not yet computed".
+   *
+   * ── Why it is refunded at all ────────────────────────────────────────────
+   *
+   * The comment that used to sit on the fully-returned check said a return
+   * refunds neither delivery nor tax, "the courier was still paid, the tax was
+   * still collected". The first half is right and stays. The second was
+   * written when `Sale.tax` was always zero, so it was never once tested
+   * against a real figure — and it is wrong twice over:
+   *
+   *   · the customer paid VAT on goods they no longer have, so keeping it is
+   *     an overcharge;
+   *   · the shop is holding VAT on a sale that did not happen, which it would
+   *     otherwise have to remit.
+   *
+   * Delivery is genuinely different: the courier really did drive, and that
+   * money really is spent.
+   *
+   * ── Why it is a separate field and not added to `totalAmount` ────────────
+   *
+   * See that field's note. `totalAmount` has one job — feeding the
+   * fully-returned comparison — and it can only keep doing it if it stays a
+   * merchandise figure. Every place that moves MONEY (the refund payment, the
+   * account debit, the customer's ledger) uses the sum of the two, because the
+   * customer was charged the sum of the two.
+   */
+  taxRefund: {
+    type: Number,
+    default: 0,
+    min: [0, 'ভ্যাট ফেরত ০ এর কম হতে পারবে না']
   },
   profitReduction: {
     type: Number,
@@ -248,6 +296,21 @@ salesReturnSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Main listing 
 salesReturnSchema.index({ shop: 1, branch: 1, refundStatus: 1, createdAt: -1 });
 
 // Virtual: Item count
+/**
+ * What the customer is actually owed: the goods plus the VAT charged on them.
+ *
+ * A derived virtual rather than a stored field, because it is exactly the sum
+ * of two figures that are already stored — and a third stored copy is a third
+ * thing to keep in step. `createReturn` computes the same sum before this
+ * document exists; every reader afterwards uses this.
+ *
+ * Every MONEY path moves this figure. `totalAmount` on its own is the
+ * merchandise, and exists to feed the fully-returned comparison — see its note.
+ */
+salesReturnSchema.virtual('refundTotal').get(function() {
+  return (this.totalAmount || 0) + (this.taxRefund || 0);
+});
+
 salesReturnSchema.virtual('itemCount').get(function() {
   return this.items.reduce((sum, item) => sum + item.quantity, 0);
 });
@@ -344,6 +407,21 @@ salesReturnSchema.statics.getReturnsSummary = async function(shopId, startDate, 
     pendingRefundCount: 0,
   };
 };
+
+/**
+ * A return is a ledger row, not a draft.
+ *
+ * `createReturn` decrements `Sale.returnedProfit`, `Sale.returnedAdjustment`,
+ * the customer's due and the product's stock — all in one transaction, none of
+ * it re-derivable from this document alone. Deleting the row leaves every one of
+ * those decrements standing with nothing left to explain them: the invoice
+ * quietly reads a lower profit, the customer quietly owes less, and no screen
+ * anywhere says a return ever happened.
+ *
+ * Its three peers on the same money paths — `Sale`, `Payment`, `Expense` — have
+ * carried this guard from the start. This one was the odd one out.
+ */
+salesReturnSchema.plugin(immutableGuard, { modelName: 'SalesReturn' });
 
 const SalesReturn = mongoose.model('SalesReturn', salesReturnSchema);
 

@@ -109,7 +109,24 @@ module.exports = {
     BKASH: 'bkash',
     NAGAD: 'nagad',
     CARD: 'card',
-    BANK: 'bank'
+    BANK: 'bank',
+    /**
+     * Money a COURIER is holding for us on a COD parcel.
+     *
+     * Not a way the customer paid — it is where the money sits between the
+     * parcel going out and the courier settling up. See COD_PLAN.md.
+     *
+     * It has to be its own method for two reasons, and the second is the
+     * load-bearing one:
+     *
+     *   · `PaymentAccount.method` is required and drawn from this enum, so a
+     *     courier account needs a value here to exist at all;
+     *   · every cash-register query filters `method: 'cash'`. A courier leg
+     *     must never reach the drawer — the money is not in the box, it is in
+     *     a van. Reusing 'cash' would report the till over by the day's
+     *     dispatches.
+     */
+    COURIER: 'courier'
   },
 
   // Sale Status

@@ -71,6 +71,118 @@ function toMoney(raw) {
 }
 
 /**
+ * Ceiling on a VAT rate. Bangladesh's standard rate is 15% and the reduced
+ * rates run 2–10%; nothing legitimate approaches this. It exists so a
+ * fat-fingered `taxRate: 750` in settings cannot multiply an invoice.
+ */
+const MAX_TAX_RATE = 100;
+
+/**
+ * Coerce a stored VAT rate into a usable percentage.
+ *
+ * Same contract as `toMoney`: anything unusable reads as 0, which means "no
+ * VAT" — the safe direction. A shop whose settings are malformed bills no tax
+ * rather than an invented one.
+ *
+ * @param {*} raw
+ * @returns {number}
+ */
+function toTaxRate(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(n, MAX_TAX_RATE);
+}
+
+/**
+ * The VAT on an invoice, and why the CLIENT never gets to say.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHAT WAS BROKEN
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * `Shop.settings.taxEnabled` and `taxRate` have existed for as long as the Shop
+ * schema has. They are editable from the shop's own Settings page AND from the
+ * admin shop editor, they round-trip through `auth.controller`'s settings
+ * whitelist, and **nothing has ever read them**. The POS sent a literal
+ * `tax: 0` on every checkout; `Sale.tax` was whatever a caller passed, which
+ * was always zero.
+ *
+ * So a shopkeeper could switch VAT on, type 15, save, see it persist — and no
+ * invoice, receipt or report ever changed. That is the most expensive kind of
+ * half-built feature: individually well-formed, visibly present, and silently
+ * inert. (`BACKLOG.md` Part 0 catalogues four others of exactly this shape.)
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE BASE IS MERCHANDISE, NOT THE TOTAL
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * VAT is charged on the goods, after any discount the shop gave — a discount
+ * reduces the consideration, so it reduces the tax. It is NOT charged on:
+ *
+ *   · itself, obviously; and
+ *   · `deliveryCharge`, which this system already treats as a pass-through and
+ *     which `report.service` strips out of merchandise revenue for exactly the
+ *     same reason.
+ *
+ * `merchandise` (`subtotal - discountAmount`) is already the term the returns
+ * path uses as "the refundable base". Reusing it means the VAT base and the
+ * refundable base cannot drift apart — which is what makes a proportional VAT
+ * refund on a return a one-line derivation rather than a second arithmetic.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * A RATE, NOT AN AMOUNT
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * When a rate is in play the client's `tax` is IGNORED, not merged. `tax` used
+ * to be a free number on an unvalidated route (`sale.validation` types it, but
+ * the figure itself was never checked against anything), so a caller could
+ * bill any VAT it liked — or none, on a shop that charges it. Deriving the
+ * figure server-side from the shop's own setting is what makes the number
+ * trustworthy enough to print on a document a customer keeps.
+ *
+ * `taxRate: 0` — the default, and every shop with VAT off — falls through to
+ * the raw `tax` input, so every existing caller and every historical row
+ * behaves exactly as before (I-1).
+ *
+ * @param {number} merchandise  subtotal less discount, already quantized
+ * @param {*} rawTax            raw client value, used only when no rate applies
+ * @param {*} rawRate           the shop's configured percentage
+ * @returns {number}
+ */
+function taxAmountFor(merchandise, rawTax, rawRate) {
+  const rate = toTaxRate(rawRate);
+  if (rate <= 0) return toMoney(rawTax);
+  return quantizeMoney((toMoney(merchandise) * rate) / 100);
+}
+
+/**
+ * The VAT rate a shop currently bills at — the ONE place that decides.
+ *
+ * Two settings, and both states are real:
+ *
+ *   `taxEnabled: false, taxRate: 15`  a shop that has switched VAT off for now
+ *                                     and kept the rate it typed. Bills nothing.
+ *   `taxEnabled: true,  taxRate: 0`   switched on and never configured. Also
+ *                                     bills nothing, rather than guessing 15.
+ *
+ * Defensive about `settings` being absent, for the reason `features.util`
+ * documents at length: `req.shop` is rehydrated from Redis, and a shop cached
+ * before a field existed has `settings === undefined`. Reading through it
+ * unguarded throws a TypeError on the checkout hot path.
+ *
+ * Fails CLOSED — anything unreadable bills no VAT. The opposite default would
+ * add 15% to invoices at a shop that never asked for it, which is a real
+ * overcharge to a real customer, not a reporting glitch.
+ *
+ * @param {Object} shop  a Shop document or its cached plain object
+ * @returns {number} percentage, 0 when the shop does not charge VAT
+ */
+function resolveTaxRate(shop) {
+  if (!shop?.settings?.taxEnabled) return 0;
+  return toTaxRate(shop.settings.taxRate);
+}
+
+/**
  * The taka value of an invoice-level discount.
  *
  * Percentage is bounded to 100 and fixed is bounded to the subtotal, so the
@@ -139,14 +251,22 @@ function discountAmountFor(subtotal, discount, discountType) {
 function computeInvoiceTotals(input = {}) {
   const subtotal = toMoney(input.subtotal);
   const discountAmount = discountAmountFor(subtotal, input.discount, input.discountType);
-  const tax = toMoney(input.tax);
   const deliveryCharge = toMoney(input.deliveryCharge);
 
   // What the GOODS came to, after the invoice discount. This is the base a
-  // return can refund against — tax and delivery are not refunded, which is why
-  // "is this sale fully returned?" must be asked against this figure and not
-  // against `total`. See `salesReturn.service`.
+  // return can refund against — delivery is not refunded, which is why "is this
+  // sale fully returned?" must be asked against this figure and not against
+  // `total`. See `salesReturn.service`.
+  //
+  // It is also the VAT base, which is why the tax line moved BELOW it: tax used
+  // to be read straight off the input, and could not have been derived here
+  // even in principle.
   const merchandise = quantizeMoney(Math.max(0, subtotal - discountAmount));
+
+  // Derived from the shop's rate when it has one, and only then. See
+  // `taxAmountFor` for why the client's figure is discarded rather than merged.
+  const taxRate = toTaxRate(input.taxRate);
+  const tax = taxAmountFor(merchandise, input.tax, input.taxRate);
   const total = quantizeMoney(Math.min(merchandise + tax + deliveryCharge, MAX_INVOICE_AMOUNT));
 
   // Clamped, not rejected. A cashier keying the tendered amount is recording
@@ -161,7 +281,7 @@ function computeInvoiceTotals(input = {}) {
   });
 
   return {
-    subtotal, discountAmount, tax, deliveryCharge, merchandise, total, paid,
+    subtotal, discountAmount, tax, taxRate, deliveryCharge, merchandise, total, paid,
     ledgerSettled, due,
   };
 }
@@ -278,7 +398,11 @@ function statusFor({ due, paid, settled = 0, current }) {
 
 module.exports = {
   MAX_INVOICE_AMOUNT,
+  MAX_TAX_RATE,
   toMoney,
+  toTaxRate,
+  taxAmountFor,
+  resolveTaxRate,
   discountAmountFor,
   computeInvoiceTotals,
   settlementFor,

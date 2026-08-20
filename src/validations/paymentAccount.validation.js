@@ -29,7 +29,7 @@ const notes = Joi.string().trim().max(500).allow('', null);
 
 const createAccount = Joi.object({
   name: name.required(),
-  type: Joi.string().valid('cash', 'bank', 'mfs', 'card', 'other').required().messages({
+  type: Joi.string().valid('cash', 'bank', 'mfs', 'card', 'courier', 'other').required().messages({
     'any.only': 'অবৈধ অ্যাকাউন্টের ধরন',
     'any.required': 'অ্যাকাউন্টের ধরন নির্বাচন করুন',
   }),

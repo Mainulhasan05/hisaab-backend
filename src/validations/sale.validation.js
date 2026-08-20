@@ -265,6 +265,31 @@ const createSale = Joi.object({
   }),
 });
 
+/**
+ * Which courier took the parcel. Required — the whole point of the handover is
+ * naming who is holding the money, and a dispatch with no courier would move a
+ * balance nobody is answerable for.
+ */
+const dispatchToCourier = Joi.object({
+  account: Joi.string().length(24).hex().required().messages({
+    'any.required': 'কোন কুরিয়ার নিয়েছে তা নির্বাচন করুন',
+    'string.empty': 'কোন কুরিয়ার নিয়েছে তা নির্বাচন করুন',
+    'string.length': 'কুরিয়ার অ্যাকাউন্ট সঠিক নয়',
+    'string.hex': 'কুরিয়ার অ্যাকাউন্ট সঠিক নয়',
+  }),
+});
+
+/**
+ * A parcel coming back is usually just "customer refused", and the shopkeeper
+ * has nothing to add. The audit entry records the event either way, so the
+ * reason stays optional rather than becoming a box to dismiss.
+ */
+const undispatchFromCourier = Joi.object({
+  reason: Joi.string().trim().max(300).allow('', null),
+});
+
 module.exports = {
   createSale,
+  dispatchToCourier,
+  undispatchFromCourier,
 };

@@ -37,9 +37,42 @@ exports.createSale = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * Hand a parcel to a courier. The COD amount moves off the customer's খাতা and
+ * onto that courier's balance — see COD_PLAN.md.
+ */
+exports.dispatchToCourier = asyncHandler(async (req, res) => {
+  const result = await saleService.dispatchToCourier(
+    req.shop._id,
+    req.user._id,
+    { saleId: req.params.id, account: req.body.account },
+    req
+  );
+  return ApiResponse.success(res, {
+    data: sanitizeReport(result, req),
+    message: 'Parcel handed to courier',
+    messageBn: 'পার্সেল কুরিয়ারে হস্তান্তর হয়েছে',
+  });
+});
+
+/** The parcel came back. Release the money the courier was holding. */
+exports.undispatchFromCourier = asyncHandler(async (req, res) => {
+  const result = await saleService.undispatchFromCourier(
+    req.shop._id,
+    req.user._id,
+    { saleId: req.params.id, reason: req.body.reason },
+    req
+  );
+  return ApiResponse.success(res, {
+    data: sanitizeReport(result, req),
+    message: 'Parcel return recorded',
+    messageBn: 'পার্সেল ফেরত রেকর্ড হয়েছে',
+  });
+});
+
 // Record payment
 exports.recordPayment = asyncHandler(async (req, res) => {
-  const result = await saleService.recordPayment(req.shop._id, req.user._id, req.params.id, req.body, req.branchId);
+  const result = await saleService.recordPayment(req.shop._id, req.user._id, req.params.id, req.body, req.branchId, req);
   return ApiResponse.success(res, {
     data: sanitizeReport(result, req),
     message: 'Payment recorded successfully',
