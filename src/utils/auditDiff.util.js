@@ -91,6 +91,10 @@ const AUDIT_FIELDS = {
   customer: [
     'name', 'phone', 'email', 'address', 'creditLimit', 'isActive',
     'totalDue', 'totalPaid', 'totalPurchases', 'openingDue',
+    // The other half of `totalDue`. Money the shop is HOLDING, so a change to
+    // it is a change to what the shop owes someone — at least as worth a trail
+    // entry as a change to what they owe the shop.
+    'advanceBalance',
     // Owner-only and it changes what the shop charges, so a promotion to
     // wholesale is exactly the kind of edit the trail exists to record.
     'isWholesale',

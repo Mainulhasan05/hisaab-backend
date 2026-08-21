@@ -164,6 +164,11 @@ describe('a due reduction lands on the branch that holds the debt', () => {
 
   beforeEach(() => {
     jest.spyOn(DueAdjustment, 'create').mockResolvedValue([{ _id: new mongoose.Types.ObjectId() }]);
+    // `_applyDueAdjustment` re-derives the branch row after moving the opening
+    // figure, rather than `$inc`-ing its due — see the netting note there. It is
+    // a real read, so it has to be stubbed alongside `applyDelta` or these
+    // tests hang on a database that is not there.
+    jest.spyOn(CustomerBalance, 'recomputeBalances').mockResolvedValue(null);
   });
 
   it('does not push the correcting branch negative', async () => {
@@ -241,7 +246,15 @@ describe('a due reduction lands on the branch that holds the debt', () => {
       separate()
     );
 
-    expect(applyDelta.mock.calls[0][0]).toMatchObject({ branch: BRANCH_A, opening: 5000, due: 5000 });
+    // `opening` only — no `due` delta. The row's due is DERIVED right after, so
+    // that an increase applied to a branch holding customer credit nets against
+    // the credit instead of leaving the row owing and in credit at once.
+    expect(applyDelta.mock.calls[0][0]).toMatchObject({ branch: BRANCH_A, opening: 5000 });
+    expect(applyDelta.mock.calls[0][0].due).toBeUndefined();
+    expect(CustomerBalance.recomputeBalances).toHaveBeenCalledWith(
+      expect.objectContaining({ branch: BRANCH_A }),
+      null
+    );
     expect(customer.totalDue).toBe(5000);
   });
 

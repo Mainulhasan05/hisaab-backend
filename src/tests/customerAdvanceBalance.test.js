@@ -112,3 +112,85 @@ describe('deriveDue is unchanged by the addition', () => {
     expect(Customer.deriveDue(net(1000, 0, 300))).toBe(700);
   });
 });
+
+
+describe('opening debt nets against a credit balance', () => {
+  /**
+   * The owner's decision, pinned: carried-in খাতা debt CONSUMES an advance
+   * rather than stacking beside it.
+   *
+   * Exercised through `applyBalances` rather than the service, because the
+   * arithmetic is the decision — the service's job is only to call it. What
+   * would break without this is not a wrong total but an impossible one: a
+   * customer both owing and in credit at the same instant.
+   */
+  const advanceHolder = () => ({ totalPurchases: 300, openingDue: 0, totalPaid: 1000 });
+
+  it('eats into the deposit instead of creating a due', () => {
+    const c = advanceHolder();
+    Customer.applyBalances(c);
+    expect(c.advanceBalance).toBe(700);
+
+    c.openingDue += 500;              // owner records ৳500 of paper-খাতা debt
+    Customer.applyBalances(c);
+
+    expect(c.totalDue).toBe(0);       // they still owe nothing…
+    expect(c.advanceBalance).toBe(200); // …and ৳500 of their credit is spoken for
+  });
+
+  it('flips to a genuine due once the old debt outgrows the deposit', () => {
+    const c = advanceHolder();
+    c.openingDue += 900;
+    Customer.applyBalances(c);
+
+    expect(c.totalDue).toBe(200);
+    expect(c.advanceBalance).toBe(0);
+  });
+
+  it('never leaves the customer owing AND in credit at once', () => {
+    for (let opening = 0; opening <= 1500; opening += 25) {
+      const c = { ...advanceHolder(), openingDue: opening };
+      Customer.applyBalances(c);
+      expect(c.totalDue === 0 || c.advanceBalance === 0).toBe(true);
+    }
+  });
+
+  it('the reduction floor still forbids an adjustment MINTING credit', () => {
+    /**
+     * G6, restated against the derived model. `_applyDueAdjustment` clamps a
+     * reduction at `−min(openingDue, totalDue)`, and `totalDue` is `max(0, net)`
+     * — so the largest write-off allowed is exactly the debt that is really
+     * there, and the net position can never be carried below zero by a
+     * correction. Money enters through a money door or not at all.
+     */
+    const c = { totalPurchases: 1000, openingDue: 500, totalPaid: 200 };
+    Customer.applyBalances(c);
+    expect(c.totalDue).toBe(1300);
+
+    const shopFloor = -Math.min(c.openingDue, c.totalDue);
+    expect(shopFloor).toBe(-500); // bounded by the opening debt, not the total
+
+    c.openingDue += shopFloor;
+    Customer.applyBalances(c);
+    expect(c.openingDue).toBe(0);
+    expect(c.advanceBalance).toBe(0); // no credit was conjured
+    expect(c.totalDue).toBe(800);
+  });
+
+  it('a write-off cannot mint credit even for a customer who overpaid on goods', () => {
+    // Overpaid ৳300 on goods but carries ৳500 of paper debt: net +৳200.
+    const c = { totalPurchases: 700, openingDue: 500, totalPaid: 1000 };
+    Customer.applyBalances(c);
+    expect(c.totalDue).toBe(200);
+
+    // The floor is the SMALLER of the two, so at most ৳200 comes off — not the
+    // full ৳500 of opening, which would have left them ৳300 in credit.
+    const shopFloor = -Math.min(c.openingDue, c.totalDue);
+    expect(shopFloor).toBe(-200);
+
+    c.openingDue += shopFloor;
+    Customer.applyBalances(c);
+    expect(c.totalDue).toBe(0);
+    expect(c.advanceBalance).toBe(0);
+  });
+});

@@ -563,12 +563,47 @@ class CustomerService {
         return { customer, adjustment: null, applied: 0 };
       }
 
+      // Captured before the write, for the audit entry. Reconstructing them
+      // afterwards as `totalDue − applied` was only ever right while the two
+      // moved in lockstep, which they stop doing the moment a customer holds
+      // credit: adding ৳500 of খাতা debt to someone ৳700 in advance moves
+      // `totalDue` by nothing at all.
+      const beforeFigures = {
+        openingDue: customer.openingDue || 0,
+        totalDue: customer.totalDue || 0,
+        advanceBalance: customer.advanceBalance || 0,
+      };
+
       // Quantized so the shop-wide rollup rounds exactly as the branch rows did
       // in `reduceOpening` — the Σ invariant is an equality, and two sides that
       // round differently break it by a paisa the recalc script then reports as
       // unexplained drift forever.
       customer.openingDue = quantizeMoney((customer.openingDue || 0) + applied);
-      customer.totalDue = quantizeMoney((customer.totalDue || 0) + applied);
+
+      /**
+       * ── Opening debt CONSUMES an advance, it does not stack beside it ───────
+       *
+       * `totalDue += applied` was right while a customer could only ever owe.
+       * Give someone holding ৳700 of credit ৳500 of carried-in খাতা debt and it
+       * writes `totalDue = 500` while `advanceBalance` sits at ৳700 — the
+       * customer owing and in credit at the same moment, which is the one state
+       * the pair is defined to make impossible.
+       *
+       * Deriving instead nets them: the ৳500 of old debt eats ৳500 of the
+       * deposit and they are left ৳200 in credit, owing nothing. That is what
+       * actually happened — the shop was holding ৳700 of their money and has
+       * now remembered ৳500 of it was already spoken for.
+       *
+       * ── This does NOT let an adjustment mint credit ─────────────────────────
+       *
+       * The obvious worry is the other direction: an owner writing off debt and
+       * accidentally creating a liability the shop must honour. `shopFloor`
+       * above already prevents it, and — pleasingly — needs no change to keep
+       * doing so. It is `−min(openingDue, totalDue)`, and `totalDue` IS
+       * `max(0, net)`, so a reduction can never carry the net position below
+       * zero. Money still enters only through a money door.
+       */
+      Customer.applyBalances(customer);
       await customer.save(sessionOpt);
 
       const [adjustment] = await DueAdjustment.create([{
@@ -594,7 +629,20 @@ class CustomerService {
           customer: customerId,
           branch: branchId,
           opening: applied,
-          due: applied,
+        }, session);
+
+        // `opening` only, then derive — the branch half of the netting above.
+        // An `$inc` of `due` here would reintroduce, one row down, exactly the
+        // owing-and-in-credit state the shop-wide side just avoided.
+        //
+        // Unguarded, unlike the equivalent in `createSale`: that one sits on the
+        // checkout hot path and had to earn its extra read, while this is an
+        // owner correcting a khata figure by hand. Rare enough that being
+        // obviously correct beats being clever.
+        await CustomerBalance.recomputeBalances({
+          shop: shopId,
+          customer: customerId,
+          branch: branchId,
         }, session);
       }
 
@@ -606,8 +654,12 @@ class CustomerService {
         description: `${applied > 0 ? 'Added' : 'Reduced'} opening due ৳${Math.abs(applied)} for ${customer.name || customer.phone}`,
         entity: { type: 'customer', id: customerId, name: customer.name },
         changes: {
-          before: { openingDue: customer.openingDue - applied, totalDue: customer.totalDue - applied },
-          after: { openingDue: customer.openingDue, totalDue: customer.totalDue },
+          before: beforeFigures,
+          after: {
+            openingDue: customer.openingDue,
+            totalDue: customer.totalDue,
+            advanceBalance: customer.advanceBalance || 0,
+          },
         },
         req,
       });
