@@ -144,6 +144,33 @@ module.exports = {
     SALE_PAYMENT: 'sale_payment',
     PURCHASE_PAYMENT: 'purchase_payment',
     DUE_COLLECTION: 'due_collection',
+    /**
+     * Money taken from a customer with no debt for it to settle — a deposit
+     * against future purchases (অগ্রিম জমা).
+     *
+     * ── Why not just another `due_collection` ────────────────────────────────
+     *
+     * Reusing that type would have been cheaper: the reallocation pool, the
+     * cash register and three reports already match on it, so an advance would
+     * have worked with no changes at all. It is still wrong, and the reason is
+     * economic rather than technical.
+     *
+     * A `due_collection` REDUCES A RECEIVABLE — money the shop had already
+     * earned, finally arriving. An advance CREATES A LIABILITY — money the shop
+     * has not earned and is merely holding. Folded together, "মোট বাকি আদায়
+     * ৳12,700" would report a day's debt collection that silently included
+     * ৳700 of deposit, and a shopkeeper judging whether their customers are
+     * paying up would be reading a number that answers a different question.
+     *
+     * Where the two genuinely belong in one bucket — the reallocation pool, and
+     * the cash drawer, both of which care only that money arrived — the match
+     * is an explicit `$in` naming both, so the joining is visible at the point
+     * it happens rather than hidden in a shared label.
+     *
+     * A payment that straddles the boundary (owes ৳2,000, pays ৳3,000) is
+     * written as TWO rows, not one mixed row. See dueSettlement.service.
+     */
+    ADVANCE: 'advance',
     REFUND: 'refund'
   },
 

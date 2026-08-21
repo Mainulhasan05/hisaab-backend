@@ -385,6 +385,11 @@ class CustomerService {
       totalPurchases: row.totalPurchases || 0,
       totalPaid: row.totalPaid || 0,
       totalDue: row.totalDue || 0,
+      // Overlaid for the same reason `totalDue` is: under separate books the
+      // branch's credit is the only figure this page may show. Omitted, the
+      // shop-wide advance would leak through the spread above and a branch
+      // holding nothing would offer to spend another branch's deposit.
+      advanceBalance: row.advanceBalance || 0,
       openingDue: row.openingDue || 0,
       purchaseCount: row.purchaseCount || 0,
       lastPurchase: row.lastPurchase || null,
@@ -455,7 +460,7 @@ class CustomerService {
         ...customer.toObject(),
         sharedName: null,
         hasLocalName: false,
-        totalPurchases: 0, totalPaid: 0, totalDue: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null,
+        totalPurchases: 0, totalPaid: 0, totalDue: 0, advanceBalance: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null,
       };
     }
 

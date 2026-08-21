@@ -708,11 +708,11 @@ class SalesReturnService {
           // `deriveDue`, not the arithmetic inline: it carries the `openingDue`
           // term, and a return must not wipe debt the customer brought with
           // them from the shop's paper খাতা. See DueAdjustment.model.js.
-          customer.totalDue = Customer.deriveDue(customer);
+          Customer.applyBalances(customer);
           await customer.save(sessionOpt);
         }
 
-        // Same two steps, per branch. `recomputeDue` mirrors the Math.max clamp
+        // Same two steps, per branch. `recomputeBalances` mirrors the Math.max clamp
         // above rather than $inc-ing totalDue: an over-refunded customer clamps
         // on one side, and clamping on only one of them is exactly how the two
         // books silently drift apart. Returns are only allowed at the branch
@@ -724,7 +724,7 @@ class SalesReturnService {
           purchases: -refundTotal,
           paid: -refundTotal,
         }, session);
-        await CustomerBalance.recomputeDue({
+        await CustomerBalance.recomputeBalances({
           shop: shopId,
           customer: sale.customer,
           branch: sale.branch,
@@ -737,7 +737,7 @@ class SalesReturnService {
         customer.totalPurchases = quantizeMoney(customer.totalPurchases - refundTotal);
         // Shared formula — carries the `openingDue` term, and quantizes. See the
         // note at the cash-refund branch above.
-        customer.totalDue = Customer.deriveDue(customer);
+        Customer.applyBalances(customer);
         await customer.save(sessionOpt);
       }
 
@@ -750,7 +750,7 @@ class SalesReturnService {
         // one and not the other is precisely how they drift.
         purchases: -refundTotal,
       }, session);
-      await CustomerBalance.recomputeDue({
+      await CustomerBalance.recomputeBalances({
         shop: shopId,
         customer: sale.customer,
         branch: sale.branch,
@@ -1086,7 +1086,7 @@ class SalesReturnService {
           // `deriveDue`, not the arithmetic inline: it carries the `openingDue`
           // term, and a return must not wipe debt the customer brought with
           // them from the shop's paper খাতা. See DueAdjustment.model.js.
-          customer.totalDue = Customer.deriveDue(customer);
+          Customer.applyBalances(customer);
           await customer.save(sessionOpt);
         }
 
@@ -1097,7 +1097,7 @@ class SalesReturnService {
           purchases: -amount,
           paid: -amount,
         }, session);
-        await CustomerBalance.recomputeDue({
+        await CustomerBalance.recomputeBalances({
           shop: shopId,
           customer: salesReturn.customer,
           branch: salesReturn.branch,

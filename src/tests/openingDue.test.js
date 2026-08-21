@@ -52,14 +52,14 @@ describe('the formula', () => {
 });
 
 describe('CustomerBalance mirrors the same formula', () => {
-  it('recomputeDue carries the opening term', async () => {
+  it('recomputeBalances carries the opening term', async () => {
     // This is the sales-return path. Before the term existed, a return on a
     // customer carrying খাতা debt recomputed their due from purchases alone and
     // wiped the opening balance.
     const row = { totalPurchases: 1000, openingDue: 5000, totalPaid: 200, totalDue: 0, save: jest.fn() };
     jest.spyOn(CustomerBalance, 'findOne').mockResolvedValue(row);
 
-    await CustomerBalance.recomputeDue({ shop: SHOP, customer: CUSTOMER, branch: BRANCH });
+    await CustomerBalance.recomputeBalances({ shop: SHOP, customer: CUSTOMER, branch: BRANCH });
 
     expect(row.totalDue).toBe(5800);
     expect(row.save).toHaveBeenCalled();

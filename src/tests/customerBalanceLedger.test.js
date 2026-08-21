@@ -154,19 +154,58 @@ describe('settleDue — allocating a collection across branches', () => {
 
   it('parks a remainder on the collecting branch so the Σ invariant survives', async () => {
     // Real only for history predating Phase 7: shop-wide due with no rows to
-    // reduce. Dropping the remainder would break Σ branch === Customer.totalDue.
+    // reduce. Dropping the remainder would break the Σ invariant.
     stubRows([{ branch: BRANCH_A, totalDue: 100, totalPaid: 0 }]);
     const applyDelta = jest.spyOn(CustomerBalance, 'applyDelta').mockResolvedValue({});
+    const recompute = jest.spyOn(CustomerBalance, 'recomputeBalances').mockResolvedValue({});
 
     const applied = await CustomerBalance.settleDue({
       shop: SHOP, customer: CUSTOMER, preferBranch: BRANCH_A, amount: 500,
     });
 
     expect(applyDelta).toHaveBeenCalledWith(
-      expect.objectContaining({ branch: BRANCH_A, paid: 400, due: -400 }),
+      expect.objectContaining({ branch: BRANCH_A, paid: 400 }),
+      null
+    );
+    expect(recompute).toHaveBeenCalledWith(
+      expect.objectContaining({ branch: BRANCH_A }),
       null
     );
     expect(applied.reduce((s, a) => s + a.amount, 0)).toBe(500);
+  });
+
+  it('credits the remainder to paid WITHOUT decrementing due — the clamp is structural', async () => {
+    /**
+     * The regression this pins. The remainder used to be written as
+     * `applyDelta({ paid: remaining, due: -remaining })` — a raw `$inc` on
+     * `totalDue` with no clamp on the path.
+     *
+     * It was safe only because `settleCustomerDue` refused any amount larger
+     * than the due, i.e. by a guarantee held in a different file. Customer
+     * advances remove that guarantee by design: an advance IS money arriving
+     * with no due to land on. Left as it was, the first advance taken would
+     * push this row's `totalDue` negative — breaking the Σ invariant, dropping
+     * the row out of every `{ totalDue: { $gt: 0 } }` query, understating the
+     * branch receivable, and throwing nothing at all.
+     *
+     * So the assertion is specifically that no negative `due` delta is sent.
+     * Crediting `totalPaid` and re-deriving is what makes the clamp impossible
+     * to bypass, rather than merely unreached.
+     */
+    stubRows([]);
+    const applyDelta = jest.spyOn(CustomerBalance, 'applyDelta').mockResolvedValue({});
+    jest.spyOn(CustomerBalance, 'recomputeBalances').mockResolvedValue({});
+
+    // No rows at all short-circuits before the remainder; give it one row with
+    // less due than the amount so the remainder branch is genuinely reached.
+    stubRows([{ branch: BRANCH_A, totalDue: 0, totalPaid: 0 }]);
+    await CustomerBalance.settleDue({
+      shop: SHOP, customer: CUSTOMER, preferBranch: BRANCH_A, amount: 700,
+    });
+
+    const delta = applyDelta.mock.calls[0][0];
+    expect(delta.paid).toBe(700);
+    expect(delta.due).toBeUndefined();
   });
 
   it('does nothing when the shop tracks no branches at all', async () => {
@@ -179,7 +218,7 @@ describe('settleDue — allocating a collection across branches', () => {
   });
 });
 
-describe('recomputeDue', () => {
+describe('recomputeBalances', () => {
   it('mirrors the Math.max clamp the Customer rollup uses', async () => {
     // An over-refunded customer clamps at zero on the Customer document. If the
     // branch row $inc'd past zero instead, the two books would drift apart on
@@ -187,7 +226,7 @@ describe('recomputeDue', () => {
     const row = { totalPurchases: 100, totalPaid: 400, totalDue: 0, save: jest.fn() };
     jest.spyOn(CustomerBalance, 'findOne').mockResolvedValue(row);
 
-    await CustomerBalance.recomputeDue({ shop: SHOP, customer: CUSTOMER, branch: BRANCH_A });
+    await CustomerBalance.recomputeBalances({ shop: SHOP, customer: CUSTOMER, branch: BRANCH_A });
 
     expect(row.totalDue).toBe(0);
     expect(row.save).toHaveBeenCalled();
@@ -196,13 +235,13 @@ describe('recomputeDue', () => {
   it('derives due from purchases minus payments', async () => {
     const row = { totalPurchases: 1000, totalPaid: 250, totalDue: 999, save: jest.fn() };
     jest.spyOn(CustomerBalance, 'findOne').mockResolvedValue(row);
-    await CustomerBalance.recomputeDue({ shop: SHOP, customer: CUSTOMER, branch: BRANCH_A });
+    await CustomerBalance.recomputeBalances({ shop: SHOP, customer: CUSTOMER, branch: BRANCH_A });
     expect(row.totalDue).toBe(750);
   });
 
   it('is a no-op without a branch', async () => {
     const findOne = jest.spyOn(CustomerBalance, 'findOne');
-    expect(await CustomerBalance.recomputeDue({ shop: SHOP, customer: CUSTOMER, branch: null })).toBeNull();
+    expect(await CustomerBalance.recomputeBalances({ shop: SHOP, customer: CUSTOMER, branch: null })).toBeNull();
     expect(findOne).not.toHaveBeenCalled();
   });
 });

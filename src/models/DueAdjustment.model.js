@@ -27,7 +27,7 @@ const { immutableGuard } = require('../utils/immutableGuard.util');
  *     totalDue = max(0, totalPurchases + openingDue − totalPaid)
  *
  * Every place that recomputes due rather than `$inc`-ing it must use that form.
- * They are: `CustomerBalance.recomputeDue`, the three sales-return paths, and
+ * They are: `CustomerBalance.recomputeBalances`, the three sales-return paths, and
  * `scripts/recalc-customer-balances.js`. `grep "totalPurchases + "` finds them.
  *
  * ── Signed amounts ───────────────────────────────────────────────────────────

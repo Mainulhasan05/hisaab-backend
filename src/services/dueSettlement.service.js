@@ -309,9 +309,20 @@ async function reallocateCustomerInvoices(
   const shopOid = new mongoose.Types.ObjectId(String(shopId));
   const customerOid = new mongoose.Types.ObjectId(String(customerId));
 
-  // ── The pool: every ৳ collected against this customer's খাতা ───────────────
+  // ── The pool: every ৳ this customer has handed over off-invoice ───────────
   //
-  // `due_collection` is the type both khata paths write and nothing else does.
+  // TWO types, and they are here for the same reason despite being different
+  // economic events. `due_collection` is money settling debt the shop had
+  // already earned; `advance` is a deposit against goods not yet sold. What
+  // they share is the only property this function cares about: the customer
+  // gave it to us, and it is not tied to any one invoice. Both are therefore
+  // available to settle whatever this customer owes, oldest first.
+  //
+  // Keeping them separate as TYPES while joining them HERE is deliberate — see
+  // PAYMENT_TYPES.ADVANCE. The reports that must not conflate them read the
+  // type; the two places that must join them (this pool, and the cash drawer)
+  // say so out loud with an `$in`.
+  //
   // Grouped by branch so separate books can be kept separate below; a
   // single-branch shop puts everything under the one null key.
   //
@@ -328,7 +339,7 @@ async function reallocateCustomerInvoices(
   // with a flat `mockResolvedValue([])` instead of hand-building an Aggregate.
   const pools = await Payment.aggregate(
     [
-      { $match: { shop: shopOid, customer: customerOid, type: 'due_collection' } },
+      { $match: { shop: shopOid, customer: customerOid, type: { $in: ['due_collection', 'advance'] } } },
       { $group: { _id: '$branch', total: { $sum: '$amount' } } },
     ],
     sessionOpt
@@ -414,6 +425,24 @@ async function reallocateCustomerInvoices(
    *      shop. The recompute is global, so this would appear the first time
    *      anything touched the customer, long after the sale, with nothing to
    *      connect the two.
+   *
+   *      ── This is NOT the advance case, and the difference is the point ────
+   *
+   *      An `advance` row is money the customer deliberately left on deposit,
+   *      and a future invoice consuming it is the entire feature. Point 2 is
+   *      about surplus arriving by ACCIDENT — unlabelled pool money left over
+   *      because an opening balance was skipped — where the shopkeeper never
+   *      agreed to anything and the invoice closing itself is inexplicable.
+   *
+   *      What separates them is intent recorded at the till: `advance` is typed
+   *      by the cashier, confirmed by the customer, and visible as a balance on
+   *      the customer's page BEFORE it is spent. Consuming opening debt first,
+   *      immediately below, is what keeps the accidental kind out of the pool
+   *      so only the deliberate kind survives to reach an invoice.
+   *
+   *      So do not "fix" this by capping the pool at what the invoices can
+   *      absorb — that cap is what would break advances, and it would do it
+   *      silently.
    *
    * Read per branch under separate books, for the same reason everything else
    * here is: `CustomerBalance.openingDue` is that branch's share, and charging

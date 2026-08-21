@@ -1498,13 +1498,21 @@ class SaleService {
     // Chittagong chose for them, which is the confusion this whole feature
     // exists to end. Only ever a rename of the same person, so nothing about
     // the money or the customer link changes.
+    // `advanceBalance` rides along on a read that was happening anyway. It is
+    // needed further down to decide whether this branch's row has to be
+    // re-derived rather than `$inc`-ed (see the rollup), and under SEPARATE
+    // books it is the only place that answer lives: a customer can hold credit
+    // at this branch while the shop-wide document shows them owing money to
+    // another one, so the shop-wide figure cannot stand in for it.
+    let branchAdvance = 0;
     if (customer && branchId) {
       const localRow = await CustomerBalance.findOne(
         { shop: shopId, customer: customer._id, branch: branchId },
-        'localName',
+        'localName advanceBalance',
         sessionOpt
       );
       if (localRow?.localName) finalCustomerName = localRow.localName;
+      branchAdvance = localRow?.advanceBalance || 0;
     }
 
     // ── The খাতা as it stands, read BEFORE this sale touches it ─────────────
@@ -1726,9 +1734,45 @@ class SaleService {
     // Update customer statistics if customer exists
     if (customer) {
       const purchasedAt = occurredAt;
+
+      /**
+       * Whether this customer is holding credit ANYWHERE that matters here —
+       * captured before the rollup below mutates the document.
+       *
+       * Two figures because the two books can genuinely disagree under separate
+       * `customerScope`: ৳700 on deposit at নয়াগোলা while Dhaka is owed ৳1,000
+       * nets to +৳300 shop-wide, so the shop-wide `advanceBalance` reads zero
+       * and would miss নয়াগোলা's row entirely.
+       *
+       * Both are already in memory — one on the customer document, one on the
+       * branch row read for `localName` — so this costs nothing on the hot
+       * path, which is the point. Almost every checkout is to someone who has
+       * never left a deposit, and they must not pay for this.
+       */
+      const heldAdvance = (customer.advanceBalance || 0) > 0 || branchAdvance > 0;
+
       customer.totalPurchases += total;
       customer.totalPaid += paid;
-      customer.totalDue += due;
+      /**
+       * `applyBalances`, not `totalDue += due`.
+       *
+       * Identical arithmetic for a customer with no credit: this sale moves the
+       * net position by `total − paid`, which IS `due` at creation time
+       * (`ledgerSettled` and `returnedAdjustment` are both zero on a brand-new
+       * invoice), so the derived figure and the increment agree to the paisa.
+       *
+       * They stop agreeing the moment a customer holds an advance. Someone
+       * carrying ৳700 of credit who buys ৳500 on বাকি has a net position moving
+       * from −৳700 to −৳200: they still owe nothing, and their credit has
+       * shrunk. The increment would instead write `totalDue = 0 + 500` while
+       * leaving `advanceBalance` at ৳700 — the customer simultaneously owing
+       * and in credit, which is the one state the pair is defined to make
+       * impossible.
+       *
+       * Deriving cannot produce that state, whatever the inputs. Same reason
+       * `cancelSale` and the three return paths stopped `$inc`-ing this field.
+       */
+      Customer.applyBalances(customer);
       customer.purchaseCount += 1;
       /**
        * "Last purchase" only ever moves FORWARD.
@@ -1757,6 +1801,19 @@ class SaleService {
         count: 1,
         lastPurchase: purchasedAt,
       }, session);
+
+      // The branch row's half of the same correction. `applyDelta` is a raw
+      // `$inc` — right, and cheapest, for the overwhelming majority — so the
+      // re-derivation runs only when there is credit for it to get wrong. One
+      // extra read and write on a checkout for a customer holding a deposit;
+      // nothing at all for everyone else.
+      if (heldAdvance) {
+        await CustomerBalance.recomputeBalances({
+          shop: shopId,
+          customer: customer._id,
+          branch: branchId,
+        }, session);
+      }
     }
 
     /**
@@ -1842,6 +1899,54 @@ class SaleService {
        * silently dropping by ৳2,200 never is.
        */
       dueAllocations = settled.allocations || [];
+    } else if (customer && !revisedFrom && (customer.advanceBalance || 0) > 0) {
+      /**
+       * ── A customer holding credit spends it HERE, not eventually ───────────
+       *
+       * `reallocateCustomerInvoices` is reached from four services, and until
+       * this branch existed `createSale` reached it only through
+       * `settleCustomerDue` above — i.e. only when the till happened to send a
+       * `dueSettlement`. An ordinary credit sale to a customer with money in
+       * the pool triggered nothing at all.
+       *
+       * That was already a live bug before advances, and it is worth naming
+       * because it is the kind that reads as a UI complaint rather than a
+       * ledger fault. Take a return against a settled invoice: the reallocator
+       * runs, frees pool money, and leaves it unallocated because there is
+       * nothing left to pay. The customer then buys ৳500 on বাকি. The invoice
+       * is written `due: 500`, nothing re-spreads the pool, and the customer's
+       * page — which derives from the rollups — reads ৳0 owed while the invoice
+       * reads ৳500 due. The two disagree until some unrelated event days later
+       * fires the reallocator, at which point ৳500 vanishes off an invoice
+       * nobody is looking at any more.
+       *
+       * With advances the same gap becomes the feature failing outright: the
+       * deposit simply never gets spent.
+       *
+       * ── Why the guard is a stored field and not the pool ───────────────────
+       *
+       * `advanceBalance` is already on the customer document this function
+       * loaded, so the overwhelming majority of checkouts — everyone who has
+       * never left a deposit — pay one property read and stop. Asking the pool
+       * instead would put an aggregate on the hottest path in the app to
+       * discover, almost always, that there was nothing to do. Same instinct as
+       * the reallocator's own early return on an empty pool.
+       *
+       * ORDER IS LOAD-BEARING: this sits after the rollup above, so THIS
+       * invoice is already in the queue and can absorb the credit. Run before
+       * it, the money would skip the sale that is happening right now and land
+       * on the next one.
+       *
+       * Revisions are excluded for the same reason they are excluded from
+       * `dueSettlement`: `reviseSale` runs its own reallocation once the
+       * replacement exists (see its note), and doing it here as well would
+       * allocate against an invoice that is about to be superseded.
+       */
+      dueAllocations = await dueSettlementService.reallocateCustomerInvoices({
+        shopId,
+        customerId: customer._id,
+        branchScoped: branchCustomerScope,
+      }, session);
     }
 
     // Create payment record if paid amount > 0.
@@ -2483,7 +2588,7 @@ class SaleService {
         const customer = await Customer.findById(sale.customer).session(session || null);
         if (customer) {
           customer.totalPaid = quantizeMoney((customer.totalPaid || 0) - held);
-          customer.totalDue = Customer.deriveDue(customer);
+          Customer.applyBalances(customer);
           await customer.save(sessionOpt);
         }
 
@@ -2493,7 +2598,7 @@ class SaleService {
           branch: sale.branch,
           paid: -held,
         }, session);
-        await CustomerBalance.recomputeDue({
+        await CustomerBalance.recomputeBalances({
           shop: shopId,
           customer: sale.customer,
           branch: sale.branch,
@@ -2884,14 +2989,14 @@ class SaleService {
       if (cancelCustomer) {
         // `deriveDue` carries the `openingDue` term, so a cancellation cannot
         // wipe debt the customer brought in from the shop's paper খাতা.
-        cancelCustomer.totalDue = Customer.deriveDue(cancelCustomer);
+        Customer.applyBalances(cancelCustomer);
         await cancelCustomer.save(sessionOpt);
       }
 
       // Unwound at the branch that raised the sale — which is the only branch
       // whose figures the sale ever moved.
       //
-      // `recomputeDue` rather than a `due` delta, mirroring the clamp above.
+      // `recomputeBalances` rather than a `due` delta, mirroring the clamp above.
       // Clamping on one side only is precisely how the shop-wide book and the
       // per-branch rows drift apart while `Σ CustomerBalance.totalDue ===
       // Customer.totalDue` still looks like it should hold.
@@ -2903,7 +3008,7 @@ class SaleService {
         paid: -sale.paid,
         count: -1,
       }, session);
-      await CustomerBalance.recomputeDue({
+      await CustomerBalance.recomputeBalances({
         shop: shopId,
         customer: sale.customer,
         branch: sale.branch,

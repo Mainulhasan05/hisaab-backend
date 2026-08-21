@@ -14,9 +14,17 @@
  * 2. REPAIR drift. `Customer.totalDue` and the branch rows are maintained by
  *    the same code in the same transactions, so they should never disagree; if
  *    they do, a write path was changed on one side only.
- * 3. VERIFY the invariant, on demand, against live data:
+ * 3. VERIFY the invariants, on demand, against live data:
  *
- *        Σ CustomerBalance.totalDue  ===  Customer.totalDue      (per customer)
+ *        Σ (CustomerBalance.totalDue − CustomerBalance.advanceBalance)
+ *            ===  Customer.totalDue − Customer.advanceBalance     (per customer)
+ *
+ *        totalDue > 0  and  advanceBalance > 0  never hold together (per row)
+ *
+ *    The first is compared on the NET because a customer may hold credit at one
+ *    branch while owing another — legitimate under separate books, and a
+ *    `Σ totalDue` comparison would report it as drift forever. See the note at
+ *    the check itself.
  *
  * The rebuild derives every figure from source documents — Sale, Payment,
  * SalesReturn, DueAdjustment — never from the rollup it is checking, so it is a
@@ -25,7 +33,13 @@
  * `DueAdjustment` is the pre-software debt a shop carried in from its paper
  * খাতা. It has no invoice behind it, so it enters the formula as its own term:
  *
- *     totalDue = max(0, totalPurchases + openingDue − totalPaid)
+ *     net            = totalPurchases + openingDue − totalPaid
+ *     totalDue       = max(0,  net)
+ *     advanceBalance = max(0, −net)
+ *
+ * The two halves come from one expression on purpose: that is what makes it
+ * impossible for a rebuilt row to claim a customer both owes money and is in
+ * credit.
  *
  * If this script is ever seen to zero out an opening balance, the cause is a
  * `dueadjustments` read that was dropped from `rebuildShop` — not bad data.
@@ -137,7 +151,7 @@ async function rebuildShop(db, shop, defaultBranchId) {
     if (!rows.has(key)) {
       rows.set(key, {
         shop: shopId, customer, branch,
-        totalPurchases: 0, totalPaid: 0, totalDue: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null,
+        totalPurchases: 0, totalPaid: 0, totalDue: 0, advanceBalance: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null,
       });
     }
     return rows.get(key);
@@ -170,9 +184,16 @@ async function rebuildShop(db, shop, defaultBranchId) {
     row.totalPurchases = round(row.totalPurchases);
     row.totalPaid = round(row.totalPaid);
     row.openingDue = round(row.openingDue);
-    // Same formula as Customer.deriveDue — kept literal here because this
-    // script is the independent check and must not import the code it verifies.
-    row.totalDue = round(Math.max(0, row.totalPurchases + row.openingDue - row.totalPaid));
+    // Same formulae as Customer.deriveDue / deriveAdvance — kept literal here
+    // because this script is the independent check and must not import the code
+    // it verifies.
+    //
+    // The two are the positive and negative halves of one net position, so
+    // deriving BOTH from the same expression is what guarantees they can never
+    // both be non-zero on the same row.
+    const net = round(row.totalPurchases + row.openingDue - row.totalPaid);
+    row.totalDue = Math.max(0, net);
+    row.advanceBalance = Math.max(0, -net);
   }
 
   // Customers with no transaction anywhere — see the note above. Skipped when
@@ -247,10 +268,11 @@ async function main() {
     for (const row of rebuilt) {
       const k = String(row.customer);
       const acc = rebuiltByCustomer.get(k) ||
-        { totalPurchases: 0, totalPaid: 0, totalDue: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null };
+        { totalPurchases: 0, totalPaid: 0, totalDue: 0, advanceBalance: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null };
       acc.totalPurchases = round(acc.totalPurchases + row.totalPurchases);
       acc.totalPaid = round(acc.totalPaid + row.totalPaid);
       acc.totalDue = round(acc.totalDue + row.totalDue);
+      acc.advanceBalance = round(acc.advanceBalance + row.advanceBalance);
       acc.openingDue = round(acc.openingDue + row.openingDue);
       acc.purchaseCount += row.purchaseCount;
       if (row.lastPurchase && (!acc.lastPurchase || row.lastPurchase > acc.lastPurchase)) {
@@ -261,22 +283,56 @@ async function main() {
 
     const customers = await db.collection('customers')
       .find({ shop: shop._id })
-      .project({ totalPurchases: 1, totalPaid: 1, totalDue: 1, purchaseCount: 1, name: 1, phone: 1 })
+      .project({ totalPurchases: 1, totalPaid: 1, totalDue: 1, advanceBalance: 1, purchaseCount: 1, name: 1, phone: 1 })
       .toArray();
 
     const customerRepairs = [];
 
     for (const customer of customers) {
       const rebuiltRollup = rebuiltByCustomer.get(String(customer._id)) ||
-        { totalPurchases: 0, totalPaid: 0, totalDue: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null };
-      const branchSum = rebuiltRollup.totalDue;
-      const shopWide = round(customer.totalDue || 0);
+        { totalPurchases: 0, totalPaid: 0, totalDue: 0, advanceBalance: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null };
+      /**
+       * Compared on the NET position, not on `totalDue` alone.
+       *
+       * Under separate books a customer may legitimately hold ৳700 on deposit
+       * at one branch while owing ৳1,000 at another. Their branch dues sum to
+       * ৳1,000 and their branch advances to ৳700, while shop-wide they are
+       * simply ৳300 in debt — so a `Σ totalDue === Customer.totalDue` check
+       * would report ৳700 of drift on a customer whose books are perfect.
+       *
+       * `due − advance` is the same signed number on both sides, which is what
+       * makes it comparable. Before advances existed both advance terms were
+       * always zero and this reduced to the check it replaces, so every shop
+       * that passed before still passes.
+       */
+      const branchSum = round(rebuiltRollup.totalDue - rebuiltRollup.advanceBalance);
+      const shopWide = round((customer.totalDue || 0) - (customer.advanceBalance || 0));
       if (Math.abs(branchSum - shopWide) > 0.01) {
         mismatches++;
         if (mismatches <= 20) {
           console.log(
             `  MISMATCH ${customer.name || customer.phone}: ` +
-            `branches sum to ৳${branchSum}, Customer.totalDue is ৳${shopWide}`
+            `branches net to ৳${branchSum}, Customer nets to ৳${shopWide} ` +
+            `(due ৳${round(customer.totalDue || 0)}, advance ৳${round(customer.advanceBalance || 0)})`
+          );
+        }
+      }
+
+      /**
+       * INV-A1/A2 — the exclusivity check, and the one most likely to catch a
+       * write path that was changed on one side only.
+       *
+       * A customer showing BOTH a due and an advance means something `$inc`-ed
+       * one half without re-deriving the other. It is per-document and cannot
+       * be explained away by branch scope, unlike the sum above.
+       */
+      if ((customer.totalDue || 0) > 0.01 && (customer.advanceBalance || 0) > 0.01) {
+        mismatches++;
+        if (mismatches <= 20) {
+          console.log(
+            `  BOTH-SIDED ${customer.name || customer.phone}: ` +
+            `owes ৳${round(customer.totalDue)} AND holds ৳${round(customer.advanceBalance)} ` +
+            `— a write path set one half without deriving the other`
           );
         }
       }
@@ -291,6 +347,20 @@ async function main() {
         (customer.purchaseCount || 0) !== rebuiltRollup.purchaseCount;
 
       if (differs) {
+        /**
+         * The shop-wide halves are DERIVED from the shop-wide components, not
+         * copied from the summed branch dues.
+         *
+         * They differ exactly when a customer holds credit at one branch and
+         * owes another: the branch dues sum to ৳1,000 while the shop, taken as
+         * one book, is owed ৳300. Writing ৳1,000 into `Customer.totalDue` would
+         * overstate the receivable and leave the document unable to reproduce
+         * its own figure from its own purchases and payments — the internal
+         * inconsistency the comment above this block warns about.
+         */
+        const shopNet = round(
+          rebuiltRollup.totalPurchases + rebuiltRollup.openingDue - rebuiltRollup.totalPaid
+        );
         customerRepairs.push({
           updateOne: {
             filter: { _id: customer._id },
@@ -298,7 +368,8 @@ async function main() {
               $set: {
                 totalPurchases: rebuiltRollup.totalPurchases,
                 totalPaid: rebuiltRollup.totalPaid,
-                totalDue: rebuiltRollup.totalDue,
+                totalDue: Math.max(0, shopNet),
+                advanceBalance: Math.max(0, -shopNet),
                 openingDue: rebuiltRollup.openingDue,
                 purchaseCount: rebuiltRollup.purchaseCount,
                 lastPurchase: rebuiltRollup.lastPurchase,
@@ -321,6 +392,7 @@ async function main() {
         Math.abs((current.totalPurchases || 0) - row.totalPurchases) > 0.01 ||
         Math.abs((current.totalPaid || 0) - row.totalPaid) > 0.01 ||
         Math.abs((current.totalDue || 0) - row.totalDue) > 0.01 ||
+        Math.abs((current.advanceBalance || 0) - row.advanceBalance) > 0.01 ||
         Math.abs((current.openingDue || 0) - row.openingDue) > 0.01 ||
         (current.purchaseCount || 0) !== row.purchaseCount;
 
@@ -333,6 +405,7 @@ async function main() {
                 totalPurchases: row.totalPurchases,
                 totalPaid: row.totalPaid,
                 totalDue: row.totalDue,
+                advanceBalance: row.advanceBalance,
                 openingDue: row.openingDue,
                 purchaseCount: row.purchaseCount,
                 lastPurchase: row.lastPurchase,
@@ -352,11 +425,12 @@ async function main() {
     for (const [key, row] of existingByKey) {
       if (!rebuilt.some((r) => `${r.customer}|${r.branch}` === key)) {
         if ((row.totalPurchases || 0) === 0 && (row.totalPaid || 0) === 0 &&
-            (row.totalDue || 0) === 0 && (row.openingDue || 0) === 0) continue;
+            (row.totalDue || 0) === 0 && (row.advanceBalance || 0) === 0 &&
+            (row.openingDue || 0) === 0) continue;
         ops.push({
           updateOne: {
             filter: { _id: row._id },
-            update: { $set: { totalPurchases: 0, totalPaid: 0, totalDue: 0, openingDue: 0, purchaseCount: 0, updatedAt: new Date() } },
+            update: { $set: { totalPurchases: 0, totalPaid: 0, totalDue: 0, advanceBalance: 0, openingDue: 0, purchaseCount: 0, updatedAt: new Date() } },
           },
         });
       }

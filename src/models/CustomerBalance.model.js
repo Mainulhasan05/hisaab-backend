@@ -24,8 +24,15 @@ const { quantizeMoney } = require('../utils/quantity.util');
  *    branches on the flag. That is what makes the toggle a same-request switch
  *    with no migration and no way to lose data by flipping it back.
  *
- * 3. **The invariant:** for any customer,
- *        Σ CustomerBalance.totalDue  ===  Customer.totalDue
+ * 3. **The invariant:** for any customer, on the NET position,
+ *        Σ (CustomerBalance.totalDue − CustomerBalance.advanceBalance)
+ *            ===  Customer.totalDue − Customer.advanceBalance
+ *
+ *    Before customer advances existed both `advanceBalance` terms were always
+ *    zero and this was written, equivalently, as `Σ totalDue === totalDue`.
+ *    The net form is the one that survives a customer holding credit at one
+ *    branch while owing another — see the field's own note for why that is a
+ *    legitimate state rather than drift.
  *    Every mutation here mirrors the corresponding `Customer` mutation with the
  *    same arithmetic, in the same transaction. `scripts/recalc-customer-balances.js`
  *    checks the invariant against live data; a mismatch means a write path was
@@ -65,6 +72,48 @@ const customerBalanceSchema = new mongoose.Schema({
   openingDue: {
     type: Number,
     default: 0
+  },
+  /**
+   * This branch's share of the money the shop is holding for the customer.
+   *
+   * The per-branch twin of `Customer.advanceBalance`, and it extends rule 3 of
+   * this file's header by one line:
+   *
+   *     Σ CustomerBalance.advanceBalance  ===  Customer.advanceBalance
+   *
+   * Under SEPARATE books an advance belongs to the branch that took it — the
+   * customer left ৳5,000 at নয়াগোলা, and Dhaka has no claim on it and must not
+   * spend it. Under SHARED books the split is bookkeeping only, exactly as it
+   * is for `totalDue`, and the read path is what decides which figure a screen
+   * shows. Same reason rows are written in both modes: the `customerScope`
+   * toggle stays a same-request switch with nothing to migrate.
+   *
+   * ── The Σ invariant is on the NET, not on each half ───────────────────────
+   *
+   * The obvious extension of rule 3 —
+   *
+   *     Σ CustomerBalance.advanceBalance === Customer.advanceBalance
+   *
+   * — is FALSE, and believing it will send someone hunting a bug that is not
+   * there. A customer can hold ৳700 on deposit at নয়াগোলা while owing ৳1,000 at
+   * Dhaka. That is not a fault; under separate books it is the entire point.
+   * Shop-wide they are ৳300 in debt, so `Customer.advanceBalance` is 0 while
+   * the branch rows sum to 700. Both figures are right.
+   *
+   * What survives is the invariant on the net position, which is the same rule
+   * 3 has always been — `advanceBalance` was simply always zero before:
+   *
+   *     Σ (totalDue − advanceBalance)  ===  Customer.totalDue − Customer.advanceBalance
+   *
+   * Per-row, the exclusivity still holds absolutely: no single row ever carries
+   * both. It is only the SUM across branches that can show one of each.
+   *
+   * Derived alongside `totalDue` by `recomputeBalances`, never incremented.
+   */
+  advanceBalance: {
+    type: Number,
+    default: 0,
+    min: 0
   },
   purchaseCount: {
     type: Number,
@@ -116,6 +165,12 @@ customerBalanceSchema.index({ shop: 1, customer: 1, branch: 1 }, { unique: true 
 customerBalanceSchema.index({ shop: 1, branch: 1, totalDue: -1 });
 // "Which customers is this branch allowed to see" + the customer-list join.
 customerBalanceSchema.index({ shop: 1, branch: 1, customer: 1 });
+// "Which customers does this branch hold money for" — partial for the same
+// reason its shop-wide twin on `Customer` is: a tiny subset of a large book.
+customerBalanceSchema.index(
+  { shop: 1, branch: 1, advanceBalance: -1 },
+  { partialFilterExpression: { advanceBalance: { $gt: 0 } } }
+);
 
 /**
  * Atomic `$inc` upsert. Mirrors whichever `Customer` mutation it sits beside.
@@ -165,26 +220,35 @@ customerBalanceSchema.statics.applyDelta = async function (delta, session = null
 };
 
 /**
- * Re-derive `totalDue` from purchases plus opening debt minus payments,
- * clamped at zero.
+ * Re-derive BOTH halves of this row's balance from purchases plus opening debt
+ * minus payments — `totalDue` when that is positive, `advanceBalance` when it
+ * is negative, each clamped at zero.
  *
- * Used only where `Customer` does the same clamped recompute rather than a
- * plain `$inc` — the sales-return paths. Mirroring the clamp is what keeps the
+ * Used wherever `Customer` does the same clamped recompute rather than a plain
+ * `$inc` — the sales-return paths, the cancellation rollup, and (since the
+ * advance work) the tail of `settleDue`. Mirroring the clamp is what keeps the
  * Σ invariant true; recomputing here while `Customer` clamps (or vice versa)
  * would silently drift the two apart on any over-refunded customer.
  *
- * Deliberately delegates to `Customer.deriveDue` rather than repeating the
+ * Deliberately delegates to `Customer.applyBalances` rather than repeating the
  * arithmetic: the `openingDue` term must appear on both sides or neither, and
- * one shared function is the only way to guarantee that.
+ * one shared function is the only way to guarantee that. It also means the
+ * per-branch rows cannot end up with a different notion of "in credit" from the
+ * shop-wide document, which is the whole point of rule 3.
+ *
+ * Renamed from `recomputeDue` when `advanceBalance` arrived. The old name is
+ * not kept as an alias on purpose: a call site still saying `recomputeDue`
+ * would be one that had not been thought about, and the reference error is a
+ * cheaper way to find it than a drifted book six months later.
  */
-customerBalanceSchema.statics.recomputeDue = async function ({ shop, customer, branch }, session = null) {
+customerBalanceSchema.statics.recomputeBalances = async function ({ shop, customer, branch }, session = null) {
   if (!shop || !customer || !branch) return null;
 
   const sessionOpt = session ? { session } : {};
   const row = await this.findOne({ shop, customer, branch }, null, sessionOpt);
   if (!row) return null;
 
-  row.totalDue = Customer.deriveDue(row);
+  Customer.applyBalances(row);
   await row.save(sessionOpt);
   return row;
 };
@@ -250,10 +314,40 @@ customerBalanceSchema.statics.settleDue = async function ({ shop, customer, pref
   }
 
   if (remaining > 0) {
+    /**
+     * ── Why this credits `paid` and then DERIVES, rather than `$inc`-ing due ──
+     *
+     * This used to be `applyDelta({ paid: remaining, due: -remaining })` — a
+     * raw `$inc` on `totalDue` with no clamp anywhere on the path. It was only
+     * ever safe by accident: `settleCustomerDue` refuses an amount larger than
+     * the due, so `remaining` could never exceed what the rows held.
+     *
+     * That is a guarantee held by a caller two files away, and the advance work
+     * removes it — an advance IS money arriving with no due to land on, so this
+     * branch is now the normal case rather than a historical edge. Left as an
+     * `$inc`, the first advance taken would drive this row's `totalDue`
+     * NEGATIVE, and negative is the one direction nothing here checks:
+     *
+     *   · `Σ CustomerBalance.totalDue === Customer.totalDue` breaks, because the
+     *     shop-wide side clamps at zero and this side would not;
+     *   · every `{ totalDue: { $gt: 0 } }` branch query silently drops the row;
+     *   · `getBranchDueSummary` reports a receivable smaller than the truth;
+     *   · and nothing anywhere throws.
+     *
+     * Deriving instead makes the clamp structural: credit the payment to
+     * `totalPaid` — which is simply true, the money arrived — and let
+     * `recomputeBalances` decide which side of zero the net position lands on.
+     * Surplus becomes `advanceBalance` on this branch, which is where an advance
+     * belongs: the branch that took the money.
+     *
+     * Same correction `cancelSale` and the returns paths already made on the
+     * shop-wide side, for the same reason. See ADVANCE_PAYMENT_PLAN.md §3.5.
+     */
     await this.applyDelta(
-      { shop, customer, branch: preferBranch, paid: remaining, due: -remaining },
+      { shop, customer, branch: preferBranch, paid: remaining },
       session
     );
+    await this.recomputeBalances({ shop, customer, branch: preferBranch }, session);
     applied.push({ branch: preferBranch, amount: remaining });
   }
 
@@ -348,7 +442,7 @@ customerBalanceSchema.statics.getBalance = async function ({ shop, customer, bra
   const row = await this.findOne({ shop, customer, branch }).lean();
   return row || {
     shop, customer, branch,
-    totalPurchases: 0, totalPaid: 0, totalDue: 0, purchaseCount: 0, lastPurchase: null,
+    totalPurchases: 0, totalPaid: 0, totalDue: 0, advanceBalance: 0, purchaseCount: 0, lastPurchase: null,
   };
 };
 

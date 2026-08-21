@@ -157,7 +157,15 @@ class CashRegisterService {
             shop: shopOid,
             ...branchMatch,
             method: 'cash',
-            type: { $in: ['due_collection', 'sale_payment'] },
+            // `advance` belongs here for the plainest possible reason: the
+            // money is IN THE DRAWER. A deposit is not revenue and it is not a
+            // collection, but the till does not count revenue — it counts
+            // notes. Left out, every advance taken in cash would be real money
+            // no bucket accounted for, and the register would report the drawer
+            // over by exactly the deposits in it, every single day. That is the
+            // same failure the `atCheckout` flag was introduced to end, arriving
+            // from the other direction.
+            type: { $in: ['due_collection', 'sale_payment', 'advance'] },
             atCheckout: { $ne: true },
             // The EFFECTIVE date, not when the row was written. A বাকি আদায়
             // backdated to a day whose register is already closed belongs to

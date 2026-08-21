@@ -123,7 +123,12 @@ async function rebuildShop(db, shopId, accounts) {
           shop: shopId,
           account: accountId,
           atCheckout: { $ne: true },
-          type: { $in: ['sale_payment', 'due_collection'] },
+          // `advance` is customer money that entered a real account, so a
+          // rebuild that omitted it would DESTROY that cash from the balance it
+          // is recomputing — the script's whole purpose is to be a second
+          // opinion, and a second opinion missing a payment type is worse than
+          // none. Mirrors the `$in` in cashRegister._calculateCashFlows.
+          type: { $in: ['sale_payment', 'due_collection', 'advance'] },
           ...since(account, 'paidAt'),
         },
       },

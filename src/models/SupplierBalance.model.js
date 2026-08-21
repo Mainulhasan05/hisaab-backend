@@ -162,7 +162,7 @@ supplierBalanceSchema.statics.applyDelta = async function (delta, session = null
  * the Σ invariant true on an over-paid supplier.
  *
  * The `openingDue` term is load-bearing and easy to drop, exactly as it is on
- * `CustomerBalance.recomputeDue`: `Supplier.totalDue` is only ever `$inc`-ed
+ * `CustomerBalance.recomputeBalances`: `Supplier.totalDue` is only ever `$inc`-ed
  * (cancel subtracts the purchase's own due and nothing else), so leaving it out
  * here would silently wipe a shop's carried-over payable from the branch book
  * the first time any purchase from that supplier was cancelled — while the

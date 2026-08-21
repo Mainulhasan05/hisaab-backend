@@ -113,7 +113,14 @@ describe('the reversal reuses row types the checker already knew', () => {
       require.resolve('../../scripts/recalc-account-balances.js'), 'utf8'
     );
 
-    expect(source).toContain("type: { $in: ['sale_payment', 'due_collection'] }");
+    // Matched loosely on the members rather than the exact array literal: the
+    // set legitimately grows (customer advances added 'advance'), and a test
+    // that fails on an ADDITION is testing the punctuation, not the rule. What
+    // must hold is that the money-IN types are all still counted.
+    const moneyIn = source.match(/type: \{ \$in: \[([^\]]+)\] \}/);
+    expect(moneyIn).not.toBeNull();
+    expect(moneyIn[1]).toContain("'sale_payment'");
+    expect(moneyIn[1]).toContain("'due_collection'");
     expect(source).toContain("type: 'refund'");
   });
 
@@ -252,5 +259,86 @@ describe('invariant guards', () => {
 
     expect(source).toContain("router.post('/:id/dispatch', idempotency()");
     expect(source).toContain("router.post('/:id/undispatch', idempotency()");
+  });
+});
+
+/**
+ * The screens that call the API.
+ *
+ * A backend that nobody presses is the state COD sat in for a day: routes live,
+ * accounts creatable, and every parcel still landing on the customer's খাতা
+ * because no button existed. `BACKLOG.md` Part 0 catalogues five features that
+ * shipped in exactly that shape, so the wiring is pinned rather than assumed.
+ *
+ * Source scans, not renders — this is the backend suite and has no DOM. They
+ * skip cleanly in a backend-only checkout.
+ */
+describe('the UI actually calls it', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const FRONTEND = path.resolve(__dirname, '../../../hisaab-frontend');
+  const read = (rel) => {
+    const full = path.join(FRONTEND, rel);
+    return fs.existsSync(full) ? fs.readFileSync(full, 'utf8') : null;
+  };
+
+  it('the sale detail offers the handover and its reversal', () => {
+    const src = read('app/(app)/dashboard/sales/[id]/page.js');
+    if (src === null) return;
+
+    expect(src).toContain('কুরিয়ারে দিন');
+    expect(src).toContain('পার্সেল ফেরত এসেছে');
+    expect(src).toContain('dispatchToCourier');
+    expect(src).toContain('undispatchFromCourier');
+  });
+
+  it('hides the handover from shops that cannot use it', () => {
+    // A courier IS a PaymentAccount, so without `fundAccounts` there is nothing
+    // to pick. A button opening an empty list is worse than no button. And a
+    // POS sale was handed over the counter — there is nothing to dispatch.
+    const src = read('app/(app)/dashboard/sales/[id]/page.js');
+    if (src === null) return;
+
+    expect(src).toContain("sale.isOnline && !sale.courier");
+    expect(src).toContain("hasFeature('fundAccounts')");
+  });
+
+  it('asks who took the parcel at the shipped step', () => {
+    // The moment custody of the money transfers, which is why the courier is
+    // named here rather than at confirm.
+    const src = read('app/(app)/online/orders/[id]/page.js');
+    if (src === null) return;
+
+    expect(src).toContain('openShipDialog');
+    expect(src).toContain('কে নিয়ে গেল?');
+    // An own-rider delivery still ships, with the money left on the খাতা.
+    expect(src).toContain('নিজেরাই পৌঁছে দিচ্ছি');
+  });
+
+  it('ships BEFORE handing the money over', () => {
+    // If the dispatch fails the parcel is still shipped, which is true — it
+    // physically left. The reverse ordering would move money for a parcel that
+    // never went out.
+    const src = read('app/(app)/online/orders/[id]/page.js');
+    if (src === null) return;
+
+    const ship = src.slice(src.indexOf('const runShip'));
+    const body = ship.slice(0, ship.indexOf('const runStatus'));
+    expect(body.indexOf("updateStatus(id, 'shipped')"))
+      .toBeLessThan(body.indexOf('/dispatch'));
+  });
+
+  it('lets a courier account be created and seen', () => {
+    // Both account screens keep their own TYPES map. The position screen was
+    // missed first time round and rendered a courier as 'অন্যান্য'.
+    for (const rel of [
+      'app/(app)/dashboard/accounts/page.js',
+      'app/(app)/dashboard/accounts/position/page.js',
+    ]) {
+      const src = read(rel);
+      if (src === null) continue;
+      expect([rel, src.includes('courier:')]).toEqual([rel, true]);
+      expect([rel, src.includes('কুরিয়ার')]).toEqual([rel, true]);
+    }
   });
 });
