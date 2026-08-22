@@ -104,6 +104,52 @@ const zoneSchema = new mongoose.Schema({
   key: { type: String, required: true, trim: true },
   name: { type: String, required: true, trim: true },
   charge: { type: Number, default: 0, min: 0 },
+  /**
+   * Free delivery once the goods subtotal reaches this. `0` = no threshold.
+   *
+   * Same field and same meaning as `Storefront.delivery.zones[].freeAbove`, and
+   * deliberately per-ZONE rather than per-page: "ঢাকায় ১০০০ টাকার উপরে ফ্রি"
+   * while the outside-Dhaka courier still charges is the ordinary Bangladeshi
+   * offer, and a page-level threshold could not express it.
+   *
+   * Measured against the subtotal AFTER any coupon, because that is the number
+   * the customer actually pays for goods — see `quoteDelivery()`.
+   */
+  freeAbove: { type: Number, default: 0, min: 0 },
+  isActive: { type: Boolean, default: true },
+}, { _id: false });
+
+/**
+ * One discount code for this page.
+ *
+ * Page-scoped rather than a `Coupon` document: that collection belongs to the
+ * shop's own sales, its redemptions are counted against the shop's ledger, and
+ * reaching for it here would be exactly the coupling I-17 forbids. A landing
+ * campaign's "EID200" is a property of the campaign, dies with it, and is worth
+ * one subdocument.
+ *
+ * NEVER sent to the browser as a list. The public payload carries no codes at
+ * all — a customer types one and the server answers yes or no — because a page
+ * whose source lists every code has no discount, it has a price cut.
+ */
+const couponSchema = new mongoose.Schema({
+  code: {
+    type: String,
+    required: [true, 'কুপন কোড দিন'],
+    trim: true,
+    uppercase: true,
+    match: [/^[A-Z0-9][A-Z0-9-]{1,23}$/, 'কুপন কোড ইংরেজি বড় হাতের অক্ষর, সংখ্যা ও হাইফেন দিয়ে লিখুন'],
+  },
+  type: { type: String, enum: ['flat', 'percent'], default: 'flat' },
+  /** Taka for `flat`, percent of subtotal for `percent`. */
+  value: { type: Number, required: true, min: 0 },
+  /** Percent codes only. `0` = uncapped. A 20% code with no cap is a blank cheque. */
+  maxDiscount: { type: Number, default: 0, min: 0 },
+  /** Smallest goods subtotal the code applies to. */
+  minSubtotal: { type: Number, default: 0, min: 0 },
+  /** `0` = unlimited. Enforced with an atomic guarded increment at order time. */
+  usageLimit: { type: Number, default: 0, min: 0 },
+  usedCount: { type: Number, default: 0, min: 0 },
   isActive: { type: Boolean, default: true },
 }, { _id: false });
 
@@ -205,6 +251,51 @@ const landingPageSchema = new mongoose.Schema({
     },
   },
 
+  /**
+   * How the customer pays.
+   *
+   * ── WHY `cod` IS A STORED VALUE AND NOT AN ASSUMPTION ─────────────────────
+   *
+   * Every order this feature took before today was cash on delivery, and none
+   * of them said so. That is fine right up to the first page that offers
+   * anything else, at which point no past order can be told apart from a new
+   * one and no report can be trusted. So the method is recorded on the order
+   * even when there is only one of it.
+   *
+   * ── WHAT `advance` IS FOR ─────────────────────────────────────────────────
+   *
+   * Not a payment gateway. The customer sends the delivery charge over bKash or
+   * Nagad to a number printed on the page and types the TrxID into the form;
+   * the shop eyeballs it against their own statement and marks it verified.
+   *
+   * It exists because a COD landing page in Bangladesh loses a real share of
+   * its parcels to prank and impulse orders, and asking for ৳120 up front is
+   * the cheapest filter there is. Nothing here checks the TrxID — pretending to
+   * would be worse than being honest that a human does it.
+   */
+  payment: {
+    /**
+     * What the form may offer. `['cod']` is the default and the status quo.
+     * A page listing both renders a picker; a page listing one does not have to.
+     */
+    methods: {
+      type: [{ type: String, enum: ['cod', 'advance'] }],
+      default: () => ['cod'],
+    },
+    /**
+     * What `advance` asks for. `delivery` = whatever this order's delivery
+     * charge came to (so a free-delivery order asks for nothing and quietly
+     * becomes COD), `fixed` = `advanceAmount` regardless.
+     */
+    advanceMode: { type: String, enum: ['delivery', 'fixed'], default: 'delivery' },
+    advanceAmount: { type: Number, default: 0, min: 0 },
+    /** "বিকাশ (পার্সোনাল): 01XXXXXXXXX — Send Money করে TrxID দিন". */
+    advanceInstructions: { type: String, trim: true, maxlength: 500 },
+  },
+
+  /** Discount codes. Never listed publicly — see `couponSchema`. */
+  coupons: { type: [couponSchema], default: () => [] },
+
   /** Order-number prefix — `AAM` vs `MOU` is how a shop tells campaigns apart. */
   orderPrefix: {
     type: String,
@@ -298,6 +389,103 @@ landingPageSchema.methods.findOffer = function findOffer(key) {
 /** Resolve one delivery zone by key. Same rule as `findOffer`. */
 landingPageSchema.methods.findZone = function findZone(key) {
   return (this.delivery?.zones || []).find((z) => z.key === String(key || '') && z.isActive) || null;
+};
+
+/** Zones a customer may actually pick. */
+landingPageSchema.methods.activeZones = function activeZones() {
+  return (this.delivery?.zones || []).filter((z) => z.isActive !== false);
+};
+
+/**
+ * What one zone charges for a given goods subtotal.
+ *
+ * The threshold is compared against the subtotal AFTER the coupon, and that is
+ * a real decision rather than an accident: a ৳1000 threshold that a ৳200 coupon
+ * can be stacked under means the shop ships ৳800 of goods for free while the
+ * page promised otherwise. Whichever way it went it had to be written down, and
+ * "free delivery on what you actually pay" is the reading a customer would give
+ * it if asked.
+ *
+ * Returns the charge and WHY it is what it is, so the order can record that
+ * delivery was free by threshold rather than because the zone happened to be
+ * ৳0 — two very different facts a month later.
+ */
+landingPageSchema.methods.quoteDelivery = function quoteDelivery(zone, payableSubtotal) {
+  const charge = Math.max(0, Number(zone?.charge) || 0);
+  const threshold = Math.max(0, Number(zone?.freeAbove) || 0);
+
+  if (threshold > 0 && Number(payableSubtotal) >= threshold) {
+    return { charge: 0, isFree: true, freeAbove: threshold };
+  }
+  return { charge, isFree: charge === 0, freeAbove: threshold };
+};
+
+/**
+ * Resolve one coupon by the code the customer typed.
+ *
+ * Case- and space-insensitive, because the code is read off an advertisement
+ * and retyped on a phone. Returns null for an unknown, inactive or exhausted
+ * code — the caller may not tell those three apart in what it says back, since
+ * "this code is used up" tells a stranger the code is real.
+ */
+landingPageSchema.methods.findCoupon = function findCoupon(code) {
+  const needle = String(code || '').trim().toUpperCase();
+  if (!needle) return null;
+
+  const found = (this.coupons || []).find((c) => c.code === needle && c.isActive !== false);
+  if (!found) return null;
+  if (found.usageLimit > 0 && found.usedCount >= found.usageLimit) return null;
+  return found;
+};
+
+/**
+ * What a coupon takes off a given subtotal — or why it does not apply.
+ *
+ * Never returns more than the subtotal. A ৳500 flat code on a ৳300 order
+ * discounts ৳300, not ৳500: delivery is a courier's cost and a discount code
+ * must not be able to eat into it, let alone turn an order into a payout.
+ */
+landingPageSchema.methods.quoteCoupon = function quoteCoupon(coupon, subtotal) {
+  const base = Math.max(0, Number(subtotal) || 0);
+  if (!coupon) return { amount: 0, reason: 'unknown' };
+
+  if (coupon.minSubtotal > 0 && base < coupon.minSubtotal) {
+    return { amount: 0, reason: 'min-subtotal', minSubtotal: coupon.minSubtotal };
+  }
+
+  let amount = coupon.type === 'percent'
+    ? Math.round((base * (Number(coupon.value) || 0)) / 100)
+    : Math.round(Number(coupon.value) || 0);
+
+  if (coupon.type === 'percent' && coupon.maxDiscount > 0) {
+    amount = Math.min(amount, coupon.maxDiscount);
+  }
+
+  return { amount: Math.max(0, Math.min(amount, base)), reason: null };
+};
+
+/** Payment methods this page offers, always with at least `cod`. */
+landingPageSchema.methods.paymentMethods = function paymentMethods() {
+  const methods = (this.payment?.methods || []).filter((m) => m === 'cod' || m === 'advance');
+  return methods.length ? [...new Set(methods)] : ['cod'];
+};
+
+/**
+ * How much must be paid up front for this order.
+ *
+ * Zero is a legitimate answer and is what turns an `advance` selection back
+ * into COD: on a free-delivery order in `delivery` mode there is nothing to
+ * send, and demanding a TrxID for ৳0 would lose the order over a form field.
+ */
+landingPageSchema.methods.advanceDue = function advanceDue(deliveryCharge) {
+  if (!this.paymentMethods().includes('advance')) return 0;
+
+  const mode = this.payment?.advanceMode || 'delivery';
+  const amount = mode === 'fixed'
+    ? Number(this.payment?.advanceAmount) || 0
+    : Number(deliveryCharge) || 0;
+
+  return Math.max(0, Math.round(amount));
 };
 
 const LandingPage = mongoose.model('LandingPage', landingPageSchema);

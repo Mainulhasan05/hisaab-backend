@@ -116,6 +116,26 @@ const MODULES = {
   // a junior staffer may draft the site, but making it public — under the
   // shop's name, to the shop's customers — is the owner's call.
   storefront:    { key: 'storefront',    label: 'অনলাইন দোকান',  labelEn: 'Online Storefront', actions: ['view', 'update', 'publish'] },
+  // ── Seasonal landing pages (সিজন পেজ) ────────────────────────────────────
+  //
+  // Two modules rather than one, and the split is the same one `storefront` and
+  // `online_orders` make: the PAGE and the ORDERS it brings in are worked by
+  // different people. Whoever rings the customers does not need to be able to
+  // rewrite the offer's headline, and whoever writes the copy has no business
+  // reading four hundred strangers' phone numbers.
+  //
+  // `landing_pages` has no `create` and no `delete` on purpose. A shop never
+  // makes one of these — the platform authors the page and assigns it (D1/D11),
+  // and `update` here means editing the handful of text and image slots the
+  // admin marked editable, nothing more. An action nobody can perform would be
+  // a permission that lies about what the role can do.
+  landing_pages:  { key: 'landing_pages',  label: 'সিজন পেজ',        labelEn: 'Landing Pages',  actions: ['view', 'update'] },
+  // `cancel` is separate from `update` for a much weaker reason than it is on
+  // `online_orders`: nothing is unwound, because nothing was ever posted to the
+  // ledger (I-17). It is separate anyway so the two order worklists read the
+  // same way in the roles matrix — an owner should not have to learn that this
+  // one works differently.
+  landing_orders: { key: 'landing_orders', label: 'সিজন পেজ অর্ডার', labelEn: 'Landing Orders', actions: ['view', 'update', 'cancel'] },
 };
 
 // List of all module keys
@@ -286,6 +306,11 @@ const ROLE_PRESETS = {
       // the owner's decision, the same way `isWholesale` is.
       online_orders: ['view', 'create', 'update', 'cancel'],
       storefront:    ['view', 'update'],
+      // Working a seasonal campaign's orders is the same parcel desk by another
+      // name. `landing_pages` is view-only: the page runs against advertising
+      // money the owner is spending, and editing its copy stays with them.
+      landing_pages:  ['view'],
+      landing_orders: ['view', 'update', 'cancel'],
       // Maintaining the shop's accounts is bookkeeping and sits with the
       // manager. `transfer` is withheld: moving the day's takings from the
       // drawer to the bank is spending authority over real money, and it stays
@@ -347,6 +372,10 @@ const ROLE_PRESETS = {
       // A cashier taking a Facebook order over the phone is doing counter work
       // by another name — same person, same judgement as ringing up a sale.
       online_orders: ['view', 'create', 'update'],
+      // Ringing a landing order's customer to check the parcel is real is
+      // counter work too. `cancel` is withheld, matching `online_orders`.
+      landing_pages:  ['view'],
+      landing_orders: ['view', 'update'],
       // No `accounts` grant, and that does NOT stop a cashier taking payment
       // into a named account. Picking where the money goes rides on
       // `sales.create` via the names-only `/accounts/options` surface; this
@@ -398,7 +427,7 @@ const ROLE_PRESETS = {
  * created with. To roll a change out to shops that already exist, bump this and
  * add a PRESET_UPGRADES entry.
  */
-const PRESET_VERSION = 8;
+const PRESET_VERSION = 9;
 
 /**
  * Additive grants applied once per role, in version order.
@@ -599,6 +628,38 @@ const PRESET_UPGRADES = [
      */
     grants: {
       manager: { accounts: ['view', 'create', 'update'] },
+    },
+  },
+  {
+    version: 9,
+    /**
+     * The seasonal landing page panel.
+     *
+     * Inert in every shop without `features.landingPages`, which is all of them
+     * on the day this ships — the same argument version 3 made for the online
+     * panel and version 8 for fund accounts, and the reason it is safe to grant
+     * platform-wide rather than shop by shop.
+     *
+     * MANAGER AND CASHIER, which is a wider grant than the recent upgrades have
+     * made, and deliberately so. A landing campaign's orders are phone calls:
+     * ring the number, confirm the parcel is real, move it along. That is
+     * counter work, it is what a cashier already does for `online_orders`, and
+     * a campaign whose orders only the owner may touch is a campaign nobody
+     * works on the evening it is actually selling.
+     *
+     * `cancel` reaches the manager only, matching `online_orders` exactly — not
+     * because cancelling unwinds anything here (it cannot; I-17) but because an
+     * owner who has learned what `cancel` means on one worklist must not find
+     * it means something else on the other.
+     *
+     * `landing_pages.update` reaches NOBODY by preset. Editing the campaign's
+     * headline is the owner's call until they hand it over: the page is running
+     * against advertising money, and a wrong price in a marked slot is spent
+     * before anyone notices.
+     */
+    grants: {
+      manager: { landing_pages: ['view'], landing_orders: ['view', 'update', 'cancel'] },
+      cashier: { landing_pages: ['view'], landing_orders: ['view', 'update'] },
     },
   },
 ];

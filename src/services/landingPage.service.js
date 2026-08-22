@@ -255,7 +255,10 @@ class LandingPageService {
    * generated HTML has to be able to save a page that is not finished yet.
    * `publish` is where the same issues become a refusal.
    */
-  async saveContent(pageId, adminId, { html, offers, delivery, seo, orderPrefix, notifications, analytics, editableKeys }) {
+  async saveContent(pageId, adminId, {
+    html, offers, delivery, seo, orderPrefix, notifications, analytics, editableKeys,
+    payment, coupons,
+  }) {
     const page = await this.getById(pageId);
 
     let sanitizeNotes = null;
@@ -282,6 +285,31 @@ class LandingPageService {
 
     if (offers !== undefined) page.offers = offers;
     if (delivery !== undefined) page.delivery = delivery;
+    if (payment !== undefined) page.payment = payment;
+
+    /**
+     * Coupons are MERGED rather than replaced, and this is the one field on
+     * this method where that matters.
+     *
+     * `usedCount` is live counter state written by `_reserveCoupon` on the
+     * public path. An admin who opens the editor, changes a headline and saves
+     * would post the coupon rows as their screen loaded them — with whatever
+     * redemption count was current five minutes ago — and a straight assignment
+     * would roll every code's usage back to that number. The shop's "limit 100"
+     * code would then run to 130 and nobody would ever see why.
+     *
+     * So the incoming rows carry the RULES and the stored rows keep the COUNT.
+     * A code that is genuinely new starts at zero; a code that was removed from
+     * the list is gone, count and all, which is what removing it means.
+     */
+    if (coupons !== undefined) {
+      const previous = new Map((page.coupons || []).map((c) => [c.code, c.usedCount || 0]));
+      page.coupons = (coupons || []).map((c) => {
+        const code = String(c.code || '').trim().toUpperCase();
+        return { ...c, code, usedCount: previous.get(code) || 0 };
+      });
+    }
+
     if (seo !== undefined) page.seo = seo;
     if (orderPrefix !== undefined) page.orderPrefix = orderPrefix;
     if (notifications !== undefined) page.notifications = notifications;
@@ -523,7 +551,14 @@ class LandingPageService {
 
   /** Every page assigned to one shop, with its resolved state. */
   async listForShop(shopId) {
-    const pages = await LandingPage.find({ shop: shopId }).sort({ createdAt: -1 }).lean();
+    // `html` and `htmlHistory` are excluded and the reason is not tidiness: a
+    // page's document is up to half a megabyte of markup, and a shop running
+    // six campaigns would otherwise ship three megabytes to render a list of
+    // six titles. `manifest` and `content` go too — the list shows neither.
+    const pages = await LandingPage.find({ shop: shopId })
+      .select('-html -htmlHistory -manifest -content -assets -analytics.fbCapiToken')
+      .sort({ createdAt: -1 })
+      .lean();
 
     return pages.map((page) => ({
       ...page,
@@ -531,6 +566,56 @@ class LandingPageService {
       // expiry whether or not the nightly job has run.
       state: resolveLandingPage(page),
     }));
+  }
+
+  /**
+   * One page, as the SHOP is allowed to see it.
+   *
+   * Scoped by shop with a 404 rather than a 403 for someone else's page: a shop
+   * must not be able to discover that a page id exists by the shape of the
+   * error. Same rule `landingOrder.getForShop` follows.
+   *
+   * The manifest is filtered down to the entries the admin marked editable, and
+   * that filtering happens HERE rather than in the panel. The panel decides what
+   * to draw; this decides what exists. A shop that opens devtools on the response
+   * learns the keys it was given and nothing about the ones it was not (I-16).
+   */
+  async getForShop(pageId, shopId) {
+    const page = await LandingPage.findOne({ _id: toObjectId(pageId) || null, shop: shopId })
+      .select('-htmlHistory -analytics.fbCapiToken');
+
+    if (!page) {
+      throw new AppError('Landing page not found', 'পেজটি পাওয়া যায়নি', 404);
+    }
+
+    const editable = new Set(page.editableKeys || []);
+    const media = await this.resolvePublicMedia(page);
+
+    return {
+      page,
+      state: resolveLandingPage(page),
+      // Only the editable slots, each already carrying its current value so the
+      // panel can render a form without a second request.
+      fields: (page.manifest || [])
+        .filter((entry) => entry && editable.has(entry.key))
+        .map((entry) => ({
+          ...entry,
+          /**
+           * The SAVED value only — empty when the shop has never touched this
+           * slot, and deliberately NOT pre-filled with `entry.preview`.
+           *
+           * `preview` is a truncated snippet of what the HTML currently says.
+           * Seeding a `rich` field's editor with it would look helpful and
+           * would, on the next save, replace a paragraph of authored markup
+           * with its own truncated plain text. The panel shows `preview` beside
+           * the box as "পেজে এখন: …" instead, and an empty value leaves the
+           * authored content untouched — the runtime only writes a slot it has
+           * something to write.
+           */
+          value: page.content?.[entry.key] ?? '',
+          image: media.assets[entry.key] || null,
+        })),
+    };
   }
 
   /**
@@ -591,7 +676,61 @@ class LandingPageService {
     const state = resolveLandingPage(page);
     if (!state.isServable) return null;
 
-    return { page, state };
+    return { page, state, media: await this.resolvePublicMedia(page) };
+  }
+
+  /**
+   * Turn every PlatformMedia id the page references into a URL the browser can
+   * load — the manifest's `data-hisaab-img` slots, the offer thumbnails and the
+   * OG image, in ONE query.
+   *
+   * Done here rather than by populating the document because the ids are spread
+   * across three unrelated shapes (a Mixed map, an array of subdocuments, and a
+   * single field) and `populate` would need three passes. It is also the reason
+   * the public payload can carry URLs without ever carrying a media id: an id is
+   * an internal handle and a landing page is read by strangers.
+   *
+   * A missing or deleted media id resolves to nothing rather than throwing. The
+   * page renders with one image short, which is survivable; a 500 on a campaign
+   * the shop is paying for traffic to is not.
+   */
+  async resolvePublicMedia(page) {
+    const ids = new Set();
+    const add = (id) => { if (id) ids.add(String(id)); };
+
+    for (const id of Object.values(page.assets || {})) add(id);
+    for (const offer of page.offers || []) add(offer.image);
+    add(page.seo?.ogImage);
+
+    if (ids.size === 0) return { assets: {}, offers: {}, ogImage: null };
+
+    const docs = await PlatformMedia.find({ _id: { $in: [...ids] } })
+      .select('url thumbUrl mediumUrl altText width height')
+      .lean();
+
+    const byId = new Map(docs.map((d) => [String(d._id), d]));
+    const shape = (doc) => (doc ? {
+      url: doc.url,
+      thumbUrl: doc.thumbUrl || doc.url,
+      mediumUrl: doc.mediumUrl || doc.url,
+      alt: doc.altText || '',
+      width: doc.width || null,
+      height: doc.height || null,
+    } : null);
+
+    const assets = {};
+    for (const [key, id] of Object.entries(page.assets || {})) {
+      const found = shape(byId.get(String(id)));
+      if (found) assets[key] = found;
+    }
+
+    const offers = {};
+    for (const offer of page.offers || []) {
+      const found = offer.image && shape(byId.get(String(offer.image)));
+      if (found) offers[offer.key] = found;
+    }
+
+    return { assets, offers, ogImage: shape(byId.get(String(page.seo?.ogImage))) };
   }
 
   // ── Reporting ─────────────────────────────────────────────────────────────

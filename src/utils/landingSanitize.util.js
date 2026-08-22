@@ -88,6 +88,11 @@ const ALLOWED_TAGS = Object.freeze([
   'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'caption', 'colgroup', 'col',
   // Interactive — the order form lives here
   'a', 'form', 'label', 'input', 'select', 'option', 'optgroup', 'textarea', 'button',
+  // `fieldset`/`legend` are how a radio group gets a visible box and an
+  // accessible name. Absent from the first version of this list, so a pasted
+  // design that used them lost its grouping silently — the fields survived and
+  // the box around them did not, which reads as a broken stylesheet.
+  'fieldset', 'legend',
   'details', 'summary',
   // Presentation
   'style', 'svg', 'path', 'g', 'circle', 'ellipse', 'rect', 'line', 'polyline', 'polygon', 'defs',

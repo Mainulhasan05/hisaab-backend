@@ -129,13 +129,73 @@ const landingOrderSchema = new mongoose.Schema({
     zoneKey: { type: String, trim: true },
     zoneName: { type: String, trim: true },
     charge: { type: Number, default: 0, min: 0 },
+    /**
+     * Delivery came out free because the order cleared the zone's threshold —
+     * as opposed to the zone simply being ৳0. Recorded because a month later
+     * "why did this parcel ship free" has two possible answers and the shop
+     * will want the right one.
+     */
+    freeByThreshold: { type: Boolean, default: false },
+    /** The threshold in force when this order was placed. Snapshot, like the rest. */
+    freeAbove: { type: Number, default: 0, min: 0 },
   },
 
-  // All three derived server-side from the page's config at placement (I-13).
-  // A total posted by the client is ignored; these are what it is ignored for.
+  /**
+   * The coupon, as a SNAPSHOT of what it did — not a reference to a code that
+   * may be edited or deleted tomorrow. `amount` is what actually came off.
+   */
+  discount: {
+    code: { type: String, trim: true, uppercase: true },
+    label: { type: String, trim: true, maxlength: 120 },
+    amount: { type: Number, default: 0, min: 0 },
+  },
+
+  /**
+   * How the money arrives.
+   *
+   * Stored on every order including the plain COD ones (see the `payment` block
+   * in LandingPage.model.js for why an assumed value is not good enough).
+   */
+  paymentMethod: {
+    type: String,
+    enum: ['cod', 'advance'],
+    default: 'cod',
+  },
+
+  /**
+   * The up-front payment, when there is one.
+   *
+   * `verified` is a HUMAN's mark. Nothing in this system talks to bKash, and a
+   * field that looked automatic would be read as one — the shop must check the
+   * TrxID against their own statement before dispatching.
+   */
+  advance: {
+    amount: { type: Number, default: 0, min: 0 },
+    /** What the customer typed. Never trusted, never parsed, only shown. */
+    senderNumber: { type: String, trim: true, maxlength: 40 },
+    trxId: { type: String, trim: true, maxlength: 60 },
+    verified: { type: Boolean, default: false },
+    verifiedAt: { type: Date },
+    verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  },
+
+  // Every figure below is derived server-side from the page's config at
+  // placement (I-13). A total posted by the client is ignored; these are what
+  // it is ignored for.
+  //
+  //   total     = subtotal − discount.amount + deliveryCharge
+  //   codAmount = total − advance.amount        ← what the courier collects
   subtotal: { type: Number, required: true, min: 0 },
   deliveryCharge: { type: Number, default: 0, min: 0 },
   total: { type: Number, required: true, min: 0 },
+  /**
+   * What is still to be collected at the door.
+   *
+   * Equal to `total` for a COD order, and that redundancy is on purpose: the
+   * packing slip prints ONE number, and computing it at each of the four places
+   * that print one is how they end up disagreeing.
+   */
+  codAmount: { type: Number, default: 0, min: 0 },
 
   status: {
     type: String,

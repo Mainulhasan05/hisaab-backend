@@ -36,6 +36,20 @@ const LANDING_FILES = [
   'models/LandingOrder.model.js',
   'models/LandingOrderCounter.model.js',
   'services/landingPage.service.js',
+  // The placement path. It was missing from this list on the first pass — the
+  // one file in the feature that actually writes an order was the one the guard
+  // did not read.
+  'services/landingOrder.service.js',
+  // Messaging. On the list because "look up the customer to get their name" is
+  // the single most natural line to write in a notification file, and it is
+  // exactly what must not happen: every name and number sent from there comes
+  // off the order's own snapshot.
+  'services/landingNotify.service.js',
+  // Both surfaces. The public one takes the order; the shop one works it, and
+  // `confirmed` there is the transition someone will eventually be tempted to
+  // turn into a Sale.
+  'controllers/publicLanding.controller.js',
+  'controllers/shopLanding.controller.js',
   'utils/landingPageState.util.js',
   'utils/landingContract.util.js',
   'utils/landingSanitize.util.js',
@@ -114,11 +128,11 @@ describe('I-17 — no ledger model is reachable from the landing feature', () =>
     }
   });
 
-  test('the service does not reach the ledger through the models barrel either', () => {
-    // `require('../models')` would hand it every model at once, which is a
-    // complete bypass of the check above.
-    const source = read('services/landingPage.service.js');
-    expect(source).not.toMatch(/require\(\s*['"`]\.\.\/models['"`]\s*\)/);
+  test.each(LANDING_FILES)('%s does not reach the ledger through the models barrel either', (rel) => {
+    // `require('../models')` would hand the file every model at once, which is
+    // a complete bypass of the check above. Applied to every file rather than
+    // just the page service: the barrel is the same door wherever it is opened.
+    expect(read(rel)).not.toMatch(/require\(\s*['"`](\.\.\/)+models['"`]\s*\)/);
   });
 
   test('the forbidden list itself has not been quietly emptied', () => {

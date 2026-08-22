@@ -35,6 +35,7 @@ const userRoutes = require('./user.routes');
 const telegramRoutes = require('./telegram.routes');
 const storefrontRoutes = require('./storefront.routes');
 const orderRoutes = require('./order.routes');
+const landingRoutes = require('./landing.routes');
 const publicRoutes = require('./public.routes');
 
 // Mount routes
@@ -88,6 +89,15 @@ router.use('/storefront', storefrontRoutes);
 router.use('/online-orders', orderRoutes);
 
 /**
+ * The shop's seasonal-page panel. `/landing`, not `/pages` — `/pages` is
+ * already the platform's static content (privacy policy, terms), and two
+ * unrelated resources under one prefix is how a route gets mounted in the wrong
+ * order a year from now. Gated end-to-end on `features.landingPages` inside the
+ * router itself.
+ */
+router.use('/landing', landingRoutes);
+
+/**
  * The public storefront reads — mounted LAST, and mounted here rather than in
  * `app.js`, because every router above applies `protect` itself. There is no
  * enclosing protected tree to be "outside" of; being outside it means carrying
@@ -132,6 +142,7 @@ router.get('/', (req, res) => {
       stockTransfers: '/api/stock-transfers',
       telegram: '/api/telegram',
       storefront: '/api/storefront',
+      landing: '/api/landing',
       public: '/api/public',
     }
   });

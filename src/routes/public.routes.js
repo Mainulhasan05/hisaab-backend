@@ -239,18 +239,34 @@ const landingSlugParam = Joi.object({
  * which `strikeOnInvalid` turns into an abuse strike: a real form never sends
  * them, so something that does is a script probing for a client-trusted total.
  */
+const landingQuantity = Joi.alternatives(
+  Joi.number().integer().min(1).max(99),
+  Joi.string().max(4)
+);
+
 const landingOrderBody = Joi.object({
   customerName: Joi.string().trim().min(1).max(120).required(),
   phone: Joi.string().trim().min(10).max(20).required(),
   address: Joi.string().trim().min(1).max(500).required(),
   note: Joi.string().trim().max(500).allow('', null),
-  quantity: Joi.alternatives(Joi.number().integer().min(1).max(99), Joi.string().max(4)),
+  // An ARRAY is accepted alongside the scalar because a checkbox form posts one
+  // quantity per ticked offer, positionally. See `_requestedOffers`.
+  quantity: Joi.alternatives(landingQuantity, Joi.array().items(landingQuantity).max(20)),
   offer: Joi.alternatives(Joi.string().trim().max(40), Joi.array().items(Joi.string().trim().max(40)).max(20)),
   zone: Joi.string().trim().max(40),
   items: Joi.array().max(20).items(Joi.object({
     offer: Joi.string().trim().max(40).required(),
-    quantity: Joi.alternatives(Joi.number().integer().min(1).max(99), Joi.string().max(4)),
+    quantity: landingQuantity,
   })),
+  // A CODE, never an amount. What it is worth is the server's to decide, the
+  // same way an offer key is a key and never a price (I-13).
+  coupon: Joi.string().trim().max(24).allow('', null),
+  paymentMethod: Joi.string().trim().valid('cod', 'advance'),
+  // Free text on purpose. Nothing here parses a TrxID — a human compares it
+  // against the shop's own statement — and a format rule would only teach a
+  // prankster what shape to type.
+  trxId: Joi.string().trim().max(60).allow('', null),
+  senderNumber: Joi.string().trim().max(40).allow('', null),
   attribution: Joi.object({
     utmSource: Joi.string().trim().max(200).allow('', null),
     utmMedium: Joi.string().trim().max(200).allow('', null),
@@ -265,6 +281,43 @@ router.get(
   '/landing/:slug',
   validate(landingSlugParam, 'params'),
   publicLandingController.getPage
+);
+
+/**
+ * The quote body — the order body minus the person.
+ *
+ * A price does not depend on who is buying, and asking for a name and address
+ * before showing a total would mean the form could not price anything until it
+ * was already filled in.
+ */
+const landingQuoteBody = Joi.object({
+  quantity: Joi.alternatives(landingQuantity, Joi.array().items(landingQuantity).max(20)),
+  offer: Joi.alternatives(Joi.string().trim().max(40), Joi.array().items(Joi.string().trim().max(40)).max(20)),
+  zone: Joi.string().trim().max(40),
+  items: Joi.array().max(20).items(Joi.object({
+    offer: Joi.string().trim().max(40).required(),
+    quantity: landingQuantity,
+  })),
+  coupon: Joi.string().trim().max(24).allow('', null),
+}).unknown(false);
+
+/**
+ * Price an order without placing it.
+ *
+ * A POST because it carries a body, not because it writes — it writes nothing,
+ * and a coupon named here is validated rather than redeemed. That is what makes
+ * it safe to call on every change to the form.
+ *
+ * No `orderAbuseGuard`: that guard's job is the per-IP ORDER ceiling, and
+ * spending it on price checks would block a customer who changed their mind
+ * twice. The router-wide `storefrontLimiter` is what bounds this endpoint,
+ * including the one abuse it is open to — walking the coupon space.
+ */
+router.post(
+  '/landing/:slug/quote',
+  validate(landingSlugParam, 'params'),
+  validate(landingQuoteBody, 'body'),
+  publicLandingController.quote
 );
 
 router.post(

@@ -59,7 +59,15 @@ const GROUP_MARKER = 'data-hisaab-group';
  * author could set the two to different things.
  */
 const REQUIRED_FIELDS = Object.freeze(['customerName', 'phone', 'address']);
-const OPTIONAL_FIELDS = Object.freeze(['note', 'quantity', 'offer', 'zone']);
+const OPTIONAL_FIELDS = Object.freeze([
+  'note', 'quantity', 'offer', 'zone',
+  // Checkout options. Optional individually, but conditionally REQUIRED by the
+  // page's own configuration — a page that offers advance payment and has no
+  // `trxId` box collects a payment nobody can trace, and that check is in
+  // `validateContract` rather than here because it depends on the config, not
+  // on the markup.
+  'paymentMethod', 'trxId', 'senderNumber', 'coupon',
+]);
 const ALL_FIELDS = Object.freeze([...REQUIRED_FIELDS, ...OPTIONAL_FIELDS]);
 
 /**
@@ -360,6 +368,49 @@ function validateContract(parsed, page = {}) {
     add('warn', 'NO_ZONE_INPUT',
       `${zones.length} delivery zones are configured but the form has no "zone" field — the first will always be used`,
       `${zones.length}টি ডেলিভারি এলাকা কনফিগ করা আছে কিন্তু ফর্মে "zone" ঘর নেই — সবসময় প্রথমটিই ধরা হবে`);
+  }
+
+  // ── Payment ───────────────────────────────────────────────────────────
+  //
+  // Every check here is conditional on the page's CONFIG rather than on the
+  // markup, which is why it cannot live in the parser. A page that takes cash
+  // on delivery needs none of these fields and must not be nagged about them.
+  const methods = (page.payment?.methods || []).filter(Boolean);
+  if (methods.includes('advance')) {
+    if (!parsed.form.fields.trxId) {
+      // An error, not a warning: the order goes through, the shop is told money
+      // was sent, and there is no reference to check it against. The customer is
+      // then asked for a TrxID on the phone, which is the support call this
+      // whole feature was meant to avoid.
+      add('error', 'ADVANCE_NO_TRXID',
+        'Advance payment is enabled but the form has no field named "trxId"',
+        'অগ্রিম পেমেন্ট চালু আছে কিন্তু ফর্মে "trxId" নামের ঘর নেই');
+    }
+    if (methods.length > 1 && !parsed.form.fields.paymentMethod) {
+      add('error', 'NO_PAYMENT_INPUT',
+        'The page offers more than one payment method but the form has no field named "paymentMethod"',
+        'একাধিক পেমেন্ট পদ্ধতি চালু আছে কিন্তু ফর্মে "paymentMethod" নামের ঘর নেই');
+    }
+    if (!page.payment?.advanceInstructions) {
+      // A warning: the page may well print the bKash number in its own copy.
+      add('warn', 'ADVANCE_NO_INSTRUCTIONS',
+        'Advance payment is enabled but no instructions are configured — the customer is not told where to send the money',
+        'অগ্রিম পেমেন্ট চালু আছে কিন্তু নির্দেশনা লেখা নেই — কাস্টমার জানবে না কোথায় টাকা পাঠাবে');
+    }
+    if ((page.payment?.advanceMode || 'delivery') === 'fixed' && !(page.payment?.advanceAmount > 0)) {
+      add('error', 'ADVANCE_NO_AMOUNT',
+        'Advance payment is set to a fixed amount, but that amount is zero',
+        'অগ্রিম পেমেন্ট "নির্দিষ্ট পরিমাণ" মোডে আছে কিন্তু পরিমাণ ০ দেওয়া');
+    }
+  }
+
+  // ── Coupons ───────────────────────────────────────────────────────────
+  if ((page.coupons || []).some((c) => c.isActive !== false) && !parsed.form.fields.coupon) {
+    // A warning rather than an error: the codes may be for a later week of the
+    // campaign, and a configured-but-unreachable code costs nobody an order.
+    add('warn', 'NO_COUPON_INPUT',
+      'Active coupons are configured but the form has no field named "coupon" — nobody can use them',
+      'সক্রিয় কুপন আছে কিন্তু ফর্মে "coupon" নামের ঘর নেই — কেউ ব্যবহার করতে পারবে না');
   }
 
   // ── Duplicates ────────────────────────────────────────────────────────

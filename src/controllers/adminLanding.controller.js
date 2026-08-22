@@ -105,6 +105,10 @@ exports.save = asyncHandler(async (req, res) => {
     notifications: req.body?.notifications,
     analytics: req.body?.analytics,
     editableKeys: req.body?.editableKeys,
+    payment: req.body?.payment,
+    // Rules only — `usedCount` is live state and the service preserves it. See
+    // the merge in `saveContent`.
+    coupons: req.body?.coupons,
   });
 
   return ApiResponse.success(res, {
