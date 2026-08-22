@@ -233,6 +233,66 @@ const shopSchema = new mongoose.Schema({
       minSaleAmountForSms: {
         type: Number,
         default: 0
+      },
+      /**
+       * The language of the receipt the CUSTOMER receives.
+       *
+       * Bangla by default — it is what a customer in Bangladesh reads, and for
+       * the half of the platform whose shop name is already Bangla it is free:
+       * the message was UCS-2 either way.
+       *
+       * `en` exists for the other half. A receipt from a shop named in ASCII is
+       * one GSM-7 segment today and becomes two the moment a Bangla character
+       * enters it, so this is a real per-message cost and the shop's to choose,
+       * not ours to impose. See smsTemplates.util.js.
+       */
+      language: {
+        type: String,
+        enum: ['bn', 'en'],
+        default: 'bn'
+      },
+      /**
+       * This shop's own wording for the sale receipt.
+       *
+       * Empty — the default, and what every existing shop has — means the
+       * platform body in `smsTemplates.util.js` is used, unchanged. So this
+       * field is inert until an operator fills it in, and clearing the box is
+       * the off switch.
+       *
+       * ADMIN-ONLY BY CONSTRUCTION. `PATCH /api/auth/shop/settings` writes from
+       * an allowlist that has never contained `smsSettings`, so a shopkeeper
+       * cannot reach this even though it lives on their document. Deliberate:
+       * a bad template here is charged to the shop's quota on every sale they
+       * make, and the segment ceiling that prevents that is enforced in the
+       * admin service. Widening the shop-side allowlist would route around it.
+       *
+       * The placeholders, the empty-line rule and the segment ceiling are all
+       * documented in `utils/smsTemplates.util.js` — read that before changing
+       * anything here. `maxlength` mirrors MAX_INVOICE_TEMPLATE_LENGTH; the
+       * schema is the backstop, the util is the message the operator sees.
+       */
+      invoiceTemplate: {
+        type: String,
+        default: '',
+        trim: true,
+        maxlength: 480
+      },
+      /**
+       * Which digits the figures in that template are printed with.
+       *
+       * `en` by default so a shop that never gets a custom template renders
+       * byte-for-byte what it rendered before this field existed. A shop that
+       * asks for a Bangla receipt almost always means `৳১,৮০,৩৫০` rather than
+       * `৳1,80,350`, and it costs nothing — the body is UCS-2 either way.
+       *
+       * Separate from `language` above, which picks between two BUILT-IN
+       * vocabularies and is a real per-segment cost decision. This one only
+       * affects a custom template's numbers.
+       */
+      numerals: {
+        type: String,
+        enum: ['en', 'bn'],
+        default: 'en'
       }
     }
   },

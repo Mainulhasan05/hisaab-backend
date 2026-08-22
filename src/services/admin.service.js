@@ -18,7 +18,15 @@ const HeldCart = require('../models/HeldCart.model');
 const ShopAiUsage = require('../models/ShopAiUsage.model');
 const PlatformSetting = require('../models/PlatformSetting.model');
 const mongoose = require('mongoose');
-const { getBangladeshTodayRange, getBangladeshTodayStr } = require('../utils/bdTime.util');
+const {
+  getBangladeshTodayRange,
+  getBangladeshTodayStr,
+  getBangladeshDayRange,
+  getBangladeshMonthRange,
+  toBangladeshMonthStr,
+  toBangladeshDateStr,
+  bangladeshDaysBetween,
+} = require('../utils/bdTime.util');
 const { resolveDailyLimit } = require('../utils/aiQuota.util');
 const { AUDIT_ACTIONS, AI_DAILY_MESSAGE_LIMIT, ADMIN_JWT_EXPIRES_IN } = require('../config/constants');
 const bcrypt = require('bcrypt');
@@ -56,6 +64,100 @@ const dayBoundary = (value, edge) => {
     : raw;
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? null : d;
+};
+
+/**
+ * The Bangladesh-calendar version of `dayBoundary`, for windows over shop data.
+ *
+ * `dayBoundary` pins to the edge of the UTC day, which is correct for the audit
+ * log (an admin-facing stream of server events) and wrong for anything that
+ * reports on a shop's trading day: UTC midnight is 06:00 Dhaka, so a UTC window
+ * cuts every Bangladeshi day six hours into it. The two are kept apart rather
+ * than merged because they genuinely answer different questions.
+ *
+ * A value that already carries a time (an ISO instant) is passed through — only
+ * a bare `YYYY-MM-DD`, which is all an `<input type="date">` can send, is read
+ * as a Bangladesh calendar date.
+ */
+const bdDayBoundary = (value, edge) => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    const { startOfDay, endOfDay } = getBangladeshDayRange(raw);
+    return edge === 'end' ? endOfDay : startOfDay;
+  }
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
+/**
+ * ─── Entry time vs sale date ─────────────────────────────────────────────────
+ *
+ * A Sale carries ONE timestamp, and it does not always mean what the platform
+ * dashboard assumed it meant.
+ *
+ * When an owner backdates an invoice, `sale.service.js` moves `createdAt` to the
+ * day they named (`pinnedAt`), anchored at noon Dhaka by `saleDate.util.js`. The
+ * moment the invoice was actually typed survives only in the `sale_create` audit
+ * entry — nothing on the document records it. That is deliberate shop-side: the
+ * sale has to land in the named day in the owner's own reports, stock movements
+ * and invoice series.
+ *
+ * The cost lands here. Every admin view keyed "today" and "recent" off
+ * `createdAt`, so a shop entering a paper ledger with backdates reads as dormant
+ * on the platform dashboard while it is being used all day. Observed on
+ * মেসার্স নাঈম ফিস কালচার: 96 of 100 sales carried a `createdAt` days behind the
+ * insert, and the shop's last "activity" showed as three days stale.
+ *
+ * The `_id` recovers it for free. An ObjectId's leading four bytes are the
+ * insert second, so entry time needs no new field, no backfill, and no join —
+ * and, because it is the shard key's prefix, ranging and sorting on it is an
+ * index scan rather than a scan plus sort.
+ *
+ * Second granularity is the whole precision available, and is ample: every
+ * window here is a calendar day.
+ */
+const objectIdAt = (dateLike) =>
+  mongoose.Types.ObjectId.createFromTime(Math.floor(new Date(dateLike).getTime() / 1000));
+
+/**
+ * An `_id` range covering `[from, to]` as instants, for filtering by entry time.
+ *
+ * The upper bound is `$lt` at the NEXT second rather than `$lte` at `to`, because
+ * `createFromTime` zeroes the counter bytes: an `$lte` built from 23:59:59.999
+ * would sort below any document actually inserted during that second and drop
+ * it. Either bound may be null — an open-ended window is a legitimate filter and
+ * the old code silently ignored the range unless both sides were supplied.
+ */
+const objectIdRange = (from, to) => {
+  const range = {};
+  if (from) range.$gte = objectIdAt(from);
+  if (to) range.$lt = objectIdAt(new Date(new Date(to).getTime() + 1000));
+  return Object.keys(range).length ? range : null;
+};
+
+/**
+ * Attaches the entry time a Sale document does not store, and says whether the
+ * two timestamps disagree.
+ *
+ * "Backdated" is a difference of Bangladesh CALENDAR DAY, not of elapsed time.
+ * A sale rung up at 15:00 for today is stamped noon by the anchor and is three
+ * hours "behind" its own entry — flagging that would mark most ordinary
+ * afternoon sales. What matters, and all that matters, is whether the sale is
+ * being counted on a different day than the one it was typed on.
+ */
+const withEntryTime = (sale) => {
+  if (!sale) return sale;
+  const enteredAt = sale._id?.getTimestamp ? sale._id.getTimestamp() : null;
+  const saleDay = toBangladeshDateStr(sale.createdAt);
+  const entryDay = enteredAt ? toBangladeshDateStr(enteredAt) : null;
+  const isBackdated = Boolean(saleDay && entryDay && saleDay !== entryDay);
+  return {
+    ...sale,
+    enteredAt,
+    isBackdated,
+    backdatedDays: isBackdated ? bangladeshDaysBetween(sale.createdAt, enteredAt) : 0,
+  };
 };
 
 class AdminService {
@@ -109,12 +211,17 @@ class AdminService {
     const cached = await cacheService.get(cacheKey);
     if (cached) return cached;
 
-    // Date helpers
+    // Date helpers.
+    //
+    // Bangladesh calendar days, via the shared helper. These three used to be
+    // `new Date(now.getFullYear(), ...)` — SERVER local midnight — which on the
+    // UTC host is 06:00 Dhaka, so "today" on this dashboard began six hours
+    // into the Bangladeshi day and disagreed with `getActivityOverview` and
+    // `getTopPerformers`, both of which already used the BD helper.
     const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const yesterdayStart = new Date(todayStart);
-    yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+    const { startOfDay: todayStart } = getBangladeshTodayRange();
+    const { startOfMonth: monthStart } = getBangladeshMonthRange(toBangladeshMonthStr(now));
+    const yesterdayStart = new Date(todayStart.getTime() - 24 * 60 * 60 * 1000);
 
     const Customer = require('../models/Customer.model');
 
@@ -163,7 +270,22 @@ class AdminService {
       // month figures and growth percentage have all read ৳0 since they were
       // written. The 60s cache faithfully cached the zero.
       Sale.aggregate([
-        { $match: { createdAt: { $gte: salesRangeStart }, status: { $ne: 'cancelled' } } },
+        // Two clocks, so two ways in. A sale entered today but dated to last
+        // week has a `createdAt` behind `salesRangeStart` and would never reach
+        // the facets on a `createdAt`-only match — which is exactly the sale the
+        // entry-side facets below exist to count. Both bounds are indexed
+        // (`{shop:1, createdAt:-1}` and the `_id` primary), so the $or resolves
+        // as an index union rather than a collection scan.
+        {
+          $match: {
+            $or: [
+              { createdAt: { $gte: salesRangeStart } },
+              { _id: { $gte: objectIdAt(salesRangeStart) } },
+            ],
+            status: { $ne: 'cancelled' },
+          },
+        },
+        { $addFields: { enteredAt: { $toDate: '$_id' } } },
         {
           $facet: {
             today: [
@@ -188,6 +310,53 @@ class AdminService {
                   _id: null,
                   totalSales: { $sum: 1 },
                   totalRevenue: { $sum: '$total' },
+                },
+              },
+            ],
+
+            // ── The same three windows, by when the invoice was TYPED ────────
+            //
+            // This is the platform's own question — "was the product used today,
+            // and for how much" — as distinct from "which day did the shops
+            // book the money to", which the three facets above answer. They are
+            // identical for every shop that does not backdate.
+            todayByEntry: [
+              { $match: { enteredAt: { $gte: todayStart } } },
+              {
+                $group: {
+                  _id: null,
+                  totalSales: { $sum: 1 },
+                  totalRevenue: { $sum: '$total' },
+                  totalItems: { $sum: { $size: '$items' } },
+                },
+              },
+            ],
+            yesterdayByEntry: [
+              { $match: { enteredAt: { $gte: yesterdayStart, $lt: todayStart } } },
+              { $group: { _id: null, totalRevenue: { $sum: '$total' } } },
+            ],
+            monthByEntry: [
+              { $match: { enteredAt: { $gte: monthStart } } },
+              {
+                $group: {
+                  _id: null,
+                  totalSales: { $sum: 1 },
+                  totalRevenue: { $sum: '$total' },
+                },
+              },
+            ],
+
+            // The gap between the two, and the shops responsible for it. This is
+            // what the dashboard shows beside today's figure so a backdating
+            // shop reads as busy-but-backdating rather than as idle.
+            backdatedToday: [
+              { $match: { enteredAt: { $gte: todayStart }, createdAt: { $lt: todayStart } } },
+              {
+                $group: {
+                  _id: null,
+                  totalSales: { $sum: 1 },
+                  totalRevenue: { $sum: '$total' },
+                  shops: { $addToSet: '$shop' },
                 },
               },
             ],
@@ -225,12 +394,22 @@ class AdminService {
     const todaySalesResult = salesFacet[0]?.today || [];
     const yesterdaySalesResult = salesFacet[0]?.yesterday || [];
     const monthSalesResult = salesFacet[0]?.month || [];
+    const todayEntryResult = salesFacet[0]?.todayByEntry || [];
+    const yesterdayEntryResult = salesFacet[0]?.yesterdayByEntry || [];
+    const monthEntryResult = salesFacet[0]?.monthByEntry || [];
+    const backdatedResult = salesFacet[0]?.backdatedToday || [];
     const revenueResult = platformRevenueFacet[0]?.allTime || [];
     const monthlyRevenueResult = platformRevenueFacet[0]?.month || [];
 
-    // Calculate growth percentages
-    const todayRevenue = todaySalesResult[0]?.totalRevenue || 0;
-    const yesterdayRevenue = yesterdaySalesResult[0]?.totalRevenue || 0;
+    // Growth compares like with like — entry against entry.
+    //
+    // On the sale-date clock this figure is not a growth rate at all: a shop
+    // keying yesterday's paper invoices this afternoon adds to YESTERDAY's
+    // total, so the denominator moves after the fact and today reads as a
+    // collapse. Both today's and yesterday's numbers here are what was actually
+    // transacted on the platform in each of those days.
+    const todayRevenue = todayEntryResult[0]?.totalRevenue || 0;
+    const yesterdayRevenue = yesterdayEntryResult[0]?.totalRevenue || 0;
     const revenueGrowth = yesterdayRevenue > 0
       ? Math.round(((todayRevenue - yesterdayRevenue) / yesterdayRevenue) * 100)
       : 0;
@@ -244,28 +423,51 @@ class AdminService {
       suspendedShops,
       totalUsers,
 
-      // Today's stats (formatted for dashboard display)
+      // Today's stats (formatted for dashboard display).
+      //
+      // The headline reads the ENTRY clock — this is a platform-activity panel,
+      // and on the sale-date clock a shop that spent the day entering last
+      // week's ledger contributed nothing to it and looked shut. `byDate` keeps
+      // the sale-date figure alongside, because "what did the shops book to
+      // today" is still a real question and is the one their own reports answer.
       today: {
-        sales: todaySalesResult[0]?.totalSales || 0,
-        salesAmount: todaySalesResult[0]?.totalRevenue || 0,
+        sales: todayEntryResult[0]?.totalSales || 0,
+        salesAmount: todayEntryResult[0]?.totalRevenue || 0,
         customers: todayNewCustomers,
         products: todayNewProducts,
         shops: todayNewShops,
         users: todayNewUsers,
-        itemsSold: todaySalesResult[0]?.totalItems || 0,
+        itemsSold: todayEntryResult[0]?.totalItems || 0,
+
+        byDate: {
+          sales: todaySalesResult[0]?.totalSales || 0,
+          salesAmount: todaySalesResult[0]?.totalRevenue || 0,
+          itemsSold: todaySalesResult[0]?.totalItems || 0,
+        },
+
+        // Entered today, dated earlier. The difference between the two figures
+        // above, itemised — so the panel can say WHY they disagree instead of
+        // leaving an operator to reconcile two numbers that should match.
+        backdated: {
+          sales: backdatedResult[0]?.totalSales || 0,
+          salesAmount: backdatedResult[0]?.totalRevenue || 0,
+          shops: (backdatedResult[0]?.shops || []).length,
+        },
       },
 
       // Legacy fields (for backward compatibility)
       todayNewShops,
       todayNewUsers,
       todayNewCustomers,
-      todaySalesCount: todaySalesResult[0]?.totalSales || 0,
-      todaySalesRevenue: todaySalesResult[0]?.totalRevenue || 0,
-      todayItemsSold: todaySalesResult[0]?.totalItems || 0,
+      todaySalesCount: todayEntryResult[0]?.totalSales || 0,
+      todaySalesRevenue: todayEntryResult[0]?.totalRevenue || 0,
+      todayItemsSold: todayEntryResult[0]?.totalItems || 0,
 
       // Month stats
-      monthSalesCount: monthSalesResult[0]?.totalSales || 0,
-      monthSalesRevenue: monthSalesResult[0]?.totalRevenue || 0,
+      monthSalesCount: monthEntryResult[0]?.totalSales || 0,
+      monthSalesRevenue: monthEntryResult[0]?.totalRevenue || 0,
+      monthSalesCountByDate: monthSalesResult[0]?.totalSales || 0,
+      monthSalesRevenueByDate: monthSalesResult[0]?.totalRevenue || 0,
 
       // Subscription revenue
       totalRevenue: revenueResult[0]?.totalRevenue || 0,
@@ -273,6 +475,15 @@ class AdminService {
 
       // Growth
       revenueGrowth,
+
+      // Which clock the sales figures above were counted on, and where its days
+      // start. The panel should not have to hardcode either.
+      windows: {
+        clock: 'entry',
+        todayStart,
+        monthStart,
+        timezone: 'Asia/Dhaka',
+      },
     };
 
     // Cache the result
@@ -355,8 +566,13 @@ class AdminService {
       { $limit: 5 },
     ]),
 
+    // "Most active today" is a question about ACTIVITY, so it is counted on the
+    // entry clock: a shop keying invoices all afternoon is the most active shop
+    // on the platform whatever dates it puts on them. Matching on `createdAt`
+    // scored it zero and handed the leaderboard to whoever happened not to
+    // backdate. See the `objectIdAt` note at the top of this file.
     Sale.aggregate([
-      { $match: { createdAt: { $gte: todayStart } } },
+      { $match: { _id: { $gte: objectIdAt(todayStart) } } },
       {
         $group: {
           _id: '$shop',
@@ -696,6 +912,27 @@ class AdminService {
             _id: null,
             totalSales: { $sum: '$total' },
             salesCount: { $sum: 1 },
+            // Both clocks. `lastSaleDate` is the newest date the shop has BOOKED
+            // a sale to; `lastSaleEnteredAt` is the last time anyone here
+            // actually rang one up. They differ by days on a shop entering a
+            // paper ledger, and only the second one answers "is this shop still
+            // trading" — which is the question this page is opened to ask.
+            lastSaleDate: { $max: '$createdAt' },
+            lastSaleEnteredAt: { $max: { $toDate: '$_id' } },
+            backdatedCount: {
+              $sum: {
+                $cond: [
+                  {
+                    $gte: [
+                      { $dateDiff: { startDate: '$createdAt', endDate: { $toDate: '$_id' }, unit: 'day', timezone: 'Asia/Dhaka' } },
+                      1,
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
           },
         },
       ]),
@@ -727,6 +964,9 @@ class AdminService {
         productsCount,
         totalSales: salesStats[0]?.totalSales || 0,
         salesCount: salesStats[0]?.salesCount || 0,
+        lastSaleDate: salesStats[0]?.lastSaleDate || null,
+        lastSaleEnteredAt: salesStats[0]?.lastSaleEnteredAt || null,
+        backdatedCount: salesStats[0]?.backdatedCount || 0,
         smsQuota: smsQuota ? {
           total: smsQuota.totalQuota,
           used: smsQuota.usedQuota,
@@ -1674,21 +1914,72 @@ class AdminService {
     };
   }
 
-  // Get all sales across all shops (admin level)
+  /**
+   * Get all sales across all shops (admin level).
+   *
+   * Reads by ENTRY TIME by default, not by the sale's own date — see the
+   * `objectIdAt` note above for why the two differ and why the difference used
+   * to make an actively-trading shop unfindable on this screen. `dateField` and
+   * `sortBy` accept `'sale'` to get the old behaviour, which is the right lens
+   * when the question is about a shop's books rather than about platform
+   * activity.
+   *
+   * For the 28 of 30 shops that never backdate the two are the same value and
+   * nothing about this screen changes.
+   */
   async getAllSales(options = {}) {
-    const { page = 1, limit = 50, shopId, status, startDate, endDate, minAmount, maxAmount } = options;
+    const {
+      page = 1,
+      limit = 50,
+      shopId,
+      status,
+      startDate,
+      endDate,
+      minAmount,
+      maxAmount,
+      dateField = 'entry',
+      sortBy = 'entry',
+      sortOrder = 'desc',
+    } = options;
+
+    const byEntry = dateField !== 'sale';
+    const dir = sortOrder === 'asc' ? 1 : -1;
 
     const query = {};
     if (shopId) query.shop = shopId;
     if (status) query.status = status;
-    if (startDate && endDate) {
-      query.createdAt = {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate),
-      };
+
+    // Each side is applied independently. This used to be `if (startDate &&
+    // endDate)`, so a one-sided range was silently dropped and the operator got
+    // an unfiltered list that looked like a filtered one.
+    const from = startDate ? bdDayBoundary(startDate, 'start') : null;
+    const to = endDate ? bdDayBoundary(endDate, 'end') : null;
+    if (from || to) {
+      if (byEntry) {
+        const range = objectIdRange(from, to);
+        if (range) query._id = range;
+      } else {
+        query.createdAt = {
+          ...(from ? { $gte: from } : {}),
+          ...(to ? { $lte: to } : {}),
+        };
+      }
     }
-    if (minAmount) query.total = { ...query.total, $gte: parseInt(minAmount) };
-    if (maxAmount) query.total = { ...query.total, $lte: parseInt(maxAmount) };
+
+    // `Number`, not `parseInt`: these are money. `parseInt('99.5')` is 99, so a
+    // max of ৳99.50 excluded ৳99.50.
+    const min = minAmount === undefined || minAmount === '' ? null : Number(minAmount);
+    const max = maxAmount === undefined || maxAmount === '' ? null : Number(maxAmount);
+    if (min !== null && !Number.isNaN(min)) query.total = { ...query.total, $gte: min };
+    if (max !== null && !Number.isNaN(max)) query.total = { ...query.total, $lte: max };
+
+    // `_id` is the tiebreaker on every sort so pagination is stable: `createdAt`
+    // alone is not unique here — a backdating shop stamps a whole batch with the
+    // same noon instant, and rows shuffled between pages as a result.
+    const sort =
+      sortBy === 'total' ? { total: dir, _id: dir }
+      : sortBy === 'sale' ? { createdAt: dir, _id: dir }
+      : { _id: dir };
 
     const skip = (page - 1) * limit;
 
@@ -1697,15 +1988,27 @@ class AdminService {
         .populate('shop', 'name phone')
         .populate('customer', 'name phone')
         .populate('createdBy', 'name')
-        .sort({ createdAt: -1 })
+        .sort(sort)
         .skip(skip)
         .limit(parseInt(limit))
         .lean(),
       Sale.countDocuments(query),
     ]);
 
+    const data = sales.map(withEntryTime);
+
     return {
-      data: sales,
+      data,
+      // Echoed back so the table can label which clock it is showing. The screen
+      // is ambiguous otherwise: two columns of dates and no way to tell which
+      // one the sort and the filter were applied to.
+      meta: {
+        dateField: byEntry ? 'entry' : 'sale',
+        sortBy,
+        sortOrder: dir === 1 ? 'asc' : 'desc',
+        backdatedOnPage: data.filter((s) => s.isBackdated).length,
+        timezone: 'Asia/Dhaka',
+      },
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -1887,8 +2190,18 @@ class AdminService {
         // One pass over the last 7 days of sales yields both windows. Bounding
         // the $match at 7 days is what keeps this off a full collection scan:
         // Sale is one of the three collections that actually grows.
+        // Counted on the ENTRY clock throughout — this panel is titled activity,
+        // and a sale entered this afternoon is activity this afternoon whatever
+        // date the owner put on it. On `createdAt` these counters read zero for
+        // any shop entering a paper ledger, which is precisely the shop an
+        // activity panel exists to show. `backdatedToday` carries the gap so the
+        // figure can be read against the shops' own day totals.
+        //
+        // Bounding on `_id` rather than `createdAt` also keeps the 7-day floor
+        // doing its job: it is what stops this becoming a full scan of the one
+        // collection that grows.
         Sale.aggregate([
-          { $match: { createdAt: { $gte: salesWindowStart } } },
+          { $match: { _id: { $gte: objectIdAt(salesWindowStart) } } },
           {
             $group: {
               _id: null,
@@ -1898,7 +2211,7 @@ class AdminService {
               todayCount: {
                 $sum: {
                   $cond: [
-                    { $and: [{ $gte: ['$createdAt', bdTodayStart] }, { $ne: ['$status', 'cancelled'] }] },
+                    { $and: [{ $gte: [{ $toDate: '$_id' }, bdTodayStart] }, { $ne: ['$status', 'cancelled'] }] },
                     1,
                     0,
                   ],
@@ -1907,7 +2220,7 @@ class AdminService {
               todayRevenue: {
                 $sum: {
                   $cond: [
-                    { $and: [{ $gte: ['$createdAt', bdTodayStart] }, { $ne: ['$status', 'cancelled'] }] },
+                    { $and: [{ $gte: [{ $toDate: '$_id' }, bdTodayStart] }, { $ne: ['$status', 'cancelled'] }] },
                     '$total',
                     0,
                   ],
@@ -1916,7 +2229,7 @@ class AdminService {
               todayDue: {
                 $sum: {
                   $cond: [
-                    { $and: [{ $gte: ['$createdAt', bdTodayStart] }, { $ne: ['$status', 'cancelled'] }] },
+                    { $and: [{ $gte: [{ $toDate: '$_id' }, bdTodayStart] }, { $ne: ['$status', 'cancelled'] }] },
                     '$due',
                     0,
                   ],
@@ -1925,7 +2238,22 @@ class AdminService {
               todayCancelled: {
                 $sum: {
                   $cond: [
-                    { $and: [{ $gte: ['$createdAt', bdTodayStart] }, { $eq: ['$status', 'cancelled'] }] },
+                    { $and: [{ $gte: [{ $toDate: '$_id' }, bdTodayStart] }, { $eq: ['$status', 'cancelled'] }] },
+                    1,
+                    0,
+                  ],
+                },
+              },
+              todayBackdated: {
+                $sum: {
+                  $cond: [
+                    {
+                      $and: [
+                        { $gte: [{ $toDate: '$_id' }, bdTodayStart] },
+                        { $lt: ['$createdAt', bdTodayStart] },
+                        { $ne: ['$status', 'cancelled'] },
+                      ],
+                    },
                     1,
                     0,
                   ],
@@ -1937,13 +2265,19 @@ class AdminService {
         // `items` is deliberately not selected: a sale carries its whole line
         // array, and eight of them would be the heaviest thing on the endpoint
         // for a number the panel does not show.
+        // Sorted by `_id`, i.e. most recently ENTERED. On `createdAt` this feed
+        // showed the most recently DATED sale, so a backdating shop's invoices
+        // never surfaced no matter how many it wrote — the newest eight rows
+        // were always someone else's. `_id` is also the tiebreaker `createdAt`
+        // never had: a batch of backdated sales shares one noon instant, and
+        // ordering within it was arbitrary.
         Sale.find({})
           .select('invoiceNo total paid due status paymentMethod customerName isOnline channel createdAt')
           .populate('shop', 'name')
           .populate('branch', 'name')
           .populate('customer', 'name phone')
           .populate('createdBy', 'name role')
-          .sort({ createdAt: -1 })
+          .sort({ _id: -1 })
           .limit(8)
           .lean(),
         // Metadata read, not a scan. "Sales ever recorded" is a scale figure,
@@ -2001,7 +2335,7 @@ class AdminService {
         },
       },
       sales: {
-        recent: recentSales,
+        recent: recentSales.map(withEntryTime),
         counts: {
           // `total` is an estimate; every other figure here is exact.
           total: salesTotal || 0,
@@ -2009,14 +2343,19 @@ class AdminService {
           todayRevenue: s.todayRevenue || 0,
           todayDue: s.todayDue || 0,
           todayCancelled: s.todayCancelled || 0,
+          // Of `todayCount`, how many carry an earlier date. Zero for every shop
+          // that does not backdate, which is all but two of them.
+          todayBackdated: s.todayBackdated || 0,
           weekCount: s.weekCount || 0,
           weekRevenue: s.weekRevenue || 0,
           weekCancelled: s.weekCancelled || 0,
         },
         // The UI labels its own windows, but it should not have to hardcode
         // where they start — a reader comparing this against a shop's daily
-        // summary needs to know which midnight we used.
+        // summary needs to know which midnight we used, and now also which of
+        // the two clocks these counts were taken on.
         windows: {
+          clock: 'entry',
           todayStart: bdTodayStart,
           weekStart: salesWindowStart,
           timezone: 'Asia/Dhaka',
@@ -2209,6 +2548,42 @@ class AdminService {
       shop.settings.invoicePrefix = settingsData.invoicePrefix;
     }
     if (settingsData.smsSettings !== undefined) {
+      /**
+       * The shop's own receipt wording, checked before it can be saved.
+       *
+       * This is the one setting on this endpoint whose blast radius is every
+       * SMS the shop sends from now on, charged to their quota, with nobody
+       * reading the messages again to notice. The two ways it goes wrong — a
+       * typo'd placeholder texted as literal braces, and a body that quietly
+       * doubles the segment count — are both caught here, at the moment an
+       * operator can still fix them, rather than in next month's quota.
+       *
+       * Only when the key is actually present in the request: a settings save
+       * that does not mention `invoiceTemplate` must not re-validate (and
+       * possibly reject) a template that is already stored and already live.
+       *
+       * See `utils/smsTemplates.util.js` for the placeholder list, the
+       * empty-line rule and the segment ceiling.
+       */
+      if ('invoiceTemplate' in settingsData.smsSettings) {
+        const { validateInvoiceTemplate } = require('../utils/smsTemplates.util');
+        const { countSms } = require('../utils/smsCounter.util');
+
+        const check = validateInvoiceTemplate(settingsData.smsSettings.invoiceTemplate, {
+          shopName: shop.name,
+          // Priced with whichever numeral system this same save is applying, not
+          // the stored one — otherwise an operator switching to Bangla digits and
+          // pasting a longer body in one save is validated against neither.
+          numerals:
+            settingsData.smsSettings.numerals ?? shop.settings.smsSettings?.numerals ?? 'en',
+          countSegments: (message) => countSms(message).segments,
+        });
+
+        if (!check.valid) {
+          throw new AppError(check.reasonBn, check.reason, 400);
+        }
+      }
+
       shop.settings.smsSettings = {
         ...shop.settings.smsSettings,
         ...settingsData.smsSettings,

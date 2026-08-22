@@ -15,6 +15,7 @@ const {
   formatSmsAmount,
   gsmSafeShopName: getGsmSafeShopName,
   buildSaleReceipt,
+  buildInvoiceSms,
   buildPaymentReceipt,
   buildDueReminder,
   buildOtp,
@@ -1972,16 +1973,47 @@ class SMSService {
 
         // Built from the shared template so the till's preview and this message
         // cannot disagree — see smsTemplates.util.js.
-        const message = buildSaleReceipt({
+        //
+        // `buildInvoiceSms` rather than `buildSaleReceipt` directly: a shop can
+        // have its own wording on `smsSettings.invoiceTemplate`, and this is
+        // the door both it and the platform body come through. A shop with no
+        // template set renders exactly what it rendered before that existed.
+        const message = buildInvoiceSms({
+          template: smsSettings.invoiceTemplate || '',
+          numerals: smsSettings.numerals || 'en',
           invoiceNo,
+          /**
+           * The date on the customer's receipt.
+           *
+           * `createdAt`, which on a backdated sale IS the backdated day — the
+           * platform keeps the business date there rather than in a second
+           * field (saleDate.util.js). A receipt for last Tuesday's sale must
+           * read last Tuesday, not the day it was typed in.
+           *
+           * Falls back to now only for the path where the sale document could
+           * not be re-read, which is the same path that already tolerates a
+           * missing `previousDue` below.
+           */
+          date: saleDoc?.createdAt || new Date(),
+          customerName,
           total: saleData.total,
           paid: saleData.paid,
           due: saleData.due,
-          // Adds two lines to the receipt ONLY when a খাতা was actually settled
+          // Adds a line to the receipt ONLY when a খাতা was actually settled
           // at this checkout; an ordinary receipt is unchanged to the byte.
           dueSettled,
+          // What the customer owed BEFORE this visit. Unused by the platform
+          // body — it is the figure a shop writing its own template asks for
+          // first ("পূর্বের বাকি"), and the same snapshot the total below is
+          // derived from, so the three figures on the receipt reconcile.
+          previousDue: saleDoc?.previousDue || 0,
+          // What the customer owes the shop after this visit, across every
+          // invoice. Printed whenever it exceeds this invoice's own due — the
+          // case the receipt used to be silent about, and the only figure the
+          // customer needs that the bill itself cannot give them.
           totalDue: totalDueAfter,
           shopName: shop.name,
+          language: shop.settings?.smsSettings?.language || 'bn',
         });
 
         // Send SMS with invoice metadata. The shop name rides along because it
@@ -2062,13 +2094,22 @@ class SMSService {
    */
   async getTemplates(shopId = null) {
     let shopName = 'Your Shop';
+    // The picker has to be shown in the language the shop's receipts actually
+    // go out in, or it is advertising a body nobody will receive.
+    let language = 'bn';
+    // The shop's own receipt wording, when an operator has set one. Same
+    // reason: the picker's job is to show what this shop sends, and for a shop
+    // with a custom template the platform body is not it.
+    let invoiceTemplate = '';
     if (shopId) {
       try {
         const Shop = require('../models/Shop.model');
-        const shop = await Shop.findById(shopId).select('name').lean();
+        const shop = await Shop.findById(shopId).select('name settings.smsSettings').lean();
         if (shop?.name) {
           shopName = getGsmSafeShopName(shop.name);
         }
+        language = shop?.settings?.smsSettings?.language || 'bn';
+        invoiceTemplate = shop?.settings?.smsSettings?.invoiceTemplate || '';
       } catch (err) {
         logger.error(`SMS: Failed to fetch shop name for templates: ${err.message}`);
       }
@@ -2110,14 +2151,30 @@ class SMSService {
         id: 'sale_receipt',
         name: 'Sale Receipt',
         nameEn: 'Sale Receipt',
-        template: buildSaleReceipt({
-          invoiceNo: '{invoice_no}',
-          total: '{total}',
-          paid: '{paid}',
-          due: '{due}',
-          shopName,
-        }),
-        variables: ['shop_name', 'invoice_no', 'total', 'paid', 'due'],
+        // A shop with its own wording is shown ITS body, tokens intact. The
+        // stored template is already placeholder-shaped, so it drops straight
+        // in — and `personalizeMessage` substitutes every token it can carry,
+        // which is why that list had to grow when these tokens did.
+        template:
+          invoiceTemplate ||
+          buildSaleReceipt({
+            invoiceNo: '{invoice_no}',
+            total: '{total}',
+            paid: '{paid}',
+            due: '{due}',
+            // A placeholder always renders, so the picker shows the whole shape
+            // of the receipt — including the balance line, which is the one a
+            // shopkeeper composing by hand would otherwise never think to add.
+            totalDue: '{total_due}',
+            shopName,
+            language,
+          }),
+        // Reported as the tokens the body actually contains, so a shop with a
+        // custom template is not offered insert buttons for placeholders its
+        // own receipt does not use.
+        variables: (invoiceTemplate
+          ? [...new Set(invoiceTemplate.match(/\{[a-zA-Z0-9_]+\}/g) || [])].map((t) => t.slice(1, -1))
+          : ['shop_name', 'invoice_no', 'total', 'paid', 'due', 'total_due']),
       },
       {
         id: 'custom',
