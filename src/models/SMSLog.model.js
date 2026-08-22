@@ -233,6 +233,73 @@ const smsLogSchema = new mongoose.Schema({
   origin: {
     type: originSchema,
     default: () => ({})
+  },
+
+  /**
+   * Which gateway actually sent this, and what it cost us.
+   *
+   * Top-level and indexed rather than buried in `apiResponse`, because "how much
+   * of last month went out on Automas" and "what did we pay for it" are queries,
+   * not forensics.
+   *
+   * ── Why the cost is stamped HERE and not derived later ──────────────────────
+   *
+   * Failover means the gateway that sent a message is not always the gateway the
+   * settings name, and the two gateways charge different rates. A margin report
+   * that multiplies segments by "the current provider's current rate" is
+   * therefore wrong twice over: wrong about which provider, and wrong about the
+   * rate if it has since been renegotiated. The only correct moment to record
+   * what a message cost is the moment it is sent, at the rate in force then.
+   *
+   * `null` on cost means "we had not been told the rate yet" — see
+   * PlatformSetting.smsProviderCost. It is deliberately not `0`, which would
+   * report a 100% margin on messages we simply had not priced.
+   */
+  gateway: {
+    /**
+     * Registry name of the provider that accepted the message.
+     *
+     * Not `index: true` — the compound `(gateway.provider, createdAt)` below
+     * already serves a lookup by provider alone, since a compound index answers
+     * queries on its leading field. A second single-field index here would be
+     * written on every insert and read by nothing.
+     */
+    provider: { type: String, default: null },
+
+    /** Transport actually used: one-to-many | dynamic | single | individual_fallback. */
+    method: { type: String, default: null },
+
+    /** The gateway's own id, for reconciling against the provider's panel. */
+    messageId: { type: String, default: null },
+
+    /** The gateway's status code, as it answered it. */
+    statusCode: { type: String, default: null },
+
+    /** The sender ID the recipient saw. */
+    senderId: { type: String, default: null },
+
+    // ── Failover attribution ────────────────────────────────────────────────
+    // Present only when the primary refused and a backup delivered. Without
+    // these three, a message that cost two gateway attempts is indistinguishable
+    // from one that cost one.
+    failedOver: { type: Boolean, default: false },
+    failedProvider: { type: String, default: null },
+    failedReason: { type: String, default: null },
+
+    /** Segments actually billed at the gateway (recipients × segments each). */
+    billedSegments: { type: Number, default: 0, min: 0 },
+
+    /** ৳ per segment charged by THIS provider at send time. */
+    unitCost: { type: Number, default: null, min: 0 },
+
+    /** ৳ this send cost the platform: billedSegments × unitCost. */
+    totalCost: { type: Number, default: null, min: 0 },
+
+    /** ৳ of prepaid quota this send consumed, at the shop's purchased rate. */
+    revenue: { type: Number, default: null, min: 0 },
+
+    /** Untouched provider body. The catch-all that stops a schema change from silently discarding a field. */
+    raw: { type: mongoose.Schema.Types.Mixed, default: null }
   }
 }, {
   timestamps: true,
@@ -257,6 +324,13 @@ smsLogSchema.index({ sentByAdmin: 1, createdAt: -1 }, { sparse: true });
 // plain, which is what it actually is; the TTL above caps the size at 60 days
 // of traffic either way.
 smsLogSchema.index({ 'origin.ip': 1, createdAt: -1 });
+
+// "What went out on which gateway, and when" — the operator's provider-mix and
+// margin queries, and the sweep the earnings rollup runs each month.
+smsLogSchema.index({ 'gateway.provider': 1, createdAt: -1 });
+// Failover is rare by design, so this stays small and answers "what did the
+// primary refuse, and why" without scanning the collection.
+smsLogSchema.index({ 'gateway.failedOver': 1, createdAt: -1 }, { sparse: true });
 
 // TTL Index - Auto-delete logs older than 60 days
 smsLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 60 * 24 * 60 * 60 }); // 60 days

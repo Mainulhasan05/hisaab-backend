@@ -23,85 +23,35 @@ const {
 } = require('../utils/smsTemplates.util');
 const { normalizeRecipients, chunk, MAX_SKIPPED_STORED } = require('../utils/smsRecipients.util');
 const { isPersonalized, personalizeMessage } = require('../utils/smsPersonalize.util');
+// Which gateway sends, what happens when it refuses, and what it cost us. The
+// service below no longer speaks any gateway's dialect — see services/sms/.
+const dispatcher = require('./sms/dispatcher');
+const smsRouting = require('./sms/routing');
+const smsEarnings = require('./sms/earnings');
 
-// MimSMS API Configuration
-const MIMSMS = {
-  BASE_URL: 'https://api.mimsms.com/api/SmsSending',
-  SINGLE: '/SMS',
-  BULK: '/OneToMany',
-  DYNAMIC: '/DSMS',
-  BALANCE: '/balanceCheck'
-};
-
-/* ── TransactionType is a property of the ENDPOINT, not of the message ────────
+/* ── The gateway dialect moved out ───────────────────────────────────────────
  *
- * Determined empirically against this account (each endpoint probed with an
- * undeliverable number, so only the validator answered):
+ * MimSMS's endpoints, its per-endpoint TransactionType matrix and its habit of
+ * answering a refusal with HTTP 200 all now live in
+ * services/sms/adapters/mimsms.adapter.js, alongside the Automas adapter that
+ * has its own, different, set of quirks. This service asks the dispatcher to
+ * send and no longer knows which gateway will.
  *
- *   /SMS        accepts T, P and D
- *   /OneToMany  accepts T only      — P and D return "Invalid TransactionType"
- *   /DSMS       accepts D only      — T and P return "Invalid TransactionType"
- *
- * This code previously sent 'P' on bulk and 'T' on dynamic, so BOTH campaign
- * endpoints were refused by the gateway on every call they ever made. Nobody
- * noticed because `sendBatch` read only the HTTP status: MimSMS answers a
- * refusal with HTTP 200 and the verdict in the body, so every rejected campaign
- * was recorded `sent`, billed to the shop, and never refunded. See
- * `readGatewayVerdict` below — that is the other half of this fix.
- *
- * The consequence for callers: a promotional bulk send cannot be routed as
- * promotional, because the gateway does not offer that on /OneToMany for this
- * account. The caller's intent is still recorded on the log; it just cannot
- * change the wire value. Override per endpoint if the account is later
- * provisioned differently.
+ * The two values below are re-exported for the contract tests that pin MimSMS's
+ * behaviour. They DELEGATE rather than duplicate: a second copy of the verdict
+ * reader would be a copy that drifts, and this one is the difference between
+ * "the campaign reached nobody" and "the campaign reported itself sent".
  */
+const MimSmsAdapter = require('./sms/adapters/mimsms.adapter');
+const registry = require('./sms/registry');
+
+const mimsmsContract = new MimSmsAdapter();
+const readGatewayVerdict = (data) => mimsmsContract.readVerdict(data);
 const TRANSACTION_TYPE = {
   single: process.env.MIMSMS_TXN_TYPE_SINGLE || 'T',
   bulk: process.env.MIMSMS_TXN_TYPE_BULK || 'T',
   dynamic: process.env.MIMSMS_TXN_TYPE_DYNAMIC || 'D',
 };
-
-/**
- * Did the gateway actually accept this?
- *
- * MimSMS returns HTTP 200 for refusals — an invalid number, a bad
- * TransactionType and a flat-out rejection all arrive as a 200 whose body says
- * `{ status: "Failed", responseResult: "..." }`. Treating the HTTP status as
- * the answer is why a campaign that reached nobody reported itself sent.
- *
- * Unknown shapes are treated as ACCEPTED rather than refused, deliberately: a
- * future gateway change that adds a field must not turn every successful send
- * into a false failure. Explicit refusals are what this reads, and anything it
- * cannot classify is logged so the silence is visible.
- */
-function readGatewayVerdict(data) {
-  if (!data || typeof data !== 'object') {
-    return { accepted: true, reason: null };
-  }
-
-  // The simulated response from SKIP_SMS, which carries no verdict.
-  if (data.simulated) return { accepted: true, reason: null };
-
-  const status = String(data.status ?? data.Status ?? '').trim().toLowerCase();
-  const code = String(data.statusCode ?? data.StatusCode ?? '').trim();
-  const detail = data.responseResult ?? data.ResponseResult ?? data.message ?? null;
-
-  if (status === 'success' || code === '200') {
-    return { accepted: true, reason: null };
-  }
-
-  if (status === 'failed' || status === 'error' || (code && code !== '200')) {
-    return {
-      accepted: false,
-      reason: detail ? `Gateway refused: ${detail}` : `Gateway refused (status ${code || status})`,
-    };
-  }
-
-  if (status || code) {
-    logger.warn(`SMS: unrecognised gateway verdict ${JSON.stringify({ status, code })} — treating as accepted`);
-  }
-  return { accepted: true, reason: null };
-}
 
 /* ── Bulk sending shape ───────────────────────────────────────────────────────
  *
@@ -134,6 +84,57 @@ const BULK = {
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Tally a campaign's traffic per gateway.
+ *
+ * A campaign is not necessarily one gateway's work: failover can move it
+ * part-way through, and the two gateways charge different rates. Summing the
+ * whole run against whichever provider answered last would misstate the cost by
+ * exactly the amount failover was responsible for — which is the number worth
+ * knowing.
+ */
+function createProviderTally() {
+  const byProvider = new Map();
+
+  return {
+    add(provider, { sentSegments = 0, failedSegments = 0, failedOver = false, method = null,
+      failedProvider = null, failedReason = null } = {}) {
+      if (!provider) return;
+      const row = byProvider.get(provider) || {
+        provider, sentSegments: 0, failedSegments: 0, batches: 0,
+        failedOverBatches: 0, method: null, failedProvider: null, failedReason: null,
+      };
+      row.sentSegments += sentSegments;
+      row.failedSegments += failedSegments;
+      row.batches += 1;
+      if (failedOver) {
+        row.failedOverBatches += 1;
+        row.failedProvider = failedProvider || row.failedProvider;
+        row.failedReason = failedReason || row.failedReason;
+      }
+      row.method = method || row.method;
+      byProvider.set(provider, row);
+    },
+
+    rows() {
+      return [...byProvider.values()];
+    },
+
+    /** The provider that carried most of the campaign — what the log row names. */
+    primary() {
+      let best = null;
+      for (const row of byProvider.values()) {
+        if (!best || row.sentSegments > best.sentSegments) best = row;
+      }
+      return best;
+    },
+
+    anyFailedOver() {
+      return [...byProvider.values()].some((r) => r.failedOverBatches > 0);
+    },
+  };
+}
 
 class SMSService {
   /**
@@ -180,6 +181,73 @@ class SMSService {
     return reserved.remainingQuota;
   }
 
+  /**
+   * Turn a dispatch outcome into the log's `gateway` record, and book the money.
+   *
+   * One helper for every send path so that provider attribution and earnings
+   * cannot drift apart between them — a campaign that books its margin and an
+   * OTP that does not is exactly how a monthly total ends up unexplainable.
+   *
+   * `result` is the dispatcher's normalised success shape; `error` is what it
+   * threw. Either may be absent. Never throws: the accounting is downstream of
+   * a message that has already gone (or already failed), and must not change
+   * that outcome.
+   *
+   * @returns {Promise<object>} the SMSLog.gateway subdocument
+   */
+  async buildGatewayRecord({
+    shopId = null,
+    segments = 0,
+    result = null,
+    error = null,
+    sent = true,
+    errorMessage = null,
+    method = null,
+  }) {
+    // On failure the provider still matters — we may have been charged by the
+    // gateway that refused, and "which one refused" is the first question.
+    const provider = result?.provider
+      || error?.provider
+      || error?.failoverProvider
+      || null;
+
+    const record = {
+      provider,
+      method: result?.method || method || null,
+      messageId: result?.messageId != null ? String(result.messageId) : null,
+      statusCode: result?.statusCode != null ? String(result.statusCode) : null,
+      senderId: result?.senderIdUsed || null,
+      failedOver: Boolean(result?.failedOver),
+      failedProvider: result?.failedProvider || error?.primaryProvider || null,
+      failedReason: result?.failedReason || error?.primaryError || null,
+      billedSegments: segments,
+      unitCost: null,
+      totalCost: null,
+      revenue: null,
+      raw: result?.data || error?.gatewayResponse || null,
+    };
+
+    if (!provider || segments <= 0) return record;
+
+    const priced = await smsEarnings.priceAndRecord({
+      shopId,
+      provider,
+      segments,
+      failedOver: record.failedOver,
+      failed: !sent,
+      at: new Date(),
+    });
+
+    record.unitCost = priced.unitCost;
+    record.totalCost = priced.totalCost;
+    record.revenue = priced.revenue;
+
+    if (!sent && errorMessage && !record.failedReason) {
+      record.failedReason = errorMessage;
+    }
+    return record;
+  }
+
   /* ── Logging a send that belongs to no shop ───────────────────────────────
    *
    * OTPs and platform notices are sent on the platform's own gateway account,
@@ -216,9 +284,21 @@ class SMSService {
     apiResponse = null,
     errorMessage = null,
     senderName = null,
+    result = null,
+    error = null,
   }) {
     const sent = status === SMS_STATUS.SENT;
+    // No quota is charged, but the segments are still what the platform is
+    // billed by the gateway — and an OTP in Bangla is two of them, not one.
+    const segments = countSms(message).segments || 1;
     try {
+      // Platform sends have no shop to earn from, so this is pure cost. Booking
+      // it is the only way the margin report accounts for the single
+      // highest-volume message the product sends.
+      const gateway = await this.buildGatewayRecord({
+        shopId: null, segments, result, error, sent, errorMessage, method: 'single',
+      });
+
       return await SMSLog.create({
         shop: null,
         branch: null,
@@ -226,10 +306,8 @@ class SMSService {
         message,
         type,
         audience,
-        transactionId,
-        // No quota is charged, but the segments are still what the platform is
-        // billed by MimSMS — and an OTP in Bangla is two of them, not one.
-        cost: countSms(message).segments || 1,
+        transactionId: transactionId || gateway.messageId || null,
+        cost: segments,
         status,
         sentCount: sent ? 1 : 0,
         failedCount: sent ? 0 : 1,
@@ -237,6 +315,7 @@ class SMSService {
         apiResponse,
         errorMessage,
         senderName,
+        gateway,
       });
     } catch (err) {
       logger.error(`SMS: failed to write ${type} log for ${phone}: ${err.message}`);
@@ -274,38 +353,38 @@ class SMSService {
     }
 
     try {
-      const response = await smsHttp.post(MIMSMS.BASE_URL + MIMSMS.SINGLE, {
-        UserName: process.env.MIMSMS_USERNAME,
-        Apikey: process.env.MIMSMS_API_KEY,
-        MobileNumber: formattedPhone,
-        SenderName: process.env.MIMSMS_SENDER_ID,
-        TransactionType: 'T', // Transactional
-        Message: message
-      });
-
-      // The same HTTP-200-refusal trap the other two send paths already guard.
-      // Without it the panel would record `sent` for every OTP the gateway
-      // turned away — a dead number, an exhausted platform float — and the one
-      // screen built to answer "why did this user never get their code" would
-      // answer it wrongly.
-      const verdict = readGatewayVerdict(response.data);
-      if (!verdict.accepted) {
-        const refusal = new Error(verdict.reason);
-        refusal.gatewayResponse = response.data;
-        throw refusal;
-      }
+      /* Failover is deliberately LEFT ON for OTPs.
+       *
+       * The usual argument against it — that a double-send hands the user two
+       * different codes and invalidates the one they are typing — does not apply
+       * here: `otp` is generated by the caller and passed in, so both attempts
+       * carry the SAME code. The worst case is a duplicate message, and the best
+       * case is that a shopkeeper still gets into their account while the
+       * primary gateway is down. For the highest-volume message the product
+       * sends, that trade is worth taking.
+       *
+       * The gateway's refusal-with-HTTP-200 trap is handled inside the adapter
+       * now, so a refusal arrives here as a throw like any other failure.
+       */
+      const result = await dispatcher.sendSingle(formattedPhone, message);
 
       await this.recordSystemLog({
         phone: formattedPhone,
         message,
         audience,
         status: SMS_STATUS.SENT,
-        transactionId: response.data?.TransactionId,
-        apiResponse: response.data,
+        transactionId: result.messageId,
+        apiResponse: result.data,
+        result,
       });
 
-      logger.info(`OTP sent to ${formattedPhone}: ${JSON.stringify(response.data)}`);
-      return response.data;
+      if (result.failedOver) {
+        logger.warn(
+          `OTP to ${formattedPhone} delivered by ${result.provider} after ${result.failedProvider} failed: ${result.failedReason}`
+        );
+      }
+      logger.info(`OTP sent to ${formattedPhone} via ${result.provider}`);
+      return result.data;
     } catch (error) {
       await this.recordSystemLog({
         phone: formattedPhone,
@@ -314,6 +393,7 @@ class SMSService {
         status: SMS_STATUS.FAILED,
         errorMessage: error.message,
         apiResponse: error.gatewayResponse || null,
+        error,
       });
 
       logger.error(`Failed to send OTP: ${error.message}`);
@@ -362,35 +442,21 @@ class SMSService {
     }
 
     try {
-      const response = await smsHttp.post(MIMSMS.BASE_URL + MIMSMS.SINGLE, {
-        UserName: process.env.MIMSMS_USERNAME,
-        Apikey: process.env.MIMSMS_API_KEY,
-        MobileNumber: formattedPhone,
-        SenderName: process.env.MIMSMS_SENDER_ID,
-        TransactionType: TRANSACTION_TYPE.single,
-        Message: body,
-      });
-
-      const verdict = readGatewayVerdict(response.data);
-      if (!verdict.accepted) {
-        const refusal = new Error(verdict.reason);
-        refusal.gatewayResponse = response.data;
-        throw refusal;
-      }
+      const result = await dispatcher.sendSingle(formattedPhone, body);
 
       const smsLog = await this.recordSystemLog({
         phone: formattedPhone, message: body, type: SMS_TYPES.SINGLE, audience,
-        status: SMS_STATUS.SENT, transactionId: response.data?.TransactionId,
-        apiResponse: response.data, senderName,
+        status: SMS_STATUS.SENT, transactionId: result.messageId,
+        apiResponse: result.data, senderName, result,
       });
 
-      logger.info(`System SMS sent to ${formattedPhone} (${audience})`);
-      return { success: true, smsLog, response: response.data };
+      logger.info(`System SMS sent to ${formattedPhone} (${audience}) via ${result.provider}`);
+      return { success: true, smsLog, response: result.data, provider: result.provider };
     } catch (error) {
       await this.recordSystemLog({
         phone: formattedPhone, message: body, type: SMS_TYPES.SINGLE, audience,
         status: SMS_STATUS.FAILED, errorMessage: error.message,
-        apiResponse: error.gatewayResponse || null, senderName,
+        apiResponse: error.gatewayResponse || null, senderName, error,
       });
 
       logger.error(`Failed to send system SMS to ${formattedPhone}: ${error.message}`);
@@ -422,25 +488,14 @@ class SMSService {
     const formattedPhone = formatPhone(phone);
 
     try {
-      const response = await smsHttp.post(MIMSMS.BASE_URL + MIMSMS.SINGLE, {
-        UserName: process.env.MIMSMS_USERNAME,
-        Apikey: process.env.MIMSMS_API_KEY,
-        MobileNumber: formattedPhone,
-        SenderName: process.env.MIMSMS_SENDER_ID,
-        TransactionType: TRANSACTION_TYPE.single,
-        Message: body
-      });
+      // The gateway's dialect, its refusal-with-HTTP-200 trap and the choice of
+      // which gateway to use all live below the dispatcher now. What comes back
+      // is normalised and already stamped with the provider that sent it.
+      const result = await dispatcher.sendSingle(formattedPhone, body);
 
-      // Same trap as the campaign path: MimSMS refuses with HTTP 200 and the
-      // verdict in the body. Without this a receipt the gateway rejected — a
-      // dead number, an exhausted gateway float — is logged `sent` and charged
-      // to the shop, with the refund below never running.
-      const verdict = readGatewayVerdict(response.data);
-      if (!verdict.accepted) {
-        const refusal = new Error(verdict.reason);
-        refusal.gatewayResponse = response.data;
-        throw refusal;
-      }
+      const gateway = await this.buildGatewayRecord({
+        shopId, segments: segmentCost, result, sent: true, method: 'single',
+      });
 
       // Log SMS
       const smsLog = await SMSLog.create({
@@ -453,7 +508,7 @@ class SMSService {
         }],
         message: body,
         type: SMS_TYPES.SINGLE,
-        transactionId: response.data?.TransactionId,
+        transactionId: result.messageId,
         cost: segmentCost,
         status: SMS_STATUS.SENT,
         sentCount: 1,
@@ -461,20 +516,34 @@ class SMSService {
         // milliseconds of `createdAt` — recorded anyway so the panel reads one
         // field for "when did it leave" across single, campaign and OTP rows.
         sentAt: new Date(),
-        apiResponse: response.data,
+        apiResponse: result.data,
         sentBy: userId,
         invoiceNumber: options.invoiceNumber || null,
-        sale: options.saleId || null
+        sale: options.saleId || null,
+        gateway
       });
 
-      logger.info(`SMS sent to ${formattedPhone} for shop ${shopId}`);
-      return { success: true, smsLog, response: response.data };
+      if (result.failedOver) {
+        logger.warn(
+          `SMS to ${formattedPhone} delivered by ${result.provider} after ${result.failedProvider} failed: ${result.failedReason}`
+        );
+      }
+      logger.info(`SMS sent to ${formattedPhone} for shop ${shopId} via ${result.provider}`);
+      return { success: true, smsLog, response: result.data, provider: result.provider };
     } catch (error) {
       // The shop paid for a message that never left. Give it back before
       // anything else — a throw on the way out must not strand the reservation.
       await SMSQuota.refund(shopId, segmentCost).catch((refundErr) =>
         logger.error(`SMS: quota refund failed for shop ${shopId}: ${refundErr.message}`)
       );
+
+      // The shop was refunded, so this send earned nothing — but the gateway
+      // that refused may still have charged us, and `failed: true` is what keeps
+      // that cost in the margin report instead of losing it.
+      const gateway = await this.buildGatewayRecord({
+        shopId, segments: segmentCost, error, sent: false,
+        errorMessage: error.message, method: 'single',
+      });
 
       // Log failed attempt
       await SMSLog.create({
@@ -489,7 +558,8 @@ class SMSService {
         // Present when the gateway refused rather than the request failing —
         // it is the only record of what it objected to.
         apiResponse: error.gatewayResponse || null,
-        sentBy: userId
+        sentBy: userId,
+        gateway
       });
 
       logger.error(`Failed to send SMS: ${error.message}`);
@@ -1038,73 +1108,150 @@ class SMSService {
   }
 
   /**
-   * Push one batch at the gateway, with a single retry.
+   * Book a finished campaign's cost and revenue, per gateway, and build the
+   * `gateway` record the campaign's log row carries.
    *
-   * Never throws: a batch that cannot be sent is a fact about that batch, not a
-   * reason to abandon the thirty-nine after it.
+   * Never throws — the campaign has already happened, and a bookkeeping failure
+   * must not turn a delivered campaign into a failed one.
+   *
+   * @returns {Promise<object>} the SMSLog.gateway subdocument
    */
-  async sendBatch(batch, { sharedBody, personalized, transactionType }) {
-    // Mirrors the guard in `sendOTP`. Without it there is no way to exercise a
-    // four-thousand-recipient campaign in development except by sending four
-    // thousand real messages.
-    if (process.env.SKIP_SMS === 'true') {
-      logger.info(`[SKIP_SMS] Pretending to send batch of ${batch.length}`);
-      return { ok: true, response: { simulated: true, count: batch.length } };
-    }
+  async recordCampaignEarnings({ shopId, tally, lastResponse = null }) {
+    const rows = tally.rows();
+    const winner = tally.primary();
 
-    // The wire value is decided by the endpoint, not by the caller's intent —
-    // see TRANSACTION_TYPE. `transactionType` is still carried through the
-    // campaign so the log records what the send was FOR, but /OneToMany and
-    // /DSMS each accept exactly one value and refuse everything else.
-    const wireType = personalized ? TRANSACTION_TYPE.dynamic : TRANSACTION_TYPE.bulk;
+    const record = {
+      provider: winner?.provider || null,
+      method: winner?.method || null,
+      messageId: null,
+      statusCode: null,
+      senderId: null,
+      failedOver: tally.anyFailedOver(),
+      failedProvider: winner?.failedProvider || null,
+      failedReason: winner?.failedReason || null,
+      billedSegments: rows.reduce((s, r) => s + r.sentSegments + r.failedSegments, 0),
+      unitCost: null,
+      totalCost: null,
+      revenue: null,
+      raw: lastResponse,
+    };
 
-    const payload = personalized
-      ? {
-          UserName: process.env.MIMSMS_USERNAME,
-          Apikey: process.env.MIMSMS_API_KEY,
-          SenderName: process.env.MIMSMS_SENDER_ID,
-          TransactionType: wireType,
-          MessageData: batch.map((r) => ({ MobileNumber: r.phone, Message: r.message })),
-        }
-      : {
-          UserName: process.env.MIMSMS_USERNAME,
-          Apikey: process.env.MIMSMS_API_KEY,
-          MobileNumber: batch.map((r) => r.phone).join(','),
-          SenderName: process.env.MIMSMS_SENDER_ID,
-          TransactionType: wireType,
-          Message: sharedBody,
-        };
+    let totalCost = 0;
+    let revenue = 0;
+    let priced = false;
 
-    const url = MIMSMS.BASE_URL + (personalized ? MIMSMS.DYNAMIC : MIMSMS.BULK);
-
-    let lastError;
-    for (let attempt = 0; attempt <= BULK.BATCH_RETRIES; attempt++) {
+    for (const row of rows) {
       try {
-        const response = await smsHttp.post(url, payload);
-
-        // A 200 is not an answer. MimSMS refuses with HTTP 200 and puts the
-        // verdict in the body, so this is where a rejected batch is caught —
-        // without it the batch is marked sent, the shop is billed for messages
-        // that reached nobody, and the refund path never runs.
-        const verdict = readGatewayVerdict(response.data);
-        if (verdict.accepted) {
-          return { ok: true, response: response.data };
+        // Delivered segments: cost AND revenue.
+        if (row.sentSegments > 0) {
+          const sent = await smsEarnings.priceAndRecord({
+            shopId, provider: row.provider, segments: row.sentSegments,
+            failedOver: row.failedOverBatches > 0, failed: false,
+          });
+          if (sent.totalCost !== null) { totalCost += sent.totalCost; priced = true; }
+          if (sent.revenue !== null) revenue += sent.revenue;
         }
 
-        lastError = new Error(verdict.reason);
-        // A refusal is a verdict, not a hiccup. Retrying an "Invalid
-        // TransactionType" or an "Invalid Mobile Number" returns the identical
-        // answer a second later and only delays the batches behind it.
-        return { ok: false, error: lastError, response: response.data };
-      } catch (error) {
-        lastError = error;
-        if (attempt < BULK.BATCH_RETRIES) {
-          await sleep(BULK.RETRY_DELAY_MS * (attempt + 1));
+        // Failed segments: cost only. The shop got its quota back.
+        if (row.failedSegments > 0) {
+          const failed = await smsEarnings.priceAndRecord({
+            shopId, provider: row.provider, segments: row.failedSegments,
+            failedOver: row.failedOverBatches > 0, failed: true,
+          });
+          if (failed.totalCost !== null) { totalCost += failed.totalCost; priced = true; }
         }
+      } catch (err) {
+        logger.error(`SMS: campaign earnings booking failed for ${row.provider}: ${err.message}`);
       }
     }
 
-    return { ok: false, error: lastError };
+    if (priced) {
+      record.totalCost = Number(totalCost.toFixed(4));
+      record.unitCost = record.billedSegments > 0
+        ? Number((totalCost / record.billedSegments).toFixed(4))
+        : null;
+    }
+    record.revenue = Number(revenue.toFixed(4));
+
+    return record;
+  }
+
+  /**
+   * Push one batch at the gateway, failing over if the primary refuses.
+   *
+   * Never throws: a batch that cannot be sent is a fact about that batch, not a
+   * reason to abandon the thirty-nine after it.
+   *
+   * ── What changed when the second gateway arrived ────────────────────────────
+   *
+   * This used to hold its own single-retry loop against MimSMS. That retry is
+   * gone, and deliberately: when a batch fails for a transport reason, the far
+   * better second attempt is the OTHER gateway, not the one that just timed out.
+   * The dispatcher makes that call, and a `permanent` refusal — an unapproved
+   * sender, a spam rejection — still gets exactly one attempt, because the
+   * second gateway would refuse it identically.
+   *
+   * ── Per-recipient results ───────────────────────────────────────────────────
+   *
+   * `results` comes back one entry per recipient, in input order, whichever
+   * gateway answered. Automas reports each recipient individually; MimSMS
+   * answers once for the whole batch and its adapter widens that verdict. The
+   * caller may therefore rely on the array existing — and MUST mark sent only
+   * the entries it confirms, which is what stops a batch-level success from
+   * blanket-marking recipients the gateway never accepted.
+   */
+  async sendBatch(batch, { sharedBody, personalized, transactionType, routingConfig = null }) {
+    // The SKIP_SMS guard now lives in each adapter, so a simulated run exercises
+    // the real dispatch path — including failover — rather than short-circuiting
+    // before it. Campaigns can be rehearsed at full size without sending.
+    try {
+      const result = personalized
+        ? await dispatcher.sendDynamic(
+          batch.map((r) => ({ phone: r.phone, message: r.message })),
+          { routingConfig }
+        )
+        : await dispatcher.sendBulk(
+          batch.map((r) => r.phone),
+          sharedBody,
+          { routingConfig }
+        );
+
+      // A gateway that accepted nobody is a failed batch, even though the call
+      // itself returned. Without this the refund path never runs for a batch
+      // that was refused per-recipient rather than outright.
+      const confirmed = (result.results || []).filter((r) => r.success).length;
+      if (confirmed === 0) {
+        const firstReason = (result.results || []).find((r) => r.error)?.error;
+        return {
+          ok: false,
+          error: new Error(firstReason || 'Gateway accepted no recipients in this batch'),
+          response: result.data,
+          results: result.results || [],
+          provider: result.provider,
+          method: result.method,
+        };
+      }
+
+      return {
+        ok: true,
+        response: result.data,
+        results: result.results || [],
+        provider: result.provider,
+        method: result.method,
+        failedOver: Boolean(result.failedOver),
+        failedProvider: result.failedProvider || null,
+        failedReason: result.failedReason || null,
+        confirmed,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error,
+        response: error.gatewayResponse || null,
+        results: [],
+        provider: error.provider || error.failoverProvider || null,
+      };
+    }
   }
 
   /**
@@ -1152,22 +1299,78 @@ class SMSService {
     let lastResponse = null;
     let lastError = null;
 
+    /* Resolve the routing ONCE for the whole campaign.
+     *
+     * Not once per batch and emphatically not once per recipient: a
+     * five-thousand-recipient campaign would otherwise re-read the same settings
+     * document five thousand times to be told the same answer. The resolved
+     * config is handed down to every batch instead.
+     *
+     * A lookup failure is not fatal — `resolve` never throws and falls back to
+     * the platform default, which is the behaviour this had before routing was
+     * configurable at all.
+     */
+    const routingConfig = await smsRouting.resolve();
+
+    // Which gateway carried how much of this campaign. Failover can move a
+    // single campaign between gateways part-way through, so the accounting has
+    // to be per provider rather than one figure for the run.
+    const providerTally = createProviderTally();
+
     for (let index = startBatch; index < batches.length; index++) {
       const batch = batches[index];
-      const result = await this.sendBatch(batch, { sharedBody, personalized, transactionType });
-
-      const status = result.ok ? SMS_STATUS.SENT : SMS_STATUS.FAILED;
-      const failedReason = result.ok ? null : (result.error?.message || 'Gateway error');
-
-      const set = {};
-      batch.forEach((recipient, i) => {
-        const position = offset + i;
-        set[`recipients.${position}.status`] = status;
-        if (failedReason) set[`recipients.${position}.failedReason`] = failedReason;
+      const result = await this.sendBatch(batch, {
+        sharedBody, personalized, transactionType, routingConfig,
       });
 
-      if (result.ok) {
-        sentCount += batch.length;
+      const batchReason = result.ok ? null : (result.error?.message || 'Gateway error');
+
+      /* Per-recipient truth, not a batch-level guess.
+       *
+       * `results` is one entry per recipient in input order. Automas answers per
+       * recipient; MimSMS answers once and its adapter widens that verdict. When
+       * the array is missing or the wrong length — a shape we do not recognise —
+       * the batch-level verdict stands in for everyone, which is the honest
+       * fallback.
+       *
+       * What must never happen is the reverse: a batch-level success marking
+       * recipients sent whose own entry says otherwise. That overstates delivery,
+       * charges the shop for messages nobody received, and leaves no way to tell
+       * who actually missed out.
+       */
+      const perRecipient = Array.isArray(result.results) && result.results.length === batch.length
+        ? result.results
+        : null;
+
+      const set = {};
+      let batchSent = 0;
+      let batchFailedSegments = 0;
+
+      batch.forEach((recipient, i) => {
+        const position = offset + i;
+        const entry = perRecipient ? perRecipient[i] : null;
+        const ok = entry ? entry.success : result.ok;
+        const reason = ok ? null : (entry?.error || batchReason || 'Gateway error');
+
+        set[`recipients.${position}.status`] = ok ? SMS_STATUS.SENT : SMS_STATUS.FAILED;
+        if (reason) set[`recipients.${position}.failedReason`] = reason;
+
+        if (ok) {
+          batchSent += 1;
+        } else {
+          // Give back exactly what this recipient was priced at, not a flat one
+          // each — a two-segment message costs two.
+          batchFailedSegments += personalized
+            ? (countSms(recipient.message).segments || 1)
+            : (countSms(sharedBody).segments || 1);
+        }
+      });
+
+      sentCount += batchSent;
+      failedCount += (batch.length - batchSent);
+      refundSegments += batchFailedSegments;
+
+      if (batchSent > 0) {
         lastResponse = result.response;
         // The first batch the gateway takes IS when this campaign started
         // reaching people — written now rather than at completion, because a
@@ -1177,22 +1380,40 @@ class SMSService {
           sentAt = new Date();
           set.sentAt = sentAt;
         }
-        if (!transactionId && result.response?.TransactionId) {
-          transactionId = result.response.TransactionId;
+        if (!transactionId) {
+          transactionId = result.response?.TransactionId
+            || perRecipient?.find((r) => r.messageId)?.messageId
+            || null;
         }
-      } else {
-        failedCount += batch.length;
-        lastError = failedReason;
+      }
+
+      if (batchSent < batch.length) {
+        lastError = batchReason || 'Gateway rejected some recipients';
         // Keep the refusal body too. It is the only place the gateway says WHY,
         // and the admin log's "Raw gateway response" panel is what an operator
         // reads when a campaign fails — showing the last SUCCESS there while
         // the status says failed is how a wrong diagnosis starts.
         if (result.response) lastResponse = result.response;
-        // Give back exactly what this batch was priced at, not a flat one per
-        // recipient — a two-segment message to a hundred people cost two hundred.
-        refundSegments += personalized
-          ? batch.reduce((sum, r) => sum + (countSms(r.message).segments || 1), 0)
-          : (countSms(sharedBody).segments || 1) * batch.length;
+      }
+
+      // Book what this batch cost and earned, per gateway. Done per batch rather
+      // than once at the end because failover can move a single campaign between
+      // gateways mid-run, and a campaign-level figure would attribute the whole
+      // thing to whichever one happened to answer last.
+      if (result.provider) {
+        providerTally.add(result.provider, {
+          sentSegments: personalized
+            ? batch.reduce((sum, r, i) => {
+              const ok = perRecipient ? perRecipient[i].success : result.ok;
+              return ok ? sum + (countSms(r.message).segments || 1) : sum;
+            }, 0)
+            : (countSms(sharedBody).segments || 1) * batchSent,
+          failedSegments: batchFailedSegments,
+          failedOver: Boolean(result.failedOver),
+          method: result.method,
+          failedProvider: result.failedProvider,
+          failedReason: result.failedReason,
+        });
       }
 
       offset += batch.length;
@@ -1234,6 +1455,18 @@ class SMSService {
       );
     }
 
+    /* Book the campaign's money, one entry per gateway that carried part of it.
+     *
+     * Per provider rather than per campaign because failover splits a run across
+     * two gateways at two different rates. Sent and failed segments are booked
+     * separately: the shop is refunded for what failed, so it earns nothing, but
+     * the gateway may still have charged us — dropping that cost would flatter
+     * the margin by exactly the amount a bad night cost.
+     */
+    const gatewayRecord = await this.recordCampaignEarnings({
+      shopId, tally: providerTally, lastResponse,
+    });
+
     await SMSLog.updateOne(
       { _id: logId },
       {
@@ -1245,6 +1478,7 @@ class SMSService {
           apiResponse: lastResponse,
           errorMessage: lastError,
           'progress.completedAt': new Date(),
+          gateway: gatewayRecord,
         },
       }
     );
@@ -1422,21 +1656,29 @@ class SMSService {
   }
 
   /**
-   * Check MimSMS balance
+   * Balance at the gateway currently routing traffic.
+   *
+   * Kept single-provider in shape because that is what its callers expect. The
+   * operator's view — every gateway's balance side by side — is
+   * `checkAllBalances` below, which is what the admin providers screen reads.
    */
   async checkBalance() {
     try {
-      const response = await smsHttp.get(MIMSMS.BASE_URL + MIMSMS.BALANCE, {
-        params: {
-          UserName: process.env.MIMSMS_USERNAME,
-          Apikey: process.env.MIMSMS_API_KEY
-        }
-      });
-      return response.data;
+      const { primaryProvider } = await smsRouting.resolve();
+      const result = await registry.getAdapter(primaryProvider).checkBalance();
+      if (!result.success) {
+        throw new Error(result.error || 'Balance check failed');
+      }
+      return result.data ?? { balance: result.balance, provider: result.provider };
     } catch (error) {
       logger.error(`Failed to check SMS balance: ${error.message}`);
       throw error;
     }
+  }
+
+  /** Every registered gateway's balance. Never throws — see the dispatcher. */
+  async checkAllBalances() {
+    return dispatcher.checkAllBalances();
   }
 
   /**

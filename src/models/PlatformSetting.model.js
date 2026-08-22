@@ -251,6 +251,75 @@ const platformSettingSchema = new mongoose.Schema({
    */
   geminiModel: { type: String, default: null },
 
+  // ── SMS gateway routing ───────────────────────────────────────────────────
+  // Which gateway sends, and who catches it when that one refuses. Platform-wide
+  // on purpose: every shop sends through the same account, so this is an
+  // operator decision, not a per-shop one. The resolver that reads these
+  // (services/sms/routing.js) is written so a per-shop override can be layered
+  // on later without the send paths changing.
+  //
+  // Credentials are NOT here. They stay in env, where a settings screen cannot
+  // leak them and a database dump does not contain them; these fields only
+  // choose between gateways that env has already configured.
+
+  /**
+   * The gateway that sends first. `null` = whatever `SMS_DEFAULT_PROVIDER` says.
+   *
+   * Null rather than a literal 'mimsms' default so that the env var stays the
+   * single source of truth until an operator deliberately overrides it. A stored
+   * default would silently win over an env change during a gateway migration —
+   * exactly when someone is relying on the env change taking effect.
+   */
+  smsPrimaryProvider: {
+    type: String,
+    enum: ['mimsms', 'automas', null],
+    default: null,
+  },
+
+  /**
+   * The gateway tried when the primary fails in a way another gateway could fix.
+   *
+   * Must differ from the primary; the service validates that on write. A backup
+   * whose credentials are missing is treated as no backup at all rather than as
+   * a backup that fails on every message.
+   */
+  smsFailoverProvider: {
+    type: String,
+    enum: ['mimsms', 'automas', null],
+    default: null,
+  },
+
+  /**
+   * Is failover armed?
+   *
+   * Defaults to FALSE so that adding this feature changes nothing about how the
+   * platform sends until someone opts in. Turning it on doubles the number of
+   * gateways that can be charged for one message, which is a decision worth
+   * making explicitly rather than inheriting from a deploy.
+   */
+  smsFailoverEnabled: { type: Boolean, default: false },
+
+  /**
+   * What ONE segment costs the platform at each gateway, in taka.
+   *
+   * `platformSmsCost` above is the single-rate version of this and remains the
+   * fallback for any provider not priced here — so a platform that has only ever
+   * used one gateway keeps working untouched.
+   *
+   * Per-provider rates exist because failover makes the blended cost real: two
+   * gateways at different rates mean the cost of a month's traffic depends on
+   * how much of it the primary refused. A single figure cannot express that, and
+   * quietly reports the wrong margin the first time failover fires in anger.
+   *
+   * `null` for a provider means "not told yet", and it propagates: a send on an
+   * unpriced gateway records a null cost rather than a zero one, so the earnings
+   * report can say "unpriced" instead of claiming a 100% margin.
+   */
+  smsProviderCost: {
+    mimsms: { type: Number, default: null, min: 0 },
+    automas: { type: Number, default: null, min: 0 },
+  },
+
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },
 }, {
   timestamps: true,

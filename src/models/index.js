@@ -57,6 +57,7 @@ module.exports = {
   AuditLog: require('./AuditLog.model'),
   SMSLog: require('./SMSLog.model'),
   SMSQuota: require('./SMSQuota.model'),
+  SmsEarning: require('./SmsEarning.model'),
   ShopCategory: require('./ShopCategory.model'),
   GeminiKey: require('./GeminiKey.model'),
   // Per-BRANCH daily AI message counter. Registered here or `sync-indexes`

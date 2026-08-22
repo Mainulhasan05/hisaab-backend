@@ -7,6 +7,7 @@ const adminMediaController = require('../controllers/adminMedia.controller');
 const adminLandingController = require('../controllers/adminLanding.controller');
 const billingController = require('../controllers/billing.controller');
 const platformSmsController = require('../controllers/platformSms.controller');
+const smsProviderController = require('../controllers/smsProvider.controller');
 const adminTelegramController = require('../controllers/adminTelegram.controller');
 const adminSecurityController = require('../controllers/adminSecurity.controller');
 const { protect, adminOnly } = require('../middleware/auth.middleware');
@@ -258,6 +259,26 @@ router.get('/sms/stats', adminController.getSMSStats);
 // The platform's own float at the gateway. Credits are sold against it, so it
 // belongs next to the allocation route rather than buried in the broadcast set.
 router.get('/sms/gateway-balance', platformSmsController.getGatewayBalance);
+
+// ── Gateway routing: which provider sends, and who catches it ─────────────
+//
+// Platform-wide, so these are operator settings rather than per-shop ones. The
+// PATCH merges: a body naming only `primaryProvider` leaves the failover
+// configuration alone, because treating an omitted field as a clear is how a
+// platform silently loses its backup gateway.
+//
+// `/test` sits inside `smsLimiter` because it costs a real message, and it
+// sends with failover DISABLED — a test that quietly succeeds on the other
+// gateway reports the opposite of what was asked.
+router.get('/sms/providers', smsProviderController.listProviders);
+router.get('/sms/providers/routing', smsProviderController.getRouting);
+router.patch('/sms/providers/routing', smsProviderController.updateRouting);
+router.patch('/sms/providers/costs', smsProviderController.updateCosts);
+router.post('/sms/providers/:name/test', smsLimiter, smsProviderController.testProvider);
+
+// Revenue, gateway cost and margin. Read from the permanent earnings ledger
+// rather than from SMSLog, which expires after 60 days.
+router.get('/sms/earnings', smsProviderController.getEarnings);
 
 // ── Broadcasts: the platform texting the shopkeepers ──────────────────────
 //

@@ -35,6 +35,33 @@ jest.mock('axios', () => ({
   post: mockGatewayPost,
 }));
 
+/**
+ * Routing and earnings both read the database on the send path, and this suite
+ * runs without one. In production that read is fast; here it waits out the
+ * lookup bound on every call, which turns an eleven-test file into a
+ * thirty-second one for reasons that have nothing to do with what it asserts.
+ *
+ * Stubbed rather than bounded-away because the subject of these tests is the
+ * SHAPE OF THE LOG ROW, not which gateway was chosen or what it cost. The
+ * failover decisions live in smsFailover.test.js, where they are the point.
+ */
+jest.mock('../services/sms/routing', () => ({
+  resolve: jest.fn().mockResolvedValue({
+    primaryProvider: 'mimsms', failoverProvider: null,
+    failoverEnabled: false, source: 'test',
+  }),
+  invalidate: jest.fn(),
+  describe: jest.fn(),
+}));
+
+jest.mock('../services/sms/earnings', () => ({
+  priceAndRecord: jest.fn().mockResolvedValue({
+    provider: 'mimsms', billedSegments: 1,
+    unitCost: null, totalCost: null, revenue: null, unpriced: true,
+  }),
+  invalidate: jest.fn(),
+}));
+
 const mongoose = require('mongoose');
 const SMSLog = require('../models/SMSLog.model');
 const SMSQuota = require('../models/SMSQuota.model');
