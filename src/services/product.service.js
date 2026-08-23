@@ -124,10 +124,17 @@ class ProductService {
       limit,
       search,
       category,
+      brand,
       status,
       lowStock,
       sortBy = 'createdAt',
       sortOrder = 'desc',
+      // Should a search term also be matched against BRAND NAMES? See the block
+      // that reads it. Only `searchProductsForSale` turns this off, and it does
+      // so with the boolean `false` — a query string can only ever produce the
+      // STRING 'false', which is not `!== false`, so this cannot be switched off
+      // from outside the way `PROJECTION` above cannot be switched on.
+      brandNameSearch,
     } = options;
 
     // Ensure valid integers with proper defaults (handles 'null', undefined, NaN)
@@ -155,6 +162,57 @@ class ProductService {
       { 'variants.sku': { $regex: searchRegex, $options: 'i' } },
       { 'variants.barcode': { $regex: searchRegex, $options: 'i' } },
     ] : null;
+
+    // ── Brand ────────────────────────────────────────────────────────────────
+    //
+    // Both halves of "find it by its brand": the explicit picker below, and the
+    // search box a few lines down. Both behind `features.brands`, matching
+    // `_resolveBrand` on the write side — a shop without the capability stores
+    // `brand: null` on every product, so an ungated filter would return an empty
+    // list and an ungated name search would buy a Brand query to find nothing.
+    const brandsOn = hasFeature(req, 'brands');
+
+    // Filter by brand. Left as a raw id for Mongoose to cast, exactly as
+    // `category` is: a malformed one surfaces as the same CastError → 400.
+    if (brandsOn && brand) {
+      query.brand = brand;
+    }
+
+    // Typing a brand name into the search box finds that brand's products.
+    //
+    // `brand` is a REF, so it cannot join a `$regex` branch the way `name` and
+    // `code` do — the names live in another collection and have to be resolved
+    // to ids first. Same shape as `staffReport._resolveScope` turning a role
+    // filter into a staff-id list.
+    //
+    // Costs one indexed read, and only on a request that carries a search term
+    // and belongs to a brands shop. A brand list is a few dozen rows, so the id
+    // set stays small. No match simply adds no branch — the name, code and
+    // barcode branches still answer, which is what makes this additive.
+    //
+    // ── NOT on the POS ────────────────────────────────────────────────────────
+    //
+    // `searchProductsForSale` passes `brandNameSearch: false`, for two reasons
+    // and the second is the real one:
+    //
+    //   · it is the hottest search path in the app, one request per keystroke,
+    //     and this would put a second round trip on every one of them;
+    //   · `POS_FIELDS` does not carry `brand`, so the till would show rows that
+    //     match a word appearing nowhere on them. A cashier typing "Square" and
+    //     getting eight products with no "Square" visible reads as a bug, not a
+    //     feature. This list renders the brand under the category, which is what
+    //     earns the behaviour here.
+    if (searchOr && brandsOn && brandNameSearch !== false) {
+      const matchedBrands = await Brand.find({
+        shop: shopId,
+        isActive: true,
+        name: { $regex: searchRegex, $options: 'i' },
+      }).select('_id').lean();
+
+      if (matchedBrands.length) {
+        searchOr.push({ brand: { $in: matchedBrands.map((b) => b._id) } });
+      }
+    }
 
     // Filter by category
     if (category) {
@@ -376,6 +434,9 @@ class ProductService {
       // the database for them instead of fetching whole documents per keystroke
       // and throwing four fifths of each away in JS.
       [PROJECTION]: POS_FIELDS,
+      // A real boolean, and AFTER the spread so a query string cannot put a
+      // truthy `'false'` here. See the block in `getProducts` that reads it.
+      brandNameSearch: false,
     }, req);
 
     // Sent ONLY to shops that have the capability. A flag-off shop's POS

@@ -656,6 +656,15 @@ productSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Branch listing by
 productSchema.index({ shop: 1, code: 1 }); // Cross-branch code match (stock transfer)
 productSchema.index({ shop: 1, name: 1 }); // Search: lets name-regex $or clauses run as shop-bounded index scans
 productSchema.index({ shop: 1, category: 1, isActive: 1 }); // Category listing with active filter
+// Brand listing, the same shape as the category one above and for the same
+// query — `getProducts` filtering the catalogue down to one brand.
+//
+// NOT sparse, unlike the two barcode indexes below. Sparse skips documents where
+// the field is ABSENT, and `brand` carries `default: null`, so every product
+// written through this model has it present-and-null and would be indexed
+// anyway. A sparse flag here would buy nothing and imply a saving that is not
+// there.
+productSchema.index({ shop: 1, brand: 1, isActive: 1 });
 productSchema.index({ shop: 1, 'variants.sku': 1 }, { sparse: true }); // Variant SKU lookup
 productSchema.index({ shop: 1, 'variants.barcode': 1 }, { sparse: true }); // Variant barcode scan
 // Top-level barcode scan. The variant equivalent above has always existed; this
