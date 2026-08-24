@@ -127,6 +127,19 @@ exports.updateProductBatch = asyncHandler(async (req, res) => {
   });
 });
 
+// Move a batch, or part of one, onto a variant. The way out of the orphan row
+// a product inherits when it gains variants after being dated.
+exports.assignProductBatch = asyncHandler(async (req, res) => {
+  const result = await productService.assignBatchToVariant(
+    req.shop._id, req.user._id, req.params.id, req.params.batchId, req.body, req
+  );
+  return ApiResponse.success(res, {
+    data: sanitizeBatches(result, req),
+    message: 'Batch assigned successfully',
+    messageBn: 'ব্যাচ ভ্যারিয়েন্টে সরানো হয়েছে',
+  });
+});
+
 // Remove a batch (does NOT change stock)
 exports.deleteProductBatch = asyncHandler(async (req, res) => {
   const result = await productService.deleteProductBatch(

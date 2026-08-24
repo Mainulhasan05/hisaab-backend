@@ -1848,7 +1848,33 @@ class ProductService {
   async getProductBatches(shopId, productId, req = null) {
     const product = await this._loadProductForBatches(shopId, productId, req);
 
-    const owners = product.hasVariants && product.variants?.length
+    const hasVariants = Boolean(product.hasVariants && product.variants?.length);
+
+    /**
+     * ── THE ORPHAN ROW ───────────────────────────────────────────────────────
+     *
+     * A product that gains variants LATER keeps whatever batches it was given
+     * while it was a plain product, and those batches belong to `variantId:
+     * null` — the product itself, a thing that is no longer sellable.
+     *
+     * This list used to be built from `product.variants` alone, so the moment
+     * the conversion was saved those batches stopped being rendered anywhere.
+     * They were not deleted; they were unreachable. Nothing could edit them,
+     * nothing could delete them, and FEFO at the till skipped them forever
+     * because a sale of ১০০ মিলি never matches an owner of null. Meanwhile the
+     * expiry screen went on warning about them every day, with no variant name
+     * beside the date and no way to act on it. A real shop hit this with 137
+     * dated units against variants that summed to 40.
+     *
+     * So the orphans get a row of their own, named as what they are and marked
+     * `unassigned` for the client to treat differently. Its `stock` is the
+     * quantity actually sitting in those batches rather than any variant's
+     * count — there is no pool behind them any more, which is the problem the
+     * row exists to show.
+     */
+    const orphans = hasVariants ? product.batchesFor(null) : [];
+
+    const owners = hasVariants
       ? product.variants.map(v => ({
           variantId: String(v._id),
           label: v.sku,
@@ -1857,6 +1883,17 @@ class ProductService {
           stock: v.stock || 0,
         }))
       : [{ variantId: null, label: product.name, attributes: null, isActive: true, stock: product.stock || 0 }];
+
+    if (orphans.length) {
+      owners.unshift({
+        variantId: null,
+        label: product.name,
+        attributes: null,
+        isActive: true,
+        unassigned: true,
+        stock: orphans.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0),
+      });
+    }
 
     return {
       productId: String(product._id),
@@ -1875,6 +1912,11 @@ class ProductService {
           receivedDate: b.receivedDate,
         }));
         const tracked = batches.reduce((s, b) => s + (b.quantity || 0), 0);
+        // An unassigned row has no untracked remainder to offer — its stock IS
+        // its batches, and the only sensible action on it is to move them onto
+        // a variant. Reporting a remainder there would invite the shopkeeper to
+        // add a second undated batch to a pool that does not exist.
+        if (o.unassigned) return { ...o, batches, tracked, untracked: 0 };
         return { ...o, batches, tracked, untracked: Math.max(0, o.stock - tracked) };
       }),
     };
@@ -1928,13 +1970,118 @@ class ProductService {
   }
 
   /**
+   * Move some or all of a batch onto a variant.
+   *
+   * ── WHY THIS IS ITS OWN OPERATION ────────────────────────────────────────
+   *
+   * This is the way out of the orphan row that `getProductBatches` documents:
+   * a product that grew variants has dated stock belonging to nothing, and the
+   * shopkeeper needs to say which variant it was.
+   *
+   * It is not a field on `updateProductBatch` because it is not an edit of one
+   * row. The 137 units dated ৫ মে ২০২৮ were one batch when the product was one
+   * thing; against two variants they are usually two batches, and any endpoint
+   * that could only move the whole row would force the shopkeeper to delete
+   * their real expiry date and retype it twice. So a partial move SPLITS: the
+   * moved quantity becomes a batch on the variant, the remainder stays where it
+   * was, and the date and batch number travel to both halves.
+   *
+   * And it is one operation rather than the client running a delete and two
+   * adds, because the half-applied middle state of that sequence is stock that
+   * has lost its expiry date. One `save()` either moves it or does not.
+   */
+  async assignBatchToVariant(shopId, userId, productId, batchId, payload, req = null) {
+    if (req) requireBranch(req);
+    const product = await this._loadProductForBatches(shopId, productId, req);
+
+    const batch = product.batches?.id(batchId);
+    if (!batch) {
+      throw new AppError('Batch not found', 'ব্যাচটি পাওয়া যায়নি', 404);
+    }
+    if (!product.hasVariants || !product.variants?.length) {
+      throw new AppError(
+        'Product has no variants',
+        'এই পণ্যের কোনো ভ্যারিয়েন্ট নেই',
+        400
+      );
+    }
+
+    const variantId = payload.variantId;
+    // Throws 404 if the variant does not exist, before anything is moved.
+    const variantStock = this._stockForOwner(product, variantId);
+
+    const unit = quantityUnit(req, product);
+    // Absent quantity means the whole row — the common case, and the one a
+    // shopkeeper means when they tap a variant against a single batch.
+    const moving = payload.quantity === undefined || payload.quantity === null || payload.quantity === ''
+      ? Number(batch.quantity) || 0
+      : parseQuantity(payload.quantity, unit, { label: product.name });
+
+    if (moving <= 0) {
+      throw new AppError('Nothing to move', 'কত পরিমাণ সরাবেন সেটা দিন', 400);
+    }
+    if (moving > (Number(batch.quantity) || 0)) {
+      throw new AppError(
+        `Batch holds only ${batch.quantity}`,
+        `এই ব্যাচে আছে ${batch.quantity}টি — তার বেশি সরানো যাবে না`,
+        400
+      );
+    }
+
+    // The destination has to have room for it, exactly as a new batch would.
+    // Without this a shopkeeper could pile 137 dated units onto a variant
+    // holding 17, and every screen downstream would then be reporting stock
+    // the shop does not have.
+    const claimed = this._batchedQtyFor(product, variantId);
+    const room = variantStock - claimed;
+    if (moving > room) {
+      throw new AppError(
+        `Assign ${moving} exceeds untracked stock ${room}`,
+        `এই ভ্যারিয়েন্টে আছে ${variantStock}টি, তার মধ্যে ${claimed}টি ইতিমধ্যে ব্যাচে আছে — সর্বোচ্চ ${room}টি এখানে সরাতে পারবেন`,
+        400
+      );
+    }
+
+    const remainder = (Number(batch.quantity) || 0) - moving;
+    const carried = {
+      batchNumber: batch.batchNumber,
+      expiryDate: batch.expiryDate,
+      costPrice: batch.costPrice,
+      receivedDate: batch.receivedDate,
+      purchaseRef: batch.purchaseRef,
+    };
+
+    if (remainder > 0) {
+      // A split. The original row keeps the remainder and a new row carries the
+      // moved units, so the date survives on both sides.
+      batch.quantity = remainder;
+      product.batches.push({ ...carried, variantId, quantity: moving });
+    } else {
+      // The whole row moves. Reassigning in place keeps the batch's own `_id`,
+      // so anything already pointing at it still resolves.
+      batch.variantId = variantId;
+    }
+
+    product.markModified('batches');
+    await product.save();
+
+    await this._logBatchAudit(
+      shopId, userId, product, 'product_update', 'ব্যাচ ভ্যারিয়েন্টে সরানো',
+      `Assigned ${moving} of batch ${carried.batchNumber} to variant ${variantId} on ${product.name}`,
+      { after: { batchNumber: carried.batchNumber, expiryDate: carried.expiryDate, quantity: moving, variantId } }
+    );
+
+    return this.getProductBatches(shopId, productId, req);
+  }
+
+  /**
    * Correct a batch. The whole reason this endpoint exists: an expiry date
    * typed wrong at creation was previously uncorrectable, because the product
    * form does not render batches and nothing else could write them.
    *
-   * `variantId` is deliberately NOT editable. Moving a batch between variants
-   * moves stock claims between two pools and would need both to be re-checked;
-   * delete and re-add says the same thing without a half-applied middle state.
+   * `variantId` is deliberately NOT editable here. Moving a batch between
+   * owners re-checks two stock pools and can split a row, which is a different
+   * operation with a different shape — see `assignBatchToVariant` above.
    */
   async updateProductBatch(shopId, userId, productId, batchId, updates, req = null) {
     if (req) requireBranch(req);

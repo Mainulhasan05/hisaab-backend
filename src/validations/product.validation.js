@@ -332,6 +332,19 @@ const updateBatch = Joi.object({
   costPrice: Joi.number().min(0).allow(null, ''),
 }).min(1);
 
+/**
+ * Moving a batch onto a variant.
+ *
+ * `quantity` is optional and means "all of it" when absent — the ordinary case,
+ * where one dated batch belongs wholly to one variant. Supplying less splits the
+ * row, which is what a shop needs when the stock it dated as one product is now
+ * two variants sharing a single expiry date.
+ */
+const assignBatch = Joi.object({
+  variantId: commonSchemas.objectId.required(),
+  quantity: quantityField,
+});
+
 const expiringBatches = Joi.object({
   // The alerts screen offers ৭ / ৩০ / ৬০ / ৯০; the bound is generous rather
   // than an enum so a report can ask for a year without a schema change.
@@ -385,5 +398,6 @@ module.exports = {
   bulkImportProducts,
   addBatch,
   updateBatch,
+  assignBatch,
   expiringBatches,
 };

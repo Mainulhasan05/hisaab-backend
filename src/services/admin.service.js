@@ -14,6 +14,7 @@ const Payment = require('../models/Payment.model');
 const PlatformPayment = require('../models/PlatformPayment.model');
 const Product = require('../models/Product.model');
 const Branch = require('../models/Branch.model');
+const { normalizeInvoicePhones } = require('../utils/phone.util');
 const HeldCart = require('../models/HeldCart.model');
 const ShopAiUsage = require('../models/ShopAiUsage.model');
 const PlatformSetting = require('../models/PlatformSetting.model');
@@ -3521,6 +3522,14 @@ class AdminService {
     }
     if (data.address !== undefined) branch.address = data.address;
     if (data.phone !== undefined) branch.phone = data.phone;
+    // `in` rather than `!== undefined`: `[]` is how the last extra invoice
+    // number is removed, and it must reach the document as an instruction. Same
+    // normaliser as the owner-facing route in branch.service, so an admin
+    // editing a branch on the owner's behalf cannot store a shape the owner's
+    // own screen would reject.
+    if ('invoicePhones' in data) {
+      branch.invoicePhones = normalizeInvoicePhones(data.invoicePhones);
+    }
     if (typeof data.isActive === 'boolean') branch.isActive = data.isActive;
 
     await branch.save();

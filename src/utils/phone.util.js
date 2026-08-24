@@ -123,7 +123,65 @@ const normalizePhone = (phone) => {
   return cleaned;
 };
 
+/**
+ * The EXTRA numbers a shop or branch prints on its invoices, cleaned up.
+ *
+ * ── WHY THESE ARE NOT PUT THROUGH `normalizePhone` ──────────────────────────
+ *
+ * `normalizePhone` exists to make a number DIALLABLE and comparable — it strips
+ * every non-digit so `01712-345678` and `+8801712345678` become one key. That
+ * is exactly right for a customer's number, which the app rings and sends SMS
+ * to and deduplicates on.
+ *
+ * These are not that. They are the numbers printed under the shop name at the
+ * top of an invoice, and the only thing that happens to them is that a customer
+ * reads them. Many are landlines (`0781-52345`), and some shops write two on
+ * one line the way they always have. Stripping the separators would reformat
+ * the shop's own stationery on their behalf, and coercing a 9-digit landline
+ * through the mobile rules would corrupt it outright. So the shop's typing is
+ * kept, and only the things that would break a layout are removed.
+ *
+ * `phone` — the shop's ONE canonical number — is untouched by this and stays
+ * where it was. It is what the storefront's WhatsApp link, the billing record
+ * and the admin console read, and none of them can take a list.
+ *
+ * @param {unknown} value  an array from the client, or a single string
+ * @returns {string[]} trimmed, de-duplicated, and capped in both directions
+ */
+const MAX_INVOICE_PHONES = 4;
+const MAX_INVOICE_PHONE_LENGTH = 32;
+
+const normalizeInvoicePhones = (value) => {
+  const list = Array.isArray(value) ? value : (value == null || value === '' ? [] : [value]);
+
+  const out = [];
+  // Compared on digits alone, so "01712-345678" and "01712345678" are one
+  // number and the invoice does not print the same line twice.
+  const seen = new Set();
+
+  for (const entry of list) {
+    if (typeof entry !== 'string' && typeof entry !== 'number') continue;
+
+    const cleaned = String(entry).replace(/\s+/g, ' ').trim().slice(0, MAX_INVOICE_PHONE_LENGTH);
+    if (!cleaned) continue;
+
+    const key = cleaned.replace(/\D/g, '');
+    // An entry with no digits at all is not a phone number; it is a stray
+    // keystroke, and it would print as one.
+    if (!key || seen.has(key)) continue;
+
+    seen.add(key);
+    out.push(cleaned);
+    if (out.length >= MAX_INVOICE_PHONES) break;
+  }
+
+  return out;
+};
+
 module.exports = {
+  MAX_INVOICE_PHONES,
+  MAX_INVOICE_PHONE_LENGTH,
+  normalizeInvoicePhones,
   formatPhone,
   formatPhoneDisplay,
   isValidPhone,

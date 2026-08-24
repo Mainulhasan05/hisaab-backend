@@ -35,6 +35,32 @@ const shopSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  /**
+   * EXTRA numbers printed on the invoice header, under `phone`.
+   *
+   * `phone` above stays the shop's ONE canonical number and is not part of this
+   * list: the storefront's tel:/WhatsApp link, the billing record, the admin
+   * console and the founder's Telegram alert all read it, and not one of them
+   * can take a list. Folding them together would have meant every one of those
+   * callers picking a number out of an array, which is how a shop ends up with
+   * its fax on a WhatsApp button.
+   *
+   * So this is additive and print-only. A shop with one number leaves it empty
+   * and nothing about the invoice changes; a shop with a landline beside the
+   * mobile puts it here and both print. Normalised by
+   * `phone.util.normalizeInvoicePhones` — deliberately NOT by `normalizePhone`,
+   * see the note there.
+   */
+  invoicePhones: {
+    type: [{ type: String, trim: true, maxlength: 32 }],
+    default: [],
+    // Capped in the schema as well as in the normaliser, because the normaliser
+    // only guards the routes that call it and the header has finite room.
+    validate: {
+      validator: (v) => !Array.isArray(v) || v.length <= 4,
+      message: 'সর্বোচ্চ ৪টি অতিরিক্ত নম্বর দেওয়া যাবে',
+    },
+  },
   owner: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'

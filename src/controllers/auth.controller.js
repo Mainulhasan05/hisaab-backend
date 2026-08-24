@@ -369,6 +369,22 @@ const updateShopSettings = asyncHandler(async (req, res) => {
     }
   }
 
+  // ── The extra numbers printed on the invoice header ────────────────────────
+  //
+  // Not in `allowedBasicFields`, because an array cannot be written through
+  // untouched the way a string can: an unnormalised one reaches the invoice as
+  // whatever the client sent, blanks and duplicates included, and prints that
+  // way. `normalizeInvoicePhones` is the single place those rules live, shared
+  // with the branch route so the two cannot drift.
+  //
+  // `[]` IS A REAL VALUE here — it is how the owner removes the last extra
+  // number — so presence is tested with `in`, not with `!== undefined`. An
+  // ABSENT key still means "leave it alone".
+  if ('invoicePhones' in req.body) {
+    const { normalizeInvoicePhones } = require('../utils/phone.util');
+    updates.invoicePhones = normalizeInvoicePhones(req.body.invoicePhones);
+  }
+
   // Handle settings fields
   for (const key of allowedSettings) {
     if (req.body[key] !== undefined) {

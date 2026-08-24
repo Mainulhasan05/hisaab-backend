@@ -10,6 +10,7 @@ const StockTransfer = require('../models/StockTransfer.model');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const cacheService = require('./cache.service');
 const { invalidateBranchCache } = require('../utils/authCache.util');
+const { normalizeInvoicePhones } = require('../utils/phone.util');
 
 class BranchService {
   /**
@@ -45,11 +46,23 @@ class BranchService {
   async updateBranch(branchId, shopId, data, req) {
     const branch = await this.getBranch(branchId, shopId);
 
-    const before = { name: branch.name, address: branch.address, phone: branch.phone };
+    const before = {
+      name: branch.name,
+      address: branch.address,
+      phone: branch.phone,
+      invoicePhones: [...(branch.invoicePhones || [])],
+    };
 
     if (data.name) branch.name = data.name;
     if (data.address !== undefined) branch.address = data.address;
     if (data.phone !== undefined) branch.phone = data.phone;
+    // `in` rather than `!== undefined`: `[]` is how the owner clears the last
+    // extra number, and it must reach the document as an instruction rather
+    // than be mistaken for "not sent". Same rule, same normaliser, as the
+    // shop-level route in auth.controller.
+    if ('invoicePhones' in data) {
+      branch.invoicePhones = normalizeInvoicePhones(data.invoicePhones);
+    }
 
     await branch.save();
 
@@ -64,7 +77,15 @@ class BranchService {
       action: AUDIT_ACTIONS.BRANCH_UPDATE.en,
       description: `শাখা "${branch.name}" আপডেট করা হয়েছে`,
       entity: { type: 'branch', id: branch._id, name: branch.name },
-      changes: { before, after: { name: branch.name, address: branch.address, phone: branch.phone } },
+      changes: {
+        before,
+        after: {
+          name: branch.name,
+          address: branch.address,
+          phone: branch.phone,
+          invoicePhones: [...(branch.invoicePhones || [])],
+        },
+      },
       req
     });
 

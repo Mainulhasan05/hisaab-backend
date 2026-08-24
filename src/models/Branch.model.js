@@ -28,6 +28,23 @@ const branchSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  /**
+   * EXTRA numbers printed on an invoice raised at THIS branch. Same shape and
+   * same reasoning as `Shop.invoicePhones` — see the note there.
+   *
+   * A branch that fills in an address or any phone is stating its own identity,
+   * and `lib/print/invoiceIdentity.js` on the client prints that instead of the
+   * shop's. A branch that fills in nothing prints the shop's, which is what
+   * keeps every existing multi-branch shop's invoices exactly as they were.
+   */
+  invoicePhones: {
+    type: [{ type: String, trim: true, maxlength: 32 }],
+    default: [],
+    validate: {
+      validator: (v) => !Array.isArray(v) || v.length <= 4,
+      message: 'সর্বোচ্চ ৪টি অতিরিক্ত নম্বর দেওয়া যাবে',
+    },
+  },
   isDefault: {
     type: Boolean,
     default: false

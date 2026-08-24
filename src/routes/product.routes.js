@@ -58,6 +58,14 @@ router.post('/:id/images', rbac('products', 'update'), upload.array('images', 5)
 router.get('/:id/batches', rbac('products', 'view'), productController.getProductBatches);
 router.post('/:id/batches', rbac('products', 'update'), validate(productValidation.addBatch), productController.addProductBatch);
 router.put('/:id/batches/:batchId', rbac('products', 'update'), validate(productValidation.updateBatch), productController.updateProductBatch);
+// Assigning is a separate verb from updating on purpose: it re-checks a second
+// stock pool and may split the row in two. See assignBatchToVariant.
+router.post(
+  '/:id/batches/:batchId/assign',
+  rbac('products', 'update'),
+  validate(productValidation.assignBatch),
+  productController.assignProductBatch
+);
 router.delete('/:id/batches/:batchId', rbac('products', 'update'), productController.deleteProductBatch);
 
 module.exports = router;

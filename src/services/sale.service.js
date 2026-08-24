@@ -309,7 +309,24 @@ class SaleService {
        * never be stale. The client still falls back to the session copy when
        * this is absent, which is what keeps older cached responses working.
        */
-      .populate('shop', 'name address phone')
+      .populate('shop', 'name address phone invoicePhones')
+      /**
+       * The BRANCH's own identity, for the same header.
+       *
+       * A shop with three branches has one name and three counters, and the
+       * slip a customer walks out with has to say which counter took the money
+       * — a Rahanpur customer ringing the number on their invoice should not
+       * reach the Gomastapur shop. So a branch that has filled in an address or
+       * a phone prints its own; a branch that has filled in nothing prints the
+       * shop's, which is every branch until someone edits one and is what keeps
+       * existing invoices byte-identical. The choice itself is made by
+       * `lib/print/invoiceIdentity.js` on the client, so the printed sheet, the
+       * thermal roll and the on-screen preview cannot disagree about it.
+       *
+       * `name` and `code` ride along for the '(শাখা: ...)' line; single-branch
+       * shops never render it.
+       */
+      .populate('branch', 'name code address phone invoicePhones')
       .populate('items.product', 'name code unit barcode');
 
     if (!sale) {
@@ -3236,7 +3253,15 @@ class SaleService {
       shop: shopId,
       // Single-branch shops carry `branch: null` on both documents, so an
       // unconditional `branch` predicate would match the row it should.
-      ...(sale.branch ? { branch: sale.branch } : {}),
+      //
+      // `_id ?? the value` because this is called with the sale in two states:
+      // raw from `reviseSale`, and POPULATED from `getSaleById` (which now
+      // pulls the branch's address and phones for the invoice header). Handing
+      // a populated subdocument straight to the caster works today and is not
+      // something a drawer-reconciliation guard should be relying on — if it
+      // ever stopped, this query would silently match no register and the
+      // closed-till block would quietly stop blocking.
+      ...(sale.branch ? { branch: sale.branch._id || sale.branch } : {}),
       date: { $gte: startOfDay, $lte: endOfDay },
     }).select('status closedAt').lean();
 
