@@ -7,6 +7,7 @@ const { AppError } = require('../middleware/error.middleware');
 const paymentAccountService = require('./paymentAccount.service');
 const { toMoney, settlementFor, statusFor } = require('../utils/invoiceMath.util');
 const { quantizeMoney } = require('../utils/quantity.util');
+const { buildPaymentReceiptNo } = require('../utils/receiptNo.util');
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────
@@ -152,9 +153,17 @@ async function settleCustomerDue(
   // `branch` is required: `cashRegister._calculateCashFlows` matches due
   // collections by branch, so an untagged payment is invisible to every
   // branch's till and understates expected closing (FEATURE_AUDIT.md H-6).
+  // The row's identity is minted HERE rather than left to `Payment.create`,
+  // because the receipt number is derived from it (see receiptNo.util.js) and
+  // it has to be on the document the customer is handed, not patched in by a
+  // second write that could fail on its own.
+  const paymentId = new mongoose.Types.ObjectId();
+  const dueAfter = quantizeMoney(dueBefore - amount);
+
   const [payment] = await Payment.create(
     [
       {
+        _id: paymentId,
         shop: shopId,
         branch: branchId,
         customer: customer._id,
@@ -169,6 +178,20 @@ async function settleCustomerDue(
         paidAt,
         notes,
         receivedBy: userId,
+        // ── What the printed রসিদ and the customer's SMS both quote ──────────
+        //
+        // Frozen on the row at the moment of collection. Both numbers are from
+        // the book this collection was validated against a few lines above —
+        // the branch's under separate books, the shop's under shared — so the
+        // slip in the customer's hand, the message on their phone and the
+        // balance the collecting counter just showed all say the same thing.
+        //
+        // Snapshotting rather than deriving is what makes a REPRINT honest: the
+        // customer's balance will have moved by next week, and a receipt that
+        // silently updates itself is not a receipt.
+        receiptNo: buildPaymentReceiptNo(paymentId, paidAt),
+        dueBefore: quantizeMoney(dueBefore),
+        dueAfter,
       },
     ],
     sessionOpt
@@ -230,7 +253,7 @@ async function settleCustomerDue(
     payment,
     amount,
     dueBefore: quantizeMoney(dueBefore),
-    dueAfter: quantizeMoney(dueBefore - amount),
+    dueAfter,
     // Which invoices this collection moved, so the till and the customer page
     // can tell the shopkeeper where their money went instead of showing a total
     // that changed for reasons they cannot follow.

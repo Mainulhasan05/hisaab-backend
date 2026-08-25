@@ -226,6 +226,70 @@ const shopSchema = new mongoose.Schema({
       default: ['size', 'color']
     },
     /**
+     * ── The shop's own variant vocabulary ─────────────────────────────────────
+     *
+     * What this is NOT: the list of options a shop can pick from. That list is
+     * DERIVED — built-in presets, plus every value this shop's own products
+     * already use, read straight out of `Product.variants[].attributes` by
+     * `variantCatalog.service`. A shop that types "৩৬" into the product form
+     * has it back as a button on the next product because the product it was
+     * saved on is the record. There is no second copy to keep in step, nothing
+     * to migrate, and nothing that can drift from what the shop actually sells.
+     *
+     * What lives HERE is only the part that cannot be inferred from products:
+     *
+     *   `customTypes` — variant types this shop invented. The eight built-in
+     *     types are a guess about Bangladeshi retail and they are wrong for
+     *     plenty of it: a shop selling oil needs ভলিউম (১০০ml / ৫০০ml), and no
+     *     amount of looking at their products can tell us they wanted to call
+     *     that dimension something. `_formatVariants` files any unrecognised
+     *     key under `attributes.custom`, so a custom type needs no schema
+     *     change and no migration — only a name.
+     *
+     *   `labels` — `{ typeId: 'কোমরের মাপ' }`. A পাঞ্জাবি shop's "সাইজ" is a
+     *     waist measurement and a grocer's is a packet weight. Renaming the
+     *     type is far cheaper than inventing one, and it is the single most
+     *     common thing a shop will want.
+     *
+     *   `hidden` — `{ typeId: ['XXXL'] }`. The one thing derivation genuinely
+     *     cannot do: forget a typo. A value mistyped onto one product would
+     *     otherwise sit in the chip list until that product is edited, and
+     *     asking a shopkeeper to hunt down the product to remove a bad chip is
+     *     not a fix. Hiding never touches the products themselves — the variant
+     *     that carries the value keeps carrying it, it simply stops being
+     *     OFFERED. Anything else would silently rewrite sold stock.
+     *
+     * All three are small, bounded and written only from the settings screen,
+     * which is what makes them safe to carry on this document — it is loaded on
+     * every authenticated request.
+     */
+    variantCatalog: {
+      customTypes: {
+        type: [
+          {
+            _id: false,
+            // Slug, ASCII, no dots — it becomes a key under
+            // `attributes.custom`, so it has to be a legal Mongo field name.
+            id: { type: String, trim: true },
+            label: { type: String, trim: true },
+            icon: { type: String, trim: true, default: '🏷️' },
+          },
+        ],
+        default: () => [],
+      },
+      // Mixed rather than Map: these are keyed by type id, they are read on
+      // every product form, and a plain object survives the JSON round trip to
+      // the client and back without the caller having to know it was a Map.
+      labels: {
+        type: mongoose.Schema.Types.Mixed,
+        default: () => ({}),
+      },
+      hidden: {
+        type: mongoose.Schema.Types.Mixed,
+        default: () => ({}),
+      },
+    },
+    /**
      * Hard ceiling on a single line's discount, as a percent off the list rate.
      * Only consulted when `features.lineDiscount` is on.
      *

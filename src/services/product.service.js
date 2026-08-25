@@ -18,6 +18,14 @@ const { normalizePackaging } = require('../utils/packaging.util');
 const { hasFeature } = require('../utils/features.util');
 const { normalizeWholesalePrice } = require('../utils/pricing.util');
 const cacheService = require('./cache.service');
+/**
+ * The shop's variant vocabulary is DERIVED from these products, so every write
+ * here can change it — see that file's header. The cache it keeps has to be
+ * dropped on each of the four paths below, or a size a shopkeeper just typed
+ * does not come back as a chip on their next product, which reads as the
+ * feature not working.
+ */
+const variantCatalogService = require('./variantCatalog.service');
 const mediaService = require('./media.service');
 // Safe to require directly: `category.service` reaches for the Product MODEL,
 // never this service, so there is no cycle between the two.
@@ -1164,6 +1172,11 @@ class ProductService {
     // validation must not leave a reference to a product that does not exist.
     await mediaService.reconcileRefs(shopId, [], mediaService.mediaIdsOfProduct(product));
 
+    // A new attribute value may have entered the shop's vocabulary. Never
+    // awaited: a stale option list is cosmetic and self-corrects within the
+    // cache TTL, while failing a product write over it would not be.
+    variantCatalogService.invalidate(shopId).catch(() => {});
+
     return this._transformProduct(product);
   }
 
@@ -1413,6 +1426,12 @@ class ProductService {
 
     // If stock was provided and this is a non-variant product, update stock through
     // the proper channel so it's tracked in StockTransaction
+    // Before the early return below, so BOTH exits from this method drop it.
+    // A new attribute value may have entered the shop's vocabulary. Never
+    // awaited: a stale option list is cosmetic and self-corrects within the
+    // cache TTL, while failing a product write over it would not be.
+    variantCatalogService.invalidate(shopId).catch(() => {});
+
     if (stock !== undefined && stock !== null && !product.hasVariants) {
       const updatedProduct = await this.updateStock(shopId, userId, productId, {
         quantity: parseInt(stock) || 0,
@@ -1545,6 +1564,11 @@ class ProductService {
         after: { code: product.code, isDeleted: true },
       },
     });
+
+    // A new attribute value may have entered the shop's vocabulary. Never
+    // awaited: a stale option list is cosmetic and self-corrects within the
+    // cache TTL, while failing a product write over it would not be.
+    variantCatalogService.invalidate(shopId).catch(() => {});
 
     return { success: true };
   }
@@ -2811,6 +2835,11 @@ class ProductService {
     }
 
     if (results.importedCount > 0) {
+      // An import is the single biggest source of new vocabulary: a shop that
+      // uploads two thousand products arrives with its whole option list
+      // already populated, and it must be visible on the very next product.
+      variantCatalogService.invalidate(shopId).catch(() => {});
+
       await AuditLog.log({
         shop: shopId,
         user: userId,

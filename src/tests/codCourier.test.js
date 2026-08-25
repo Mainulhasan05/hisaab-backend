@@ -246,7 +246,12 @@ describe('invariant guards', () => {
       require.resolve('../services/sale.service.js'), 'utf8'
     );
 
-    expect(source).toContain('if (claimed.customer && !skipReceiptSms) {');
+    // `result.sale.customer`, not `claimed.customer`: the send moved OUT of the
+    // transaction callback (it used to race the commit and could fire on an
+    // aborted collection), so it now reads the settled result rather than the
+    // in-flight document. The guard itself is unchanged, which is what this
+    // pins — a handover must not text a receipt.
+    expect(source).toContain('if (result.sale.customer && !skipReceiptSms) {');
     expect(source).toContain('skipReceiptSms: true');
   });
 

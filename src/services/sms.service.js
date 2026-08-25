@@ -2046,7 +2046,38 @@ class SMSService {
   }
 
   /**
-   * Send payment receipt SMS (non-blocking)
+   * Payment receipt — the message that follows a বাকি আদায়.
+   *
+   * ── CALL THIS AFTER THE TRANSACTION HAS COMMITTED ──────────────────────────
+   *
+   * Not from inside it. `setImmediate` schedules against the event loop, not
+   * against the commit, so a send dispatched from within `runInTransaction`
+   * races the commit it is reporting — and loses often enough to matter. Two
+   * concrete failures, both of which this method used to produce:
+   *
+   *  1. The balance was read LIVE off the customer document. Win the race and
+   *     you read the pre-payment figure, so the customer who just cleared their
+   *     খাতা is texted the balance they walked in with. Nothing logs an error;
+   *     the message is well-formed and wrong.
+   *
+   *  2. If the transaction ABORTED, the receipt still went out. The shop's
+   *     books show no collection and the customer has an SMS saying otherwise.
+   *
+   * Both are closed the same way: the caller settles first, then calls this
+   * with the figures the settlement itself returned.
+   *
+   * @param {object}  paymentData
+   * @param {ObjectId} paymentData.customerId
+   * @param {number}  paymentData.amount
+   * @param {number}  [paymentData.remainingDue]
+   *        What the customer owes AFTER this payment, from the settlement's own
+   *        snapshot — `Payment.dueAfter`. Omitted means "not computed", and the
+   *        body then says nothing about the balance rather than guessing at it;
+   *        see `buildPaymentReceipt`. Never re-derive it here.
+   * @param {boolean} [paymentData.forceSend]
+   *        The collection screen's SMS switch. Overrides the shop's auto-send
+   *        setting exactly as the till's checkbox does for a sale receipt — the
+   *        shopkeeper is looking at the preview and has asked for this one.
    */
   sendPaymentReceiptAsync(shopId, userId, paymentData) {
     const Shop = require('../models/Shop.model');
@@ -2058,21 +2089,41 @@ class SMSService {
         if (!shop) return;
 
         const smsSettings = shop.settings?.smsSettings || {};
-        if (!smsSettings.autoSendOnDuePayment) return;
+        const forceSend = paymentData.forceSend === true;
+        if (!forceSend && !smsSettings.autoSendOnDuePayment) return;
 
+        // Read for the NAME and the PHONE only — neither moves during a
+        // collection, so this read is safe whenever it lands.
         const customer = await Customer.findById(paymentData.customerId);
         if (!customer || !customer.phone) return;
 
         const quota = await SMSQuota.findOne({ shop: shopId });
         if (!quota || !quota.isEnabled || quota.remainingQuota < 1) return;
 
-        // `customer` is re-read here, after the collection has settled, so
-        // `totalDue` is already the post-payment balance. The client preview
-        // subtracts the amount itself to arrive at the same number.
+        /**
+         * The balance, from the settlement rather than from the database.
+         *
+         * `Customer.totalDue` is the wrong number in two separate ways even
+         * once the commit has landed: it is a LIVE figure, so another counter
+         * collecting in the same minute changes what this message says about a
+         * payment that already happened; and it is SHOP-WIDE, while a shop on
+         * separate branch books validated, collected and displayed a BRANCH
+         * balance. The preview the shopkeeper approved showed the branch
+         * figure; this used to text the shop-wide one.
+         *
+         * `dueAfter` is the snapshot taken at the moment of collection, from
+         * the same book the collection was checked against — so the slip, the
+         * screen and the SMS all agree, and go on agreeing.
+         */
+        const remainingDue =
+          paymentData.remainingDue === undefined || paymentData.remainingDue === null
+            ? null
+            : Math.max(0, Number(paymentData.remainingDue) || 0);
+
         const message = buildPaymentReceipt({
           customerName: customer.name,
           amount: paymentData.amount,
-          remainingDue: customer.totalDue,
+          remainingDue,
           shopName: shop.name,
         });
 

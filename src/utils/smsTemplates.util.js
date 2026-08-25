@@ -195,9 +195,54 @@ const buildSaleReceipt = ({
  * `remainingDue` is the balance AFTER this payment lands. Previewing it before
  * the collection is recorded therefore means subtracting the amount yourself;
  * the client mirror does exactly that.
+ *
+ * ── The balance line is conditional, for two different reasons ───────────────
+ *
+ * **Cleared (`0`) prints its own sentence.** `Current due: Tk0` is the line a
+ * customer reads three times to be sure of, and it is the single most valuable
+ * thing this message can carry — that the খাতা is closed. Saying so in words
+ * costs two characters over the digits and removes the doubt.
+ *
+ * **Unknown (`null`) prints nothing at all.** Not every caller has the balance
+ * in hand — `recordPayment` settles one named invoice, and what the customer
+ * owes the shop overall is a different question it never asked. `Tk0` there
+ * would tell a customer owing ৳2,990 that they are clear, which is the same
+ * failure `showsTotalDue` exists to prevent on the sale receipt. Saying nothing
+ * is recoverable; a confident wrong zero is not.
+ *
+ * ── Why the রসিদ নং is NOT in here ──────────────────────────────────────────
+ *
+ * It is on the printed slip, and it was in this message for about an hour.
+ * The reason it came back out is the promise the mirror exists to keep: the
+ * shopkeeper is shown this exact body BEFORE the collection is written, and the
+ * receipt number is derived from the payment's `_id`, which does not exist
+ * until it is. There is no honest way to preview it — a placeholder would put a
+ * number on the screen that never reaches the customer's phone, and omitting it
+ * from the preview alone would under-count the segments the shop is billed for.
+ *
+ * It also costs ~26 characters, which on a UCS-2 body is most of a third
+ * segment. The number belongs on paper, where it is free and where a customer
+ * looking for it will actually look.
  */
-const buildPaymentReceipt = ({ customerName, amount, remainingDue, shopName }) =>
-  `${customerName},\nTk${formatSmsAmount(amount)} payment received.\nCurrent due: Tk${formatSmsAmount(remainingDue)}\nThank you - ${gsmSafeShopName(shopName)}`;
+const buildPaymentReceipt = ({ customerName, amount, remainingDue, shopName }) => {
+  const lines = [`${customerName},`, `Tk${formatSmsAmount(amount)} payment received.`];
+
+  if (remainingDue !== null && remainingDue !== undefined && remainingDue !== '') {
+    // A non-numeric string is a `{remaining_due}` token from the template
+    // picker, which must always render so the picker shows the whole shape of
+    // the message rather than a version of it with the balance line missing.
+    const numeric = Number(remainingDue);
+    const isToken = typeof remainingDue === 'string' && Number.isNaN(numeric);
+    lines.push(
+      isToken || numeric > 0
+        ? `Current due: Tk${formatSmsAmount(remainingDue)}`
+        : 'No due remaining.'
+    );
+  }
+
+  lines.push(`Thank you - ${gsmSafeShopName(shopName)}`);
+  return lines.join('\n');
+};
 
 /**
  * Due reminder — sent from the SMS page to customers carrying a balance.

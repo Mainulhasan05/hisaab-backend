@@ -50,6 +50,7 @@ const { priceTierFor, sellingPriceFor, hasWholesalePrice } = require('../utils/p
 const { resolveLineRate } = require('../utils/lineDiscount.util');
 const { resolveSaleDate } = require('../utils/saleDate.util');
 const { resolveCustomInvoiceNo } = require('../utils/invoiceNo.util');
+const { buildPaymentReceiptNo } = require('../utils/receiptNo.util');
 const { deductBatches, restoreBatches, batchWriteOp } = require('../utils/batch.util');
 const { hasFeature } = require('../utils/features.util');
 const { isCombo, findComponentVariant, isChooseSlot } = require('../utils/combo.util');
@@ -2223,7 +2224,9 @@ class SaleService {
    */
   async recordPayment(shopId, userId, saleId, paymentData, branchId = null, req = null, internalOptions = {}) {
     const { skipReceiptSms = false } = internalOptions;
-    return await runInTransaction(async (session) => {
+    // Set inside the transaction, read after it commits — see the send below.
+    let customerDueAfter = null;
+    const result = await runInTransaction(async (session) => {
       const sessionOpt = session ? { session } : {};
       const { method, transactionId, notes, account: rawAccount } = paymentData;
 
@@ -2317,7 +2320,14 @@ class SaleService {
       // Create payment record. `atCheckout` stays false: this is money arriving
       // AFTER the sale, which is precisely what the cash register's
       // due-collection bucket is for.
+      //
+      // It also earns a রসিদ নং, for the same reason `settleCustomerDue`'s row
+      // does: the customer handed money over and walked away, and the invoice
+      // they already have does not evidence THIS payment. `atCheckout` money is
+      // the case that gets none — there the invoice is the receipt.
+      const paymentId = new mongoose.Types.ObjectId();
       const [payment] = await Payment.create([{
+        _id: paymentId,
         shop: shopId,
         branch: claimed.branch || null,
         sale: saleId,
@@ -2329,6 +2339,7 @@ class SaleService {
         type: 'sale_payment',
         notes,
         receivedBy: userId,
+        receiptNo: buildPaymentReceiptNo(paymentId, new Date()),
       }], sessionOpt);
 
       // Money in. Zero-effect when `account` is null.
@@ -2341,9 +2352,21 @@ class SaleService {
 
       // Update customer balance if applicable
       if (claimed.customer) {
-        await Customer.findByIdAndUpdate(claimed.customer, {
+        /**
+         * `new: true` so the post-payment balance comes back from the write
+         * that produced it.
+         *
+         * The receipt SMS used to re-read this document from a background
+         * callback scheduled before the commit — a race it lost often enough
+         * to text customers the balance they had BEFORE paying. Taking the
+         * figure from the update itself removes the second read entirely, and
+         * it is the same number the sale page's preview showed the shopkeeper
+         * (`customer.totalDue` minus the amount).
+         */
+        const updatedCustomer = await Customer.findByIdAndUpdate(claimed.customer, {
           $inc: { totalPaid: amount, totalDue: -amount },
-        }, sessionOpt);
+        }, { ...sessionOpt, new: true });
+        customerDueAfter = Math.max(0, quantizeMoney(updatedCustomer?.totalDue || 0));
 
         // Attributed to the SALE's branch, not the collector's. The due being
         // cleared belongs to whichever branch raised the invoice; crediting it to
@@ -2389,24 +2412,36 @@ class SaleService {
         },
       }], sessionOpt);
 
-      // Send payment receipt SMS (non-blocking — runs in background).
-      //
-      // Suppressed for a courier handover: the customer has NOT paid anything,
-      // the parcel has merely left the shop, and "আপনি ৳2,400 পরিশোধ করেছেন" is
-      // both untrue and alarming when it arrives days before delivery.
-      if (claimed.customer && !skipReceiptSms) {
-        const SMSService = require('./sms.service');
-        SMSService.sendPaymentReceiptAsync(shopId, userId, {
-          customerId: claimed.customer,
-          amount,
-        });
-      }
-
       // Invalidate related caches
       this.invalidateCache(shopId).catch(() => {}); // Non-blocking
 
       return { sale: claimed, payment };
     });
+
+    /**
+     * Send the receipt SMS — AFTER the commit, never from inside it.
+     *
+     * `setImmediate` schedules against the event loop, not against the
+     * transaction, so a send dispatched from within the callback above raced
+     * the commit it was reporting: it could read a pre-payment balance, and it
+     * fired even when the transaction went on to abort — texting a receipt for
+     * money the books never recorded. Out here both are impossible.
+     *
+     * Suppressed for a courier handover: the customer has NOT paid anything,
+     * the parcel has merely left the shop, and "আপনি ৳2,400 পরিশোধ করেছেন" is
+     * both untrue and alarming when it arrives days before delivery.
+     */
+    if (result.sale.customer && !skipReceiptSms) {
+      const SMSService = require('./sms.service');
+      SMSService.sendPaymentReceiptAsync(shopId, userId, {
+        customerId: result.sale.customer,
+        amount: result.payment.amount,
+        remainingDue: customerDueAfter,
+        forceSend: paymentData.sendSms === true,
+      });
+    }
+
+    return result;
   }
 
   /**

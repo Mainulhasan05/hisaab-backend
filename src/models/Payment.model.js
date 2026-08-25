@@ -170,6 +170,62 @@ const paymentSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true
+  },
+  /**
+   * ── The receipt the customer walks away with ───────────────────────────────
+   *
+   * রসিদ নং, set only on rows that produce a printable money receipt — today
+   * that is `due_collection` (বাকি আদায়) and `sale_payment` collected after
+   * the fact. A checkout leg (`atCheckout: true`) gets none: the INVOICE is
+   * already that customer's receipt, and handing them a second numbered slip
+   * for the same money is how a khata ends up counted twice.
+   *
+   * Empty on every row written before this field existed. That is not a gap to
+   * backfill — a receipt number is only meaningful if a piece of paper carrying
+   * it exists, and for historical rows none does. `receiptNoFor()` in
+   * `dueSettlement.service` is where new ones are minted; see
+   * `utils/receiptNo.util.js` for why it is derived rather than counted.
+   */
+  receiptNo: {
+    type: String,
+    trim: true
+    // NO `default`. The unique index below is sparse, and sparse skips MISSING
+    // values — not empty ones. A `default: ''` would index every receipt-less
+    // row under the same key and the second one written would fail E11000.
+  },
+  /**
+   * ── What the customer owed, immediately before and immediately after ───────
+   *
+   * A snapshot, deliberately, and the reason is the same one `Sale.previousDue`
+   * documents: a receipt describes ONE transaction at ONE moment. Recomputing
+   * "current due" when the receipt is re-printed next week would put a figure
+   * on the reprint that the original slip never said, and the customer holding
+   * both would be right to think the shop's books move on their own.
+   *
+   * It is also what the SMS quotes. Reading the balance live for that message
+   * was a race the app lost regularly — the send is dispatched from inside the
+   * settlement transaction, so a live read could land before the commit and
+   * text the customer the balance they had BEFORE paying. See
+   * `sendPaymentReceiptAsync`.
+   *
+   * ── Which book these figures are from ──────────────────────────────────────
+   *
+   * Whichever one the collection was validated against. Under separate branch
+   * books that is the BRANCH balance, because a branch may only collect against
+   * its own receivable (`settleCustomerDue` refuses anything larger) and the
+   * customer standing at that counter is being handed that branch's account.
+   * Under shared books there is one balance and this is it.
+   *
+   * `null` — not 0 — on rows written before this existed and on any path that
+   * did not compute them, so a reader can tell "cleared" from "unknown".
+   */
+  dueBefore: {
+    type: Number,
+    default: null
+  },
+  dueAfter: {
+    type: Number,
+    default: null
   }
 }, {
   timestamps: true,
@@ -188,6 +244,11 @@ paymentSchema.index({ shop: 1, sale: 1 }); // Sale payments lookup
 paymentSchema.index({ shop: 1, viaSale: 1 }, { sparse: true });
 paymentSchema.index({ shop: 1, purchase: 1 }, { sparse: true }); // Purchase payments
 paymentSchema.index({ type: 1, createdAt: -1 }); // Admin subscription-payment queries (no shop predicate)
+// Looking a receipt up by the number printed on it — the counter's "এই রসিদটা
+// কোনটা?" question. Sparse because only collection rows carry one, and unique
+// so a derived number that somehow repeated is caught here rather than
+// discovered by two customers holding the same slip.
+paymentSchema.index({ shop: 1, receiptNo: 1 }, { unique: true, sparse: true });
 
 // Virtual: Is refund
 paymentSchema.virtual('isRefund').get(function() {

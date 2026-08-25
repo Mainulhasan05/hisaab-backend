@@ -163,6 +163,24 @@ exports.getExpiringBatches = asyncHandler(async (req, res) => {
 });
 
 // Get low stock products
+/**
+ * Every variant option value this shop's own products already use.
+ *
+ * The CLIENT merges this with the built-in presets in `lib/data/variants.js` —
+ * see the note in `variantCatalog.service` for why the merge is not done here.
+ * A shop that has never used a type simply has no key for it, which is what
+ * lets the client keep showing the built-ins until there is something better.
+ */
+exports.getVariantOptions = asyncHandler(async (req, res) => {
+  const variantCatalogService = require('../services/variantCatalog.service');
+  const used = await variantCatalogService.getUsedValues(req.shop._id, req);
+  return ApiResponse.success(res, {
+    data: { used },
+    message: 'Variant options retrieved successfully',
+    messageBn: 'ভ্যারিয়েন্ট অপশন লোড হয়েছে',
+  });
+});
+
 exports.getLowStock = asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
   const products = await productService.getLowStockProducts(req.shop._id, limit, req);

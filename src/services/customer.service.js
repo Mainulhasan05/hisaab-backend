@@ -1159,7 +1159,7 @@ class CustomerService {
 
   // Record due payment
   async collectDuePayment(shopId, userId, customerId, paymentData, req) {
-    return await runInTransaction(async (session) => {
+    const result = await runInTransaction(async (session) => {
       const { method, transactionId, notes } = paymentData;
 
     // When the customer actually handed the money over. Absent means now,
@@ -1184,7 +1184,7 @@ class CustomerService {
     // `dueSettlement.service`. That is not indirection for its own sake: the POS
     // settles dues at checkout too, and two implementations of those six steps
     // would drift into a book that never reconciles. See that file's header.
-    const { payment, amount, allocations } = await dueSettlementService.settleCustomerDue(
+    const { payment, amount, allocations, dueBefore, dueAfter } = await dueSettlementService.settleCustomerDue(
       {
         shopId,
         userId,
@@ -1225,13 +1225,6 @@ class CustomerService {
       req,
     });
 
-    // Send payment receipt SMS (non-blocking — runs in background)
-    const SMSService = require('./sms.service');
-    SMSService.sendPaymentReceiptAsync(shopId, userId, {
-      customerId: customer._id,
-      amount,
-    });
-
     /**
      * `allocations` is which invoices this money actually closed.
      *
@@ -1240,9 +1233,43 @@ class CustomerService {
      * they can check against the paper in the customer's hand. The screen that
      * takes the money is the only place this is cheap to show — afterwards it
      * has to be reconstructed from two collections and an allocation order.
+     *
+     * `dueBefore` / `dueAfter` ride along because the printed রসিদ needs both
+     * and the client must not compute them: under separate branch books the
+     * figure on the customer's page is the branch's, and only the settlement
+     * knows which book it just moved.
      */
-    return { customer, payment, allocations };
+    return { customer, payment, allocations, dueBefore, dueAfter };
     });
+
+    /**
+     * ── The customer's copy ────────────────────────────────────────────────
+     *
+     * OUTSIDE the transaction, deliberately, and this is the whole reason
+     * `runInTransaction`'s result is captured rather than returned directly.
+     *
+     * Dispatched from inside, the send raced the commit two ways: it read a
+     * balance that might still be the pre-payment one, and it fired even when
+     * the transaction went on to abort — texting a receipt for a collection the
+     * shop's books never recorded. Here there is nothing left to race. The
+     * money is settled, the row is written, and the figures below are the
+     * settlement's own snapshot rather than a fresh read that could already
+     * have moved.
+     *
+     * `sendSms` is the collection screen's switch, mirroring the till's SMS
+     * checkbox: it sends this one message for a shop that has auto-send off,
+     * and it is only ever set by a shopkeeper who is looking at the preview.
+     * Absent — every existing caller — leaves the shop setting in charge.
+     */
+    const SMSService = require('./sms.service');
+    SMSService.sendPaymentReceiptAsync(shopId, userId, {
+      customerId,
+      amount: result.payment.amount,
+      remainingDue: result.dueAfter,
+      forceSend: paymentData.sendSms === true,
+    });
+
+    return result;
   }
 
   /**
@@ -1279,7 +1306,7 @@ class CustomerService {
         .sort({ createdAt: 1 })
         .lean(),
       Payment.find(scope)
-        .select('amount method type sale createdAt paidAt notes')
+        .select('amount method type sale createdAt paidAt notes receiptNo')
         .sort({ createdAt: 1 })
         .lean(),
       DueAdjustment.find(scope)
@@ -1357,6 +1384,17 @@ class CustomerService {
         // Pairs with the return's credit line above.
         debit: isRefund ? (p.amount || 0) : 0,
         credit: isRefund ? 0 : (p.amount || 0),
+        /**
+         * Present only when this row has a printable রসিদ behind it, which is
+         * what the খতিয়ান needs in order to offer a reprint on the right lines
+         * and stay silent on the rest.
+         *
+         * Null on every collection taken before receipt numbers existed, and on
+         * checkout legs — where the invoice is already the customer's evidence.
+         * The client reads it as "is there a slip to reprint", so a null must
+         * mean no button rather than a button that 404s.
+         */
+        receiptNo: p.receiptNo || null,
       });
     }
 
@@ -1407,6 +1445,79 @@ class CustomerService {
   }
 
   // Get customer purchase history
+  /**
+   * ─────────────────────────────────────────────────────────────────────────
+   * ONE COLLECTION, AS A PRINTABLE রসিদ
+   * ─────────────────────────────────────────────────────────────────────────
+   *
+   * The receipt is printed the moment the money is taken, straight off the
+   * collection response — this endpoint is for every time AFTER that: the
+   * customer lost their copy, the shopkeeper printed to a printer that was out
+   * of paper, or someone is settling a dispute a fortnight later from the
+   * খতিয়ান.
+   *
+   * ── It reads the snapshot, it does not recompute ──────────────────────────
+   *
+   * `dueBefore` / `dueAfter` come off the Payment row exactly as they were
+   * frozen at collection time. Recomputing "what do they owe now" would make a
+   * reprint disagree with the original slip, and the customer holding both
+   * would be right to conclude the shop's books move on their own. A receipt
+   * is a statement about a moment; this returns that moment.
+   *
+   * `null` on both is a row written before those fields existed. The client
+   * prints the receipt without the balance block rather than printing zeroes —
+   * an old collection is still worth a receipt, it just cannot claim to know
+   * what the khata stood at.
+   *
+   * ── Scope ─────────────────────────────────────────────────────────────────
+   *
+   * Goes through `getCustomerById`, so a shop on separate branch books cannot
+   * reach a receipt for a customer this branch has never served — the same 404
+   * their detail page gives. The payment itself is then matched on shop AND
+   * customer, so a valid payment id belonging to someone else is a 404 too.
+   */
+  async getPaymentReceipt(shopId, customerId, paymentId, req = null) {
+    const customer = await this.getCustomerById(shopId, customerId, req);
+
+    const payment = await Payment.findOne({
+      _id: paymentId,
+      shop: shopId,
+      customer: customerId,
+    })
+      .populate('receivedBy', 'name')
+      .populate('sale', 'invoiceNo')
+      .populate('account', 'name')
+      .lean();
+
+    if (!payment) {
+      throw new AppError('Receipt not found', 'রসিদ পাওয়া যায়নি', 404);
+    }
+
+    /**
+     * Checkout money has no receipt of its own, and asking for one is a
+     * mistake worth reporting rather than papering over. The invoice already
+     * evidences it; a second numbered slip for the same taka is how one
+     * payment ends up recorded twice in a customer's own file.
+     */
+    if (payment.atCheckout) {
+      throw new AppError(
+        'Checkout payments are evidenced by the invoice',
+        'এই টাকার রসিদ ইনভয়েসেই আছে',
+        400
+      );
+    }
+
+    return {
+      payment,
+      customer: {
+        _id: customer._id,
+        name: customer.name,
+        phone: customer.phone,
+        address: customer.address,
+      },
+    };
+  }
+
   async getCustomerHistory(shopId, customerId, options = {}, req = null) {
     const { page = 1, limit = 20 } = options;
 

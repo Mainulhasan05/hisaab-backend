@@ -28,6 +28,14 @@ router.post('/:id([0-9a-fA-F]{24})/collect-due', idempotency(), rbac('customers'
 // no invoice backs, which is the one customer-desk action a counter-sale cannot
 // undo. A cashier who could reach it could manufacture or erase debt.
 router.post('/:id([0-9a-fA-F]{24})/opening-due', idempotency(), ownerOnly, customerController.setOpeningDue);
+// Re-printing a বাকি আদায় receipt. `customers.view`, not `update`: handing a
+// customer a copy of a receipt they already have is reading, and a staff member
+// trusted to see the খতিয়ান is trusted to reprint a line from it.
+router.get(
+  '/:id([0-9a-fA-F]{24})/receipts/:paymentId([0-9a-fA-F]{24})',
+  rbac('customers', 'view'),
+  customerController.getPaymentReceipt
+);
 router.get('/:id([0-9a-fA-F]{24})/ledger', rbac('customers', 'view'), customerController.getCustomerLedger);
 router.get('/:id([0-9a-fA-F]{24})/history', rbac('customers', 'view'), customerController.getCustomerHistory);
 

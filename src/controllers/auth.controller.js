@@ -443,6 +443,174 @@ const updateShopSettings = asyncHandler(async (req, res) => {
     }
   }
 
+  // ── The shop's own variant vocabulary ─────────────────────────────────────
+  //
+  // Only the three things that CANNOT be derived from the shop's products: a
+  // type they invented, a type they want renamed, and a value they want the app
+  // to stop offering. The options themselves are read out of
+  // `Product.variants[].attributes` and are not settable here at all — see
+  // `variantCatalog.service` for why that is the whole point.
+  //
+  // Bounded on every axis. This document is loaded on every authenticated
+  // request, so an unbounded blob here is a tax on every page load in the app;
+  // and the values arrive from a form, which means they arrive from anyone who
+  // can reach the form.
+  if (req.body.variantCatalog !== undefined) {
+    const incoming = req.body.variantCatalog;
+    if (typeof incoming !== 'object' || incoming === null || Array.isArray(incoming)) {
+      return ApiResponse.badRequest(res, {
+        message: 'variantCatalog must be an object',
+        messageBn: 'ভ্যারিয়েন্ট সেটিংস সঠিক নয়',
+      });
+    }
+
+    // A type id becomes a KEY under `attributes.custom`, so it has to be a
+    // legal Mongo field name: no dots, no leading `$`. Slugged rather than
+    // rejected, because the shopkeeper types a Bangla label and should never
+    // meet the concept of an id at all.
+    const slug = (raw) =>
+      String(raw || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 24);
+
+    if (incoming.customTypes !== undefined) {
+      if (!Array.isArray(incoming.customTypes)) {
+        return ApiResponse.badRequest(res, {
+          message: 'customTypes must be a list',
+          messageBn: 'ভ্যারিয়েন্টের ধরন তালিকা সঠিক নয়',
+        });
+      }
+      const seen = new Set();
+      const types = [];
+      for (const raw of incoming.customTypes.slice(0, 12)) {
+        const label = String(raw?.label || '').trim().slice(0, 40);
+        if (!label) continue;
+        // Falls back to slugging the LABEL, so a client that never sends an id
+        // still gets a stable one — and a Bangla-only label that slugs to
+        // nothing gets a positional id rather than being silently dropped.
+        const id = slug(raw?.id) || slug(label) || `type-${types.length + 1}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        types.push({ id, label, icon: String(raw?.icon || '🏷️').trim().slice(0, 8) });
+      }
+      updates['settings.variantCatalog.customTypes'] = types;
+    }
+
+    if (incoming.labels !== undefined) {
+      if (typeof incoming.labels !== 'object' || incoming.labels === null || Array.isArray(incoming.labels)) {
+        return ApiResponse.badRequest(res, {
+          message: 'labels must be an object',
+          messageBn: 'ভ্যারিয়েন্টের নাম সঠিক নয়',
+        });
+      }
+      const labels = {};
+      for (const [key, value] of Object.entries(incoming.labels).slice(0, 24)) {
+        const id = slug(key);
+        const label = String(value || '').trim().slice(0, 40);
+        // An empty label is how the form clears an override back to the
+        // built-in name, so it is dropped rather than stored as ''.
+        if (id && label) labels[id] = label;
+      }
+      updates['settings.variantCatalog.labels'] = labels;
+    }
+
+    if (incoming.hidden !== undefined) {
+      if (typeof incoming.hidden !== 'object' || incoming.hidden === null || Array.isArray(incoming.hidden)) {
+        return ApiResponse.badRequest(res, {
+          message: 'hidden must be an object',
+          messageBn: 'লুকানো অপশন সঠিক নয়',
+        });
+      }
+      const hidden = {};
+      for (const [key, value] of Object.entries(incoming.hidden).slice(0, 24)) {
+        const id = slug(key);
+        if (!id || !Array.isArray(value)) continue;
+        const values = [
+          ...new Set(
+            value
+              .map((v) => String(v || '').trim().slice(0, 60))
+              .filter(Boolean)
+          ),
+        ].slice(0, 100);
+        if (values.length > 0) hidden[id] = values;
+      }
+      updates['settings.variantCatalog.hidden'] = hidden;
+    }
+  }
+
+  // ── Which messages this shop sends its customers automatically ────────────
+  //
+  // `smsSettings` has been on the Shop document for as long as the SMS feature
+  // has existed, and NOTHING outside the admin panel could write it. So the
+  // switch that decides whether a customer gets a receipt when they clear their
+  // খাতা was reachable only by us — a shopkeeper paying for SMS could not turn
+  // their own receipts on, and support was doing it by hand, one shop at a
+  // time. That is the gap this closes.
+  //
+  // ── What deliberately stays admin-only ─────────────────────────────────────
+  //
+  // `invoiceTemplate` and `numerals`. A bad template is billed to the shop's
+  // quota on EVERY sale, which is why the segment ceiling that guards it lives
+  // in `admin.service`; widening this allowlist to reach it would route around
+  // that check rather than duplicate it. See the note on the field in
+  // Shop.model.js. `numerals` only decorates a custom template, so it follows
+  // the template.
+  //
+  // ── On `language` ─────────────────────────────────────────────────────────
+  //
+  // Allowed here, and it is a MONEY decision rather than a taste one: a Bangla
+  // body is UCS-2, which halves the characters per segment and typically turns
+  // a one-segment receipt into two. The shop pays that difference on every
+  // message, so the shop chooses. The composer shows the segment count beside
+  // the toggle for exactly this reason.
+  //
+  // Nested one level down, so each key is written as its own `settings.x.y`
+  // path. Writing the OBJECT would silently drop whichever sibling the client
+  // did not send — including the admin-only template.
+  if (req.body.smsSettings !== undefined) {
+    const incoming = req.body.smsSettings;
+    if (typeof incoming !== 'object' || incoming === null || Array.isArray(incoming)) {
+      return ApiResponse.badRequest(res, {
+        message: 'smsSettings must be an object',
+        messageBn: 'এসএমএস সেটিংস সঠিক নয়',
+      });
+    }
+
+    if (incoming.autoSendOnSale !== undefined) {
+      updates['settings.smsSettings.autoSendOnSale'] = Boolean(incoming.autoSendOnSale);
+    }
+    if (incoming.autoSendOnDuePayment !== undefined) {
+      updates['settings.smsSettings.autoSendOnDuePayment'] = Boolean(incoming.autoSendOnDuePayment);
+    }
+    if (incoming.sendToCustomersWithPhone !== undefined) {
+      updates['settings.smsSettings.sendToCustomersWithPhone'] = Boolean(
+        incoming.sendToCustomersWithPhone
+      );
+    }
+    if (incoming.minSaleAmountForSms !== undefined) {
+      const minimum = Number(incoming.minSaleAmountForSms);
+      if (!Number.isFinite(minimum) || minimum < 0) {
+        return ApiResponse.badRequest(res, {
+          message: 'Minimum sale amount must be 0 or more',
+          messageBn: 'সর্বনিম্ন বিক্রয় পরিমাণ ০ বা তার বেশি দিন',
+        });
+      }
+      updates['settings.smsSettings.minSaleAmountForSms'] = minimum;
+    }
+    if (incoming.language !== undefined) {
+      if (!['bn', 'en'].includes(incoming.language)) {
+        return ApiResponse.badRequest(res, {
+          message: 'SMS language must be bn or en',
+          messageBn: 'এসএমএস ভাষা bn অথবা en হতে হবে',
+        });
+      }
+      updates['settings.smsSettings.language'] = incoming.language;
+    }
+  }
+
   if (Object.keys(updates).length === 0) {
     return ApiResponse.badRequest(res, {
       message: 'No valid settings provided',

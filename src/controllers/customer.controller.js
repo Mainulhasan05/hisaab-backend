@@ -94,6 +94,19 @@ exports.setOpeningDue = asyncHandler(async (req, res) => {
   });
 });
 
+// One collection's রসিদ, for re-printing. See the service method for why this
+// reads the frozen snapshot rather than the customer's live balance.
+exports.getPaymentReceipt = asyncHandler(async (req, res) => {
+  const result = await customerService.getPaymentReceipt(
+    req.shop._id, req.params.id, req.params.paymentId, req
+  );
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Receipt retrieved successfully',
+    messageBn: 'রসিদ পাওয়া গেছে',
+  });
+});
+
 // Full account statement — sales, payments, returns and adjustments in one
 // running-balance ledger
 exports.getCustomerLedger = asyncHandler(async (req, res) => {

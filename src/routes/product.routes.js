@@ -15,6 +15,13 @@ router.use(protect);
 // Product routes
 router.get('/', rbac('products', 'view'), productController.getProducts);
 router.post('/', rbac('products', 'create'), validate(productValidation.createProduct), productController.createProduct);
+// ABOVE `/:id`, like every other named product route here — Express matches in
+// order, so a route declared after it is read as a product id and 404s.
+//
+// `products.view`, not `products.create`: this is the list of options the
+// product form offers, and the form is also opened to look at a product. A
+// staff member who can see products can see what their shop calls its sizes.
+router.get('/variant-options', rbac('products', 'view'), productController.getVariantOptions);
 router.get('/low-stock', rbac('products', 'view'), productController.getLowStock);
 router.get('/search', rbac('products', 'view'), productController.searchProductsForSale);
 router.get('/barcode/:code', rbac('products', 'view'), productController.getProductByCode);
