@@ -1172,6 +1172,7 @@ class PurchaseService {
       throw new AppError('Purchase not found', 'ক্রয়টি পাওয়া যায়নি', 404);
     }
 
+    // cancelled-inclusive: a purchase's payment history, shown in full.
     const payments = await Payment.find({ shop: shopId, purchase: purchaseId })
       .populate('receivedBy', 'name')
       .sort({ createdAt: -1 })

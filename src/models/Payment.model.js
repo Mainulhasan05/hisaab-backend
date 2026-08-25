@@ -226,6 +226,104 @@ const paymentSchema = new mongoose.Schema({
   dueAfter: {
     type: Number,
     default: null
+  },
+  /**
+   * ── Which branches' books this collection actually reduced ────────────────
+   *
+   * `CustomerBalance.settleDue` spreads a khata collection across the branches
+   * that hold the debt — collecting branch first, then oldest — and returns
+   * exactly what it applied. That return value used to be discarded.
+   *
+   * It is kept now because CANCELLING a collection has to put the money back
+   * where it came from, and there is no way to work that out afterwards: the
+   * balances have moved on, other collections have landed, and re-deriving the
+   * split would reverse a different allocation from the one that happened. A
+   * reversal that guesses is how one branch ends up permanently overstated and
+   * another permanently short.
+   *
+   * Empty on rows written before this existed, and on shops with no branch
+   * rows at all. `cancelDueCollection` falls back to the payment's own branch
+   * there, which is where a single-branch shop's money was always going.
+   */
+  branchAllocation: {
+    type: [
+      {
+        _id: false,
+        branch: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null },
+        amount: { type: Number, default: 0 },
+      },
+    ],
+    default: () => [],
+  },
+  /**
+   * ═════════════════════════════════════════════════════════════════════════
+   * VOIDING A ROW THAT SHOULD NEVER HAVE EXISTED
+   * ═════════════════════════════════════════════════════════════════════════
+   *
+   * `immutableGuard` has refused to delete a Payment since the day it was
+   * written, and the error it raises says "Use void/cancel instead." Nothing
+   * ever built the void. So a বাকি আদায় keyed against the wrong customer, or
+   * for ৳20,000 instead of ৳2,000, was permanent: the shop's books, the
+   * customer's খাতা and the day's cash were all wrong and there was no
+   * operation in the system that could put them right.
+   *
+   * ── Why a status and not a deletion, and not a negative row ───────────────
+   *
+   * Not a deletion, because the receipt is already in the customer's hand. A
+   * number they can read has to keep resolving to something, and what it must
+   * resolve to is "বাতিল" — not "not found", which is indistinguishable from
+   * the shop losing the record.
+   *
+   * Not a reversing row with a negative amount either, tempting as it is: it
+   * would make every `$sum: '$amount'` net out for free. But `amount` carries
+   * `min: 0.01` precisely because a negative payment runs the whole ledger
+   * backwards (see `settleCustomerDue`), and every reader that COUNTS rows
+   * rather than summing them would report two collections where there was one.
+   * `PlatformPayment.reversalOf` takes that shape and can afford to — it has a
+   * handful of readers. This model has fourteen.
+   *
+   * ── The one thing to get right when adding a reader ───────────────────────
+   *
+   * Filter `status: { $ne: 'cancelled' }`, NEVER `status: 'active'`. Every row
+   * written before this field existed has no `status` at all, and `$ne` matches
+   * a missing field while an equality test does not — so the equality version
+   * silently reports every shop's historical takings as zero. That is also why
+   * there is no migration to run: the absence of the field IS "active".
+   *
+   * `src/tests/paymentCancellation.test.js` scans the services for a reader
+   * that forgot.
+   */
+  status: {
+    type: String,
+    enum: {
+      values: ['active', 'cancelled'],
+      message: 'অবৈধ পেমেন্ট স্ট্যাটাস'
+    },
+    default: 'active'
+  },
+  cancelledAt: {
+    type: Date,
+    default: null
+  },
+  cancelledBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+  /**
+   * Required by the service, not by the schema.
+   *
+   * A void moves real money back and manufactures debt against a customer who
+   * believes they have paid. "Why?" is the first question anyone auditing this
+   * will ask, and the answer has to have been captured at the moment it was
+   * still known. The schema stays permissive so a legacy row is not made
+   * invalid retroactively; `cancelDueCollection` refuses an empty one.
+   */
+  cancelReason: {
+    type: String,
+    trim: true,
+    maxlength: [300, 'কারণ ৩০০ অক্ষরের বেশি হতে পারবে না'],
+    default: ''
   }
 }, {
   timestamps: true,
@@ -249,6 +347,11 @@ paymentSchema.index({ type: 1, createdAt: -1 }); // Admin subscription-payment q
 // so a derived number that somehow repeated is caught here rather than
 // discovered by two customers holding the same slip.
 paymentSchema.index({ shop: 1, receiptNo: 1 }, { unique: true, sparse: true });
+// The রসিদ register: "every collection this shop has taken, newest first",
+// with the cancelled ones filtered out or called out. Compound on status so the
+// common listing is served straight from the index rather than by fetching
+// cancelled rows and discarding them.
+paymentSchema.index({ shop: 1, type: 1, status: 1, paidAt: -1 });
 
 // Virtual: Is refund
 paymentSchema.virtual('isRefund').get(function() {

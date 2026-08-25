@@ -56,7 +56,7 @@ function productScope(shopId, branchId, extra = {}) {
 // must agree and don't is how a report ends up disagreeing with the dashboard
 // about which day a sale landed on.
 const { BD_OFFSET_MS, BD_TZ, getBangladeshTodayStr, getBangladeshDayRange } = require('../utils/bdTime.util');
-const { paidAtMatch } = require('../utils/paymentDate.util');
+const { paidAtMatch, LIVE_PAYMENT } = require('../utils/paymentDate.util');
 
 class ReportService {
   /**
@@ -892,6 +892,7 @@ class ReportService {
           $match: {
             ...this._baseMatch(shopId, branchId),
             type: 'due_collection',
+            ...LIVE_PAYMENT,
             // Effective date: a collection entered today for last Tuesday
             // belongs on last Tuesday's summary, not this one.
             ...paidAtMatch({ $gte: startOfDay, $lte: endOfDay }),

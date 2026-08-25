@@ -50,6 +50,7 @@ const { priceTierFor, sellingPriceFor, hasWholesalePrice } = require('../utils/p
 const { resolveLineRate } = require('../utils/lineDiscount.util');
 const { resolveSaleDate } = require('../utils/saleDate.util');
 const { resolveCustomInvoiceNo } = require('../utils/invoiceNo.util');
+const { LIVE_PAYMENT } = require('../utils/paymentDate.util');
 const { buildPaymentReceiptNo } = require('../utils/receiptNo.util');
 const { deductBatches, restoreBatches, batchWriteOp } = require('../utils/batch.util');
 const { hasFeature } = require('../utils/features.util');
@@ -2589,6 +2590,10 @@ class SaleService {
         sale: sale._id,
         account: courierId,
         method: 'courier',
+        // This one SUMS, so a voided leg would overstate what the courier is
+        // holding. Nothing can void a courier leg today; the filter is here so
+        // that the day something can, this reconciliation is already right.
+        ...LIVE_PAYMENT,
       }).select('amount type').session(session || null).lean();
 
       const held = quantizeMoney(legs.reduce(
@@ -3559,6 +3564,8 @@ class SaleService {
       throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }
 
+    // cancelled-inclusive: the invoice's payment history, where a voided row
+    // must stay legible rather than disappear.
     const payments = await Payment.find({ shop: shopId, sale: saleId })
       .populate('receivedBy', 'name')
       .sort({ createdAt: -1 })

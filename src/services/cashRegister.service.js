@@ -12,7 +12,7 @@ const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS } = require('../config/constants');
 const { branchFilter, requireBranch, isAllBranchesView } = require('../utils/branchScope.util');
 const { toBangladeshDateStr, getBangladeshDayRange, endOfBangladeshDay } = require('../utils/bdTime.util');
-const { paidAtMatch } = require('../utils/paymentDate.util');
+const { paidAtMatch, LIVE_PAYMENT } = require('../utils/paymentDate.util');
 
 class CashRegisterService {
   /**
@@ -167,6 +167,7 @@ class CashRegisterService {
             // from the other direction.
             type: { $in: ['due_collection', 'sale_payment', 'advance'] },
             atCheckout: { $ne: true },
+            ...LIVE_PAYMENT,
             // The EFFECTIVE date, not when the row was written. A বাকি আদায়
             // backdated to a day whose register is already closed belongs to
             // that day's book and must not land in today's expected closing —
@@ -215,6 +216,7 @@ class CashRegisterService {
             ...branchMatch,
             method: 'cash',
             type: 'refund',
+            ...LIVE_PAYMENT,
             ...paidAtMatch({ $gte: start, $lte: end }),
           },
         },
@@ -243,6 +245,7 @@ class CashRegisterService {
             ...branchMatch,
             method: 'cash',
             type: 'purchase_payment',
+            ...LIVE_PAYMENT,
             ...paidAtMatch({ $gte: start, $lte: end }),
           },
         },

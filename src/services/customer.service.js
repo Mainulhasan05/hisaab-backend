@@ -17,8 +17,8 @@ const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.u
 const { resolveWholesaleFlag } = require('../utils/pricing.util');
 const { toMoney } = require('../utils/invoiceMath.util');
 const { quantizeMoney } = require('../utils/quantity.util');
-const { resolvePaidAt } = require('../utils/paymentDate.util');
-const { toBangladeshDateStr } = require('../utils/bdTime.util');
+const { resolvePaidAt, paidAtMatch, LIVE_PAYMENT } = require('../utils/paymentDate.util');
+const { toBangladeshDateStr, endOfBangladeshDay } = require('../utils/bdTime.util');
 const mongoose = require('mongoose');
 
 /** Escape user input before it reaches $regex — raw input is a ReDoS vector. */
@@ -1305,8 +1305,22 @@ class CustomerService {
         .select('invoiceNo total createdAt')
         .sort({ createdAt: 1 })
         .lean(),
+      /**
+       * cancelled-inclusive: the খতিয়ান deliberately does NOT filter with
+       * `LIVE_PAYMENT`.
+       *
+       * A voided collection has to stay visible here, struck through and marked
+       * বাতিল. This is the one screen that answers "কবে কত জমা দিয়েছিলাম", and a
+       * payment that vanishes from it is indistinguishable from the shop having
+       * lost the record — which is precisely the suspicion a customer holding a
+       * receipt will arrive with.
+       *
+       * What it must NOT do is move the balance. See where `cancelled` is read
+       * below: the row is emitted with `debit: 0, credit: 0`, so the running
+       * balance is identical to one computed without it.
+       */
       Payment.find(scope)
-        .select('amount method type sale createdAt paidAt notes receiptNo')
+        .select('amount method type sale createdAt paidAt notes receiptNo status cancelledAt cancelReason')
         .sort({ createdAt: 1 })
         .lean(),
       DueAdjustment.find(scope)
@@ -1365,6 +1379,17 @@ class CustomerService {
 
     for (const p of payments) {
       const isRefund = p.type === 'refund';
+      /**
+       * A voided collection is shown but does not count.
+       *
+       * Zeroing the two figures rather than skipping the row is what keeps both
+       * promises at once: the entry is still there to read, and the running
+       * balance below is arithmetically identical to a ledger that never
+       * contained it. Filtering it out instead would leave a customer unable to
+       * see what happened to a receipt they are holding; leaving the amount in
+       * would put the খতিয়ান permanently out by that payment.
+       */
+      const isCancelled = p.status === 'cancelled';
       entries.push({
         _id: String(p._id),
         type: isRefund ? 'refund' : 'payment',
@@ -1382,8 +1407,13 @@ class CustomerService {
         saleId: p.sale ? String(p.sale) : null,
         // Cash handed back reverses the credit the customer got for paying.
         // Pairs with the return's credit line above.
-        debit: isRefund ? (p.amount || 0) : 0,
-        credit: isRefund ? 0 : (p.amount || 0),
+        debit: isCancelled ? 0 : (isRefund ? (p.amount || 0) : 0),
+        credit: isCancelled ? 0 : (isRefund ? 0 : (p.amount || 0)),
+        // What the row SAID before it was voided, so the খতিয়ান can show the
+        // struck-through figure rather than a meaningless ৳0.
+        cancelled: isCancelled,
+        cancelledAmount: isCancelled ? (p.amount || 0) : 0,
+        cancelReason: isCancelled ? (p.cancelReason || '') : '',
         /**
          * Present only when this row has a printable রসিদ behind it, which is
          * what the খতিয়ান needs in order to offer a reprint on the right lines
@@ -1479,6 +1509,16 @@ class CustomerService {
   async getPaymentReceipt(shopId, customerId, paymentId, req = null) {
     const customer = await this.getCustomerById(shopId, customerId, req);
 
+    /**
+     * cancelled-inclusive: and this is the case the rule was written for.
+     *
+     * The receipt number is already on a slip in someone's hand. It has to keep
+     * resolving — to a document stamped বাতিল, which is an answer, rather than
+     * to a 404, which is indistinguishable from the shop having lost the
+     * record. A customer who was told their payment was cancelled and then
+     * finds the receipt "does not exist" has been given the worse of the two
+     * stories.
+     */
     const payment = await Payment.findOne({
       _id: paymentId,
       shop: shopId,
@@ -1518,6 +1558,167 @@ class CustomerService {
     };
   }
 
+  /**
+   * ─────────────────────────────────────────────────────────────────────────
+   * VOID A WRONG COLLECTION
+   * ─────────────────────────────────────────────────────────────────────────
+   *
+   * The ledger arithmetic lives in `dueSettlement.cancelDueCollection`, beside
+   * the `settleCustomerDue` it reverses, so the two can be read against each
+   * other. What this adds is the audit trail — and the audit entry matters more
+   * here than on almost any other action in the app, because a void moves real
+   * money back and hands a customer a debt they believe they have already
+   * cleared. Six months later "why does this customer owe ৳2,000 again" has to
+   * have an answer with a name and a date on it.
+   */
+  async cancelDueCollection(shopId, userId, paymentId, body = {}, req = null) {
+    const result = await runInTransaction(async (session) => {
+      const out = await dueSettlementService.cancelDueCollection(
+        { shopId, userId, paymentId, reason: body.reason, req },
+        session
+      );
+
+      await AuditLog.log({
+        shop: shopId,
+        user: userId,
+        customer: out.customer._id,
+        action: 'due_collection_cancel',
+        actionBn: 'বাকি আদায় বাতিল',
+        // The reason and the receipt number are both in the description because
+        // they are the two things a reader will search for, and neither can be
+        // recovered from anywhere else once the row is one of thousands.
+        description:
+          `Cancelled ৳${out.amount} collection ${out.payment.receiptNo || out.payment._id} ` +
+          `from ${out.customer.name} (${out.customer.phone}) — ${out.payment.cancelReason}`,
+        descriptionBn:
+          `${out.customer.name} এর ৳${out.amount} আদায় বাতিল ` +
+          `(রসিদ ${out.payment.receiptNo || '—'}) — ${out.payment.cancelReason}`,
+        entity: {
+          type: 'customer',
+          id: out.customer._id,
+          name: out.customer.name,
+        },
+        changes: {
+          before: { totalDue: quantizeMoney(out.customer.totalDue - out.amount) },
+          after: { totalDue: out.customer.totalDue },
+        },
+        req,
+      });
+
+      return out;
+    });
+
+    /**
+     * No SMS.
+     *
+     * Deliberate, and worth stating so nobody adds one later thinking it was an
+     * oversight. "আপনার ৳২,০০০ জমা বাতিল করা হয়েছে" arriving unannounced is
+     * alarming in exactly the way a receipt is reassuring — the customer cannot
+     * tell a shop's typo from an accusation, and the shopkeeper is standing
+     * right there and can explain it in one sentence. If a shop wants to tell
+     * them, the SMS page can send whatever wording fits.
+     */
+    return result;
+  }
+
+  /**
+   * ─────────────────────────────────────────────────────────────────────────
+   * THE রসিদ REGISTER — every collection this shop has taken
+   * ─────────────────────────────────────────────────────────────────────────
+   *
+   * A receipt that can only be found by remembering WHICH customer it belonged
+   * to is only half a record. This is the other half: the whole book, newest
+   * first, searchable by receipt number, customer name or phone — which is how
+   * a shopkeeper holding a slip and no other context actually looks something
+   * up.
+   *
+   * cancelled-inclusive by design, with `status` on every row. A register that
+   * hid voided collections would let one disappear between two visits with no
+   * trace, which is exactly the failure the void was built to avoid. The client
+   * strikes them through; `summary.total` counts only the live ones.
+   *
+   * Ordered on `paidAt` — the day the money changed hands, not the day it was
+   * keyed in, matching the খতিয়ান and every report. A collection backdated to
+   * last Tuesday sorts into last Tuesday.
+   */
+  async getCollectionRegister(shopId, options = {}, req = null) {
+    const { page = 1, limit = 25, search = '', startDate, endDate, includeCancelled = true } = options;
+
+    const scope = branchFilter(req || {}, { shop: shopId, type: 'due_collection' });
+    if (!includeCancelled) Object.assign(scope, LIVE_PAYMENT);
+
+    if (startDate || endDate) {
+      const range = {};
+      if (startDate) range.$gte = new Date(startDate);
+      if (endDate) range.$lte = endOfBangladeshDay(new Date(endDate));
+      Object.assign(scope, paidAtMatch(range));
+    }
+
+    /**
+     * Search runs over the receipt number here and over the CUSTOMER
+     * separately, because a Payment has no name on it to match — the customer
+     * is a reference. Resolving matching customers first and then filtering by
+     * id keeps this one indexed query instead of a `$lookup` over the whole
+     * payment collection.
+     */
+    const term = String(search || '').trim();
+    if (term) {
+      const rx = new RegExp(escapeRegex(term), 'i');
+      const matched = await Customer.find(
+        { shop: shopId, $or: [{ name: rx }, { phone: rx }] },
+        '_id'
+      ).limit(200).lean();
+
+      scope.$or = [
+        { receiptNo: rx },
+        ...(matched.length > 0 ? [{ customer: { $in: matched.map((c) => c._id) } }] : []),
+      ];
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const [rows, total, liveTotal] = await Promise.all([
+      // cancelled-inclusive: a register that hid voided collections would let
+      // one disappear between two visits with no trace, which is the failure
+      // the void was built to avoid. `status` rides on every row so the client
+      // can strike them through; `summary` below counts only the live ones.
+      Payment.find(scope)
+        .select('amount method type paidAt createdAt receiptNo notes status cancelledAt cancelReason dueBefore dueAfter branch')
+        .populate('customer', 'name phone')
+        .populate('receivedBy', 'name')
+        .populate('cancelledBy', 'name')
+        .sort({ paidAt: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      // cancelled-inclusive: this counts the rows the listing above returns, so
+      // it has to match it exactly — a count that excluded voided rows would
+      // paginate a list that includes them and lose the last page.
+      Payment.countDocuments(scope),
+      // What the shop actually took over this filter — voided rows excluded,
+      // because a total that counts money the shop gave back is not a total.
+      Payment.aggregate([
+        { $match: { ...scope, ...LIVE_PAYMENT } },
+        { $group: { _id: null, amount: { $sum: '$amount' }, count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    return {
+      collections: rows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / parseInt(limit)) || 0,
+      },
+      summary: {
+        collected: liveTotal[0]?.amount || 0,
+        count: liveTotal[0]?.count || 0,
+        cancelled: total - (liveTotal[0]?.count || 0),
+      },
+    };
+  }
+
   async getCustomerHistory(shopId, customerId, options = {}, req = null) {
     const { page = 1, limit = 20 } = options;
 
@@ -1548,6 +1749,10 @@ class CustomerService {
       // is where it belongs anyway, being older than everything that has one.
       // `scripts/backfill-payment-paid-at.js` stamps them and removes the
       // caveat entirely.
+      // cancelled-inclusive: a history tab that hides voided collections is a
+      // history tab that cannot answer "what happened to my receipt". Both the
+      // page and its count include them, so the pagination stays honest; the
+      // client marks them.
       Payment.find(scope)
         .sort({ paidAt: -1, createdAt: -1 })
         .skip(skip)

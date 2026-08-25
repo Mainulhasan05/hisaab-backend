@@ -224,7 +224,10 @@ async function settleCustomerDue(
   // that actually hold the debt — collecting branch first, then oldest. Under
   // separate books the check above guarantees it all lands on the collecting
   // branch, so one code path serves both modes.
-  await CustomerBalance.settleDue(
+  // The return value is kept, not discarded: it is the only record of WHICH
+  // branches' books this money reduced, and a cancellation has to put it back
+  // exactly there. See `Payment.branchAllocation`.
+  const branchAllocation = await CustomerBalance.settleDue(
     {
       shop: shopId,
       customer: customer._id,
@@ -233,6 +236,15 @@ async function settleCustomerDue(
     },
     session
   );
+
+  if (branchAllocation.length > 0) {
+    await Payment.updateOne(
+      { _id: paymentId },
+      { $set: { branchAllocation } },
+      sessionOpt
+    );
+    payment.branchAllocation = branchAllocation;
+  }
 
   // ── And finally, the invoices that actually hold the debt ─────────────────
   //
@@ -362,7 +374,19 @@ async function reallocateCustomerInvoices(
   // with a flat `mockResolvedValue([])` instead of hand-building an Aggregate.
   const pools = await Payment.aggregate(
     [
-      { $match: { shop: shopOid, customer: customerOid, type: { $in: ['due_collection', 'advance'] } } },
+      {
+        $match: {
+          shop: shopOid,
+          customer: customerOid,
+          type: { $in: ['due_collection', 'advance'] },
+          // A voided collection is not money the shop is holding, so it must
+          // not settle an invoice. `$ne` rather than `status: 'active'`: every
+          // row written before the field existed has no `status` at all, and an
+          // equality test would exclude all of them — emptying the pool and
+          // silently un-allocating every khata payment ever taken.
+          status: { $ne: 'cancelled' },
+        },
+      },
       { $group: { _id: '$branch', total: { $sum: '$amount' } } },
     ],
     sessionOpt
@@ -623,4 +647,188 @@ async function readCollectableDue(
   return quantizeMoney(doc?.totalDue || 0);
 }
 
-module.exports = { settleCustomerDue, readCollectableDue, reallocateCustomerInvoices };
+/**
+ * ═════════════════════════════════════════════════════════════════════════════
+ * VOID A বাকি আদায় THAT SHOULD NEVER HAVE BEEN TAKEN
+ * ═════════════════════════════════════════════════════════════════════════════
+ *
+ * `immutableGuard` has refused to delete a Payment since it was written, and
+ * the error it raises tells the caller to "use void/cancel instead". Nothing
+ * ever built that. So a collection keyed against the wrong customer, or for
+ * ৳20,000 instead of ৳2,000, was permanent — the customer's খাতা, the shop's
+ * cash and every report were wrong together and no operation in the system
+ * could put them right. A shopkeeper's only recourse was to invent a
+ * compensating entry somewhere else, which is how a book stops reconciling.
+ *
+ * ── This undoes exactly what `settleCustomerDue` did, in reverse ─────────────
+ *
+ * Five writes, and they have to be all five or none. Reading them beside
+ * `settleCustomerDue` is the intended way to check this stays correct:
+ *
+ *   1. the Payment row is marked `cancelled` (never deleted — the receipt is
+ *      already in the customer's hand and its number must keep resolving);
+ *   2. the fund account gives the money back;
+ *   3. `Customer.totalPaid` / `totalDue` move back;
+ *   4. each branch row that was reduced is put back by the amount IT took,
+ *      from the snapshot taken at collection time;
+ *   5. the invoices are re-derived — which needs no reversal logic at all,
+ *      because `reallocateCustomerInvoices` recomputes from scratch and the
+ *      pool it reads now excludes cancelled rows.
+ *
+ * ── What it deliberately refuses ─────────────────────────────────────────────
+ *
+ * Anything that is not a `due_collection`. A checkout leg belongs to its sale
+ * and is undone by cancelling the sale; an invoice payment moves `Sale.paid`
+ * and `Sale.status` as well, which is a different reversal that this one would
+ * get wrong. Refusing loudly is worth more than a void that half works.
+ *
+ * ── On cancelling an OLD collection ──────────────────────────────────────────
+ *
+ * Allowed, and deliberately so. A wrong entry is not always caught the same
+ * day, and a shopkeeper who cannot fix last week's mistake will fix it by
+ * inventing an entry this week instead. Reports key on `paidAt`, so they
+ * re-derive correctly; a CLOSED cash register keeps its frozen figures, which
+ * is what a settled record is for. The UI warns when the day has passed, and
+ * the reason is stored so the difference has an explanation attached.
+ *
+ * @param {Object} p
+ * @param {ObjectId} p.shopId
+ * @param {ObjectId} p.userId    who is cancelling
+ * @param {ObjectId} p.paymentId
+ * @param {string} p.reason      required, and kept
+ * @param {Object|null} p.req
+ * @param {Object|null} session
+ */
+async function cancelDueCollection(
+  { shopId, userId, paymentId, reason, req = null },
+  session = null
+) {
+  const sessionOpt = session ? { session } : {};
+
+  const note = String(reason || '').trim();
+  if (!note) {
+    throw new AppError(
+      'A reason is required to cancel a collection',
+      'বাতিলের কারণ লিখুন',
+      400
+    );
+  }
+
+  // cancelled-inclusive: this read is what REFUSES a second cancellation, so it
+  // has to be able to see the first one. Filtering here would make a
+  // double-tapped বাতিল look like an unknown payment and reverse the money
+  // twice — the exact failure the status check below exists to prevent.
+  const payment = await Payment.findOne(
+    { _id: paymentId, shop: shopId },
+    null,
+    sessionOpt
+  );
+  if (!payment) {
+    throw new AppError('Payment not found', 'পেমেন্ট পাওয়া যায়নি', 404);
+  }
+
+  if (payment.type !== 'due_collection') {
+    throw new AppError(
+      'Only due collections can be cancelled here',
+      'শুধু বাকি আদায় এখান থেকে বাতিল করা যায়',
+      400
+    );
+  }
+
+  /**
+   * Idempotent by refusal rather than by silence.
+   *
+   * A double-tapped বাতিল button on a slow connection must not reverse the
+   * money twice — and a caller who is told "already cancelled" learns something
+   * true, whereas a silent success would suggest a second reversal happened.
+   */
+  if (payment.status === 'cancelled') {
+    throw new AppError(
+      'This collection is already cancelled',
+      'এই আদায়টি আগেই বাতিল করা হয়েছে',
+      400
+    );
+  }
+
+  const customer = await Customer.findOne(
+    { _id: payment.customer, shop: shopId },
+    null,
+    sessionOpt
+  );
+  if (!customer) {
+    throw new AppError('কাস্টমার পাওয়া যায়নি', 'Customer not found', 404);
+  }
+
+  const amount = quantizeMoney(payment.amount || 0);
+
+  // 1 — the row itself. Marked BEFORE the rollups move, so that if anything
+  // below throws, the transaction rolls the mark back with it rather than
+  // leaving money reversed against a row that still reads as live.
+  payment.status = 'cancelled';
+  payment.cancelledAt = new Date();
+  payment.cancelledBy = userId;
+  payment.cancelReason = note;
+  await payment.save(sessionOpt);
+
+  // 2 — the money leaves the account it landed in. A no-op for a shop without
+  // `features.fundAccounts`, whose rows carry a null account (I-1).
+  await paymentAccountService.applyAccountDelta({
+    shop: shopId,
+    account: payment.account,
+    amount: -amount,
+    session: session || null,
+  });
+
+  // 3 — the shop-wide rollup. Quantized per write, like every other mutation of
+  // these two fields, so a customer settled in instalments does not end on a
+  // 1e-13 residue that keeps them on the বাকি list forever.
+  customer.totalPaid = quantizeMoney((customer.totalPaid || 0) - amount);
+  customer.totalDue = quantizeMoney((customer.totalDue || 0) + amount);
+  await customer.save(sessionOpt);
+
+  // 4 — each branch row gets back exactly what it gave.
+  //
+  // From the snapshot, not re-derived: the balances have moved since, and
+  // spreading the reversal by today's figures would credit branches that never
+  // held this debt while leaving the ones that did permanently overstated.
+  const allocation = (payment.branchAllocation || []).filter((a) => a?.branch);
+  const toRestore = allocation.length > 0
+    ? allocation
+    // Legacy rows, and single-branch shops, have no snapshot. The payment's own
+    // branch is where the money was taken and — under separate books, which is
+    // the only mode where this matters — where `settleCustomerDue` guarantees
+    // all of it landed.
+    : (payment.branch ? [{ branch: payment.branch, amount }] : []);
+
+  for (const entry of toRestore) {
+    const share = quantizeMoney(Number(entry.amount) || 0);
+    if (share <= 0) continue;
+    await CustomerBalance.applyDelta(
+      {
+        shop: shopId,
+        customer: customer._id,
+        branch: entry.branch,
+        paid: -share,
+        due: share,
+      },
+      session
+    );
+  }
+
+  // 5 — the invoices. No reversal logic: this recomputes the whole allocation
+  // from a pool that no longer contains the cancelled row, so the invoices this
+  // money was holding open simply go back to being open.
+  const allocations = await reallocateCustomerInvoices(
+    { shopId, customerId: customer._id },
+    session
+  );
+
+  return { payment, customer, amount, allocations };
+}
+
+module.exports = {
+  settleCustomerDue,
+  readCollectableDue,
+  reallocateCustomerInvoices,
+  cancelDueCollection,
+};

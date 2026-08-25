@@ -15,7 +15,7 @@ const Product = require('../models/Product.model');
 const { buildDateMatch } = require('../utils/reportScope.util');
 const { isBranchCustomerScope } = require('../utils/branchScope.util');
 const { quantizeMoney } = require('../utils/quantity.util');
-const { paidAtMatch, PAID_AT_EXPR } = require('../utils/paymentDate.util');
+const { paidAtMatch, PAID_AT_EXPR, LIVE_PAYMENT } = require('../utils/paymentDate.util');
 const { PAYMENT_TYPES } = require('../config/constants');
 
 /**
@@ -402,7 +402,7 @@ class DetailedReportService {
         // land on the same side of the statement's opening line as it does in
         // the খতিয়ান, or the opening balance and the entries disagree by
         // exactly that payment.
-        { $match: { ...scope, ...paidAtMatch(before) } },
+        { $match: { ...scope, ...LIVE_PAYMENT, ...paidAtMatch(before) } },
         {
           $group: {
             _id: '$customer',
@@ -462,7 +462,7 @@ class DetailedReportService {
         .sort({ createdAt: 1 })
         .limit(MAX_ROWS_PER_COLLECTION)
         .lean(),
-      Payment.find({ ...scope, ...paidAtMatch(range) })
+      Payment.find({ ...scope, ...LIVE_PAYMENT, ...paidAtMatch(range) })
         .select('customer amount method type notes createdAt paidAt')
         .sort({ createdAt: 1 })
         .limit(MAX_ROWS_PER_COLLECTION)
@@ -759,7 +759,7 @@ class DetailedReportService {
         },
       ]),
       Payment.aggregate([
-        { $match: { ...paymentScope, ...paidAtMatch(before) } },
+        { $match: { ...paymentScope, ...LIVE_PAYMENT, ...paidAtMatch(before) } },
         { $lookup: { from: 'purchases', localField: 'purchase', foreignField: '_id', as: 'p' } },
         { $unwind: '$p' },
         { $match: { 'p.supplier': { $in: ids } } },
@@ -807,7 +807,7 @@ class DetailedReportService {
         },
       ]),
       Payment.aggregate([
-        { $match: { ...paymentScope, ...paidAtMatch(range) } },
+        { $match: { ...paymentScope, ...LIVE_PAYMENT, ...paidAtMatch(range) } },
         { $lookup: { from: 'purchases', localField: 'purchase', foreignField: '_id', as: 'p' } },
         { $unwind: '$p' },
         // The cap comes AFTER the supplier filter, deliberately. Capping first

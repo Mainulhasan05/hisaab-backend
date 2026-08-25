@@ -94,6 +94,29 @@ exports.setOpeningDue = asyncHandler(async (req, res) => {
   });
 });
 
+// The রসিদ register — every বাকি আদায় this shop has taken, searchable by
+// receipt number, customer name or phone.
+exports.getCollectionRegister = asyncHandler(async (req, res) => {
+  const result = await customerService.getCollectionRegister(req.shop._id, req.query, req);
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Collection register retrieved successfully',
+    messageBn: 'আদায়ের তালিকা লোড হয়েছে',
+  });
+});
+
+// Void a collection that should never have been taken. Owner-only — see route.
+exports.cancelDueCollection = asyncHandler(async (req, res) => {
+  const result = await customerService.cancelDueCollection(
+    req.shop._id, req.user._id, req.params.paymentId, req.body, req
+  );
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Collection cancelled',
+    messageBn: 'আদায়টি বাতিল করা হয়েছে',
+  });
+});
+
 // One collection's রসিদ, for re-printing. See the service method for why this
 // reads the frozen snapshot rather than the customer's live balance.
 exports.getPaymentReceipt = asyncHandler(async (req, res) => {

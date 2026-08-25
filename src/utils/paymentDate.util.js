@@ -180,8 +180,43 @@ function resolvePaidAt({ raw, req = null, shop = null, label = 'আদায়�
   return when;
 }
 
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * "MONEY THAT ACTUALLY COUNTS"
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Spread this into the `$match` or filter of EVERY Payment read that sums,
+ * counts or lists money. A cancelled row is a collection that should never have
+ * been taken — the customer's খাতা has been put back, the fund account has
+ * given the money up, and any reader that still counts it is reporting cash the
+ * shop does not have.
+ *
+ * ── Why `$ne` and never `status: 'active'` ───────────────────────────────────
+ *
+ * Every Payment written before the field existed carries no `status` at all.
+ * `$ne: 'cancelled'` matches a missing field; `status: 'active'` does not — so
+ * the equality version would silently report every shop's entire history as
+ * zero, on every report, with no error anywhere. There is deliberately no
+ * migration backfilling `active`: the absence of the field IS active, and a
+ * predicate that depends on a migration having run is a predicate that will be
+ * wrong on the day it does not.
+ *
+ * ── The two places that must NOT use this ────────────────────────────────────
+ *
+ * The customer's খতিয়ান and the রসিদ lookup, which have to SHOW a cancelled
+ * row — struck through, marked বাতিল. "Not found" is indistinguishable from the
+ * shop having lost the record, and the receipt number is already in the
+ * customer's hand. Both opt out explicitly, in writing, at the call site.
+ *
+ * Lives here rather than in its own file because every one of those readers
+ * already imports `paidAtMatch` from this module — the effective-date rule and
+ * the is-it-real rule are asked together, every time.
+ */
+const LIVE_PAYMENT = Object.freeze({ status: { $ne: 'cancelled' } });
+
 module.exports = {
   PAID_AT_EXPR,
   paidAtMatch,
   resolvePaidAt,
+  LIVE_PAYMENT,
 };

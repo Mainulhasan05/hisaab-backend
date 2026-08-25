@@ -15,6 +15,29 @@ router.get('/leaderboard', rbac('customers', 'view'), customerController.getCust
 router.post('/bulk-import/validate', rbac('customers', 'create'), customerController.validateImport);
 router.post('/bulk-import', idempotency(), rbac('customers', 'create'), customerController.bulkImport);
 router.get('/phone/:phone', rbac('customers', 'view'), customerController.getCustomerByPhone);
+
+// The রসিদ register. ABOVE the `/:id(...)` routes, like every other named
+// collection route — Express matches in order and `receipts` would otherwise be
+// read as a customer id.
+router.get('/receipts', rbac('customers', 'view'), customerController.getCollectionRegister);
+
+// ── Voiding a collection ──────────────────────────────────────────────────
+//
+// `ownerOnly`, and for the same reason `opening-due` is: this WRITES A
+// RECEIVABLE BACK ONTO A CUSTOMER. A cashier who could reach it could erase a
+// collection they had pocketed and leave the customer carrying the debt, and
+// the only trace would be an audit row nobody reads daily. It also moves money
+// out of a fund account and changes a past day's reported takings.
+//
+// Idempotent at the route as well as in the service: a double-tapped বাতিল on a
+// slow connection must not reverse the same money twice.
+router.post(
+  '/receipts/:paymentId([0-9a-fA-F]{24})/cancel',
+  idempotency(),
+  ownerOnly,
+  customerController.cancelDueCollection
+);
+
 router.get('/:id([0-9a-fA-F]{24})', rbac('customers', 'view'), customerController.getCustomer);
 router.put('/:id([0-9a-fA-F]{24})', rbac('customers', 'update'), customerController.updateCustomer);
 router.delete('/:id([0-9a-fA-F]{24})', rbac('customers', 'delete'), customerController.deleteCustomer);
