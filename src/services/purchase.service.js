@@ -33,8 +33,13 @@ const {
   parseSellingPrice,
   buildSellingPriceUpdate,
   buildSellingPriceRestore,
+  buildWholesalePriceUpdate,
+  buildWholesalePriceRestore,
 } = require('../utils/purchasePrice.util');
 const { toMoney } = require('../utils/invoiceMath.util');
+const { computePurchaseTotals } = require('../utils/purchaseMath.util');
+const { normalizeWholesalePrice } = require('../utils/pricing.util');
+const { hasFeature } = require('../utils/features.util');
 
 class PurchaseService {
   // Get all purchases with filtering and pagination
@@ -122,6 +127,12 @@ class PurchaseService {
       const sessionOpt = session ? { session } : {};
       const { items, supplier, paid, paymentMethod, date, notes } = purchaseData;
       const rawPayments = Array.isArray(purchaseData.payments) ? purchaseData.payments : [];
+
+      // The পাইকারি column only exists for a shop that bought the capability
+      // (I-7). Resolved ONCE here rather than per line: `hasFeature` reads the
+      // request's shop document, and asking it twenty times in the item loop
+      // would be twenty identical answers.
+      const wholesaleEnabled = hasFeature(req, 'wholesale');
 
     if (!items || items.length === 0) {
       throw new AppError('কমপক্ষে একটি পণ্য যোগ করুন', 'At least one item is required', 400);
@@ -260,6 +271,23 @@ class PurchaseService {
       // `Product.sellingPrice` has always meant.
       const sellingPrice = parseSellingPrice(item.sellingPrice, product.name);
 
+      // ── The পাইকারি rate, if the shop has the capability ────────────────
+      //
+      // `normalizeWholesalePrice` owns the whole gate: it 403s a client that
+      // posts the key without `features.wholesale`, 400s a malformed figure,
+      // and reads 0 and '' as "no rate" rather than as free. Reproducing any of
+      // that here would be a second copy of an entitlement check, which is how
+      // the two drift.
+      //
+      // A shop without the flag never sends the key, so this returns undefined
+      // and the line stores nothing — which is what keeps a flag-off shop
+      // byte-identical (I-7).
+      const wholesalePrice = normalizeWholesalePrice(
+        item.wholesalePrice,
+        wholesaleEnabled,
+        { label: product.name }
+      );
+
       // A variant line must name a variant that exists. Without this the id
       // falls through to the stock write, whose `arrayFilters` match nothing,
       // and `bulkWrite` reports success for a delivery that increased no stock
@@ -294,6 +322,11 @@ class PurchaseService {
         // Null when the line left the price alone, which keeps the stored
         // document identical to what a shop that never uses this posts.
         sellingPrice: sellingPrice ?? undefined,
+        wholesalePrice: wholesalePrice ?? undefined,
+        // What the supplier knocked off THIS line, in taka. Clamped to the line
+        // by `computePurchaseTotals` below, not here — one place decides what a
+        // concession is allowed to be.
+        lineDiscount: toMoney(item.lineDiscount),
         total: itemTotal,
         // The delivery's own batch details. These were read straight off the
         // raw `item` at the stock-write below and never stored, so the expiry a
@@ -306,6 +339,44 @@ class PurchaseService {
 
       totalAmount = quantizeMoney(totalAmount + itemTotal);
     }
+
+    /**
+     * ── What the delivery actually cost ────────────────────────────────────
+     *
+     * `totalAmount` above is the sum of the BILLED lines, which is what this
+     * method has always computed and is now only the first term. The discount
+     * at the foot of the bill and the ভাড়া are spread back over the lines
+     * here, and the result is what `costing.util` blends into
+     * `Product.buyingPrice` — see `purchaseMath.util.js` for why freight is
+     * part of what the stock cost rather than a memo line.
+     *
+     * A delivery with no concession and no ভাড়া — every purchase on the
+     * platform today — comes back with `landedUnitPrice === unitPrice`
+     * exactly and `totalAmount` unchanged, so nothing about it moves (I-1).
+     */
+    const totals = computePurchaseTotals({
+      lines: preparedItems,
+      discount: purchaseData.discount,
+      discountType: purchaseData.discountType,
+      freightCharge: purchaseData.freightCharge,
+      otherCharge: purchaseData.otherCharge,
+    });
+
+    // Written back onto the lines by position — `computePurchaseTotals` maps
+    // its input one-for-one and never reorders, which is what makes the index
+    // safe to key on.
+    totals.lines.forEach((line, i) => {
+      preparedItems[i].lineDiscount = line.lineDiscount;
+      preparedItems[i].discountShare = line.discountShare;
+      preparedItems[i].chargeShare = line.chargeShare;
+      preparedItems[i].landedUnitPrice = line.landedUnitPrice;
+      // Re-stated from the same source as everything else so the line total and
+      // the invoice subtotal cannot be computed two ways and disagree. Equal to
+      // `itemTotal` above by construction.
+      preparedItems[i].total = line.total;
+    });
+
+    totalAmount = totals.totalAmount;
 
     // Generate invoice number
     const invoiceNo = await Purchase.generateInvoiceNo(shopId);
@@ -359,9 +430,25 @@ class PurchaseService {
       shop: shopId,
       branch: branchId,
       invoiceNo,
+      // The number on the SUPPLIER's own challan — what a month-end
+      // reconciliation against their statement is done with. Ours is
+      // `invoiceNo` and they have never heard of it.
+      supplierInvoiceNo: purchaseData.supplierInvoiceNo
+        ? String(purchaseData.supplierInvoiceNo).trim()
+        : undefined,
       supplier: supplierDoc?._id,
       supplierName,
       items: preparedItems,
+      // The foot of the bill, every term of it, from the one function that
+      // computed them. Zero throughout for a delivery with no concession and no
+      // ভাড়া, which stores `subtotal === totalAmount` exactly as before.
+      subtotal: totals.subtotal,
+      itemDiscount: totals.itemDiscount,
+      discount: toMoney(purchaseData.discount),
+      discountType: purchaseData.discountType === 'percentage' ? 'percentage' : 'fixed',
+      discountAmount: totals.discountAmount,
+      freightCharge: totals.freightCharge,
+      otherCharge: totals.otherCharge,
       totalAmount,
       paid: paidAmount,
       paymentMethod: primaryMethod,
@@ -422,6 +509,10 @@ class PurchaseService {
     // (the usual case) or set a price on a delivery received at zero cost.
     const priceSnapshots = new Map();
 
+    // And again for the পাইকারি rate — see the write below for why the three
+    // maps are separate rather than one.
+    const wholesaleSnapshots = new Map();
+
     for (const [itemIndex, item] of preparedItems.entries()) {
       const product = purchaseProductMap.get(String(item.product));
       // Validation above already threw on an unresolvable product; this guard
@@ -451,16 +542,36 @@ class PurchaseService {
       const previousCost = item.variantId
         ? getVariantCost(product, item.variantId)
         : (product.buyingPrice || 0);
+
+      // ── The cost basis blends from the LANDED rate, not the billed one ────
+      //
+      // `landedUnitPrice` carries this line's share of the ভাড়া and the
+      // supplier's discount; `unitPrice` is what the bill said. Blending the
+      // billed rate is what made every margin report on the platform agree that
+      // a consignment whose freight was never recorded had cost less than it
+      // did.
+      //
+      // The fallback is not defensive padding — `computePurchaseTotals` returns
+      // `landedUnitPrice === unitPrice` for a delivery with no charges, and a
+      // caller that bypassed it (a script, a seeder) must still get the old
+      // behaviour rather than a NaN.
+      //
+      // THE SNAPSHOT BELOW MUST READ THE SAME NUMBER. `cancelPurchase` decides
+      // whether it still owns the cost by comparing against `costAfter`; if the
+      // two are computed from different prices the comparison stops matching and
+      // a cancellation silently stops restoring the cost it moved.
+      const costRate = item.landedUnitPrice ?? item.unitPrice;
+
       const costUpdate = item.variantId && product.hasVariants
-        ? buildVariantCostUpdate(item.variantId, item.quantity, item.unitPrice)
-        : buildProductCostUpdate(item.quantity, item.unitPrice);
+        ? buildVariantCostUpdate(item.variantId, item.quantity, costRate)
+        : buildProductCostUpdate(item.quantity, costRate);
 
       if (costUpdate) {
         purchaseStockOps.push({
           updateOne: { filter: { _id: product._id }, update: costUpdate },
         });
 
-        const costAfter = blendedCost(previousStock, previousCost, item.quantity, item.unitPrice);
+        const costAfter = blendedCost(previousStock, previousCost, item.quantity, costRate);
         costSnapshots.set(itemIndex, { costBefore: previousCost, costAfter });
 
         // Keep the in-memory document in step, so a second line for the same
@@ -517,6 +628,42 @@ class PurchaseService {
         }
       }
 
+      // ── The পাইকারি rate, same rules ────────────────────────────────────
+      //
+      // A `$set` and not a blend, ownership-snapshotted for the reversal, and
+      // written onto the variant when the line is a variant line — every
+      // sentence above about `sellingPrice` applies here unchanged.
+      //
+      // Kept in its own snapshot map rather than folded into `priceSnapshots`
+      // because the two move independently: a delivery may reprice the shelf
+      // without touching the wholesale rate, which is the ordinary case, or set
+      // a wholesale rate on goods whose retail price did not change.
+      //
+      // `item.wholesalePrice` is undefined for every shop without
+      // `features.wholesale`, so this whole block is a no-op for them (I-7).
+      const wholesaleOp = buildWholesalePriceUpdate({
+        productId: product._id,
+        variantId: item.variantId,
+        hasVariants: product.hasVariants,
+        wholesalePrice: item.wholesalePrice,
+      });
+
+      if (wholesaleOp) {
+        const previousWholesale = isVariantLine
+          ? (findVariant(product, item.variantId)?.wholesalePrice ?? null)
+          : (product.wholesalePrice ?? null);
+
+        purchaseStockOps.push(wholesaleOp);
+        wholesaleSnapshots.set(itemIndex, { wholesalePriceBefore: previousWholesale });
+
+        if (isVariantLine) {
+          const variant = findVariant(product, item.variantId);
+          if (variant) variant.wholesalePrice = item.wholesalePrice;
+        } else {
+          product.wholesalePrice = item.wholesalePrice;
+        }
+      }
+
       // ── The received batch ──────────────────────────────────────────────
       //
       // Built once, ABOVE the variant / non-variant split, and stamped with the
@@ -541,7 +688,11 @@ class PurchaseService {
               batchNumber: item.batchNumber || `B-${purchase.invoiceNo}-${Date.now()}`,
               expiryDate: item.expiryDate || null,
               quantity: item.quantity,
-              costPrice: item.unitPrice,
+              // Landed, like the moving average it sits beside. A batch is a
+              // parcel of stock and its cost is what that stock cost — FIFO
+              // valuation off a batch that excluded its freight would disagree
+              // with `Product.buyingPrice`, which does not.
+              costPrice: item.landedUnitPrice ?? item.unitPrice,
               receivedDate: new Date(),
               purchaseRef: purchase._id,
             },
@@ -611,8 +762,12 @@ class PurchaseService {
         quantity: item.quantity,
         previousStock,
         newStock,
-        unitCost: item.unitPrice,
-        totalCost: item.total,
+        // Stock valuation, so LANDED — this ledger is what an inventory value
+        // is rebuilt from, and it has to agree with the cost basis it explains.
+        // `item.total` is the BILLED figure; it belongs on the invoice, not in
+        // the valuation ledger, so `totalCost` is recomputed from the same rate.
+        unitCost: item.landedUnitPrice ?? item.unitPrice,
+        totalCost: quantizeMoney(item.quantity * (item.landedUnitPrice ?? item.unitPrice)),
         reference: {
           type: 'purchase',
           id: purchase._id,
@@ -633,7 +788,7 @@ class PurchaseService {
     // Record what this delivery did to each shelf's cost basis. Without it a
     // cancellation has no way to know whether the cost it would be reversing is
     // still the one this purchase set — see `cancelPurchase`.
-    if (costSnapshots.size > 0 || priceSnapshots.size > 0) {
+    if (costSnapshots.size > 0 || priceSnapshots.size > 0 || wholesaleSnapshots.size > 0) {
       for (const [index, snapshot] of costSnapshots) {
         const line = purchase.items[index];
         if (!line) continue;
@@ -648,6 +803,15 @@ class PurchaseService {
         const line = purchase.items[index];
         if (!line) continue;
         line.sellingPriceBefore = snapshot.sellingPriceBefore ?? undefined;
+      }
+      // Same reading for the পাইকারি rate: `null` records "there was no
+      // wholesale rate", which the reversal restores as an ABSENCE rather than
+      // as ৳0 — the difference between a product that bills পাইকারি customers
+      // at retail and one that bills them nothing.
+      for (const [index, snapshot] of wholesaleSnapshots) {
+        const line = purchase.items[index];
+        if (!line) continue;
+        line.wholesalePriceBefore = snapshot.wholesalePriceBefore ?? undefined;
       }
       await purchase.save(sessionOpt);
     }
@@ -840,6 +1004,37 @@ class PurchaseService {
         }
       }
 
+      // ── And the পাইকারি rate, on the same terms ─────────────────────────
+      //
+      // Deliberately NOT gated on `features.wholesale` here. A cancellation
+      // must undo what the purchase did regardless of what the shop's
+      // entitlements look like today: if the capability was switched off
+      // between the delivery and the cancellation, skipping this would leave
+      // the rate this delivery wrote standing forever, and switching the
+      // capability back on would resurrect it. The write path is where the
+      // entitlement is enforced; reversal only has to be faithful.
+      const wholesaleRestoreOp = buildWholesalePriceRestore({
+        productId: product._id,
+        variantId: item.variantId,
+        hasVariants: product.hasVariants,
+        wholesalePrice: item.wholesalePrice,
+        wholesalePriceBefore: item.wholesalePriceBefore,
+        currentPrice: cancelIsVariantLine
+          ? (findVariant(product, item.variantId)?.wholesalePrice ?? null)
+          : (product.wholesalePrice ?? null),
+      });
+
+      if (wholesaleRestoreOp) {
+        cancelStockOps.push(wholesaleRestoreOp);
+        const beforeWholesale = item.wholesalePriceBefore ?? undefined;
+        if (cancelIsVariantLine) {
+          const variant = findVariant(product, item.variantId);
+          if (variant) variant.wholesalePrice = beforeWholesale;
+        } else {
+          product.wholesalePrice = beforeWholesale;
+        }
+      }
+
       // Flag-independent, like every other reversal path: what was received
       // must be removable at the same precision even if packaging was later
       // switched off for this shop.
@@ -919,8 +1114,11 @@ class PurchaseService {
         quantity: -item.quantity,
         previousStock,
         newStock,
-        unitCost: item.unitPrice,
-        totalCost: item.total,
+        // The reversal has to carry the same valuation the receipt did, or the
+        // two ledger rows do not cancel and the rebuilt inventory value keeps
+        // the freight of a purchase that no longer exists.
+        unitCost: item.landedUnitPrice ?? item.unitPrice,
+        totalCost: quantizeMoney(item.quantity * (item.landedUnitPrice ?? item.unitPrice)),
         reference: {
           type: 'purchase',
           id: purchase._id,

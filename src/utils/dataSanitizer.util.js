@@ -143,6 +143,26 @@ function sanitizeSales(sales, req) {
 const PURCHASE_MONEY_KEYS = new Set([
   'unitPrice', 'total', 'totalAmount', 'paid', 'due',
   'totalPaid', 'totalDue', 'amount',
+  // The supplier's per-pack rate — "৳১,৮০০ per বস্তা". `unitPrice` above is
+  // its per-base twin, so leaving this listed nowhere let anyone divide by
+  // `packSize` and read back the cost this set exists to withhold. Same defect
+  // `packUnitCost` in COST_KEYS was added for, on the other payload.
+  'packUnitPrice',
+  // What this delivery did to the shelf's cost basis. Snapshots, so they are
+  // not named like a price and were never stripped — and `costAfter` IS the
+  // product's buying price, exactly the number `view_cost` withholds.
+  'costBefore', 'costAfter',
+  // ── The landed-cost terms ────────────────────────────────────────────────
+  //
+  // `landedUnitPrice` is the cost, straightforwardly: `unitPrice` plus this
+  // line's share of the ভাড়া, less its share of the discount. Every other
+  // field here reconstructs part of it — a reader holding `total`, the shares
+  // and the invoice charges can put the cost back together arithmetically,
+  // which is the same full-bypass shape `netEarnings` had on the reports side.
+  // So the whole set goes, not just the obvious one.
+  'landedUnitPrice', 'landedTotal', 'lineDiscount', 'discountShare', 'chargeShare',
+  'subtotal', 'itemDiscount', 'discount', 'discountAmount',
+  'freightCharge', 'otherCharge', 'merchandise',
 ]);
 
 /**

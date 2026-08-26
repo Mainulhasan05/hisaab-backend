@@ -100,7 +100,32 @@ function parseSellingPrice(raw, label = '') {
  * @returns {Object|null} a bulkWrite op, or null when nothing is to be written
  */
 function buildSellingPriceUpdate({ productId, variantId = null, hasVariants = false, sellingPrice }) {
-  if (sellingPrice == null || !(sellingPrice > 0)) return null;
+  return _buildPriceUpdate('sellingPrice', { productId, variantId, hasVariants, price: sellingPrice });
+}
+
+/**
+ * The same write, for the পাইকারি rate.
+ *
+ * A separate exported name rather than a `field` argument on the caller's side,
+ * for the reason `sellingPriceFor(entity, tier)` gives in pricing.util: two
+ * prices that behave identically are exactly the pair a caller silently gets
+ * backwards. The shared body below is the part worth not duplicating.
+ *
+ * `features.wholesale` is NOT checked here — the caller has already run the
+ * value through `normalizeWholesalePrice`, which owns the 403 and the "0 means
+ * absent" reading. Adding a second gate here would put the entitlement check in
+ * two places, which is how they drift.
+ *
+ * @param {Object} input  same shape as `buildSellingPriceUpdate`
+ * @returns {Object|null}
+ */
+function buildWholesalePriceUpdate({ productId, variantId = null, hasVariants = false, wholesalePrice }) {
+  return _buildPriceUpdate('wholesalePrice', { productId, variantId, hasVariants, price: wholesalePrice });
+}
+
+/** Shared body. `field` is a Product field name, never client input. */
+function _buildPriceUpdate(field, { productId, variantId, hasVariants, price }) {
+  if (price == null || !(price > 0)) return null;
 
   // A variant line prices its OWN variant. Writing the parent's field for a
   // variant product would set a number that nothing reads — `pricing.util`
@@ -113,7 +138,7 @@ function buildSellingPriceUpdate({ productId, variantId = null, hasVariants = fa
         ? { _id: productId, 'variants._id': variantId }
         : { _id: productId },
       update: {
-        $set: { [isVariantLine ? 'variants.$.sellingPrice' : 'sellingPrice']: sellingPrice },
+        $set: { [isVariantLine ? `variants.$.${field}` : field]: price },
       },
     },
   };
@@ -145,17 +170,49 @@ function buildSellingPriceRestore({
   sellingPriceBefore,
   currentPrice,
 }) {
+  return _buildPriceRestore('sellingPrice', {
+    productId, variantId, hasVariants,
+    price: sellingPrice, priceBefore: sellingPriceBefore, currentPrice,
+  });
+}
+
+/**
+ * The same reversal, for the পাইকারি rate.
+ *
+ * Ownership-checked identically, and it matters slightly more here: a wholesale
+ * rate is set for a named buyer's benefit, so silently reverting one that was
+ * renegotiated after this delivery would quote that buyer a price nobody agreed.
+ *
+ * @param {Object} input  same shape as `buildSellingPriceRestore`
+ * @returns {Object|null}
+ */
+function buildWholesalePriceRestore({
+  productId,
+  variantId = null,
+  hasVariants = false,
+  wholesalePrice,
+  wholesalePriceBefore,
+  currentPrice,
+}) {
+  return _buildPriceRestore('wholesalePrice', {
+    productId, variantId, hasVariants,
+    price: wholesalePrice, priceBefore: wholesalePriceBefore, currentPrice,
+  });
+}
+
+/** Shared body. `field` is a Product field name, never client input. */
+function _buildPriceRestore(field, { productId, variantId, hasVariants, price, priceBefore, currentPrice }) {
   // The line never wrote a price, so there is nothing to undo.
-  if (sellingPrice == null || !(sellingPrice > 0)) return null;
+  if (price == null || !(price > 0)) return null;
 
   // Someone has repriced since. That change owns the number now; reversing past
   // it would discard a price a person deliberately chose.
   if (currentPrice == null) return null;
-  if (Math.abs(currentPrice - sellingPrice) >= PRICE_EPSILON) return null;
+  if (Math.abs(currentPrice - price) >= PRICE_EPSILON) return null;
 
   const isVariantLine = Boolean(variantId && hasVariants);
-  const path = isVariantLine ? 'variants.$.sellingPrice' : 'sellingPrice';
-  const hadPrice = sellingPriceBefore != null && Number.isFinite(sellingPriceBefore);
+  const path = isVariantLine ? `variants.$.${field}` : field;
+  const hadPrice = priceBefore != null && Number.isFinite(priceBefore);
 
   return {
     updateOne: {
@@ -163,7 +220,7 @@ function buildSellingPriceRestore({
         ? { _id: productId, 'variants._id': variantId }
         : { _id: productId },
       update: hadPrice
-        ? { $set: { [path]: sellingPriceBefore } }
+        ? { $set: { [path]: priceBefore } }
         : { $unset: { [path]: '' } },
     },
   };
@@ -174,4 +231,6 @@ module.exports = {
   parseSellingPrice,
   buildSellingPriceUpdate,
   buildSellingPriceRestore,
+  buildWholesalePriceUpdate,
+  buildWholesalePriceRestore,
 };

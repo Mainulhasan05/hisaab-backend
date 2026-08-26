@@ -95,6 +95,96 @@ const purchaseItemSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
+  // ── What the supplier knocked off THIS line ────────────────────────────────
+  //
+  // Taka, never a percentage. The bill says "৳200 less on the rice"; a
+  // percentage is typed in the form and resolved to taka before it is sent,
+  // the same way `Sale.items[].discount` works.
+  //
+  // Clamped to the line it sits on by `purchaseMath` — a ৳200 concession on a
+  // ৳150 line is a typo, and letting it through drives the line negative and
+  // inverts the allocation weight beside it.
+  lineDiscount: {
+    type: Number,
+    default: 0,
+    min: [0, 'ছাড় ০ এর কম হতে পারবে না']
+  },
+  // ── This line's share of the invoice-level figures ─────────────────────────
+  //
+  // The invoice discount and the charges (ভাড়া + অন্যান্য) are stated once at
+  // the foot of the bill and spread back over the lines pro-rata by value —
+  // see `purchaseMath.util.js` for why by value, and why the rounding
+  // remainder is load-bearing.
+  //
+  // STORED rather than re-derived on read. The allocation depends on every
+  // OTHER line in the delivery, so re-deriving it later against a changed
+  // catalogue would restate what this delivery cost. Same reasoning as the
+  // `unit` and `packSize` snapshots above.
+  //
+  // Both are 0 for every purchase written before these fields existed, and for
+  // every delivery with no discount and no ভাড়া — which is every purchase on
+  // the platform today.
+  discountShare: {
+    type: Number,
+    default: 0,
+    min: [0, 'ছাড় ০ এর কম হতে পারবে না']
+  },
+  chargeShare: {
+    type: Number,
+    default: 0,
+    min: [0, 'খরচ ০ এর কম হতে পারবে না']
+  },
+  // ── What the goods on this line actually COST ──────────────────────────────
+  //
+  // Per base unit, like `unitPrice` beside it — and deliberately NOT the same
+  // number:
+  //
+  //     unitPrice        what the supplier BILLED
+  //     landedUnitPrice  what it cost, once this line's share of the discount
+  //                      and the ভাড়া is folded in
+  //
+  // `costing.util` blends `Product.buyingPrice` from THIS field, and
+  // `Sale.profit` is computed from that. Before it existed the blend read
+  // `unitPrice`, so a shop that paid ৳1,80,000 for goods plus ৳6,000 of truck
+  // hire recorded a cost basis 3.3% below what the consignment actually cost
+  // it — and every margin report on the platform agreed that this was fine.
+  //
+  // Keeping BOTH is what lets a stored purchase still reconcile line-for-line
+  // against the paper in the shopkeeper's hand. Collapsing them into one field
+  // looks like tidiness and destroys that.
+  //
+  // Absent on every purchase written before this existed; fall back to
+  // `unitPrice`, which is what it would have equalled anyway.
+  landedUnitPrice: {
+    type: Number,
+    min: [0, 'ক্রয় মূল্য ০ এর কম হতে পারবে না']
+  },
+  // ── What this line did to the shelf's WHOLESALE price ──────────────────────
+  //
+  // The third price a delivery can set, and the exact mirror of `sellingPrice`
+  // below — read that note first; everything it says applies here.
+  //
+  // `features.wholesale` ONLY (I-7). A shop without the capability never sends
+  // the key, the server refuses it through `normalizeWholesalePrice`, and this
+  // field stays absent on every line — which is what keeps a flag-off shop
+  // pixel- and byte-identical.
+  //
+  // Per BASE unit, and `0` means ABSENT, not free: a cleared money box posts 0,
+  // and billing ৳0 for a carton because someone emptied a field is not a
+  // discount. Same rule `packSellingPrice` and `Product.wholesalePrice`
+  // already follow.
+  wholesalePrice: {
+    type: Number,
+    min: [0, 'পাইকারি মূল্য ০ এর কম হতে পারবে না']
+  },
+  // What the product's wholesale rate was immediately before this line changed
+  // it, so `cancelPurchase` can tell whether the number it would restore is
+  // still the one this delivery wrote. Set only when `wholesalePrice` above
+  // actually wrote something.
+  wholesalePriceBefore: {
+    type: Number,
+    min: [0, 'পাইকারি মূল্য ০ এর কম হতে পারবে না']
+  },
   // ── What this line did to the shelf's cost basis ───────────────────────────
   //
   // Receiving goods re-blends `Product.buyingPrice` as a moving weighted average
@@ -163,6 +253,26 @@ const purchaseSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  /**
+   * The SUPPLIER'S own bill number — the challan printed on the paper that
+   * arrived with the goods.
+   *
+   * `invoiceNo` above is OURS (`PUR2026080012`) and always has been. It is
+   * useless for the one job a purchase record has to do at month end:
+   * reconciling against the vendor's statement, which lists their numbers and
+   * has never heard of ours. Without this field that reconciliation was manual,
+   * and the printed goods-received note had nothing to tie back to.
+   *
+   * Free text, and deliberately NOT unique: suppliers reuse and duplicate their
+   * own numbering, two suppliers may both issue "1024", and a shop copying it
+   * off a smudged carbon must never be blocked from recording the delivery.
+   * Empty on every purchase written before this existed.
+   */
+  supplierInvoiceNo: {
+    type: String,
+    trim: true,
+    maxlength: [60, 'চালান নম্বর ৬০ অক্ষরের বেশি হতে পারবে না']
+  },
   supplier: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Supplier'
@@ -180,6 +290,90 @@ const purchaseSchema = new mongoose.Schema({
       },
       message: 'কমপক্ষে একটি পণ্য যোগ করুন'
     }
+  },
+  /**
+   * ── The foot of the supplier's bill ─────────────────────────────────────
+   *
+   * `totalAmount` used to BE the subtotal: nothing existed between the sum of
+   * the lines and the amount owed. It is now derived, and these are the terms:
+   *
+   *     totalAmount = subtotal − itemDiscount − discountAmount
+   *                              + freightCharge + otherCharge
+   *
+   * Every field here defaults to 0, so a purchase with no concessions and no
+   * ভাড়া stores `subtotal === totalAmount` and is byte-identical in every
+   * field that existed before (I-1). That is the acceptance test for this
+   * change, not a hope about it.
+   *
+   * The arithmetic lives in `purchaseMath.util.js` and nowhere else — the
+   * service calls it, this schema only stores what came back. Recomputing any
+   * of it in a second place is how the invoice and the supplier ledger drifted
+   * apart on the sale side; see the header of `invoiceMath.util.js`.
+   */
+  /** Σ (quantity × unitPrice) — the list column, before any concession. */
+  subtotal: {
+    type: Number,
+    default: 0,
+    min: [0, 'উপমোট ০ এর কম হতে পারবে না']
+  },
+  /** Σ items[].lineDiscount — the per-line concessions, already struck off. */
+  itemDiscount: {
+    type: Number,
+    default: 0,
+    min: [0, 'ছাড় ০ এর কম হতে পারবে না']
+  },
+  /**
+   * The trade discount at the foot of the bill, RAW — this holds `10` on a
+   * percentage bill, which is why it is not bounded to a money ceiling and why
+   * nothing may sum it. `discountAmount` below is the figure to read.
+   */
+  discount: {
+    type: Number,
+    default: 0,
+    min: [0, 'ছাড় ০ এর কম হতে পারবে না']
+  },
+  discountType: {
+    type: String,
+    enum: ['fixed', 'percentage'],
+    default: 'fixed'
+  },
+  /**
+   * The trade discount in TAKA, resolved from the two fields above.
+   *
+   * Stored resolved for the reason written up on `Sale.discountAmount`:
+   * reports sum the raw column, so a month of 10% discounts each contributed
+   * ৳10 to "total discount received" regardless of the bill size, and the
+   * figure was meaningless for any shop that discounts by percentage.
+   *
+   * Resolved against MERCHANDISE (subtotal less the line concessions), NOT
+   * against subtotal — deliberately unlike `Sale`. On a supplier's bill the
+   * per-line concessions are struck off before the trade discount is applied
+   * to the foot, so 10% means 10% of what is left.
+   */
+  discountAmount: {
+    type: Number,
+    default: 0,
+    min: [0, 'ছাড় ০ এর কম হতে পারবে না']
+  },
+  /**
+   * ভাড়া — what it cost to get the consignment here.
+   *
+   * This is NOT a memo line. It is spread over the lines by
+   * `purchaseMath.computePurchaseTotals` and reaches `Product.buyingPrice`
+   * through `landedUnitPrice`, because it is part of what the stock cost.
+   * Recording it here and booking it as a transport `Expense` as well would
+   * double-count it.
+   */
+  freightCharge: {
+    type: Number,
+    default: 0,
+    min: [0, 'ভাড়া ০ এর কম হতে পারবে না']
+  },
+  /** Labour, unloading, weighing. Allocated exactly as `freightCharge` is. */
+  otherCharge: {
+    type: Number,
+    default: 0,
+    min: [0, 'খরচ ০ এর কম হতে পারবে না']
   },
   totalAmount: {
     type: Number,
