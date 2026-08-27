@@ -111,6 +111,73 @@ function applyRunningBalance(entries, opening) {
 const sumBy = (rows, key) => quantizeMoney(rows.reduce((acc, r) => acc + (r[key] || 0), 0));
 
 /**
+ * The later-payment `$lookup` both supplier-statement passes hang off a
+ * purchase, with each joined row projected down to `applied` — what THIS
+ * purchase absorbed of it.
+ *
+ * A plain `foreignField: 'purchase'` join stopped being the truth twice over:
+ *
+ *   - a payment may settle SEVERAL bills (F-4). The row names only the primary
+ *     purchase, so the primary would soak up the whole `amount` (driving its
+ *     computed cash-on-delivery negative, which the `> 0` guard then hides)
+ *     while the other bills read as settled on the spot. `allocations` carries
+ *     the real split, so where it exists the slice is what counts;
+ *   - a voided row (`cancelPurchase` unwinds its payments now) is money the
+ *     drawer got back, excluded the way `LIVE_PAYMENT` does it — `$ne`, never
+ *     an equality on a field legacy rows do not carry.
+ *
+ * `shop` and `type` ride as plain predicates so the join stays on the
+ * `{shop, purchase}` index prefix instead of scanning every payment per bill.
+ */
+const laterPaymentsLookup = (shopOid) => ({
+  $lookup: {
+    from: 'payments',
+    let: { pid: '$_id' },
+    pipeline: [
+      {
+        $match: {
+          shop: shopOid,
+          type: PAYMENT_TYPES.PURCHASE_PAYMENT,
+          status: { $ne: 'cancelled' },
+          $expr: {
+            $or: [
+              { $eq: ['$purchase', '$$pid'] },
+              { $in: ['$$pid', { $ifNull: ['$allocations.purchase', []] }] },
+            ],
+          },
+        },
+      },
+      {
+        $project: {
+          applied: {
+            $cond: [
+              { $gt: [{ $size: { $ifNull: ['$allocations', []] } }, 0] },
+              {
+                $sum: {
+                  $map: {
+                    input: {
+                      $filter: {
+                        input: '$allocations',
+                        as: 'a',
+                        cond: { $eq: ['$$a.purchase', '$$pid'] },
+                      },
+                    },
+                    as: 'a',
+                    in: { $ifNull: ['$$a.amount', 0] },
+                  },
+                },
+              },
+              '$amount',
+            ],
+          },
+        },
+      },
+    ],
+    as: 'laterPayments',
+  },
+});
+
+/**
  * ─────────────────────────────────────────────────────────────────────────────
  * THE GOODS LINES (`withItems`)
  * ─────────────────────────────────────────────────────────────────────────────
@@ -732,26 +799,20 @@ class DetailedReportService {
     const [bills, payments, adjustments] = await Promise.all([
       Purchase.aggregate([
         { $match: { ...purchaseScope, date: before } },
-        {
-          $lookup: {
-            from: 'payments',
-            localField: '_id',
-            foreignField: 'purchase',
-            as: 'laterPayments',
-          },
-        },
+        laterPaymentsLookup(purchaseScope.shop),
         {
           $group: {
             _id: '$supplier',
             billed: { $sum: '$totalAmount' },
             // See the block comment on `getSupplierStatements`: what was handed
             // over when the goods arrived is `paid` minus everything the
-            // payment ledger has since added.
+            // payment ledger has since added — each row's `applied` slice, not
+            // its full amount; see `laterPaymentsLookup`.
             paidAtPurchase: {
               $sum: {
                 $subtract: [
                   { $ifNull: ['$paid', 0] },
-                  { $sum: '$laterPayments.amount' },
+                  { $sum: '$laterPayments.applied' },
                 ],
               },
             },
@@ -784,14 +845,7 @@ class DetailedReportService {
         { $match: { ...purchaseScope, ...(range ? { date: range } : {}) } },
         { $sort: { date: 1 } },
         { $limit: MAX_ROWS_PER_COLLECTION },
-        {
-          $lookup: {
-            from: 'payments',
-            localField: '_id',
-            foreignField: 'purchase',
-            as: 'laterPayments',
-          },
-        },
+        laterPaymentsLookup(purchaseScope.shop),
         {
           $project: {
             supplier: 1,
@@ -801,7 +855,7 @@ class DetailedReportService {
             itemCount: { $size: { $ifNull: ['$items', []] } },
             ...(withItems ? { items: PURCHASE_ITEM_MAP } : {}),
             paidAtPurchase: {
-              $subtract: [{ $ifNull: ['$paid', 0] }, { $sum: '$laterPayments.amount' }],
+              $subtract: [{ $ifNull: ['$paid', 0] }, { $sum: '$laterPayments.applied' }],
             },
           },
         },
@@ -1105,6 +1159,32 @@ class DetailedReportService {
             },
             { $sort: { totalRetailValue: -1 } },
           ],
+          byBrand: [
+            {
+              $group: {
+                _id: '$brand',
+                productCount: { $sum: 1 },
+                totalUnits: { $sum: '$effectiveStock' },
+                totalBuyingValue: { $sum: '$totalCost' },
+                totalRetailValue: { $sum: '$totalRetail' },
+              },
+            },
+            { $lookup: { from: 'brands', localField: '_id', foreignField: '_id', as: 'brnd' } },
+            {
+              $project: {
+                _id: 1,
+                // Products with no brand (every product, in a shop without the
+                // feature) fall into one bucket — named like byCategory's
+                // uncategorised 'অন্যান্য', but honest about what it is.
+                brandName: { $ifNull: [{ $arrayElemAt: ['$brnd.name', 0] }, 'ব্র্যান্ডবিহীন'] },
+                productCount: 1,
+                totalUnits: { $round: ['$totalUnits', 3] },
+                totalBuyingValue: { $round: ['$totalBuyingValue', 2] },
+                totalRetailValue: { $round: ['$totalRetailValue', 2] },
+              },
+            },
+            { $sort: { totalRetailValue: -1 } },
+          ],
         },
       },
     ]);
@@ -1122,6 +1202,7 @@ class DetailedReportService {
       scope: { branchId: branchId ? String(branchId) : null },
       rows,
       byCategory: result?.byCategory || [],
+      byBrand: result?.byBrand || [],
       summary: {
         totalProducts: raw.totalProducts || 0,
         totalUnits: Math.round((raw.totalUnits || 0) * 1000) / 1000,

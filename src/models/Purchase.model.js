@@ -469,6 +469,27 @@ const purchaseSchema = new mongoose.Schema({
     enum: ['completed', 'partial', 'unpaid', 'cancelled'],
     default: 'completed'
   },
+  // ── The cancellation record (F-6) ──────────────────────────────────────────
+  //
+  // `status: 'cancelled'` said THAT a bill was voided; nothing said when, by
+  // whom, or why — and the list hid the row anyway, so a voided purchase left
+  // no trace on any screen a finance person would look at. All three are null
+  // on every live purchase and on every one cancelled before this existed.
+  cancelledAt: {
+    type: Date,
+    default: null
+  },
+  cancelledBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+  cancelReason: {
+    type: String,
+    trim: true,
+    maxlength: [200, 'কারণ ২০০ অক্ষরের বেশি হতে পারবে না'],
+    default: null
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

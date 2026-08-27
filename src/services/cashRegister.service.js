@@ -194,18 +194,59 @@ class CashRegisterService {
         { $group: { _id: null, total: { $sum: '$amount' } } },
       ]),
 
-      // Cash purchases (paid amount from cash purchases)
+      // ── Cash handed over when the goods arrived ──────────────────────────
+      //
+      // Summed from the purchase's `payments[]` LEGS, exactly as `cashSales`
+      // above sums a sale's. `paymentMethod` is only "whichever leg was
+      // largest" (purchase.service.js, split-payment block), so the old
+      // `$match {paymentMethod:'cash'} → $sum '$paid'` was wrong in both
+      // directions on a split-tender purchase and by the full amount:
+      //
+      //   ৳50,000 cash + ৳1,50,000 bank → 'bank' → ৳0 left the drawer
+      //   ৳1,50,000 cash + ৳50,000 bank → 'cash' → ৳2,00,000 counted out
+      //
+      // The fallback branch serves docs written before `payments[]` existed —
+      // for them `paid` and `paymentMethod` are still one figure, one method.
+      //
+      // The legs are frozen at checkout: a supplier balance settled LATER
+      // (`recordPayment`) grows `paid` but never `payments[]`, and is counted
+      // by the `purchase_payment` bucket below — which is what keeps the two
+      // streams disjoint for every purchase that carries legs.
       Purchase.aggregate([
         {
           $match: {
             shop: shopOid,
             ...branchMatch,
-            paymentMethod: 'cash',
             status: { $ne: 'cancelled' },
             date: { $gte: start, $lte: end },
           },
         },
-        { $group: { _id: null, total: { $sum: '$paid' } } },
+        {
+          $project: {
+            cashAmount: {
+              $cond: [
+                { $gt: [{ $size: { $ifNull: ['$payments', []] } }, 0] },
+                {
+                  $sum: {
+                    $map: {
+                      input: {
+                        $filter: {
+                          input: '$payments',
+                          as: 'p',
+                          cond: { $eq: ['$$p.method', 'cash'] },
+                        },
+                      },
+                      as: 'p',
+                      in: { $ifNull: ['$$p.amount', 0] },
+                    },
+                  },
+                },
+                { $cond: [{ $eq: ['$paymentMethod', 'cash'] }, { $ifNull: ['$paid', 0] }, 0] },
+              ],
+            },
+          },
+        },
+        { $group: { _id: null, total: { $sum: '$cashAmount' } } },
       ]),
 
       // Cash refunds (from Payment model)

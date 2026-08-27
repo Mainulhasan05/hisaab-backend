@@ -256,6 +256,33 @@ const paymentSchema = new mongoose.Schema({
     default: () => [],
   },
   /**
+   * ── Which purchases this supplier payment actually settled ────────────────
+   *
+   * The purchase-side mirror of `branchAllocation` above, and kept for the same
+   * reason: an allocation cannot be reconstructed afterwards, because every
+   * bill's `paid` keeps moving on its own.
+   *
+   * A supplier payment may exceed the bill it was recorded against (F-4): the
+   * `purchase` this row names absorbs up to its own due, and the excess settles
+   * the same shop+supplier+branch's older bills, oldest first. Each entry is one
+   * bill's slice; Σ amount === this row's `amount`.
+   *
+   * Populated ONLY when the money reached beyond the named purchase. A plain
+   * one-bill payment stores `[]` and reads exactly as every row before this
+   * field existed. `cancelPurchase` reads it to refuse cancelling a bill whose
+   * money is entangled with other bills' — see the multi-bill note there.
+   */
+  allocations: {
+    type: [
+      {
+        _id: false,
+        purchase: { type: mongoose.Schema.Types.ObjectId, ref: 'Purchase', default: null },
+        amount: { type: Number, default: 0 },
+      },
+    ],
+    default: () => [],
+  },
+  /**
    * ═════════════════════════════════════════════════════════════════════════
    * VOIDING A ROW THAT SHOULD NEVER HAVE EXISTED
    * ═════════════════════════════════════════════════════════════════════════

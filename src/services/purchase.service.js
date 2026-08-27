@@ -37,6 +37,7 @@ const {
   buildWholesalePriceRestore,
 } = require('../utils/purchasePrice.util');
 const { toMoney } = require('../utils/invoiceMath.util');
+const { LIVE_PAYMENT } = require('../utils/paymentDate.util');
 const { computePurchaseTotals } = require('../utils/purchaseMath.util');
 const { normalizeWholesalePrice } = require('../utils/pricing.util');
 const { hasFeature } = require('../utils/features.util');
@@ -51,11 +52,26 @@ class PurchaseService {
       startDate,
       endDate,
       status,
+      dueOnly,
+      includeCancelled,
+      search,
       sortBy = 'date',
       sortOrder = 'desc',
     } = options;
 
-    const query = { shop: shopId, status: { $ne: 'cancelled' } };
+    // Every filter below is ANDed onto the shop predicate (I-5) — there is no
+    // such thing as a purchase query without `shop`.
+    const query = { shop: shopId };
+
+    // Cancelled bills are hidden by DEFAULT: a voided purchase is not a
+    // payable. But hidden is not erased (F-6) — `?status=cancelled` lists only
+    // them, and `?includeCancelled=true` shows them beside the live ones, which
+    // is the view a month-end review reads.
+    if (status) {
+      query.status = status;
+    } else if (!(includeCancelled === true || includeCancelled === 'true')) {
+      query.status = { $ne: 'cancelled' };
+    }
 
     // Branch scoping
     if (options.branchId) {
@@ -63,14 +79,37 @@ class PurchaseService {
     }
 
     if (supplier) {
-      query.supplier = supplier;
+      // Cast explicitly. `find()` would cast a valid string itself (I-3 is an
+      // aggregation trap), but this id comes off the query string and an
+      // invalid one must be a 400, not a CastError 500.
+      if (!mongoose.Types.ObjectId.isValid(String(supplier))) {
+        throw new AppError('Invalid supplier id', 'সরবরাহকারী সঠিক নয়', 400);
+      }
+      query.supplier = new mongoose.Types.ObjectId(String(supplier));
     }
 
-    if (status) {
-      query.status = status;
+    // "যাদের বাকি আছে" — open payables only. Re-asserts the cancelled
+    // exclusion whatever the flags above said: a cancelled purchase keeps its
+    // stored `due` figure (the pre-save hook skips cancelled docs), and a
+    // voided bill is not owed.
+    if (dueOnly === true || dueOnly === 'true') {
+      query.due = { $gt: 0 };
+      query.status = { $ne: 'cancelled' };
+    }
+
+    // Matches OUR number and the supplier's challan number, case-insensitive.
+    // Escaped so a pasted "PUR(" cannot 500 the list.
+    if (search && String(search).trim()) {
+      const rx = new RegExp(
+        String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+        'i'
+      );
+      query.$or = [{ invoiceNo: rx }, { supplierInvoiceNo: rx }];
     }
 
     if (startDate || endDate) {
+      // Against the backdatable `date` — the day the goods arrived — never
+      // `createdAt`, the day someone sat down with the phone.
       query.date = {};
       if (startDate) query.date.$gte = new Date(startDate);
       // End of the Bangladesh calendar day — see the same note in
@@ -112,7 +151,10 @@ class PurchaseService {
     }))
       .populate('supplier', 'name phone address')
       .populate('items.product', 'name code stock')
-      .populate('createdBy', 'name');
+      .populate('createdBy', 'name')
+      // Who voided it, for the detail page's cancelled banner. Null on every
+      // live purchase and on purchases cancelled before the F-6 fields existed.
+      .populate('cancelledBy', 'name');
 
     if (!purchase) {
       throw new AppError('ক্রয়টি পাওয়া যায়নি', 'Purchase not found', 404);
@@ -880,7 +922,8 @@ class PurchaseService {
   // supplier still owed, or the supplier balance unwound while the goods stayed
   // on the shelf. Every write below — stock, batches, ledger, supplier, status —
   // now lands together or not at all.
-  async cancelPurchase(shopId, userId, purchaseId, req = null) {
+  async cancelPurchase(shopId, userId, purchaseId, req = null, options = {}) {
+    const { reason } = options;
     return await runInTransaction(async (session) => {
       const sessionOpt = session ? { session } : {};
 
@@ -895,6 +938,52 @@ class PurchaseService {
 
     if (purchase.status === 'cancelled') {
       throw new AppError('এই ক্রয়টি আগেই বাতিল করা হয়েছে', 'Purchase already cancelled', 400);
+    }
+
+    /**
+     * ── Supplier payments recorded after the purchase ────────────────────────
+     *
+     * These are `Payment{type:'purchase_payment'}` rows from `recordPayment` —
+     * NOT the checkout legs in `purchase.payments[]`, which the loop further
+     * down already credits back. They are voided below so the post-cancel books
+     * read "this bill never happened, the money went back to the drawer".
+     *
+     * ── The multi-bill decision (F-4) ────────────────────────────────────────
+     *
+     * A payment may have settled SEVERAL bills (`Payment.allocations`). Voiding
+     * such a row because ONE of its bills is being cancelled would claw back
+     * money that legitimately settled the others; shrinking the row instead
+     * would leave `amount` misstating what was actually handed over, and every
+     * `$sum: '$amount'` reader with it. Neither is correct, so a purchase
+     * entangled in a multi-bill payment — as the payment's named bill OR as one
+     * of its allocation targets — REFUSES to cancel until that payment is
+     * voided first. Refusing loudly beats an unwind that half works; same call
+     * `cancelDueCollection` makes about foreign payment types.
+     */
+    const laterPayments = await Payment.find({
+      shop: shopId,
+      purchase: purchase._id,
+      type: 'purchase_payment',
+      ...LIVE_PAYMENT,
+    }).session(session || null);
+
+    const inboundAllocated = await Payment.find({
+      shop: shopId,
+      type: 'purchase_payment',
+      'allocations.purchase': purchase._id,
+      purchase: { $ne: purchase._id },
+      ...LIVE_PAYMENT,
+    }).session(session || null);
+
+    const spansOtherBills = (p) =>
+      (p.allocations || []).some((a) => String(a.purchase) !== String(purchase._id));
+
+    if (inboundAllocated.length > 0 || laterPayments.some(spansOtherBills)) {
+      throw new AppError(
+        'A payment on this purchase also settled other bills — void that payment first',
+        'এই ক্রয়ের পেমেন্ট অন্য বিলের সাথে ভাগ হয়ে আছে — আগে পেমেন্টটি বাতিল করুন',
+        400
+      );
     }
 
     // Reverse stock for each item.
@@ -1176,11 +1265,6 @@ class PurchaseService {
      *
      * Empty for purchases written before split payments existed and for shops
      * without the capability, in which case this loop does nothing at all.
-     *
-     * Payments recorded LATER against this purchase (`recordPayment`) are not
-     * unwound here — those are `Payment` rows with their own accounts, and a
-     * cancelled purchase carrying settled supplier payments is a case the
-     * supplier ledger above already declines to net out.
      */
     for (const leg of (purchase.payments || [])) {
       await paymentAccountService.applyAccountDelta({
@@ -1191,7 +1275,48 @@ class PurchaseService {
       });
     }
 
+    /**
+     * ── And the payments recorded later, voided and refunded ─────────────────
+     *
+     * Fetched (and multi-bill-screened) at the top of this method. Each row is
+     * marked cancelled — never deleted, `immutableGuard` — so `LIVE_PAYMENT`
+     * readers (cash register, reports, the payment history) stop counting it,
+     * and its account gets back exactly what that payment debited.
+     *
+     * The Supplier / SupplierBalance deltas ABOVE already assume this. They
+     * subtract the purchase's CURRENT due (post-payment) and its full `paid`
+     * (payments included), so with the rows voided the bill's lifetime
+     * contribution nets to exactly zero on both books:
+     *
+     *     Supplier.totalDue:        +D₀  − Σa  − (D₀ − Σa)          = 0
+     *     SupplierBalance.totalPaid: +counter + Σa − (counter + Σa) = 0
+     *
+     * (D₀ = due at creation, Σa = later payments, counter = paid at checkout.)
+     * Adding a second term here for the voided money would double-unwind it.
+     */
+    for (const pay of laterPayments) {
+      pay.status = 'cancelled';
+      pay.cancelledAt = new Date();
+      pay.cancelledBy = userId;
+      pay.cancelReason = 'ক্রয় বাতিল — টাকা ফেরত';
+      await pay.save(sessionOpt);
+
+      await paymentAccountService.applyAccountDelta({
+        shop: shopId,
+        account: pay.account,
+        amount: Number(pay.amount) || 0,
+        session: session || null,
+      });
+    }
+
     purchase.status = 'cancelled';
+    // The cancellation record (F-6): the list can now SHOW a voided bill with
+    // who/when/why on it instead of erasing the trace.
+    purchase.cancelledAt = new Date();
+    purchase.cancelledBy = userId;
+    if (reason) {
+      purchase.cancelReason = String(reason).trim().slice(0, 200);
+    }
     await purchase.save(sessionOpt);
 
     // Audit log
@@ -1200,8 +1325,10 @@ class PurchaseService {
       user: userId,
       action: 'purchase_cancel',
       actionBn: 'ক্রয় বাতিল',
-      description: `Cancelled purchase #${purchase.invoiceNo}: ৳${purchase.totalAmount}`,
-      descriptionBn: `ক্রয় বাতিল #${purchase.invoiceNo}: ৳${purchase.totalAmount}`,
+      description: `Cancelled purchase #${purchase.invoiceNo}: ৳${purchase.totalAmount}`
+        + (purchase.cancelReason ? ` — ${purchase.cancelReason}` : ''),
+      descriptionBn: `ক্রয় বাতিল #${purchase.invoiceNo}: ৳${purchase.totalAmount}`
+        + (purchase.cancelReason ? ` — ${purchase.cancelReason}` : ''),
       entity: {
         type: 'purchase',
         id: purchase._id,
@@ -1245,7 +1372,12 @@ class PurchaseService {
       today: todaySummary,
     };
   }
-  // Record payment for a purchase
+  // Record payment for a purchase.
+  //
+  // F-5: transactional. This was five independent writes — purchase.save,
+  // Payment.create, applyAccountDelta, Supplier.$inc, SupplierBalance — and a
+  // failure between any two of them split the books with nothing to signal it.
+  // Same `runInTransaction` wrapper `createPurchase` and `cancelPurchase` use.
   async recordPayment(shopId, userId, purchaseId, paymentData, req = null) {
     /**
      * `reference` and `transactionId` were dropped on the floor.
@@ -1263,104 +1395,204 @@ class PurchaseService {
     // where `0 + '500'` concatenates rather than adds.
     const amount = toMoney(paymentData.amount);
 
-    const purchase = await Purchase.findOne(branchFilter(req, { _id: purchaseId, shop: shopId }));
-    if (!purchase) {
-      throw new AppError('Purchase not found', 'ক্রয়টি পাওয়া যায়নি', 404);
-    }
+    return await runInTransaction(async (session) => {
+      const sessionOpt = session ? { session } : {};
 
-    if (purchase.status === 'cancelled') {
-      throw new AppError('Cannot record payment for cancelled purchase', 'বাতিল ক্রয়ে পেমেন্ট দেওয়া যাবে না', 400);
-    }
+      const purchase = await Purchase.findOne(branchFilter(req, { _id: purchaseId, shop: shopId }))
+        .session(session || null);
+      if (!purchase) {
+        throw new AppError('Purchase not found', 'ক্রয়টি পাওয়া যায়নি', 404);
+      }
 
-    if (amount <= 0) {
-      throw new AppError('Payment amount must be greater than 0', 'পেমেন্টের পরিমাণ ০ এর বেশি হতে হবে', 400);
-    }
+      if (purchase.status === 'cancelled') {
+        throw new AppError('Cannot record payment for cancelled purchase', 'বাতিল ক্রয়ে পেমেন্ট দেওয়া যাবে না', 400);
+      }
 
-    if (amount > purchase.due) {
-      throw new AppError('Payment amount exceeds due balance', 'পেমেন্টের পরিমাণ বাকির চেয়ে বেশি', 400);
-    }
+      if (amount <= 0) {
+        throw new AppError('Payment amount must be greater than 0', 'পেমেন্টের পরিমাণ ০ এর বেশি হতে হবে', 400);
+      }
 
-    // Update purchase
-    purchase.paid += amount;
-    await purchase.save(); // pre-save hook recalculates due and status
+      const primaryDue = quantizeMoney(purchase.due || 0);
 
-    // Create payment record.
-    //
-    // `branch` was missing here, and it is not cosmetic: `_calculateCashFlows`
-    // matches every cash movement by branch, so an untagged supplier payment is
-    // invisible to every branch's till. Cash left the drawer and nothing
-    // recorded it. Same defect the customer due-collection path fixed (H-6).
-    //
-    // Attributed to the PURCHASE's branch, not the caller's. `branchFilter`
-    // above already restricts a branch to paying its own purchases, so the two
-    // are the same in normal use — but an owner in All-Branches has no active
-    // branch, and the debt belongs to whichever branch bought the goods.
-    // Which fund account the money left. Attributed like `branch` below — to
-    // the account the caller names, or the method's default. Null for a shop
-    // without `features.fundAccounts` (I-1).
-    const account = paymentData.account
-      ? (await paymentAccountService.assertUsableAccount(shopId, paymentData.account, req))._id
-      : await paymentAccountService.resolveAccountForMethod(req?.shop || { _id: shopId }, method, req);
+      // A purchase with no supplier keeps the old hard cap: there is no ledger
+      // for the excess to settle and no vendor to hold an advance against.
+      if (amount > primaryDue && !purchase.supplier) {
+        throw new AppError('Payment amount exceeds due balance', 'পেমেন্টের পরিমাণ বাকির চেয়ে বেশি', 400);
+      }
 
-    const payment = await Payment.create({
-      shop: shopId,
-      branch: purchase.branch || null,
-      purchase: purchaseId,
-      amount,
-      method,
-      account,
-      reference,
-      transactionId,
-      type: 'purchase_payment',
-      notes,
-      receivedBy: userId,
-    });
+      /**
+       * F-4 — the excess settles the supplier's OLDER bills.
+       *
+       * In real life the shop hands the supplier ৳50,000 covering this challan
+       * AND last month's. The primary bill absorbs up to its own due; whatever
+       * is left walks the same shop+supplier+branch's other open bills oldest
+       * first (the sale side's `dueSettled`/`ledgerSettled` rule), each taking
+       * up to its due.
+       *
+       * Same BRANCH deliberately: the money reduces this branch's payable, and
+       * settling another branch's bill from here would be the cross-branch
+       * write-down `settleCustomerDue` refuses on the customer side.
+       *
+       * Anything beyond the supplier's total open due is refused — a supplier
+       * advance is deliberately still not tracked (see supplier.service.js).
+       */
+      const primaryApplied = quantizeMoney(Math.min(amount, primaryDue));
+      let excess = quantizeMoney(amount - primaryApplied);
 
-    // Money out. `atCheckout` is false by default on this row, which is what
-    // tells `recalc-account-balances.js` to count it here rather than assume it
-    // was already counted as a purchase leg.
-    await paymentAccountService.applyAccountDelta({
-      shop: shopId,
-      account,
-      amount: -amount,
-    });
+      const olderAllocations = []; // [{ doc, amount }]
+      if (excess > 0) {
+        const eligible = await Purchase.find({
+          shop: shopId,
+          supplier: purchase.supplier,
+          branch: purchase.branch || null,
+          _id: { $ne: purchase._id },
+          status: { $ne: 'cancelled' },
+          due: { $gt: 0 },
+        })
+          .sort({ date: 1, createdAt: 1 })
+          .session(session || null);
 
-    // Update supplier balance if applicable
-    if (purchase.supplier) {
-      await Supplier.findByIdAndUpdate(purchase.supplier, {
-        $inc: { totalDue: -amount },
-      });
+        for (const bill of eligible) {
+          if (excess <= 0) break;
+          const take = quantizeMoney(Math.min(excess, bill.due));
+          if (take <= 0) continue;
+          olderAllocations.push({ doc: bill, amount: take });
+          excess = quantizeMoney(excess - take);
+        }
 
-      // The same reduction on the branch that owed it.
-      await SupplierBalance.applyDelta({
+        if (excess > 0) {
+          const maxPayable = quantizeMoney(amount - excess);
+          throw new AppError(
+            `Payment exceeds the supplier's total outstanding (maximum ৳${maxPayable})`,
+            `সরবরাহকারীর মোট বাকি ৳${maxPayable} — এর বেশি নেওয়া যাবে না`,
+            400
+          );
+        }
+      }
+
+      // Create payment record.
+      //
+      // `branch` was missing here, and it is not cosmetic: `_calculateCashFlows`
+      // matches every cash movement by branch, so an untagged supplier payment is
+      // invisible to every branch's till. Cash left the drawer and nothing
+      // recorded it. Same defect the customer due-collection path fixed (H-6).
+      //
+      // Attributed to the PURCHASE's branch, not the caller's. `branchFilter`
+      // above already restricts a branch to paying its own purchases, so the two
+      // are the same in normal use — but an owner in All-Branches has no active
+      // branch, and the debt belongs to whichever branch bought the goods.
+      // Which fund account the money left. Attributed like `branch` below — to
+      // the account the caller names, or the method's default. Null for a shop
+      // without `features.fundAccounts` (I-1).
+      const account = paymentData.account
+        ? (await paymentAccountService.assertUsableAccount(shopId, paymentData.account, req))._id
+        : await paymentAccountService.resolveAccountForMethod(req?.shop || { _id: shopId }, method, req);
+
+      // Apply each bill's slice. `paid` is set explicitly and never past
+      // `totalAmount` (each slice is capped at that bill's due above), so the
+      // pre('save') clamp has nothing to fight — the hook only re-derives
+      // `due` and lands `status` on completed/partial/unpaid.
+      const dueBefore = purchase.due;
+      purchase.paid = quantizeMoney(purchase.paid + primaryApplied);
+      await purchase.save(sessionOpt);
+
+      for (const alloc of olderAllocations) {
+        alloc.doc.paid = quantizeMoney(alloc.doc.paid + alloc.amount);
+        await alloc.doc.save(sessionOpt);
+      }
+
+      // ONE Payment row for the full amount, its split recorded on
+      // `allocations` — the mirror of `branchAllocation` on the customer side.
+      // Empty for a plain one-bill payment, so that row stays byte-identical
+      // to every row written before F-4 existed.
+      const [payment] = await Payment.create([{
         shop: shopId,
-        supplier: purchase.supplier,
-        branch: purchase.branch,
-        paid: amount,
-        due: -amount,
+        branch: purchase.branch || null,
+        purchase: purchaseId,
+        amount,
+        method,
+        account,
+        reference,
+        transactionId,
+        type: 'purchase_payment',
+        notes,
+        receivedBy: userId,
+        allocations: olderAllocations.length > 0
+          ? [
+              ...(primaryApplied > 0 ? [{ purchase: purchase._id, amount: primaryApplied }] : []),
+              ...olderAllocations.map((a) => ({ purchase: a.doc._id, amount: a.amount })),
+            ]
+          : [],
+      }], sessionOpt);
+
+      // Money out. `atCheckout` is false by default on this row, which is what
+      // tells `recalc-account-balances.js` to count it here rather than assume it
+      // was already counted as a purchase leg.
+      await paymentAccountService.applyAccountDelta({
+        shop: shopId,
+        account,
+        amount: -amount,
+        session: session || null,
       });
-    }
 
-    // Audit log
-    await AuditLog.create({
-      shop: shopId,
-      user: userId,
-      action: 'payment_received',
-      actionBn: 'ক্রয়ের পেমেন্ট',
-      description: `Paid ৳${amount} for purchase ${purchase.invoiceNo}`,
-      descriptionBn: `ক্রয় ${purchase.invoiceNo} এর জন্য ৳${amount} পেমেন্ট`,
-      entity: {
-        type: 'purchase',
-        id: purchase._id,
-        name: purchase.invoiceNo,
-      },
-      changes: {
-        before: { paid: purchase.paid - amount, due: purchase.due + amount },
-        after: { paid: purchase.paid, due: purchase.due },
-      },
+      // Update supplier balance if applicable. ONCE, by the total — every
+      // allocated bill belongs to the same supplier and the same branch, so
+      // the Supplier mutation and its SupplierBalance mirror carry the same
+      // arithmetic in the same transaction (Σ branch due === supplier due).
+      if (purchase.supplier) {
+        await Supplier.findByIdAndUpdate(purchase.supplier, {
+          $inc: { totalDue: -amount },
+        }, sessionOpt);
+
+        // The same reduction on the branch that owed it.
+        await SupplierBalance.applyDelta({
+          shop: shopId,
+          supplier: purchase.supplier,
+          branch: purchase.branch,
+          paid: amount,
+          due: -amount,
+        }, session);
+      }
+
+      // Audit log
+      await AuditLog.create([{
+        shop: shopId,
+        branch: purchase.branch || null,
+        user: userId,
+        action: 'payment_received',
+        actionBn: 'ক্রয়ের পেমেন্ট',
+        description: `Paid ৳${amount} for purchase ${purchase.invoiceNo}`
+          + (olderAllocations.length > 0
+            ? ` (settled ${olderAllocations.length} older bill${olderAllocations.length > 1 ? 's' : ''})`
+            : ''),
+        descriptionBn: `ক্রয় ${purchase.invoiceNo} এর জন্য ৳${amount} পেমেন্ট`
+          + (olderAllocations.length > 0 ? ` (${olderAllocations.length}টি পুরোনো বিলসহ)` : ''),
+        entity: {
+          type: 'purchase',
+          id: purchase._id,
+          name: purchase.invoiceNo,
+        },
+        changes: {
+          before: { paid: quantizeMoney(purchase.paid - primaryApplied), due: dueBefore },
+          after: { paid: purchase.paid, due: purchase.due },
+        },
+      }], sessionOpt);
+
+      // Every bill this money touched, invoice numbers included so the UI can
+      // toast "পুরোনো বিল PUR… এ ৳X বসেছে" without a second fetch.
+      const allocations = [
+        ...(primaryApplied > 0
+          ? [{ purchase: purchase._id, invoiceNo: purchase.invoiceNo, amount: primaryApplied }]
+          : []),
+        ...olderAllocations.map((a) => ({
+          purchase: a.doc._id,
+          invoiceNo: a.doc.invoiceNo,
+          amount: a.amount,
+        })),
+      ];
+
+      return { purchase, payment, allocations, totalApplied: amount };
     });
-
-    return { purchase, payment };
   }
 
   // Get payments for a purchase
@@ -1370,8 +1602,9 @@ class PurchaseService {
       throw new AppError('Purchase not found', 'ক্রয়টি পাওয়া যায়নি', 404);
     }
 
-    // cancelled-inclusive: a purchase's payment history, shown in full.
-    const payments = await Payment.find({ shop: shopId, purchase: purchaseId })
+    // A voided row (a cancelled purchase's unwound payment) is money the
+    // drawer got back — it is not part of what was paid on this bill.
+    const payments = await Payment.find({ shop: shopId, purchase: purchaseId, ...LIVE_PAYMENT })
       .populate('receivedBy', 'name')
       .sort({ createdAt: -1 })
       .lean();

@@ -38,7 +38,9 @@ exports.createPurchase = asyncHandler(async (req, res) => {
 
 // Cancel purchase
 exports.cancelPurchase = asyncHandler(async (req, res) => {
-  await purchaseService.cancelPurchase(req.shop._id, req.user._id, req.params.id, req);
+  await purchaseService.cancelPurchase(req.shop._id, req.user._id, req.params.id, req, {
+    reason: req.body?.reason,
+  });
   return ApiResponse.success(res, {
     message: 'Purchase cancelled successfully',
     messageBn: 'ক্রয় সফলভাবে বাতিল হয়েছে',

@@ -45,6 +45,50 @@ function productScope(shopId, branchId, extra = {}) {
   return scope;
 }
 
+// A product with variants holds no stock of its own — the units sit on the
+// variants, and the parent `stock` rollup drifts wherever a write path skips
+// the pre-save hook. Reading `$stock` for those reports every variant product
+// as out of stock. Same expression as detailedReport.service.js's stock
+// report, and it must stay identical — the dashboard tile and the stock report
+// counting "low" from different fields is a contradiction an owner can see on
+// one screen. Guarded on `hasVariants`, not `variants.length`: a
+// converted-back product (flag false, stale `variants[]` summing 0) keeps its
+// real stock on `stock`, and summing its abandoned variants would zero it.
+const effectiveStockExpr = {
+  $cond: [
+    { $eq: ['$hasVariants', true] },
+    { $sum: { $ifNull: ['$variants.stock', []] } },
+    { $ifNull: ['$stock', 0] },
+  ],
+};
+
+// Valuation counterpart: per-variant stock × per-variant price, falling back
+// to the parent price where a variant has none — detailedReport.service.js's
+// `variantAware` fold, kept in step for the same reason as above.
+const effectiveValueExpr = (field) => ({
+  $cond: [
+    { $eq: ['$hasVariants', true] },
+    {
+      $reduce: {
+        input: { $ifNull: ['$variants', []] },
+        initialValue: 0,
+        in: {
+          $add: [
+            '$$value',
+            {
+              $multiply: [
+                { $ifNull: ['$$this.stock', 0] },
+                { $ifNull: [`$$this.${field}`, { $ifNull: [`$${field}`, 0] }] },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    { $multiply: [{ $ifNull: ['$stock', 0] }, { $ifNull: [`$${field}`, 0] }] },
+  ],
+});
+
 // Bangladesh is UTC+6. All dates from frontend are in Bangladesh local time.
 // These used to be defined here; they moved to utils/bdTime.util.js when the
 // Telegram digest job needed the same notion of "today". Two copies of this
@@ -83,10 +127,10 @@ class ReportService {
    *
    * ── Why this needs its own cache, on top of the dashboard's ──────────────
    *
-   * The predicate is `$expr: { $lt: ['$stock', '$minStock'] }` — a comparison
-   * between two fields of the SAME document. MongoDB cannot serve that from an
-   * index, no matter how the shop/branch keys are arranged, so it is a
-   * COLLECTION SCAN of the shop's whole catalogue every time it runs.
+   * The predicate compares effective stock against `minStock` — two fields of
+   * the SAME document. MongoDB cannot serve that from an index, no matter how
+   * the shop/branch keys are arranged, so it is a COLLECTION SCAN of the
+   * shop's whole catalogue every time it runs.
    *
    * Measured at 189ms for a single query against 5k products, and it is a
    * major share of the dashboard's server time (PERFORMANCE_BASELINE.md §N-1).
@@ -117,7 +161,7 @@ class ReportService {
     if (cached != null) return cached;
 
     const count = await Product.countDocuments(
-      productScope(shopId, branchId, { isActive: true, $expr: { $lt: ['$stock', '$minStock'] } })
+      productScope(shopId, branchId, { isActive: true, $expr: { $lt: [effectiveStockExpr, '$minStock'] } })
     );
     await cacheService.set(cacheKey, count, getTTL.lowStock);
     return count;
@@ -471,16 +515,23 @@ class ReportService {
     const { startDate, endDate } = options;
 
     // Cached for the same reason `_lowStockCount` above is: two of the four
-    // queries below carry `$expr: { $lt: ['$stock', '$minStock'] }`, a
-    // comparison between two fields of one document that MongoDB cannot serve
-    // from an index at any arrangement. Each is a collection scan of the shop's
+    // queries below compare effective stock against `minStock`, a comparison
+    // between two fields of one document that MongoDB cannot serve from an
+    // index at any arrangement. Each is a collection scan of the shop's
     // catalogue. The dashboard already shields its copy behind a 60s cache;
     // this method ran the same scan twice on every call with no cache at all.
+    //
+    // Two keys, not one: only `topSelling` depends on the date range. The
+    // stock lists and the summary are point-in-time snapshots of the
+    // catalogue, and caching them under a range-scoped key re-ran the
+    // catalogue scans once per distinct range — the exact scans this cache
+    // exists to shield — while letting two cached ranges disagree about what
+    // is currently low.
     const prVersion = await cacheService.getShopCacheVersion(shopId);
-    const prCacheKey =
-      `${KEYS.PRODUCT_REPORT(shopId, startDate, endDate)}:branch:${branchId || 'all'}:v${prVersion}`;
-    const prCached = await cacheService.get(prCacheKey);
-    if (prCached) return prCached;
+    const prTopKey =
+      `${KEYS.PRODUCT_REPORT(shopId, startDate, endDate)}:branch:${branchId || 'all'}:v${prVersion}:top`;
+    const prSnapshotKey =
+      `${KEYS.PRODUCT_REPORT(shopId, null, null)}:branch:${branchId || 'all'}:v${prVersion}:snapshot`;
 
     // Top selling products
     const matchStage = {
@@ -493,68 +544,81 @@ class ReportService {
       matchStage.createdAt = dateMatch;
     }
 
-    // These four are independent of one another and used to run as four
-    // sequential `await`s — four full round trips before the first byte.
-    const [topSelling, lowStock, noStock, summaryResult] = await Promise.all([
-      Sale.aggregate([
-        { $match: matchStage },
-        { $unwind: '$items' },
-        {
-          $group: {
-            _id: '$items.product',
-            productName: { $first: '$items.productName' },
-            totalQuantity: { $sum: '$items.quantity' },
-            totalRevenue: { $sum: '$items.total' },
-            salesCount: { $sum: 1 },
+    // The halves are independent and each checks its own cache, so a request
+    // whose range is new still reuses the snapshot half.
+    const [topSelling, snapshot] = await Promise.all([
+      (async () => {
+        const cached = await cacheService.get(prTopKey);
+        if (cached) return cached;
+        const rows = await Sale.aggregate([
+          { $match: matchStage },
+          { $unwind: '$items' },
+          {
+            $group: {
+              _id: '$items.product',
+              productName: { $first: '$items.productName' },
+              totalQuantity: { $sum: '$items.quantity' },
+              totalRevenue: { $sum: '$items.total' },
+              salesCount: { $sum: 1 },
+            },
           },
-        },
-        roundQtyStage,
-        { $sort: { totalQuantity: -1 } },
-        { $limit: 20 },
-      ]),
+          roundQtyStage,
+          { $sort: { totalQuantity: -1 } },
+          { $limit: 20 },
+        ]);
+        await cacheService.set(prTopKey, rows, getTTL.productReport);
+        return rows;
+      })(),
 
-      // Low stock products
-      Product.find(
-        productScope(shopId, branchId, { isActive: true, $expr: { $lt: ['$stock', '$minStock'] } })
-      )
-        .select('name code stock minStock sellingPrice')
-        .sort({ stock: 1 })
-        .limit(20)
-        .lean(),
+      (async () => {
+        const cached = await cacheService.get(prSnapshotKey);
+        if (cached) return cached;
+        // `$set` overwrites `stock` with the variant fold so the rows keep the
+        // exact shape the old `.select('name code stock ...')` returned.
+        const [lowStock, noStock, summaryResult] = await Promise.all([
+          // Low stock products
+          Product.aggregate([
+            { $match: productScope(shopId, branchId, { isActive: true }) },
+            { $set: { stock: effectiveStockExpr } },
+            { $match: { $expr: { $lt: ['$stock', '$minStock'] } } },
+            { $sort: { stock: 1 } },
+            { $limit: 20 },
+            { $project: { name: 1, code: 1, stock: 1, minStock: 1, sellingPrice: 1 } },
+          ]),
 
-      // No stock products
-      Product.find(
-        productScope(shopId, branchId, { isActive: true, stock: { $lte: 0 } })
-      )
-        .select('name code stock minStock sellingPrice')
-        .limit(20)
-        .lean(),
+          // No stock products
+          Product.aggregate([
+            { $match: productScope(shopId, branchId, { isActive: true }) },
+            { $set: { stock: effectiveStockExpr } },
+            { $match: { stock: { $lte: 0 } } },
+            { $limit: 20 },
+            { $project: { name: 1, code: 1, stock: 1, minStock: 1, sellingPrice: 1 } },
+          ]),
 
-      // Product summary
-      Product.aggregate([
-        { $match: productScope(shopId, branchId, { isActive: true }) },
-        {
-          $group: {
-            _id: null,
-            totalProducts: { $sum: 1 },
-            totalStock: { $sum: '$stock' },
-            totalValue: { $sum: { $multiply: ['$stock', '$sellingPrice'] } },
-          },
-        },
-      ]),
+          // Product summary
+          Product.aggregate([
+            { $match: productScope(shopId, branchId, { isActive: true }) },
+            {
+              $group: {
+                _id: null,
+                totalProducts: { $sum: 1 },
+                totalStock: { $sum: effectiveStockExpr },
+                totalValue: { $sum: effectiveValueExpr('sellingPrice') },
+              },
+            },
+          ]),
+        ]);
+        const part = {
+          lowStock,
+          noStock,
+          summary: summaryResult[0] || { totalProducts: 0, totalStock: 0, totalValue: 0 },
+        };
+        await cacheService.set(prSnapshotKey, part, getTTL.productReport);
+        return part;
+      })(),
     ]);
 
-    const summary = summaryResult[0] || { totalProducts: 0, totalStock: 0, totalValue: 0 };
-
-    const prResult = {
-      topSelling,
-      lowStock,
-      noStock,
-      summary,
-    };
-
-    await cacheService.set(prCacheKey, prResult, getTTL.productReport);
-    return prResult;
+    return { topSelling, ...snapshot };
   }
 
   // Get customer report
@@ -703,6 +767,11 @@ class ReportService {
 
     const dateMatch = { createdAt: { $gte: startOfDay, $lte: endOfDay } };
     const expenseDateMatch = { date: { $gte: startOfDay, $lte: endOfDay } };
+    // Purchases are backdatable: `date` is the client-supplied business date,
+    // and the purchase list and supplier statement already book on it. Keyed
+    // on `createdAt`, a backdated purchase landed on the day it was typed
+    // instead of the day it belongs to.
+    const purchaseDateMatch = { date: { $gte: startOfDay, $lte: endOfDay } };
 
     // Run all aggregations in parallel
     const [
@@ -874,7 +943,7 @@ class ReportService {
 
       // 6. Purchases summary
       Purchase.aggregate([
-        { $match: { ...this._baseMatch(shopId, branchId), status: { $ne: 'cancelled' }, ...dateMatch } },
+        { $match: { ...this._baseMatch(shopId, branchId), status: { $ne: 'cancelled' }, ...purchaseDateMatch } },
         {
           $group: {
             _id: null,
@@ -943,12 +1012,16 @@ class ReportService {
         { $limit: 10 },
       ]),
 
-      // 11. Low stock products
-      Product.find(productScope(shopId, branchId, { isActive: true, $expr: { $lte: ['$stock', '$minStock'] } }))
-        .select('name code stock minStock sellingPrice')
-        .sort({ stock: 1 })
-        .limit(15)
-        .lean(),
+      // 11. Low stock products — `$set` overwrites `stock` with the variant
+      // fold so the rows keep the shape the old `.select(...)` returned.
+      Product.aggregate([
+        { $match: productScope(shopId, branchId, { isActive: true }) },
+        { $set: { stock: effectiveStockExpr } },
+        { $match: { $expr: { $lte: ['$stock', '$minStock'] } } },
+        { $sort: { stock: 1 } },
+        { $limit: 15 },
+        { $project: { name: 1, code: 1, stock: 1, minStock: 1, sellingPrice: 1 } },
+      ]),
     ]);
 
     const sales = salesAgg[0] || { totalRevenue: 0, totalProfit: 0, totalPaid: 0, totalDue: 0, totalDiscount: 0, totalItems: 0, count: 0 };
@@ -1175,6 +1248,9 @@ class ReportService {
     const dateQuery = this._buildDateMatch(startDate, endDate);
     const dateMatch = dateQuery ? { createdAt: dateQuery } : {};
     const expenseDateMatch = dateQuery ? { date: dateQuery } : {};
+    // Purchases book on `date` — the backdatable business date the purchase
+    // list and supplier statement filter on — never on entry time.
+    const purchaseDateMatch = dateQuery ? { date: dateQuery } : {};
 
     // Run all aggregations in parallel
     const [
@@ -1308,7 +1384,7 @@ class ReportService {
           $match: {
             ...this._baseMatch(shopId, branchId),
             status: { $ne: 'cancelled' },
-            ...dateMatch,
+            ...purchaseDateMatch,
           },
         },
         {
