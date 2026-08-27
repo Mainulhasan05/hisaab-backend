@@ -53,6 +53,14 @@ module.exports = {
   AccountEntry: require('./AccountEntry.model'),
   // "The statement says X, the app says Y." Same reason.
   AccountReconciliation: require('./AccountReconciliation.model'),
+  // কেনা ফেরত — goods sent back to a supplier. Registered here or
+  // `sync-indexes` never sees the collection at all, and production (autoIndex
+  // off) gets NONE of its indexes: the unique `{shop, returnNo}` that stops two
+  // returns sharing a number, the `{shop, purchase}` the max-returnable map is
+  // built from, and the `{shop, branch, refundStatus, createdAt}` behind the
+  // "টাকা ফেরত পাওয়া বাকি" banner. Every one of those would fall back to a
+  // collection scan or, in the unique case, to no guard at all.
+  PurchaseReturn: require('./PurchaseReturn.model'),
   StockTransaction: require('./StockTransaction.model'),
   AuditLog: require('./AuditLog.model'),
   SMSLog: require('./SMSLog.model'),

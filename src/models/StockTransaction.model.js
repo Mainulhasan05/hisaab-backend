@@ -83,7 +83,12 @@ const stockTransactionSchema = new mongoose.Schema({
   reference: {
     type: {
       type: String,
-      enum: ['sale', 'purchase', 'manual', 'return', 'damage']
+      // `purchase_return` points at a `PurchaseReturn` document, NOT at the
+      // purchase it came off. A partial RTV is its own event with its own
+      // number, and pointing the row at the purchase would make two different
+      // movements — the delivery in and the part of it that went back —
+      // indistinguishable in the stock history.
+      enum: ['sale', 'purchase', 'manual', 'return', 'damage', 'purchase_return']
     },
     id: mongoose.Schema.Types.ObjectId,
     invoiceNo: String

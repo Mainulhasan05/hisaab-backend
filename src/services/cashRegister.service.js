@@ -62,6 +62,7 @@ class CashRegisterService {
       cashPurchases,
       cashRefunds,
       cashSupplierPayments,
+      cashPurchaseRefunds,
       transfersIn,
       transfersOut,
       ownerMovements,
@@ -293,6 +294,34 @@ class CashRegisterService {
         { $group: { _id: null, total: { $sum: '$amount' } } },
       ]),
 
+      // ── Cash a SUPPLIER handed back (কেনা ফেরত) ──────────────────────────
+      //
+      // Money INTO the drawer, and the mirror of `cashSupplierPayments` above:
+      // the shop sent damaged goods back and the DSR paid for them across the
+      // counter, so the notes are physically in the box.
+      //
+      // `purchase_refund`, never `refund`. The `cashRefunds` bucket above is
+      // the customer side — money going OUT — and folding the two together
+      // would subtract this money instead of adding it, leaving the till over
+      // by twice the amount returned.
+      //
+      // `LIVE_PAYMENT` for the reason every Payment reader carries it: a voided
+      // row is money the drawer gave back up, and counting it reports cash the
+      // shop does not have.
+      Payment.aggregate([
+        {
+          $match: {
+            shop: shopOid,
+            ...branchMatch,
+            method: 'cash',
+            type: 'purchase_refund',
+            ...LIVE_PAYMENT,
+            ...paidAtMatch({ $gte: start, $lte: end }),
+          },
+        },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]),
+
       // ── Money banked, or otherwise moved OUT of the drawer ───────────────
       //
       // `amountOut` is what left this account. The charge on a transfer is the
@@ -368,10 +397,27 @@ class CashRegisterService {
       sales: cashSales[0]?.total || 0,
       dueCollections: cashDueCollections[0]?.total || 0,
       expenses: cashExpenses[0]?.total || 0,
-      // Goods paid for at the counter, plus supplier balances settled later.
-      // Both are cash out against purchases, so they share the one bucket the
-      // register already renders.
-      purchases: (cashPurchases[0]?.total || 0) + (cashSupplierPayments[0]?.total || 0),
+      // Goods paid for at the counter, plus supplier balances settled later,
+      // LESS whatever a supplier handed back for returned goods. All three are
+      // the same pipe — money moving between the drawer and a supplier — so
+      // they share the one bucket the register already renders.
+      //
+      // ── Why a NET figure and not a seventh bucket ─────────────────────────
+      //
+      // A `cashIn.purchaseRefunds` key would mean a schema change on
+      // `CashRegister`, a new entry in `CASH_IN_KEYS`, a row in the rendered
+      // register and a migration of every closed day's document — for a figure
+      // that is, economically, a purchase that partly un-happened. Netting it
+      // reaches `expectedClosing` through arithmetic the model already does,
+      // and a shop that never returns anything sees a byte-identical register
+      // (I-1).
+      //
+      // `cashOut.purchases` carries no `min: 0`, so a day whose refunds exceed
+      // its purchases reads negative — which is the honest number: on that day
+      // the supplier pipe put money INTO the box.
+      purchases: (cashPurchases[0]?.total || 0)
+        + (cashSupplierPayments[0]?.total || 0)
+        - (cashPurchaseRefunds[0]?.total || 0),
       refunds: cashRefunds[0]?.total || 0,
       // Cash walked INTO the drawer from a bank or an MFS account, and cash
       // walked OUT to one. Both zero for a shop that has never recorded a

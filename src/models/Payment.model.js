@@ -370,10 +370,20 @@ paymentSchema.index({ shop: 1, viaSale: 1 }, { sparse: true });
 paymentSchema.index({ shop: 1, purchase: 1 }, { sparse: true }); // Purchase payments
 paymentSchema.index({ type: 1, createdAt: -1 }); // Admin subscription-payment queries (no shop predicate)
 // Looking a receipt up by the number printed on it — the counter's "এই রসিদটা
-// কোনটা?" question. Sparse because only collection rows carry one, and unique
-// so a derived number that somehow repeated is caught here rather than
-// discovered by two customers holding the same slip.
-paymentSchema.index({ shop: 1, receiptNo: 1 }, { unique: true, sparse: true });
+// কোনটা?" question. Unique so a derived number that somehow repeated is caught
+// here rather than discovered by two customers holding the same slip.
+//
+// PARTIAL, not sparse. `sparse` skips a document only when EVERY indexed field
+// is missing, and `shop` is always present — so on this compound key a sparse
+// index still enrols every receipt-less payment under `receiptNo: null`, and
+// the second one in a shop fails E11000. That is exactly why this index could
+// not be built against real data until 2026-08-27. The partial filter indexes
+// only the rows that actually carry a number, which is what "sparse" was
+// reaching for.
+paymentSchema.index(
+  { shop: 1, receiptNo: 1 },
+  { unique: true, partialFilterExpression: { receiptNo: { $type: 'string' } } }
+);
 // The রসিদ register: "every collection this shop has taken, newest first",
 // with the cancelled ones filtered out or called out. Compound on status so the
 // common listing is served straight from the index rather than by fetching

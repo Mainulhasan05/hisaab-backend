@@ -10,6 +10,7 @@ const Supplier = require('../models/Supplier.model');
 const SupplierBalance = require('../models/SupplierBalance.model');
 const SupplierDueAdjustment = require('../models/SupplierDueAdjustment.model');
 const Purchase = require('../models/Purchase.model');
+const PurchaseReturn = require('../models/PurchaseReturn.model');
 const Product = require('../models/Product.model');
 
 const { buildDateMatch } = require('../utils/reportScope.util');
@@ -676,9 +677,31 @@ class DetailedReportService {
     const adjustmentScope = { shop: oid(shopId), supplier: { $in: ids } };
     if (branchId) adjustmentScope.branch = oid(branchId);
 
+    /**
+     * কেনা ফেরত rows, and the one predicate that decides whether they belong
+     * on this page at all: `refundMethod: 'adjustment'`.
+     *
+     * Only an adjustment return moved the DEBT. A `cash` return handed money
+     * across the counter and left what the shop owes exactly as it was; a
+     * `pending` one has moved nothing yet. Crediting either here would show the
+     * supplier as owed less than they are, and `closingBalance` would stop
+     * agreeing with `recordedDue` — the divergence this whole statement prints
+     * both figures in order to expose.
+     *
+     * There is no `status: { $ne: 'cancelled' }` term because a return has no
+     * cancelled state (immutableGuard, no route). If one is ever given a void,
+     * this predicate is the first thing that must learn about it.
+     */
+    const returnScope = {
+      shop: oid(shopId),
+      supplier: { $in: ids },
+      refundMethod: 'adjustment',
+    };
+    if (branchId) returnScope.branch = oid(branchId);
+
     const [openings, entriesBySupplier] = await Promise.all([
-      this._supplierOpeningBalances({ purchaseScope, paymentScope, adjustmentScope, ids, rangeStart }),
-      this._supplierRangeEntries({ purchaseScope, paymentScope, adjustmentScope, ids, range, withItems }),
+      this._supplierOpeningBalances({ purchaseScope, paymentScope, adjustmentScope, returnScope, ids, rangeStart }),
+      this._supplierRangeEntries({ purchaseScope, paymentScope, adjustmentScope, returnScope, ids, range, withItems }),
     ]);
 
     const statements = [];
@@ -786,7 +809,7 @@ class DetailedReportService {
    * the payment stays inside it. That requires editing a purchase date
    * backwards past its own payment, which no screen offers.
    */
-  async _supplierOpeningBalances({ purchaseScope, paymentScope, adjustmentScope, ids, rangeStart }) {
+  async _supplierOpeningBalances({ purchaseScope, paymentScope, adjustmentScope, returnScope, ids, rangeStart }) {
     const balances = new Map();
     if (!rangeStart) return balances;
 
@@ -796,7 +819,7 @@ class DetailedReportService {
       balances.set(key, quantizeMoney((balances.get(key) || 0) + amount));
     };
 
-    const [bills, payments, adjustments] = await Promise.all([
+    const [bills, payments, adjustments, returns] = await Promise.all([
       Purchase.aggregate([
         { $match: { ...purchaseScope, date: before } },
         laterPaymentsLookup(purchaseScope.shop),
@@ -830,17 +853,34 @@ class DetailedReportService {
         { $match: { ...adjustmentScope, createdAt: before } },
         { $group: { _id: '$supplier', total: { $sum: '$amount' } } },
       ]),
+      // ── কেনা ফেরত carried into the window ──────────────────────────────
+      //
+      // MIRRORED here, not only pushed as a range entry. The bills group above
+      // counts a purchase at its FULL `totalAmount`, which is what the supplier
+      // billed and is deliberately never rewritten by a return — so without
+      // this term a shop that returned goods before the window opened starts
+      // the statement owing money it has already had credited, and every row
+      // below it carries the error forward. That is exactly the drift the
+      // comment on this method warns about for `paid`.
+      //
+      // Dated on `createdAt`: a return is not backdatable (no route accepts a
+      // date), so when it was written IS when it happened.
+      PurchaseReturn.aggregate([
+        { $match: { ...returnScope, createdAt: before } },
+        { $group: { _id: '$supplier', total: { $sum: '$totalAmount' } } },
+      ]),
     ]);
 
     for (const r of bills) add(r._id, (r.billed || 0) - (r.paidAtPurchase || 0));
     for (const r of payments) add(r._id, -r.total);
     for (const r of adjustments) add(r._id, r.total);
+    for (const r of returns) add(r._id, -r.total);
 
     return balances;
   }
 
-  async _supplierRangeEntries({ purchaseScope, paymentScope, adjustmentScope, ids, range, withItems = false }) {
-    const [purchases, payments, adjustments] = await Promise.all([
+  async _supplierRangeEntries({ purchaseScope, paymentScope, adjustmentScope, returnScope, ids, range, withItems = false }) {
+    const [purchases, payments, adjustments, returns] = await Promise.all([
       Purchase.aggregate([
         { $match: { ...purchaseScope, ...(range ? { date: range } : {}) } },
         { $sort: { date: 1 } },
@@ -885,6 +925,14 @@ class DetailedReportService {
       ]),
       SupplierDueAdjustment.find({ ...adjustmentScope, ...(range ? { createdAt: range } : {}) })
         .select('supplier amount kind note createdAt')
+        .sort({ createdAt: 1 })
+        .limit(MAX_ROWS_PER_COLLECTION)
+        .lean(),
+      // কেনা ফেরত — adjustment-method only; see `returnScope`. The frontend's
+      // `LedgerTable.ENTRY_TONE` already carries a `return` key from the
+      // customer statement, so this renders with no client change at all.
+      PurchaseReturn.find({ ...returnScope, ...(range ? { createdAt: range } : {}) })
+        .select('supplier returnNo totalAmount items createdAt')
         .sort({ createdAt: 1 })
         .limit(MAX_ROWS_PER_COLLECTION)
         .lean(),
@@ -945,6 +993,48 @@ class DetailedReportService {
         note: a.note || null,
         debit: a.amount > 0 ? a.amount : 0,
         credit: a.amount < 0 ? -a.amount : 0,
+      });
+    }
+
+    // ── Goods that went back, and the credit that came with them ────────────
+    //
+    // A CREDIT on the supplier statement, because this ledger's balance is what
+    // the shop OWES: sending goods back lowers it, exactly as paying does. The
+    // sign is the opposite of the customer statement's `return` row for the
+    // same reason the whole statement's sign is opposite — see the ledger
+    // convention at the head of this file.
+    //
+    // `ENTRY_RANK` already ranks `return` between a bill and a payment, so a
+    // same-day trio reads "বিল / ফেরত / পরিশোধ" down the page with no change
+    // needed there.
+    for (const r of returns) {
+      push(r.supplier, {
+        type: 'return',
+        date: r.createdAt,
+        label: `কেনা ফেরত ${r.returnNo}`,
+        ref: r.returnNo,
+        itemCount: (r.items || []).length,
+        debit: 0,
+        credit: r.totalAmount || 0,
+        // The line detail, keyed the way `PURCHASE_ITEM_MAP` keys a goods line
+        // — `unitCost` / `totalCost`, NOT `unitPrice` / `total`. Those are the
+        // names `dataSanitizer.COST_KEYS` strips, and a statement row that used
+        // the raw field names would print the shop's buying prices to anyone
+        // holding plain `reports.view`.
+        ...(withItems
+          ? itemsField((r.items || []).map((it) => ({
+              productName: it.productName,
+              productCode: it.productCode,
+              variantLabel: it.variantLabel,
+              quantity: it.quantity,
+              unit: it.unit,
+              packSize: it.packSize,
+              batchNumber: it.batchNumber,
+              expiryDate: it.expiryDate,
+              unitCost: it.unitPrice,
+              totalCost: it.total,
+            })))
+          : {}),
       });
     }
 

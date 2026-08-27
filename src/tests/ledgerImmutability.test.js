@@ -49,6 +49,10 @@ const GUARDED = [
   'SalesReturn',
   'AccountEntry',
   'AccountTransfer',
+  // কেনা ফেরত. Guarded from birth, on the same footing as `SalesReturn`: it has
+  // decremented stock, drained batches, reduced `Purchase.returnedAmount` and
+  // moved both supplier books, none of it re-derivable from the row itself.
+  'PurchaseReturn',
 ];
 
 /** Assert a promise rejected with the ledger guard's 403. */

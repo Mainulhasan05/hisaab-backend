@@ -46,6 +46,7 @@ const StockTransaction = require('../models/StockTransaction.model');
 const Supplier = require('../models/Supplier.model');
 const SupplierBalance = require('../models/SupplierBalance.model');
 const Payment = require('../models/Payment.model');
+const PurchaseReturn = require('../models/PurchaseReturn.model');
 
 const SHOP = new mongoose.Types.ObjectId();
 const USER = new mongoose.Types.ObjectId();
@@ -122,6 +123,16 @@ let accountDeltas;
 
 beforeEach(() => {
   accountDeltas = [];
+
+  // No কেনা ফেরত against this bill. `cancelPurchase` now asks first (D-4): a
+  // purchase with goods already sent back refuses to cancel, because otherwise
+  // the stock, the batches and the supplier books all double-reverse. Every
+  // case in this file is about the MONEY unwind and none of them have returns,
+  // so the answer is zero throughout — the refusal itself is covered in
+  // `purchaseReturn.test.js`.
+  jest.spyOn(PurchaseReturn, 'countDocuments').mockReturnValue({
+    session: () => Promise.resolve(0),
+  });
 
   supplierDoc = {
     _id: SUPPLIER,

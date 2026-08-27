@@ -171,7 +171,32 @@ module.exports = {
      * written as TWO rows, not one mixed row. See dueSettlement.service.
      */
     ADVANCE: 'advance',
-    REFUND: 'refund'
+    REFUND: 'refund',
+    /**
+     * Money coming back IN from a SUPPLIER, against a কেনা ফেরত.
+     *
+     * ── Why not reuse `REFUND` ───────────────────────────────────────────────
+     *
+     * `refund` is money going OUT — the shop handing a customer their money
+     * back. Every reader of it treats it that way: the cash register books it
+     * under `cashOut.refunds`, and the customer statement prints it as a DEBIT
+     * that raises what the customer owes. A supplier refund is the exact
+     * opposite in both places — cash INTO the drawer, and nothing to do with
+     * any customer at all. Reusing the type would have made the till read short
+     * by every returned taka and put supplier money on customer ledgers.
+     *
+     * So it is its own type, and every aggregation keyed on `type` had to be
+     * checked (PURCHASE_RETURN_PLAN.md §7):
+     *
+     *   cash register    → nets against `cashOut.purchases`; the money came
+     *                      back down the same pipe it went out
+     *   customer flows   → absent, correctly: these rows carry no `customer`
+     *   supplier statement → absent, deliberately. A refund is a DRAWER
+     *                      movement; the debt never changed (only an
+     *                      `adjustment` return moves the খাতা, and that is
+     *                      recorded on the return document, not here).
+     */
+    PURCHASE_REFUND: 'purchase_refund'
   },
 
   // Platform billing — money a shop pays HisaabBD (models/PlatformPayment)
@@ -204,6 +229,12 @@ module.exports = {
     SALE: 'sale',
     ADJUSTMENT: 'adjustment',
     RETURN: 'return',
+    // Goods going BACK to the supplier (কেনা ফেরত). Deliberately not `RETURN`,
+    // which is the CUSTOMER giving goods back and therefore stock coming IN.
+    // The two point in opposite directions, and a stock-history screen that
+    // labelled them the same word would be telling a shopkeeper the shelf grew
+    // when it shrank.
+    PURCHASE_RETURN: 'purchase_return',
     DAMAGE: 'damage',
     TRANSFER_OUT: 'transfer_out',
     TRANSFER_IN: 'transfer_in',
@@ -280,6 +311,13 @@ module.exports = {
 
     // Sales Returns
     SALES_RETURN_CREATE: { en: 'sales_return_create', bn: 'মাল ফেরত' },
+
+    // Purchase Returns (RTV) — goods going back to the supplier. The Bengali
+    // label is deliberately NOT 'মাল ফেরত': that is the customer-side wording
+    // and the audit log is read by people who need to know which direction the
+    // goods went.
+    PURCHASE_RETURN_CREATE: { en: 'purchase_return_create', bn: 'কেনা ফেরত' },
+    PURCHASE_RETURN_SETTLE: { en: 'purchase_return_settle', bn: 'কেনা ফেরতের টাকা গ্রহণ' },
 
     // Cash Register
     CASH_REGISTER_OPEN: { en: 'cash_register_open', bn: 'ক্যাশ রেজিস্টার খোলা' },

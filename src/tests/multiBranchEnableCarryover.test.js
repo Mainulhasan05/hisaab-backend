@@ -42,7 +42,7 @@ describe('enableMultiBranch backfills every branch-scoped model', () => {
   // model without adding it here is what fails — the failure mode being fixed.
   const MUST_BACKFILL = [
     'Sale', 'Purchase', 'Expense', 'CashRegister', 'StockTransaction',
-    'Payment', 'SalesReturn', 'SMSLog', 'AuditLog', 'HeldCart', 'Order',
+    'Payment', 'SalesReturn', 'PurchaseReturn', 'SMSLog', 'AuditLog', 'HeldCart', 'Order',
     'DueAdjustment', 'SupplierDueAdjustment',
   ];
 

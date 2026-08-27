@@ -18,6 +18,7 @@ const purchaseRoutes = require('./purchase.routes');
 const cashRegisterRoutes = require('./cashRegister.routes');
 const paymentAccountRoutes = require('./paymentAccount.routes');
 const salesReturnRoutes = require('./salesReturn.routes');
+const purchaseReturnRoutes = require('./purchaseReturn.routes');
 const heartbeatRoutes = require('./heartbeat.routes');
 const contactRoutes = require('./contact.routes');
 const pageContentRoutes = require('./pageContent.routes');
@@ -66,6 +67,10 @@ router.use('/cash-register', cashRegisterRoutes);
 // itself, so a shop without the capability 404s on every verb.
 router.use('/accounts', paymentAccountRoutes);
 router.use('/sales-returns', salesReturnRoutes);
+// কেনা ফেরত — goods going back to the SUPPLIER. Its own prefix rather than a
+// verb under `/purchases`, mirroring `/sales-returns`: the two are lists in
+// their own right and each has a screen of its own.
+router.use('/purchase-returns', purchaseReturnRoutes);
 router.use('/heartbeat', heartbeatRoutes);
 router.use('/contact', contactRoutes);
 router.use('/pages', pageContentRoutes);
@@ -131,6 +136,7 @@ router.get('/', (req, res) => {
       purchases: '/api/purchases',
       cashRegister: '/api/cash-register',
       salesReturns: '/api/sales-returns',
+      purchaseReturns: '/api/purchase-returns',
       heartbeat: '/api/heartbeat',
       contact: '/api/contact',
       pages: '/api/pages',

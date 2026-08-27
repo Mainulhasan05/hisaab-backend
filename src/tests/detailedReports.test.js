@@ -45,6 +45,7 @@ const DueAdjustment = require('../models/DueAdjustment.model');
 const Supplier = require('../models/Supplier.model');
 const SupplierDueAdjustment = require('../models/SupplierDueAdjustment.model');
 const Purchase = require('../models/Purchase.model');
+const PurchaseReturn = require('../models/PurchaseReturn.model');
 const Product = require('../models/Product.model');
 const { COST_KEYS, PROFIT_KEYS } = require('../utils/dataSanitizer.util');
 
@@ -246,7 +247,9 @@ describe('customer statement', () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 describe('supplier statement', () => {
-  function stubSupplierData({ purchases = [], payments = [], adjustments = [], openings = {} }) {
+  function stubSupplierData({
+    purchases = [], payments = [], adjustments = [], returns = [], openings = {},
+  }) {
     jest.spyOn(Supplier, 'find').mockReturnValue(mockChain([
       { _id: SUPPLIER, name: 'ঢাকা ট্রেডার্স', phone: '01811000000', totalDue: 0, openingDue: 0 },
     ]));
@@ -259,6 +262,12 @@ describe('supplier statement', () => {
       .mockResolvedValueOnce(payments);
     jest.spyOn(SupplierDueAdjustment, 'aggregate').mockResolvedValue(openings.adjustments || []);
     jest.spyOn(SupplierDueAdjustment, 'find').mockReturnValue(mockChain(adjustments));
+    // কেনা ফেরত, in BOTH passes — the opening group and the in-range detail.
+    // A supplier statement that learned the entry in only one of the two drifts
+    // its opening জের, which is the failure the range-entries method's own
+    // comment warns about.
+    jest.spyOn(PurchaseReturn, 'aggregate').mockResolvedValue(openings.returns || []);
+    jest.spyOn(PurchaseReturn, 'find').mockReturnValue(mockChain(returns));
   }
 
   const RANGE = { startDate: '2026-08-01', endDate: '2026-08-31' };
@@ -330,6 +339,50 @@ describe('supplier statement', () => {
     const report = await service.getSupplierStatements(SHOP, RANGE, null);
     expect(report.statements[0].openingBalance).toBe(5000);
     expect(report.statements[0].totals.closingBalance).toBe(5000);
+  });
+
+  it('credits কেনা ফেরত against the payable, in the window', async () => {
+    // The mirror of the customer statement's `return` row with the sign
+    // flipped: this balance is what the shop OWES, so goods going back lower
+    // it exactly as paying does.
+    stubSupplierData({
+      purchases: [{
+        supplier: SUPPLIER, invoiceNo: 'PUR-5', totalAmount: 5000,
+        paidAtPurchase: 0, date: d('2026-08-03'), itemCount: 4,
+      }],
+      returns: [{
+        supplier: SUPPLIER, returnNo: 'PRET202608100001', totalAmount: 800,
+        items: [], createdAt: d('2026-08-10'),
+      }],
+    });
+
+    const report = await service.getSupplierStatements(SHOP, RANGE, null);
+    const entries = report.statements[0].entries;
+
+    expect(entries).toHaveLength(2);
+    expect(entries[1]).toMatchObject({
+      type: 'return',
+      label: 'কেনা ফেরত PRET202608100001',
+      debit: 0,
+      credit: 800,
+    });
+    expect(report.statements[0].totals.closingBalance).toBe(4200);
+  });
+
+  it('mirrors pre-window returns into the opening জের', async () => {
+    // Billed 9,000 before the window with nothing paid, and 2,000 of it sent
+    // back. The bills group counts the purchase at its FULL totalAmount —
+    // deliberately never rewritten by a return — so without this term the
+    // statement opens owing money the supplier has already credited.
+    stubSupplierData({
+      openings: {
+        bills: [{ _id: SUPPLIER, billed: 9000, paidAtPurchase: 0 }],
+        returns: [{ _id: SUPPLIER, total: 2000 }],
+      },
+    });
+
+    const report = await service.getSupplierStatements(SHOP, RANGE, null);
+    expect(report.statements[0].openingBalance).toBe(7000);
   });
 
   it('narrows "only who we owe" in the query, not after the page cap', async () => {

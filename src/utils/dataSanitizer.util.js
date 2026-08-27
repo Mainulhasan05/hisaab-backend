@@ -163,6 +163,22 @@ const PURCHASE_MONEY_KEYS = new Set([
   'landedUnitPrice', 'landedTotal', 'lineDiscount', 'discountShare', 'chargeShare',
   'subtotal', 'itemDiscount', 'discount', 'discountAmount',
   'freightCharge', 'otherCharge', 'merchandise',
+  // ── The কেনা ফেরত terms ─────────────────────────────────────────────────
+  //
+  // A return document's own money is already covered above — its lines carry
+  // `unitPrice`, `total`, `landedUnitPrice` and the discount shares, and its
+  // head carries `totalAmount`. These are the two names the SUMMARY endpoint
+  // invents, and neither resembles anything already listed:
+  //
+  //     totalReturns         the window's credit total
+  //     pendingRefundAmount  what suppliers still owe back
+  //
+  // `adjustedAmount` is the third and is a strict subset of `totalReturns`, so
+  // leaving it out would hand back most of what the other two withhold.
+  // `returnedAmount` is the accumulator on `Purchase` itself — the term that
+  // makes `totalAmount − paid − returnedAmount` reconstructible, which is the
+  // same full-bypass shape `netEarnings` had on the reports side.
+  'totalReturns', 'pendingRefundAmount', 'adjustedAmount', 'returnedAmount',
 ]);
 
 /**

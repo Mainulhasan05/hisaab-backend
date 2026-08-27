@@ -390,6 +390,50 @@ const purchaseSchema = new mongoose.Schema({
     default: 0,
     min: [0, 'বাকি ০ এর কম হতে পারবে না']
   },
+  /**
+   * ── Supplier credit taken off this bill by a কেনা ফেরত ────────────────────
+   *
+   * The third term in the `due` derivation below, and the ONLY sanctioned way
+   * to reduce what a purchase owes without pretending it was paid.
+   *
+   * ── Why a stored accumulator and not a lower `due` ────────────────────────
+   *
+   * `due` is DERIVED in `pre('save')` from `totalAmount − paid`. So a return
+   * that simply wrote a smaller `due` would survive exactly until the next
+   * `save()` of the document — `recordPayment` does one on every payment — at
+   * which point the hook would recompute the old figure from `paid` alone and
+   * the credit would silently vanish. That is not hypothetical: it is precisely
+   * the bug `Sale.returnedAmount` was introduced to end on the sale side (see
+   * the accumulator note in `salesReturn.service`), and this is the same fix.
+   *
+   * ── Why not just increase `paid` ──────────────────────────────────────────
+   *
+   * Because the shop did not pay. `paid` is money that left the drawer, and
+   * every reader treats it as such: the supplier statement prints
+   * `paid − Σ later payments` as "ক্রয়ের সময় পরিশোধ", the cash register sums
+   * the cash legs, and `recalc-supplier-balances` reconciles against it. Adding
+   * a return to `paid` would report cash the shop never handed over, on the
+   * statement the shop reconciles against the supplier's own paper.
+   *
+   * ── Why `updateOne` was rejected ──────────────────────────────────────────
+   *
+   * An `updateOne` writing `due` and `status` directly would bypass the hook —
+   * and then live exactly one `save()` from being overwritten, the same way the
+   * naive version above does. Feeding the hook a new input keeps ONE
+   * derivation, and makes it idempotent: any later `save()` from any path lands
+   * on the same answer instead of a different one.
+   *
+   * ── Byte-identity (I-1) ───────────────────────────────────────────────────
+   *
+   * NO `default`, deliberately. A default of 0 would stamp the field onto every
+   * purchase every shop has ever recorded the next time it was saved. Absent
+   * means zero, every reader falls back, and a shop that never returns anything
+   * stores documents identical to today's.
+   */
+  returnedAmount: {
+    type: Number,
+    min: [0, 'ফেরত ০ এর কম হতে পারবে না']
+  },
   paymentMethod: {
     type: String,
     enum: ['cash', 'bkash', 'nagad', 'card', 'bank', 'credit'],
@@ -516,7 +560,28 @@ purchaseSchema.pre('save', function(next) {
   if (!Number.isFinite(this.paid) || this.paid > this.totalAmount) {
     this.paid = Math.min(Math.max(0, this.paid || 0), this.totalAmount);
   }
-  this.due = Math.max(0, this.totalAmount - this.paid);
+
+  /**
+   * Credit the supplier gave back on goods that went to them (কেনা ফেরত).
+   *
+   * Read through a fallback and clamped to what the bill can still absorb, for
+   * two separate reasons:
+   *
+   *   · absent on every purchase written before returns existed, and on every
+   *     purchase that has never had one — which is nearly all of them. Absent
+   *     reads as 0 and the arithmetic below is byte-identical to what it was
+   *     (I-1).
+   *   · capped at `totalAmount − paid`, so a credit can only ever wipe an
+   *     OUTSTANDING obligation. It can never drive `due` below zero, and it can
+   *     never be mistaken for money owed BACK to the shop — a supplier advance
+   *     is deliberately still not tracked anywhere (see `recordPayment`'s F-4
+   *     refusal, which makes the same call).
+   */
+  const returnedCredit = Number.isFinite(this.returnedAmount)
+    ? Math.min(Math.max(0, this.returnedAmount), Math.max(0, this.totalAmount - this.paid))
+    : 0;
+
+  this.due = Math.max(0, this.totalAmount - this.paid - returnedCredit);
 
   // Payment status is derived — EXCEPT for a cancelled purchase, which is a
   // lifecycle state and not a payment state.
@@ -536,6 +601,20 @@ purchaseSchema.pre('save', function(next) {
   //
   // Sale.model.js has carried this guard since it was written; this is the same
   // rule, and the two must not diverge again.
+  //
+  // ── What a return does to the label ──────────────────────────────────────
+  //
+  // `status` is derived from `due`, and `due` is now net of `returnedAmount`.
+  // So a bill whose whole remaining obligation was cancelled out by a কেনা
+  // ফেরত reads 'completed' — which is what this field has ALWAYS meant here:
+  // nothing outstanding. It is deliberately not given a fourth value.
+  //
+  // The alternative (a 'returned' status) would be read by `getPurchases`'s
+  // default `status: { $ne: 'cancelled' }` filter as an ordinary live bill and
+  // by nothing else, so it would buy a label and cost a migration of every
+  // status-filtered query, every report `$match` and the list's own filter
+  // chips. The return document is where "this bill had goods sent back" is
+  // recorded, and the detail page reads it from there.
   if (this.status !== 'cancelled') {
     if (this.due === 0) {
       this.status = 'completed';

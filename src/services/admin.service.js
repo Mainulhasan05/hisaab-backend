@@ -7,6 +7,7 @@ const Expense = require('../models/Expense.model');
 const CashRegister = require('../models/CashRegister.model');
 const StockTransaction = require('../models/StockTransaction.model');
 const SalesReturn = require('../models/SalesReturn.model');
+const PurchaseReturn = require('../models/PurchaseReturn.model');
 const SMSLog = require('../models/SMSLog.model');
 const SMSQuota = require('../models/SMSQuota.model');
 const AuditLog = require('../models/AuditLog.model');
@@ -2727,7 +2728,7 @@ class AdminService {
     const SupplierDueAdjustment = require('../models/SupplierDueAdjustment.model');
     const branchScopedModels = [
       Sale, Purchase, Expense, CashRegister, StockTransaction,
-      Payment, SalesReturn, SMSLog, AuditLog, HeldCart, Order,
+      Payment, SalesReturn, PurchaseReturn, SMSLog, AuditLog, HeldCart, Order,
       DueAdjustment, SupplierDueAdjustment
     ];
 

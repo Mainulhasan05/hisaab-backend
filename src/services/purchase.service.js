@@ -941,6 +941,45 @@ class PurchaseService {
     }
 
     /**
+     * ── A bill with goods already sent back cannot be voided (D-4) ───────────
+     *
+     * Cancelling reverses the WHOLE delivery: it removes every line's quantity
+     * from the shelf, deletes the batches this purchase created, and unwinds
+     * the supplier's খাতা by the bill's full `totalAmount`. A কেনা ফেরত has
+     * already done part of exactly that — its own slice of the stock is gone,
+     * its own slice of the batch is gone, and (for an `adjustment`) its credit
+     * is already off the supplier's books through `Purchase.returnedAmount`.
+     *
+     * Run both and every one of those is reversed twice: stock clamps at zero
+     * while the supplier rollup does not, which is precisely the two-books
+     * drift `Purchase.pre('save')`'s cancelled-status guard has its own long
+     * comment about.
+     *
+     * There is no partial unwind to write instead, because a `PurchaseReturn`
+     * has no cancelled state by design (immutableGuard, no route) — so refusing
+     * is not a stopgap, it is the answer. Same call the multi-bill payment
+     * refusal below makes, and the same call `cancelDueCollection` makes about
+     * foreign payment types: refusing loudly beats an unwind that half works.
+     *
+     * `countDocuments` and not a `find`: existence IS liveness here. Unlike
+     * `Payment`, a return row cannot be voided, so there is no `LIVE_*` guard
+     * to apply.
+     */
+    const PurchaseReturn = require('../models/PurchaseReturn.model');
+    const returnCount = await PurchaseReturn.countDocuments({
+      shop: shopId,
+      purchase: purchase._id,
+    }).session(session || null);
+
+    if (returnCount > 0) {
+      throw new AppError(
+        'This purchase has goods returned against it — it can no longer be cancelled',
+        'এই ক্রয়ের মাল ফেরত আছে — ক্রয়টি আর বাতিল করা যাবে না',
+        400
+      );
+    }
+
+    /**
      * ── Supplier payments recorded after the purchase ────────────────────────
      *
      * These are `Payment{type:'purchase_payment'}` rows from `recordPayment` —
@@ -1195,6 +1234,20 @@ class PurchaseService {
       // Create reversal stock transaction
       cancelTxns.push({
         shop: shopId,
+        // `branch` was missing here, and it is not cosmetic: every stock-history
+        // read is `branchFilter`-scoped, so an untagged reversal row was
+        // invisible in EVERY branch's view forever — the same defect that made
+        // due collections vanish from every branch's cash register (H-6). The
+        // receive path beside it has always tagged its rows; only the reversal
+        // did not, so a cancelled delivery's `purchase` rows showed and its
+        // `return` rows did not, and the history read as if the goods had
+        // arrived and never left.
+        //
+        // The PURCHASE's branch, not the caller's: `branchFilter` above already
+        // restricts a branch to cancelling its own bills, but an owner in
+        // All-Branches has no active branch and the goods belong to whichever
+        // branch bought them.
+        branch: purchase.branch || null,
         product: item.product,
         productName: item.productName,
         productCode: item.productCode,
@@ -1322,6 +1375,10 @@ class PurchaseService {
     // Audit log
     await AuditLog.create([{
       shop: shopId,
+      // Tagged, like the reversal ledger rows above and like every other write
+      // in this file. An untagged audit row is unfilterable by branch, which is
+      // the whole of finding M-8 ("~30 of 33 audit sites untagged").
+      branch: purchase.branch || null,
       user: userId,
       action: 'purchase_cancel',
       actionBn: 'ক্রয় বাতিল',
