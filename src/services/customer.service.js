@@ -1179,6 +1179,62 @@ class CustomerService {
   }
 
   // Record due payment
+  /**
+   * The customer's still-open invoices, oldest first.
+   *
+   * Feeds the picker on the বাকি আদায় form: without it the shopkeeper is
+   * asked to type an amount against a খাতা with no way to see which bills make
+   * it up, and the money lands wherever oldest-first puts it.
+   *
+   * Ordered EXACTLY as `reallocateCustomerInvoices` orders its queue —
+   * `saleDate` where present, `createdAt` otherwise — so the list on screen is
+   * the order the money will actually be applied in when the owner picks
+   * nothing. A picker that showed a different order than the engine uses would
+   * be worse than no picker.
+   *
+   * `due` here is the live figure, already net of any khata money allocated to
+   * it, which is what the owner needs to see: what is still owed on this bill
+   * TODAY.
+   */
+  async getOpenInvoices(shopId, customerId, req = null) {
+    const scope = { shop: shopId, customer: customerId, status: { $ne: 'cancelled' } };
+
+    // Under separate books a collection may only settle its own branch's
+    // invoices — `settleCustomerDue` refuses anything else — so offering the
+    // others would be offering a choice the server will reject.
+    if (req && isBranchCustomerScope(req)) {
+      const branchId = requireBranch(req);
+      if (branchId) scope.branch = branchId;
+    }
+
+    const sales = await Sale.find(
+      scope,
+      'invoiceNo total paid ledgerSettled returnedAdjustment due status saleDate createdAt',
+      { lean: true }
+    ).sort({ createdAt: 1 });
+
+    const open = sales.filter((sale) => (sale.due || 0) > 0);
+
+    open.sort((a, b) => {
+      const aAt = a.saleDate || a.createdAt;
+      const bAt = b.saleDate || b.createdAt;
+      return new Date(aAt) - new Date(bAt);
+    });
+
+    return open.map((sale) => ({
+      _id: sale._id,
+      invoiceNo: sale.invoiceNo,
+      date: sale.saleDate || sale.createdAt,
+      total: sale.total || 0,
+      paid: sale.paid || 0,
+      // How much of this bill the খাতা has already covered. Shown so a partly
+      // settled invoice does not read as though the customer paid it directly.
+      ledgerSettled: sale.ledgerSettled || 0,
+      due: sale.due || 0,
+      status: sale.status,
+    }));
+  }
+
   async collectDuePayment(shopId, userId, customerId, paymentData, req) {
     const result = await runInTransaction(async (session) => {
       const { method, transactionId, notes } = paymentData;
@@ -1215,6 +1271,8 @@ class CustomerService {
         branchScoped,
         method,
         rawAccount: paymentData.account,
+        // Which invoices the owner picked, if any. Absent means oldest-first.
+        appliedTo: paymentData.appliedTo,
         paidAt,
         transactionId,
         notes,

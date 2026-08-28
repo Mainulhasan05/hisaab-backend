@@ -7,7 +7,7 @@ const customerService = require('../services/customer.service');
 const supplierService = require('../services/supplier.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
-const { sanitizeReport } = require('../utils/dataSanitizer.util');
+const { sanitizeReport, canViewExpenses } = require('../utils/dataSanitizer.util');
 
 // Get dashboard statistics
 exports.getDashboard = asyncHandler(async (req, res) => {
@@ -120,7 +120,14 @@ exports.getSalesByDate = asyncHandler(async (req, res) => {
     });
   }
 
-  const report = await reportService.getSalesByDate(req.shop._id, date, req.branchId, { staffId });
+  // The route is gated `reports.view`; the itemised expense rows need
+  // `expenses.view` on top of it. Asked here rather than filtered later — the
+  // fields that give an expense row away are `amount` and `description`, which
+  // the field-name denylist in `sanitizeReport` cannot single out.
+  const report = await reportService.getSalesByDate(req.shop._id, date, req.branchId, {
+    staffId,
+    includeExpenses: canViewExpenses(req),
+  });
   return ApiResponse.success(res, {
     data: sanitizeReport(report, req),
     message: 'Sales for date retrieved successfully',

@@ -73,6 +73,15 @@ exports.restoreCustomer = asyncHandler(async (req, res) => {
 });
 
 // Collect due payment
+exports.getOpenInvoices = asyncHandler(async (req, res) => {
+  const invoices = await customerService.getOpenInvoices(req.shop._id, req.params.id, req);
+  return ApiResponse.success(res, {
+    data: invoices,
+    message: 'Open invoices retrieved successfully',
+    messageBn: 'বাকি ইনভয়েস লোড হয়েছে',
+  });
+});
+
 exports.collectDue = asyncHandler(async (req, res) => {
   const result = await customerService.collectDuePayment(req.shop._id, req.user._id, req.params.id, req.body, req);
   return ApiResponse.success(res, {

@@ -3,8 +3,9 @@
  *
  * The reports that a cashier legitimately opens (`reports.view`) each compute
  * their own profit-derived figures, and `sanitizeReport` filters them by NAME.
- * `netEarnings` — profit minus expenses, returned by the daily summary and the
- * date-wise report — was not on that list, so it shipped to anyone with plain
+ * `netEarnings` (now `netProfit`) — profit minus expenses, returned by the
+ * daily summary and the date-wise report — was not on that list, so it
+ * shipped to anyone with plain
  * `reports.view`. Because those same payloads carry the expense total beside
  * it, `profit = netEarnings + expenses` reconstructed the withheld figure
  * exactly.
@@ -56,12 +57,13 @@ function profitLookingKeys(data, path = '', found = []) {
 // money fields. Keep these in step with report.service.js.
 const DAILY_SUMMARY = {
   date: '2026-08-14',
-  netEarnings: 4200,
+  netProfit: 4200,
+  netSales: 11700,
   netCashFlow: 9100,
   sales: { revenue: 12000, profit: 5000, paid: 9000, due: 3000, count: 14 },
   expenses: { total: 800, count: 3, byCategory: [{ _id: 'rent', total: 800 }] },
   purchases: { total: 2000, paid: 2000, due: 0, count: 1 },
-  returns: { total: 300, profitLoss: 120, count: 1 },
+  returns: { total: 300, profitLoss: 120, cashRefund: 300, count: 1 },
   cashFlow: { cashIn: 9100, cashOut: 2800, net: 6300 },
   hourlyData: [{ hour: 11, revenue: 4000, profit: 1500, orders: 5 }],
   topProducts: [{ _id: 'p1', productName: 'চাল', totalQuantity: 10, totalRevenue: 5000 }],
@@ -70,20 +72,50 @@ const DAILY_SUMMARY = {
 const DATE_WISE = {
   month: '2026-08',
   days: [
-    { date: '2026-08-01', sales: 5000, expenses: 500, profit: 1200, netEarnings: 700, orderCount: 6 },
-    { date: '2026-08-02', sales: 0, expenses: 0, profit: 0, netEarnings: 0, orderCount: 0 },
+    {
+      date: '2026-08-01',
+      sales: 5000, returns: 200, netSales: 4800, expenses: 500,
+      profit: 1200, returnsLoss: 60, netProfit: 640,
+      cashIn: 4200, cashOut: 900, netCash: 3300,
+      salesPaid: 4000, collected: 200, purchasePaid: 200, cashRefund: 200,
+      orderCount: 6,
+    },
+    {
+      date: '2026-08-02',
+      sales: 0, returns: 0, netSales: 0, expenses: 0,
+      profit: 0, returnsLoss: 0, netProfit: 0,
+      cashIn: 0, cashOut: 0, netCash: 0,
+      salesPaid: 0, collected: 0, purchasePaid: 0, cashRefund: 0,
+      orderCount: 0,
+    },
   ],
-  monthTotal: { sales: 5000, expenses: 500, profit: 1200, netEarnings: 700, orderCount: 6 },
+  monthTotal: {
+    sales: 5000, returns: 200, netSales: 4800, expenses: 500,
+    profit: 1200, returnsLoss: 60, netProfit: 640,
+    cashIn: 4200, cashOut: 900, netCash: 3300,
+    orderCount: 6,
+  },
 };
 
 const SALES_BY_DATE = {
   date: '2026-08-14',
   sales: [{ invoiceNo: 'INV-1', total: 500, profit: 90 }],
+  expenses: [{ categoryName: 'দোকান ভাড়া', amount: 40, paymentMethod: 'cash' }],
   summary: {
     totalSales: 500,
     totalProfit: 90,
+    totalReturns: 20,
+    netSales: 480,
+    returnsLoss: 5,
     totalExpenses: 40,
-    netEarnings: 50,
+    netProfit: 45,
+    cashIn: 500,
+    cashOut: 60,
+    netCash: 440,
+    salesPaid: 500,
+    collected: 0,
+    purchasePaid: 0,
+    cashRefund: 20,
     averageOrderValue: 500,
   },
 };
@@ -127,16 +159,52 @@ describe('A cashier sees no profit figure on any report they can open', () => {
     });
   }
 
-  it('strips netEarnings specifically — the field that leaked', () => {
+  it('strips netProfit specifically — the field that leaked, under its new name', () => {
+    // Was `netEarnings`. Renamed when the day-book split performance from cash;
+    // it is the same figure and the same leak, so it stays stripped.
     const daily = sanitizeReport(DAILY_SUMMARY, cashierReq);
-    expect(daily.netEarnings).toBeUndefined();
+    expect(daily.netProfit).toBeUndefined();
 
     const month = sanitizeReport(DATE_WISE, cashierReq);
-    expect(month.monthTotal.netEarnings).toBeUndefined();
-    month.days.forEach((d) => expect(d.netEarnings).toBeUndefined());
+    expect(month.monthTotal.netProfit).toBeUndefined();
+    month.days.forEach((d) => expect(d.netProfit).toBeUndefined());
 
     const day = sanitizeReport(SALES_BY_DATE, cashierReq);
-    expect(day.summary.netEarnings).toBeUndefined();
+    expect(day.summary.netProfit).toBeUndefined();
+  });
+
+  it('strips the returns side of the subtraction too', () => {
+    // `netProfit = profit − returnsLoss − expenses`. Withholding netProfit and
+    // profit while leaving `returnsLoss` beside them is only safe because it is
+    // stripped as well — otherwise a cashier who sees two of three terms of a
+    // published identity is one subtraction away from the third.
+    const day = sanitizeReport(SALES_BY_DATE, cashierReq);
+    expect(day.summary.returnsLoss).toBeUndefined();
+
+    const month = sanitizeReport(DATE_WISE, cashierReq);
+    expect(month.monthTotal.returnsLoss).toBeUndefined();
+    month.days.forEach((d) => expect(d.returnsLoss).toBeUndefined());
+  });
+
+  it('leaves the CASH figures intact — they are money, not profit', () => {
+    // The whole reason the day-book reports two books. A cashier may know what
+    // came into the drawer and what left it; that is the job. None of it
+    // reveals margin: cash in and out are gross movements with no cost basis
+    // anywhere in them.
+    const day = sanitizeReport(SALES_BY_DATE, cashierReq);
+    expect(day.summary.cashIn).toBe(500);
+    expect(day.summary.cashOut).toBe(60);
+    expect(day.summary.netCash).toBe(440);
+    expect(day.summary.collected).toBe(0);
+    expect(day.summary.purchasePaid).toBe(0);
+
+    const month = sanitizeReport(DATE_WISE, cashierReq);
+    expect(month.monthTotal.cashIn).toBe(4200);
+    expect(month.monthTotal.netCash).toBe(3300);
+    // Sales and returns survive too — neither carries a cost.
+    expect(month.monthTotal.sales).toBe(5000);
+    expect(month.monthTotal.returns).toBe(200);
+    expect(month.monthTotal.netSales).toBe(4800);
   });
 
   it('leaves nothing behind that reconstructs profit by subtraction', () => {
@@ -145,7 +213,7 @@ describe('A cashier sees no profit figure on any report they can open', () => {
     const out = sanitizeReport(DAILY_SUMMARY, cashierReq);
     expect(out.sales.revenue).toBe(12000);
     expect(out.expenses.total).toBe(800);
-    expect(out.netEarnings).toBeUndefined();
+    expect(out.netProfit).toBeUndefined();
     expect(out.sales.profit).toBeUndefined();
   });
 
@@ -175,12 +243,13 @@ describe('Nobody entitled to profit loses it', () => {
   it('keeps every profit figure for a manager, who holds view_profit', () => {
     expect(canViewProfit(managerReq)).toBe(true);
     const out = sanitizeReport(DAILY_SUMMARY, managerReq);
-    expect(out.netEarnings).toBe(4200);
+    expect(out.netProfit).toBe(4200);
     expect(out.sales.profit).toBe(5000);
     expect(out.returns.profitLoss).toBe(120);
 
     const month = sanitizeReport(DATE_WISE, managerReq);
-    expect(month.monthTotal.netEarnings).toBe(700);
+    expect(month.monthTotal.netProfit).toBe(640);
+    expect(month.monthTotal.returnsLoss).toBe(60);
 
     const returns = sanitizeReport(RETURNS_SUMMARY, managerReq);
     expect(returns.totalProfitLoss).toBe(120);
@@ -189,7 +258,7 @@ describe('Nobody entitled to profit loses it', () => {
   it('denies profit when no user is resolved at all', () => {
     expect(canViewProfit(null)).toBe(false);
     expect(canViewProfit({})).toBe(false);
-    expect(sanitizeReport(DAILY_SUMMARY, {}).netEarnings).toBeUndefined();
+    expect(sanitizeReport(DAILY_SUMMARY, {}).netProfit).toBeUndefined();
   });
 });
 

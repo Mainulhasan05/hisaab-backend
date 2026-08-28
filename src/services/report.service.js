@@ -40,6 +40,85 @@ const staffReportService = require('./staffReport.service');
  */
 const roundQtyStage = { $set: { totalQuantity: { $round: ['$totalQuantity', MAX_DECIMALS] } } };
 
+/* ───────────────────────────────────────────────────────────────────────────
+ * DAY-STABLE ACCOUNTING
+ * ───────────────────────────────────────────────────────────────────────────
+ *
+ * A day-book must be final once the day closes. Reopening 8 August in October
+ * has to show what 8 August showed in August, or it is not a book — it is a
+ * live query wearing a date, and nobody can reconcile against it.
+ *
+ * The default reporting shape does not have that property, for two reasons,
+ * and both of them are in the SALE document rather than in any report:
+ *
+ *   1. A return REWRITES the original sale. `returnedAmount` goes up and
+ *      `profit` comes down, in place, on the invoice from August. Every report
+ *      built on `netSaleAmountExpr` (total − returnedAmount) or on `$profit`
+ *      therefore restates August the moment a customer walks in during October.
+ *
+ *   2. A return that empties an invoice CANCELS it (`salesReturn.service`,
+ *      "Fully returned AND nothing left owing"). The standard
+ *      `status: { $ne: 'cancelled' }` filter then drops that sale from its own
+ *      day entirely — August loses a whole invoice and an order off its count.
+ *
+ * Together they double-count every return: once as a silent reduction on the
+ * day of the SALE, and again as a returns line on the day of the RETURN.
+ *
+ * The three expressions below are the fix. They reconstruct what the invoice
+ * said on the day it was written, from fields the return path maintains as
+ * accumulators, and the returns are then booked — once — on the day they
+ * actually happened.
+ *
+ * ── This is not a contradiction of `netSaleAmountExpr` ──────────────────────
+ *
+ * That expression answers "what is this invoice worth NOW", which is the right
+ * question for an invoice list, a customer statement or a staff member's
+ * credited sales, and it stays the definition there. These answer "what
+ * happened on this DAY", which is a different question with a different and
+ * equally correct answer. A day-book and a ledger of open invoices are allowed
+ * to differ; what they must not do is each silently answer half of both.
+ */
+
+/**
+ * A sale as invoiced, including one later emptied by a return.
+ *
+ * `returnedAmount > 0` is what separates "cancelled BY a return" from a genuine
+ * void: a mistaken sale that is voided outright never had anything returned
+ * against it. A voided sale stays excluded — it did not happen — while a sale
+ * that was real on the day and came back later stays counted on its own day,
+ * with the return booked on the day it arrived.
+ */
+function invoicedOnDayMatch() {
+  return {
+    $or: [
+      { status: { $ne: 'cancelled' } },
+      { status: 'cancelled', returnedAmount: { $gt: 0 } },
+    ],
+  };
+}
+
+/**
+ * Profit as invoiced, before any return took a bite out of it.
+ *
+ * `Sale.profit` is stored NET of returns and `Sale.returnedProfit` accumulates
+ * exactly what was taken off, so their sum is invariant: the return path writes
+ * `profit -= r` and `returnedProfit += r` in the same update. Reconstructing it
+ * this way needs no new field and no backfill — a sale that has never been
+ * returned against carries `returnedProfit: 0` and the sum is just `profit`.
+ */
+function grossProfitExpr() {
+  return { $add: ['$profit', { $ifNull: ['$returnedProfit', 0] }] };
+}
+
+/**
+ * The bill as written. `Sale.total` is never rewritten by a return — only
+ * `returnedAmount` beside it is — so this is already day-stable and the
+ * expression exists to be named rather than to compute anything.
+ */
+function grossSaleAmountExpr() {
+  return '$total';
+}
+
 // Products are per-branch documents, so a report's product scope is just the
 // shop plus the optional branch — no join to a separate stock collection.
 function productScope(shopId, branchId, extra = {}) {
@@ -103,7 +182,7 @@ const effectiveValueExpr = (field) => ({
 // must agree and don't is how a report ends up disagreeing with the dashboard
 // about which day a sale landed on.
 const { BD_OFFSET_MS, BD_TZ, getBangladeshTodayStr, getBangladeshDayRange } = require('../utils/bdTime.util');
-const { paidAtMatch, LIVE_PAYMENT } = require('../utils/paymentDate.util');
+const { paidAtMatch, LIVE_PAYMENT, PAID_AT_EXPR } = require('../utils/paymentDate.util');
 
 class ReportService {
   /**
@@ -790,14 +869,16 @@ class ReportService {
       topProducts,
       lowStockProducts,
     ] = await Promise.all([
-      // 1. Sales summary
+      // 1. Sales summary — gross and as-invoiced. The day's returns are a
+      // book of their own (#8 below) and are subtracted once, at the bottom,
+      // on the day they arrived. See DAY-STABLE ACCOUNTING at the top.
       Sale.aggregate([
-        { $match: { ...this._baseMatch(shopId, branchId), status: { $ne: 'cancelled' }, ...dateMatch } },
+        { $match: { ...this._baseMatch(shopId, branchId), ...invoicedOnDayMatch(), ...dateMatch } },
         {
           $group: {
             _id: null,
-            totalRevenue: { $sum: netSaleAmountExpr() },
-            totalProfit: { $sum: '$profit' },
+            totalRevenue: { $sum: grossSaleAmountExpr() },
+            totalProfit: { $sum: grossProfitExpr() },
             totalPaid: { $sum: '$paid' },
             totalDue: { $sum: '$due' },
             // `discountAmount`, not `discount`. The latter holds "10" on a
@@ -910,8 +991,11 @@ class ReportService {
         {
           $group: {
             _id: { $hour: '$createdAt' },
-            revenue: { $sum: netSaleAmountExpr() },
-            profit: { $sum: '$profit' },
+            // Gross, matching the day total this same method reports. A chart
+            // whose bars do not sum to the figure printed above it is worse
+            // than no chart.
+            revenue: { $sum: grossSaleAmountExpr() },
+            profit: { $sum: grossProfitExpr() },
             count: { $sum: 1 },
           },
         },
@@ -979,7 +1063,7 @@ class ReportService {
         },
       ]),
 
-      // 8. Sales returns
+      // 8. Sales returns, on the day the goods came back.
       SalesReturn.aggregate([
         { $match: { ...this._baseMatch(shopId, branchId), ...dateMatch } },
         {
@@ -987,6 +1071,24 @@ class ReportService {
             _id: null,
             totalReturns: { $sum: '$totalAmount' },
             totalProfitLoss: { $sum: '$profitReduction' },
+            // Only a settled CASH refund left the drawer. An `adjustment`
+            // writes the customer's খাতা down and a `store_credit` moves
+            // nothing until it is settled — counting either as cash out
+            // reported money leaving that never did.
+            cashRefund: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ['$refundMethod', 'cash'] },
+                      { $eq: ['$refundStatus', 'settled'] },
+                    ],
+                  },
+                  '$totalAmount',
+                  0,
+                ],
+              },
+            },
             count: { $sum: 1 },
           },
         },
@@ -1030,19 +1132,26 @@ class ReportService {
     const sales = salesAgg[0] || { totalRevenue: 0, totalProfit: 0, totalPaid: 0, totalDue: 0, totalDiscount: 0, totalItems: 0, count: 0 };
     const expenses = expenseAgg[0] || { totalExpenses: 0, count: 0 };
     const purchases = purchaseAgg[0] || { totalPurchases: 0, totalPaid: 0, totalDue: 0, count: 0 };
-    const returns = returnsAgg[0] || { totalReturns: 0, totalProfitLoss: 0, count: 0 };
+    const returns = returnsAgg[0] || { totalReturns: 0, totalProfitLoss: 0, cashRefund: 0, count: 0 };
 
     // Due collections total
     const dueCollectionTotal = dueCollections.reduce((sum, d) => sum + d.total, 0);
     const dueCollectionCount = dueCollections.reduce((sum, d) => sum + d.count, 0);
 
-    // Cash flow
-    const cashIn = sales.totalPaid + dueCollectionTotal;
-    const cashOut = expenses.totalExpenses + purchases.totalPaid + returns.totalReturns;
-    const netCashFlow = cashIn - cashOut;
+    // Cash flow — only refunds that actually left the drawer count as cash out.
+    const cashIn = quantizeMoney(sales.totalPaid + dueCollectionTotal);
+    const cashOut = quantizeMoney(
+      expenses.totalExpenses + purchases.totalPaid + (returns.cashRefund || 0)
+    );
+    const netCashFlow = quantizeMoney(cashIn - cashOut);
 
-    // Net earnings for the day
-    const netEarnings = sales.totalProfit - expenses.totalExpenses;
+    // What the day EARNED, as opposed to what it took. `totalRevenue` and
+    // `totalProfit` are now gross, so this is the one place the day's returns
+    // are deducted — once, and on the day they happened.
+    const netSales = quantizeMoney(sales.totalRevenue - returns.totalReturns);
+    const netProfit = quantizeMoney(
+      sales.totalProfit - returns.totalProfitLoss - expenses.totalExpenses
+    );
 
     // Build hourly chart data (0-23 hours)
     const hourlyData = [];
@@ -1060,8 +1169,12 @@ class ReportService {
     const result = {
       date: startOfDay.toISOString().split('T')[0],
 
-      // Summary
-      netEarnings,
+      // Summary. `netEarnings` was profit − expenses under a name that reads
+      // as "the money we actually made"; it could be positive on a day the
+      // drawer went backwards. `netProfit` is what it always computed, named
+      // honestly, and `netCashFlow` beside it is the money.
+      netProfit,
+      netSales,
       netCashFlow,
 
       // Sales
@@ -1107,6 +1220,9 @@ class ReportService {
       returns: {
         total: returns.totalReturns,
         profitLoss: returns.totalProfitLoss,
+        // What of it actually left the drawer, which is the part that belongs
+        // in `cashFlow.cashOut` below.
+        cashRefund: returns.cashRefund || 0,
         count: returns.count,
       },
 
@@ -1141,61 +1257,114 @@ class ReportService {
    * shop fires at once, so this is one aggregation per shop — grouped by
    * branch — instead of eleven per branch per shop.
    *
-   * The match and the money expressions are the same ones getDailySummary uses,
-   * so the digest total always equals what the owner sees on the dashboard.
+   * ── BOTH numbers here are GROSS, and returns are deducted separately. ────
    *
-   * ── BOTH numbers here are net of returns. ─────────────────────────────────
+   * Read this before touching either expression; the history is instructive.
    *
-   * This comment used to claim the opposite — that `revenue` was net of returns
-   * and `profit` was not, and that the gap was deliberate. It was not true, and
-   * a wrong comment on a money expression is worse than none: the next person to
-   * read it goes looking for the asymmetry, "fixes" it by subtracting
-   * `SalesReturn.profitReduction` somewhere, and double-counts every return on
-   * the platform.
-   *
-   * What actually happens is that a return writes BOTH adjustments back onto the
-   * original `Sale` document, in `salesReturn.service.createReturn`:
+   * A return writes both of its adjustments back onto the ORIGINAL `Sale`, in
+   * `salesReturn.service.createReturn`:
    *
    *     returnedAmount += refund          → `netSaleAmountExpr` nets revenue
    *     profit         -= profitReduction → `$sum: '$profit'` is already net
    *
-   * So the two agree, and `SalesReturn.profitReduction` must never be subtracted
-   * again downstream. `getProfitLoss` reports it as a separate line for the
-   * owner's information and correctly leaves it out of `netProfit`.
+   * Reading those fields directly therefore gives numbers that are already net,
+   * and the comment that used to live here said so, warning the next reader not
+   * to subtract `SalesReturn.profitReduction` again and double-count.
    *
-   * The one consequence worth knowing: because both adjustments land on the
-   * original sale, a return re-dates itself to the day of the SALE. A report for
-   * last Tuesday, re-run after a Tuesday sale is returned on Friday, shows less
-   * revenue and less profit than the same report did on Wednesday. That is a
-   * deliberate accounting choice, not drift.
+   * That warning was correct about the arithmetic and wrong about the
+   * consequence it accepted: because both adjustments land on the original
+   * sale, a return RE-DATES ITSELF to the day of the sale. A report for last
+   * Tuesday, re-run after a Tuesday sale is returned on Friday, showed less
+   * revenue and less profit than the same report did on Wednesday. It was
+   * described as a deliberate accounting choice. It is not one a book can make:
+   * a closed day that changes is not a record of anything, and the shop cannot
+   * reconcile a period whose figures move after it ends.
+   *
+   * So the expressions were un-netted instead. `grossSaleAmountExpr` and
+   * `grossProfitExpr` reconstruct what the invoice said on the day it was
+   * written, and the day's own returns are subtracted ONCE, by the caller, on
+   * the day they arrived.
+   *
+   * The old warning still applies in its narrow form, and matters more now:
+   * subtract `profitReduction` from `$profit` and you double-count. Subtract it
+   * from `grossProfitExpr()` and you are correct. The two are not
+   * interchangeable — check which one you have.
+   *
+   * The match and the money expressions are the same ones `getDailySummary`
+   * uses, so the digest total still equals what the owner sees on the
+   * dashboard. Keep them in step: that equality is the point of this method.
    */
   async getDigestTotals(shopId, dateStr, { multiBranch = false } = {}) {
     const { startOfDay, endOfDay } = getBangladeshDayRange(dateStr);
 
-    const rows = await Sale.aggregate([
+    // Sales and the day's returns, bucketed the same way, so the deduction
+    // below can be made per branch as well as in total.
+    const [rows, returnRows] = await Promise.all([
+      Sale.aggregate([
       {
         $match: {
           shop: new mongoose.Types.ObjectId(shopId),
-          status: { $ne: 'cancelled' },
+          ...invoicedOnDayMatch(),
           createdAt: { $gte: startOfDay, $lte: endOfDay },
         },
       },
       {
         $group: {
           _id: multiBranch ? '$branch' : null,
-          revenue: { $sum: netSaleAmountExpr() },
-          profit: { $sum: '$profit' },
+          revenue: { $sum: grossSaleAmountExpr() },
+          profit: { $sum: grossProfitExpr() },
           count: { $sum: 1 },
         },
       },
+      ]),
+
+      SalesReturn.aggregate([
+        {
+          $match: {
+            shop: new mongoose.Types.ObjectId(shopId),
+            createdAt: { $gte: startOfDay, $lte: endOfDay },
+          },
+        },
+        {
+          $group: {
+            _id: multiBranch ? '$branch' : null,
+            returned: { $sum: '$totalAmount' },
+            returnedProfit: { $sum: '$profitReduction' },
+          },
+        },
+      ]),
     ]);
 
-    const total = rows.reduce(
-      (acc, r) => ({
-        count: acc.count + (r.count || 0),
-        revenue: acc.revenue + (r.revenue || 0),
-        profit: acc.profit + (r.profit || 0),
-      }),
+    // One deduction, on the day the goods came back. The sale figures above are
+    // gross, so this is not the double-count the header warns about — it is the
+    // half of the pair that makes them net.
+    const returnsById = new Map(returnRows.map((r) => [String(r._id), r]));
+    const netFor = (row) => {
+      const ret = returnsById.get(String(row._id)) || {};
+      return {
+        count: row.count || 0,
+        revenue: (row.revenue || 0) - (ret.returned || 0),
+        profit: (row.profit || 0) - (ret.returnedProfit || 0),
+      };
+    };
+
+    // A branch with returns but no sales still has to be deducted, or a day of
+    // pure refunds reports as a day when nothing happened.
+    const saleKeys = new Set(rows.map((r) => String(r._id)));
+    const returnOnlyRows = returnRows
+      .filter((r) => !saleKeys.has(String(r._id)))
+      .map((r) => ({ _id: r._id, count: 0, revenue: 0, profit: 0 }));
+
+    const allRows = [...rows, ...returnOnlyRows];
+    const total = allRows.reduce(
+      (acc, r) => {
+        const net = netFor(r);
+        return {
+          count: acc.count + net.count,
+          revenue: acc.revenue + net.revenue,
+          profit: acc.profit + net.profit,
+        };
+      },
       { count: 0, revenue: 0, profit: 0 }
     );
 
@@ -1219,15 +1388,16 @@ class ReportService {
       .sort({ isDefault: -1, name: 1 })
       .lean();
 
-    const byId = new Map(rows.map((r) => [String(r._id), r]));
+    const byId = new Map(allRows.map((r) => [String(r._id), r]));
     result.byBranch = branches.map((b) => {
-      const row = byId.get(String(b._id)) || {};
+      const row = byId.get(String(b._id)) || { _id: b._id, count: 0, revenue: 0, profit: 0 };
+      const net = netFor(row);
       return {
         branchId: b._id,
         name: b.name,
-        count: row.count || 0,
-        revenue: quantizeMoney(row.revenue || 0),
-        profit: quantizeMoney(row.profit || 0),
+        count: net.count,
+        revenue: quantizeMoney(net.revenue),
+        profit: quantizeMoney(net.profit),
       };
     });
 
@@ -1272,15 +1442,19 @@ class ReportService {
         {
           $match: {
             ...this._baseMatch(shopId, branchId),
-            status: { $ne: 'cancelled' },
+            ...invoicedOnDayMatch(),
             ...dateMatch,
           },
         },
         {
           $group: {
             _id: null,
-            totalRevenue: { $sum: netSaleAmountExpr() },
-            totalProfit: { $sum: '$profit' },
+            // Gross, as invoiced. The period's returns are a line of their own
+            // below — see DAY-STABLE ACCOUNTING at the top of this file. A P&L
+            // for a closed month must not change when a customer walks in
+            // during the next one.
+            totalRevenue: { $sum: grossSaleAmountExpr() },
+            totalProfit: { $sum: grossProfitExpr() },
             totalPaid: { $sum: '$paid' },
             totalDue: { $sum: '$due' },
             // `discountAmount`, not `discount`. The latter holds "10" on a
@@ -1402,12 +1576,13 @@ class ReportService {
         },
       ]),
 
-      // 6. Daily sales breakdown (for chart)
+      // 6. Daily sales breakdown (for chart). Same gross basis as the summary
+      // above, so a bar on the chart and the total beside it never disagree.
       Sale.aggregate([
         {
           $match: {
             ...this._baseMatch(shopId, branchId),
-            status: { $ne: 'cancelled' },
+            ...invoicedOnDayMatch(),
             ...dateMatch,
           },
         },
@@ -1416,8 +1591,8 @@ class ReportService {
             _id: {
               $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: BD_TZ },
             },
-            revenue: { $sum: netSaleAmountExpr() },
-            profit: { $sum: '$profit' },
+            revenue: { $sum: grossSaleAmountExpr() },
+            profit: { $sum: grossProfitExpr() },
             count: { $sum: 1 },
           },
         },
@@ -1547,15 +1722,24 @@ class ReportService {
     const cogs = quantizeMoney(Math.max(0, merchandiseRevenue - sales.totalProfit));
 
     /**
-     * Net profit = Sales profit - Expenses. Returns are NOT subtracted here,
-     * and the comment that used to sit on this line claiming they were
-     * ("- Returns profit loss") described an expression the code has never
-     * evaluated.
+     * Net profit = Gross profit - Returns - Expenses - Charges - Shrinkage.
      *
-     * They are not subtracted because they are already gone: `createReturn`
-     * decrements `profit` on the original Sale, so `sales.totalProfit` above is
-     * net of every return raised against the period. Subtracting
-     * `returns.totalProfitLoss` again would count each return twice.
+     * `returns.totalProfitLoss` IS subtracted here, and the history of this one
+     * line is worth keeping. It used not to be, correctly: `createReturn`
+     * decrements `profit` on the original Sale, so a `$sum: '$profit'` was
+     * already net of every return ever raised against the period, and
+     * subtracting again would have double-counted.
+     *
+     * The cost of that was a P&L that restated itself. A return raised in
+     * October reached back and reduced August's profit, so August's statement
+     * was a different document every time it was opened. `totalProfit` is now
+     * `grossProfitExpr()` — as invoiced, before any return — so the deduction
+     * happens here instead, once, against the period the goods actually came
+     * back in.
+     *
+     * Which figure you have decides whether subtracting is right. Against
+     * `$profit`: double-counts. Against `grossProfitExpr()`: correct. They are
+     * not interchangeable.
      *
      * It is still reported, as `returnsLoss` below — an owner wants to see how
      * much of the month walked back through the door, and cannot read that off
@@ -1609,7 +1793,7 @@ class ReportService {
     );
 
     const netProfit = quantizeMoney(
-      sales.totalProfit - expenses.totalExpenses - charges - shrinkage
+      sales.totalProfit - returns.totalProfitLoss - expenses.totalExpenses - charges - shrinkage
     );
 
     // Merge daily sales and expenses into a single chart dataset
@@ -1626,9 +1810,18 @@ class ReportService {
     }
     const chartData = Array.from(dailyMap.values()).sort((a, b) => a.date.localeCompare(b.date));
 
+    // Gross sales less what came back: the "net sales" line of an ordinary
+    // statement. `revenue` stays GROSS because `merchandiseRevenue` and `cogs`
+    // are derived from it and the identity
+    // `merchandiseRevenue - cogs === grossProfit` is what `Sale.pre('save')`
+    // computes per invoice — netting returns into it would break the tie-out
+    // while looking tidier.
+    const netRevenue = quantizeMoney(sales.totalRevenue - returns.totalReturns);
+
     const result = {
       // Summary
       revenue: sales.totalRevenue,
+      netRevenue,
       // Revenue less the two pass-through lines. Exposed so the P&L can show
       // why `revenue - cogs` is not `grossProfit` when a shop bills delivery.
       merchandiseRevenue,
@@ -1724,27 +1917,33 @@ class ReportService {
     const lastDay = new Date(year, mon, 0).getDate(); // last day of month
     const endOfMonth = new Date(Date.UTC(year, mon - 1, lastDay + 1) - BD_OFFSET_MS - 1);
 
-    // Run sales and expenses aggregations in parallel
-    const [dailySales, dailyExpenses] = await Promise.all([
+    // Bucket a date field into Bangladesh calendar days. `timezone` is not
+    // optional — `$dateToString` defaults to UTC, which puts the first six
+    // hours of every Dhaka day on the day before (see reportDateBuckets.test).
+    const dayBucket = (dateExpr) => ({
+      $dateToString: { format: '%Y-%m-%d', date: dateExpr, timezone: BD_TZ },
+    });
+
+    // Five books, each keyed on the day the thing ACTUALLY happened:
+    // sales on the invoice date, returns on the day they came back, expenses
+    // and purchases on their business date, collections on `paidAt`.
+    const [dailySales, dailyExpenses, dailyReturns, dailyCollections, dailyPurchases] =
+      await Promise.all([
       Sale.aggregate([
         {
           $match: {
             ...this._baseMatch(shopId, branchId),
-            status: { $ne: 'cancelled' },
+            ...invoicedOnDayMatch(),
             createdAt: { $gte: startOfMonth, $lte: endOfMonth },
           },
         },
         {
           $group: {
-            _id: {
-              $dateToString: {
-                format: '%Y-%m-%d',
-                date: '$createdAt',
-                timezone: BD_TZ,
-              },
-            },
-            totalSales: { $sum: netSaleAmountExpr() },
-            totalProfit: { $sum: '$profit' },
+            _id: dayBucket('$createdAt'),
+            // Gross, not net: a return is booked on the day it arrived, below.
+            // Netting it here as well would take the same refund off twice.
+            totalSales: { $sum: grossSaleAmountExpr() },
+            totalProfit: { $sum: grossProfitExpr() },
             totalPaid: { $sum: '$paid' },
             totalDue: { $sum: '$due' },
             orderCount: { $sum: 1 },
@@ -1762,15 +1961,89 @@ class ReportService {
         },
         {
           $group: {
-            _id: {
-              $dateToString: {
-                format: '%Y-%m-%d',
-                date: '$date',
-                timezone: BD_TZ,
-              },
-            },
+            _id: dayBucket('$date'),
             totalExpenses: { $sum: '$amount' },
             expenseCount: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+
+      // Returns, on the day the goods came back — NOT on the day of the sale
+      // they came off. `cashRefund` is separated because only a cash refund
+      // moves money: an `adjustment` writes the customer's খাতা down and a
+      // `store_credit` moves nothing at all until it is settled later.
+      SalesReturn.aggregate([
+        {
+          $match: {
+            ...this._baseMatch(shopId, branchId),
+            createdAt: { $gte: startOfMonth, $lte: endOfMonth },
+          },
+        },
+        {
+          $group: {
+            _id: dayBucket('$createdAt'),
+            returnAmount: { $sum: '$totalAmount' },
+            returnProfitLoss: { $sum: '$profitReduction' },
+            cashRefund: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ['$refundMethod', 'cash'] },
+                      { $eq: ['$refundStatus', 'settled'] },
+                    ],
+                  },
+                  '$totalAmount',
+                  0,
+                ],
+              },
+            },
+            returnCount: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+
+      // বাকি আদায় — money for invoices written on some earlier day, which is
+      // exactly the cash this report could not see. Keyed on the effective
+      // date, so a Saturday collection entered on Monday lands on Saturday.
+      Payment.aggregate([
+        {
+          $match: {
+            ...this._baseMatch(shopId, branchId),
+            type: 'due_collection',
+            ...LIVE_PAYMENT,
+            ...paidAtMatch({ $gte: startOfMonth, $lte: endOfMonth }),
+          },
+        },
+        {
+          $group: {
+            _id: dayBucket(PAID_AT_EXPR),
+            collected: { $sum: '$amount' },
+            collectionCount: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+
+      // Money paid to suppliers. `date` and not `createdAt` for the reason the
+      // daily summary documents: a purchase is backdatable and belongs on the
+      // day the goods were bought.
+      Purchase.aggregate([
+        {
+          $match: {
+            ...this._baseMatch(shopId, branchId),
+            status: { $ne: 'cancelled' },
+            date: { $gte: startOfMonth, $lte: endOfMonth },
+          },
+        },
+        {
+          $group: {
+            _id: dayBucket('$date'),
+            purchasePaid: { $sum: '$paid' },
+            purchaseTotal: { $sum: '$totalAmount' },
+            purchaseCount: { $sum: 1 },
           },
         },
         { $sort: { _id: 1 } },
@@ -1778,43 +2051,87 @@ class ReportService {
     ]);
 
     // Build the days array for the entire month.
-    // Indexed once rather than re-scanned per day: the two `.find()` calls that
+    // Indexed once rather than re-scanned per day: the `.find()` calls that
     // used to sit inside this loop made it O(days x rows).
-    const salesByDate = new Map(dailySales.map((s) => [s._id, s]));
-    const expensesByDate = new Map(dailyExpenses.map((e) => [e._id, e]));
+    const salesByDate = new Map(dailySales.map((r) => [r._id, r]));
+    const expensesByDate = new Map(dailyExpenses.map((r) => [r._id, r]));
+    const returnsByDate = new Map(dailyReturns.map((r) => [r._id, r]));
+    const collectionsByDate = new Map(dailyCollections.map((r) => [r._id, r]));
+    const purchasesByDate = new Map(dailyPurchases.map((r) => [r._id, r]));
 
     const days = [];
-    let monthTotalSales = 0;
-    let monthTotalExpenses = 0;
-    let monthTotalProfit = 0;
-    let monthTotalOrders = 0;
+    const total = {
+      sales: 0, returns: 0, expenses: 0, grossProfit: 0, returnsLoss: 0,
+      cashIn: 0, cashOut: 0, orderCount: 0, purchasePaid: 0, collected: 0,
+      salesPaid: 0, cashRefund: 0,
+    };
 
     for (let d = 1; d <= lastDay; d++) {
       const dateStr = `${year}-${String(mon).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-      const salesData = salesByDate.get(dateStr);
-      const expenseData = expensesByDate.get(dateStr);
+      const saleRow = salesByDate.get(dateStr);
+      const expenseRow = expensesByDate.get(dateStr);
+      const returnRow = returnsByDate.get(dateStr);
+      const collectionRow = collectionsByDate.get(dateStr);
+      const purchaseRow = purchasesByDate.get(dateStr);
 
-      const sales = salesData?.totalSales || 0;
-      const expenses = expenseData?.totalExpenses || 0;
-      const profit = salesData?.totalProfit || 0;
-      const orders = salesData?.orderCount || 0;
-      const netEarnings = profit - expenses;
+      // ── Book 1: performance. What the day earned, final once it closes. ──
+      const sales = saleRow?.totalSales || 0;
+      const returns = returnRow?.returnAmount || 0;
+      const grossProfit = saleRow?.totalProfit || 0;
+      const returnsLoss = returnRow?.returnProfitLoss || 0;
+      const expenses = expenseRow?.totalExpenses || 0;
 
-      monthTotalSales += sales;
-      monthTotalExpenses += expenses;
-      monthTotalProfit += profit;
-      monthTotalOrders += orders;
+      // ── Book 2: cash. What actually moved, which is a different number. ──
+      //
+      // A day of বাকি sales earns profit and takes no money; a day of বাকি
+      // আদায় takes money and earns nothing. Reporting only the first is what
+      // made "আসল আয়" read positive on a day the drawer went backwards.
+      const salesPaid = saleRow?.totalPaid || 0;
+      const collected = collectionRow?.collected || 0;
+      const purchasePaid = purchaseRow?.purchasePaid || 0;
+      const cashRefund = returnRow?.cashRefund || 0;
+
+      const cashIn = quantizeMoney(salesPaid + collected);
+      const cashOut = quantizeMoney(expenses + purchasePaid + cashRefund);
+
+      total.sales += sales;
+      total.returns += returns;
+      total.expenses += expenses;
+      total.grossProfit += grossProfit;
+      total.returnsLoss += returnsLoss;
+      total.salesPaid += salesPaid;
+      total.collected += collected;
+      total.purchasePaid += purchasePaid;
+      total.cashRefund += cashRefund;
+      total.cashIn += cashIn;
+      total.cashOut += cashOut;
+      total.orderCount += saleRow?.orderCount || 0;
 
       days.push({
         date: dateStr,
+        // Performance
         sales,
+        returns,
+        netSales: quantizeMoney(sales - returns),
+        profit: grossProfit,
+        returnsLoss,
         expenses,
-        profit,
-        paid: salesData?.totalPaid || 0,
-        due: salesData?.totalDue || 0,
-        orderCount: orders,
-        expenseCount: expenseData?.expenseCount || 0,
-        netEarnings,
+        netProfit: quantizeMoney(grossProfit - returnsLoss - expenses),
+        // Cash
+        cashIn,
+        cashOut,
+        netCash: quantizeMoney(cashIn - cashOut),
+        salesPaid,
+        collected,
+        purchasePaid,
+        cashRefund,
+        // Counts
+        due: saleRow?.totalDue || 0,
+        orderCount: saleRow?.orderCount || 0,
+        expenseCount: expenseRow?.expenseCount || 0,
+        returnCount: returnRow?.returnCount || 0,
+        collectionCount: collectionRow?.collectionCount || 0,
+        purchaseCount: purchaseRow?.purchaseCount || 0,
       });
     }
 
@@ -1822,11 +2139,21 @@ class ReportService {
       month: `${year}-${String(mon).padStart(2, '0')}`,
       days,
       monthTotal: {
-        sales: monthTotalSales,
-        expenses: monthTotalExpenses,
-        profit: monthTotalProfit,
-        netEarnings: monthTotalProfit - monthTotalExpenses,
-        orderCount: monthTotalOrders,
+        sales: quantizeMoney(total.sales),
+        returns: quantizeMoney(total.returns),
+        netSales: quantizeMoney(total.sales - total.returns),
+        profit: quantizeMoney(total.grossProfit),
+        returnsLoss: quantizeMoney(total.returnsLoss),
+        expenses: quantizeMoney(total.expenses),
+        netProfit: quantizeMoney(total.grossProfit - total.returnsLoss - total.expenses),
+        cashIn: quantizeMoney(total.cashIn),
+        cashOut: quantizeMoney(total.cashOut),
+        netCash: quantizeMoney(total.cashIn - total.cashOut),
+        salesPaid: quantizeMoney(total.salesPaid),
+        collected: quantizeMoney(total.collected),
+        purchasePaid: quantizeMoney(total.purchasePaid),
+        cashRefund: quantizeMoney(total.cashRefund),
+        orderCount: total.orderCount,
       },
     };
   }
@@ -1840,6 +2167,13 @@ class ReportService {
    * so attributing the day's rent to one employee would make their "আসল আয়"
    * a number that means nothing. When the day is staff-scoped the expense
    * totals come back as zero and the caller shows sales figures only.
+   *
+   * `options.includeExpenses` attaches the ROWS behind the খরচ total, not just
+   * the total. It is a separate flag rather than something this method decides
+   * for itself because the decision is a permission one — the route is gated
+   * `reports.view` and the rows need `expenses.view` — and the service does not
+   * see `req`. The controller passes `canViewExpenses(req)`; see the note on
+   * that helper for why the rows cannot simply be stripped afterwards.
    */
   async getSalesByDate(shopId, dateStr, branchId = null, options = {}) {
     const { startOfDay, endOfDay } = getBangladeshDayRange(dateStr);
@@ -1851,20 +2185,29 @@ class ReportService {
     };
     if (staffId) dayMatch.createdBy = staffId;
 
-    const [sales, summary, expenseTotal, staff] = await Promise.all([
+    // Rows only when the caller may see them AND the day is not staff-scoped —
+    // the same `!staffId` condition the expense TOTAL below is already keyed
+    // on, so the list can never disagree with the number it itemises.
+    const wantExpenseRows = options.includeExpenses === true && !staffId;
+
+    const [sales, summary, expenseTotal, returnTotal, collectionTotal, purchaseTotal,
+      expenseRows, staff] = await Promise.all([
       Sale.find(dayMatch)
         .populate('customer', 'name phone')
         .populate('createdBy', 'name')
         .sort({ createdAt: -1 })
         .lean(),
 
+      // Gross and as-invoiced — see the DAY-STABLE ACCOUNTING note at the top
+      // of this file. The day's returns are booked separately below, on the day
+      // they arrived, so netting them here as well would deduct them twice.
       Sale.aggregate([
-        { $match: { ...dayMatch, status: { $ne: 'cancelled' } } },
+        { $match: { ...dayMatch, ...invoicedOnDayMatch() } },
         {
           $group: {
             _id: null,
-            totalSales: { $sum: netSaleAmountExpr() },
-            totalProfit: { $sum: '$profit' },
+            totalSales: { $sum: grossSaleAmountExpr() },
+            totalProfit: { $sum: grossProfitExpr() },
             totalPaid: { $sum: '$paid' },
             totalDue: { $sum: '$due' },
             count: { $sum: 1 },
@@ -1889,6 +2232,87 @@ class ReportService {
               },
             },
           ]),
+
+      // The day's other three books. Staff-scoped days get none of them, for
+      // the same reason they get no expense total: rent, a supplier payment and
+      // a customer's old due belong to the shop, not to whoever was at the till.
+      staffId
+        ? Promise.resolve([])
+        : SalesReturn.aggregate([
+            {
+              $match: {
+                ...this._baseMatch(shopId, branchId),
+                createdAt: { $gte: startOfDay, $lte: endOfDay },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                returnAmount: { $sum: '$totalAmount' },
+                returnProfitLoss: { $sum: '$profitReduction' },
+                cashRefund: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $eq: ['$refundMethod', 'cash'] },
+                          { $eq: ['$refundStatus', 'settled'] },
+                        ],
+                      },
+                      '$totalAmount',
+                      0,
+                    ],
+                  },
+                },
+                count: { $sum: 1 },
+              },
+            },
+          ]),
+
+      staffId
+        ? Promise.resolve([])
+        : Payment.aggregate([
+            {
+              $match: {
+                ...this._baseMatch(shopId, branchId),
+                type: 'due_collection',
+                ...LIVE_PAYMENT,
+                ...paidAtMatch({ $gte: startOfDay, $lte: endOfDay }),
+              },
+            },
+            { $group: { _id: null, collected: { $sum: '$amount' }, count: { $sum: 1 } } },
+          ]),
+
+      staffId
+        ? Promise.resolve([])
+        : Purchase.aggregate([
+            {
+              $match: {
+                ...this._baseMatch(shopId, branchId),
+                status: { $ne: 'cancelled' },
+                date: { $gte: startOfDay, $lte: endOfDay },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                purchasePaid: { $sum: '$paid' },
+                purchaseTotal: { $sum: '$totalAmount' },
+                count: { $sum: 1 },
+              },
+            },
+          ]),
+
+      wantExpenseRows
+        ? Expense.find({
+            ...this._baseMatch(shopId, branchId),
+            date: { $gte: startOfDay, $lte: endOfDay },
+          })
+            .populate('category', 'name icon')
+            .populate('createdBy', 'name')
+            .sort({ date: -1, createdAt: -1 })
+            .lean()
+        : Promise.resolve([]),
 
       // Scoped to the shop, so one shop cannot drill into another's staff by
       // guessing an id — the sale match already enforces it, but the identity
@@ -1916,6 +2340,16 @@ class ReportService {
       count: 0,
     };
     const expenseData = expenseTotal[0] || { total: 0, count: 0 };
+    const returnData = returnTotal[0] || { returnAmount: 0, returnProfitLoss: 0, cashRefund: 0, count: 0 };
+    const collectionData = collectionTotal[0] || { collected: 0, count: 0 };
+    const purchaseData = purchaseTotal[0] || { purchasePaid: 0, purchaseTotal: 0, count: 0 };
+
+    // The day's two books. See DAY-STABLE ACCOUNTING at the top of this file
+    // for why performance and cash are reported as two numbers and not one.
+    const cashIn = quantizeMoney(summaryData.totalPaid + collectionData.collected);
+    const cashOut = quantizeMoney(
+      expenseData.total + purchaseData.purchasePaid + returnData.cashRefund
+    );
 
     return {
       date: dateStr,
@@ -1929,11 +2363,42 @@ class ReportService {
           }
         : null,
       sales,
+      // Absent (not empty) when the caller may not see them, so the UI can tell
+      // "no expenses that day" apart from "not allowed to know" and does not
+      // render an empty খরচ তালিকা over a day that had five.
+      expenses: wantExpenseRows ? expenseRows : null,
       summary: {
         ...summaryData,
+
+        // ── Performance ──────────────────────────────────────────────────
+        totalReturns: returnData.returnAmount,
+        returnCount: returnData.count,
+        netSales: quantizeMoney(summaryData.totalSales - returnData.returnAmount),
+        returnsLoss: returnData.returnProfitLoss,
         totalExpenses: expenseData.total,
         expenseCount: expenseData.count,
-        netEarnings: summaryData.totalProfit - expenseData.total,
+        // Renamed from `netEarnings`, which read as "the money we actually
+        // made" while computing something that can be positive on a day the
+        // drawer went backwards. This is profit; `netCash` below is the money.
+        netProfit: quantizeMoney(
+          summaryData.totalProfit - returnData.returnProfitLoss - expenseData.total
+        ),
+
+        // ── Cash ─────────────────────────────────────────────────────────
+        cashIn,
+        cashOut,
+        netCash: quantizeMoney(cashIn - cashOut),
+        salesPaid: summaryData.totalPaid,
+        collected: collectionData.collected,
+        collectionCount: collectionData.count,
+        purchasePaid: purchaseData.purchasePaid,
+        purchaseTotal: purchaseData.purchaseTotal,
+        purchaseCount: purchaseData.count,
+        cashRefund: returnData.cashRefund,
+
+        // Gross per invoice, matching `totalSales` above — dividing the NET of
+        // a day's returns by the day's order count would understate the basket
+        // of a day whose returns came off invoices written on some other day.
         averageOrderValue:
           summaryData.count > 0
             ? Math.round(summaryData.totalSales / summaryData.count)

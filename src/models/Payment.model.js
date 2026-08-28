@@ -86,6 +86,49 @@ const paymentSchema = new mongoose.Schema({
     default: PAYMENT_TYPES.SALE_PAYMENT
   },
   /**
+   * Which invoices the shopkeeper CHOSE to settle with this money.
+   *
+   * ── Why this is stored, and stored here ──────────────────────────────────
+   *
+   * খাতা money is not tied to an invoice when it is taken — that is what makes
+   * it খাতা money — so `reallocateCustomerInvoices` decides where it lands, by
+   * re-deriving the whole allocation from scratch every time anything touches
+   * the customer. That recompute is what makes the allocation idempotent and
+   * self-healing, and it is not negotiable.
+   *
+   * A shopkeeper picking "put this ৳5,000 on HFG-403" therefore cannot be a
+   * one-off write onto that invoice: the next recompute would spread it
+   * oldest-first and quietly undo them, with nothing on any screen to say why
+   * the invoice they had closed was open again.
+   *
+   * So the choice is stored as INPUT to the derivation rather than as its
+   * output. The recompute honours these targets first and spreads only what is
+   * left over, so it stays a pure function of stored data — still idempotent,
+   * still self-healing, and now it remembers what the owner asked for.
+   *
+   * Empty (the default, and every row written before this field existed) means
+   * "no preference": oldest invoice first, exactly as before.
+   *
+   * A target that can no longer be honoured — the invoice was cancelled,
+   * revised, returned against, or paid down at the counter since — is not an
+   * error. That money falls back into the general pool and is spread
+   * oldest-first, because the alternative is a collection that cannot be
+   * re-derived at all.
+   */
+  appliedTo: [{
+    _id: false,
+    sale: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Sale',
+      required: true
+    },
+    amount: {
+      type: Number,
+      required: true,
+      min: [0.01, 'টাকার পরিমাণ ০ এর বেশি হতে হবে']
+    }
+  }],
+  /**
    * Was this row written by `createSale` as the checkout leg?
    *
    * ── Why a flag and not an inference ────────────────────────────────────────

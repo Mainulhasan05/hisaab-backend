@@ -459,7 +459,7 @@ class PurchaseService {
     // caller's branch because visibility is not authority.
     for (const leg of payments) {
       if (leg.account) {
-        await paymentAccountService.assertUsableAccount(shopId, leg.account, req);
+        await paymentAccountService.assertUsableAccount(shopId, leg.account, req, leg.method);
       } else {
         leg.account = await paymentAccountService.resolveAccountForMethod(
           req?.shop || { _id: shopId }, leg.method, req
@@ -1554,7 +1554,7 @@ class PurchaseService {
       // the account the caller names, or the method's default. Null for a shop
       // without `features.fundAccounts` (I-1).
       const account = paymentData.account
-        ? (await paymentAccountService.assertUsableAccount(shopId, paymentData.account, req))._id
+        ? (await paymentAccountService.assertUsableAccount(shopId, paymentData.account, req, method))._id
         : await paymentAccountService.resolveAccountForMethod(req?.shop || { _id: shopId }, method, req);
 
       // Apply each bill's slice. `paid` is set explicitly and never past

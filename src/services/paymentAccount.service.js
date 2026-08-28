@@ -285,8 +285,27 @@ class PaymentAccountService {
    * Visibility is not enough on a write path: an owner in All-Branches view can
    * SEE every cash box, and must still not be able to book a Dhaka sale into
    * the Chittagong drawer.
+   *
+   * ── `expectedMethod` ──────────────────────────────────────────────────────
+   *
+   * When given, the account must ANSWER to that method. Nothing used to check
+   * this, so a payload naming `method: 'bkash'` with the id of the cash box was
+   * accepted and booked: the bKash balance stayed flat, the cash box gained
+   * money nobody had put in it, and the day's cash count came up over with no
+   * row to explain it. The cash register is the sharpest version — every one of
+   * its queries selects on `method: 'cash'`, so a bKash payment landing in a
+   * cash account is counted as cash on hand that does not exist.
+   *
+   * The UI narrows the picker to the chosen method (see AccountPicker), but a
+   * stale tab, a retried request or a direct API call all reach this instead,
+   * and each of them can carry a pairing the current UI can no longer produce.
+   *
+   * Optional because two callers legitimately have no method to check against:
+   * `transferBetweenAccounts`, where the whole point is that the two ends
+   * differ, and the COD courier account, whose method is `courier` by
+   * construction and never a tender.
    */
-  async assertUsableAccount(shopId, accountId, req) {
+  async assertUsableAccount(shopId, accountId, req, expectedMethod = null) {
     if (!accountId) return null;
 
     const account = await PaymentAccount.findOne({ _id: accountId, shop: shopId }).lean();
@@ -297,6 +316,13 @@ class PaymentAccountService {
       throw new AppError(
         'Account belongs to another branch',
         'এই অ্যাকাউন্টটি অন্য শাখার',
+        400
+      );
+    }
+    if (expectedMethod && account.method !== expectedMethod) {
+      throw new AppError(
+        `Account method ${account.method} does not match payment method ${expectedMethod}`,
+        'পেমেন্ট মাধ্যম আর অ্যাকাউন্টটি মিলছে না',
         400
       );
     }

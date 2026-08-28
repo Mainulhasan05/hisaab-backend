@@ -316,7 +316,7 @@ class PurchaseReturnService {
       // nothing at all until `settleRefund` runs.
       const refundAccount = refundMethod === 'cash'
         ? (returnData.account
-            ? (await paymentAccountService.assertUsableAccount(shopId, returnData.account, req))._id
+            ? (await paymentAccountService.assertUsableAccount(shopId, returnData.account, req, 'cash'))._id
             : await paymentAccountService.resolveAccountForMethod(
                 req?.shop || { _id: shopId }, paymentMethod || 'cash', req
               ))
@@ -711,7 +711,7 @@ class PurchaseReturnService {
       // The account is credited NOW, not when the return was recorded — that
       // moved no money. `refundStatus` is what separates the two.
       const settleAccount = data.account
-        ? (await paymentAccountService.assertUsableAccount(shopId, data.account, req))._id
+        ? (await paymentAccountService.assertUsableAccount(shopId, data.account, req, method))._id
         : await paymentAccountService.resolveAccountForMethod(
             req?.shop || { _id: shopId }, method, req
           );

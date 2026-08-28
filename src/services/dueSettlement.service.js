@@ -51,6 +51,125 @@ const { buildPaymentReceiptNo } = require('../utils/receiptNo.util');
  */
 
 /**
+ * Check the invoices a shopkeeper picked before any of them is recorded.
+ *
+ * Returns `[]` for the default case — no picks — which is what keeps an
+ * ordinary বাকি আদায় byte-identical to what it always posted.
+ *
+ * Every rule here exists because breaking it writes a wrong number rather than
+ * throwing: an invoice belonging to someone else, to another branch's book, or
+ * one already settled would all be accepted by the recompute and would move
+ * money the collection has no claim on.
+ */
+async function validateTargets({
+  shopId, customerId, branchId, branchScoped, amount, appliedTo, session,
+}) {
+  if (!Array.isArray(appliedTo) || appliedTo.length === 0) return [];
+
+  // Order is preserved: the picker lists invoices oldest-first, so an
+  // amount-less pick fills them in that order.
+  const wanted = [];
+  const seen = new Set();
+  for (const row of appliedTo) {
+    const saleId = row && (row.sale || row.saleId || row._id);
+    if (!saleId || !mongoose.Types.ObjectId.isValid(String(saleId))) {
+      throw new AppError('Invalid invoice in allocation', 'ইনভয়েস সঠিক নয়', 400);
+    }
+    const id = String(saleId);
+    // Naming the same invoice twice is a client bug, not a shopkeeper's intent.
+    // Ignored rather than rejected: it has one correct reading.
+    if (seen.has(id)) continue;
+    seen.add(id);
+    wanted.push({ id, amount: quantizeMoney(Number(row && row.amount) || 0) });
+  }
+  if (wanted.length === 0) return [];
+
+  const sales = await Sale.find(
+    {
+      _id: { $in: wanted.map((w) => new mongoose.Types.ObjectId(w.id)) },
+      shop: shopId,
+      customer: customerId,
+      status: { $ne: 'cancelled' },
+    },
+    'invoiceNo branch total paid returnedAdjustment',
+    { session: session || null, lean: true }
+  );
+
+  if (sales.length !== wanted.length) {
+    throw new AppError(
+      'Invoice not found for this customer',
+      'এই কাস্টমারের এমন কোনো ইনভয়েস পাওয়া যায়নি',
+      404
+    );
+  }
+
+  const byId = new Map(sales.map((sale) => [String(sale._id), sale]));
+
+  /**
+   * ── An amount-less pick means "as much of this bill as this money covers" ──
+   *
+   * The client sends invoice ids, not figures. That is deliberate: a client
+   * that computes money computes it from a list it fetched some seconds ago,
+   * and by the time the request lands the invoice may have been paid down at
+   * the counter or returned against. The capacity is therefore read here, from
+   * the same stored fields the recompute reads, at the moment of the write.
+   *
+   * Filled in the order the picker listed them — oldest first — so a collection
+   * smaller than the ticked bills behaves the way a shopkeeper expects rather
+   * than spreading itself thinly across all of them.
+   */
+  let left = quantizeMoney(amount);
+  const out = [];
+
+  for (const w of wanted) {
+    const sale = byId.get(w.id);
+
+    if (branchScoped && String(sale.branch || '') !== String(branchId || '')) {
+      throw new AppError(
+        'Invoice belongs to another branch',
+        'এই ইনভয়েসটি অন্য শাখার',
+        400
+      );
+    }
+
+    // Capacity from the STORED figures with `ledgerSettled: 0`, the same way
+    // the recompute does it — `sale.due` already carries the previous
+    // allocation, so checking against it would refuse a re-allocation that
+    // merely moves money from one invoice to another.
+    const { due: capacity } = settlementFor({
+      total: sale.total || 0,
+      paid: sale.paid || 0,
+      returnedAdjustment: sale.returnedAdjustment,
+      ledgerSettled: 0,
+    });
+
+    if (w.amount > quantizeMoney(capacity) + 0.001) {
+      throw new AppError(
+        `Invoice ${sale.invoiceNo} cannot absorb that much`,
+        `${sale.invoiceNo} ইনভয়েসে এত টাকা বসবে না`,
+        400
+      );
+    }
+
+    const take = quantizeMoney(Math.min(w.amount > 0 ? w.amount : capacity, capacity, left));
+    if (take <= 0) continue;
+
+    out.push({ sale: new mongoose.Types.ObjectId(w.id), amount: take });
+    left = quantizeMoney(left - take);
+  }
+
+  if (left < -0.001) {
+    throw new AppError(
+      'Allocated more than collected',
+      'যত টাকা নেওয়া হয়েছে তার বেশি ভাগ করা যাবে না',
+      400
+    );
+  }
+
+  return out;
+}
+
+/**
  * Apply `amount` against a customer's outstanding due.
  *
  * @param {Object}   p
@@ -64,6 +183,9 @@ const { buildPaymentReceiptNo } = require('../utils/receiptNo.util');
  * @param {*}        [p.rawAccount]        caller-named fund account, validated here
  * @param {Date}     [p.paidAt]            when the money changed hands
  * @param {ObjectId} [p.viaSale]           the checkout this rode in on, if any
+ * @param {Array<{sale, amount}>} [p.appliedTo]  invoices the owner picked; omit
+ *   for the default oldest-first spread. Validated here and stored on the
+ *   Payment — see `Payment.appliedTo` for why it is stored rather than applied.
  * @param {string}   [p.transactionId]
  * @param {string}   [p.notes]
  * @param {Object}   [p.req]               for fund-account resolution
@@ -82,6 +204,7 @@ async function settleCustomerDue(
     rawAccount = null,
     paidAt,
     viaSale = null,
+    appliedTo = null,
     transactionId,
     notes,
     req = null,
@@ -143,7 +266,7 @@ async function settleCustomerDue(
   // a shop without `features.fundAccounts`, which makes the delta below a
   // no-op (I-1).
   const account = rawAccount
-    ? (await paymentAccountService.assertUsableAccount(shopId, rawAccount, req))._id
+    ? (await paymentAccountService.assertUsableAccount(shopId, rawAccount, req, method))._id
     : await paymentAccountService.resolveAccountForMethod(
         req?.shop || { _id: shopId },
         method || 'cash',
@@ -160,6 +283,16 @@ async function settleCustomerDue(
   const paymentId = new mongoose.Types.ObjectId();
   const dueAfter = quantizeMoney(dueBefore - amount);
 
+  // Validated BEFORE the row is written, not filtered afterwards. A target that
+  // names another customer's invoice, or another branch's under separate books,
+  // is a request to write down a receivable this collection has no claim on —
+  // the same cross-branch write-down the amount check above already refuses.
+  // Silently dropping it would settle the money somewhere the owner did not
+  // choose, and tell them it worked.
+  const targets = await validateTargets({
+    shopId, customerId: customer._id, branchId, branchScoped, amount, appliedTo, session,
+  });
+
   const [payment] = await Payment.create(
     [
       {
@@ -175,6 +308,9 @@ async function settleCustomerDue(
         account,
         transactionId,
         type: 'due_collection',
+        // Empty for an ordinary collection, which is the overwhelming majority
+        // and behaves exactly as it always did: oldest invoice first.
+        appliedTo: targets,
         paidAt,
         notes,
         receivedBy: userId,
@@ -387,7 +523,16 @@ async function reallocateCustomerInvoices(
           status: { $ne: 'cancelled' },
         },
       },
-      { $group: { _id: '$branch', total: { $sum: '$amount' } } },
+      {
+        $group: {
+          _id: '$branch',
+          total: { $sum: '$amount' },
+          // Every invoice the shopkeeper named, flattened across this branch's
+          // collections. Carried out of the same indexed aggregate the pool
+          // total already costs, rather than fetched in a second query.
+          targets: { $push: '$appliedTo' },
+        },
+      },
     ],
     sessionOpt
   );
@@ -447,6 +592,47 @@ async function reallocateCustomerInvoices(
     for (const p of pools) remaining.set(key(p._id), quantizeMoney(p.total));
   } else {
     remaining.set('~', quantizeMoney(pools.reduce((s, p) => s + p.total, 0)));
+  }
+
+  /**
+   * ── The shopkeeper's own instructions ───────────────────────────────────
+   *
+   * `Payment.appliedTo` is where "put this ৳5,000 on HFG-403" is recorded. It
+   * is read here as an INPUT to the recompute, never as a substitute for it —
+   * see the field's note on why a direct write onto the invoice would be undone
+   * by the next pass.
+   *
+   * Summed per invoice, because several collections may name the same one:
+   * ৳2,000 last week and ৳3,000 today is ৳5,000 against that invoice, not the
+   * later figure replacing the earlier.
+   *
+   * Targeted money is RESERVED out of the general pool immediately below, which
+   * is what stops the পুরোনো খাতা step and the oldest-first loop from spending
+   * it on something the owner did not choose.
+   */
+  const targetedBySale = new Map();
+  const targetedByBucket = new Map();
+  for (const row of pools) {
+    const bucket = branchScoped ? key(row._id) : '~';
+    for (const list of row.targets || []) {
+      for (const t of list || []) {
+        if (!t || !t.sale) continue;
+        const amt = quantizeMoney(Number(t.amount) || 0);
+        if (amt <= 0) continue;
+        const id = String(t.sale);
+        targetedBySale.set(id, quantizeMoney((targetedBySale.get(id) || 0) + amt));
+        targetedByBucket.set(bucket, quantizeMoney((targetedByBucket.get(bucket) || 0) + amt));
+      }
+    }
+  }
+
+  for (const [bucket, reserved] of targetedByBucket) {
+    const pool = remaining.get(bucket) || 0;
+    // Floored at zero: a target can only ever have been validated against money
+    // that was actually collected, but a voided collection removes its amount
+    // from the pool while its `appliedTo` row goes with it, and clamping here
+    // costs nothing and cannot go negative in any order of events.
+    remaining.set(bucket, quantizeMoney(Math.max(0, pool - reserved)));
   }
 
   /**
@@ -522,11 +708,66 @@ async function reallocateCustomerInvoices(
     }
   }
 
+  /**
+   * ── Pass one: what the owner asked for ──────────────────────────────────
+   *
+   * Run BEFORE the oldest-first loop, and separately from it, because a target
+   * may name a NEWER invoice than one the loop would otherwise fill — the whole
+   * point of letting the owner choose. Capping each target at what its invoice
+   * can still absorb happens here so the loop below sees a settled picture.
+   *
+   * What cannot be honoured goes back into the general pool rather than being
+   * dropped. An invoice can shrink or vanish between the collection and this
+   * recompute — cancelled, revised, returned against, or paid down at the
+   * counter — and money the customer really handed over has to land somewhere.
+   * Silently discarding it would put `Sale.due` and `Customer.totalDue` back
+   * out of step, which is the exact drift this whole file exists to close.
+   */
+  const targetedApplied = new Map();
+  if (targetedBySale.size > 0) {
+    for (const sale of sales) {
+      const wanted = targetedBySale.get(String(sale._id)) || 0;
+      if (wanted <= 0) continue;
+
+      const { due: capacity } = settlementFor({
+        total: sale.total || 0,
+        paid: sale.paid || 0,
+        returnedAdjustment: sale.returnedAdjustment,
+        ledgerSettled: 0,
+      });
+
+      const usable = quantizeMoney(Math.min(wanted, capacity));
+      targetedApplied.set(String(sale._id), usable);
+
+      const orphaned = quantizeMoney(wanted - usable);
+      if (orphaned > 0) {
+        const bucket = branchScoped ? key(sale.branch) : '~';
+        remaining.set(bucket, quantizeMoney((remaining.get(bucket) || 0) + orphaned));
+      }
+    }
+
+    // A target naming an invoice that is no longer in the queue at all — the
+    // sale was cancelled, so `sales` never loaded it. Same rule: the money is
+    // real, so it returns to the pool. Bucketed by the branch that collected
+    // it, since the invoice it pointed at is gone and cannot say.
+    const seen = new Set(sales.map((sale) => String(sale._id)));
+    for (const [id, wanted] of targetedBySale) {
+      if (seen.has(id)) continue;
+      for (const [bucket, reserved] of targetedByBucket) {
+        if (reserved <= 0) continue;
+        remaining.set(bucket, quantizeMoney((remaining.get(bucket) || 0) + wanted));
+        break;
+      }
+    }
+  }
+
   const changed = [];
 
   for (const sale of sales) {
     const bucket = branchScoped ? key(sale.branch) : '~';
     const pool = remaining.get(bucket) || 0;
+    // What this invoice was promised, already capped at what it can hold.
+    const promised = targetedApplied.get(String(sale._id)) || 0;
 
     // What this invoice can absorb, and what it owes once it has. Derived from
     // the STORED figures via the shared helper rather than read off `sale.due`,
@@ -540,7 +781,10 @@ async function reallocateCustomerInvoices(
       ledgerSettled: 0,
     });
 
-    const take = quantizeMoney(Math.min(pool, capacity));
+    // Targeted money is already reserved out of `pool`, so it is added rather
+    // than competed for; the general pool then fills whatever room is left.
+    const fromPool = quantizeMoney(Math.min(pool, Math.max(0, capacity - promised)));
+    const take = quantizeMoney(promised + fromPool);
     const before = quantizeMoney(sale.ledgerSettled || 0);
 
     if (take !== before) {
@@ -596,7 +840,9 @@ async function reallocateCustomerInvoices(
       });
     }
 
-    remaining.set(bucket, quantizeMoney(pool - take));
+    // Only the untargeted part comes off the pool — `promised` was withheld
+    // from it before the loop began.
+    remaining.set(bucket, quantizeMoney(pool - fromPool));
   }
 
   // Most recently affected first: the invoice a shopkeeper is looking for after

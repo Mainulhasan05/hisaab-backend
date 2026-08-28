@@ -46,6 +46,10 @@ router.delete('/:id([0-9a-fA-F]{24})', rbac('customers', 'delete'), customerCont
 // customer has no business resurrecting one. Reusing the existing action also
 // keeps every stored role preset valid with nothing to backfill.
 router.post('/:id([0-9a-fA-F]{24})/restore', rbac('customers', 'delete'), customerController.restoreCustomer);
+// The picker on the বাকি আদায় form. `customers.view` and not `update`: this
+// only reads which bills are open, and a staff member who may look at the
+// খতিয়ান may look at what makes it up.
+router.get('/:id([0-9a-fA-F]{24})/open-invoices', rbac('customers', 'view'), customerController.getOpenInvoices);
 router.post('/:id([0-9a-fA-F]{24})/collect-due', idempotency(), rbac('customers', 'update'), customerController.collectDue);
 // Owner-only, and not merely `customers.update`: this writes a receivable that
 // no invoice backs, which is the one customer-desk action a counter-sale cannot

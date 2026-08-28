@@ -25,6 +25,28 @@ function canViewProfit(req) {
 }
 
 /**
+ * May this requester read individual expense rows?
+ *
+ * The date-wise report is gated `reports.view`, which is a weaker permission
+ * than `expenses.view` — a role can be given the day's totals without being
+ * given the expense ledger, and several stock roles are (see permissions.js).
+ * The day drill-down therefore has to ask separately before it attaches the
+ * rows behind its খরচ total: an amount alone says the shop spent ৳4,500, but a
+ * row says the owner paid ৳4,500 to a particular person for a particular
+ * thing, and those are not the same disclosure.
+ *
+ * This cannot be done with `stripKeysDeep` the way profit and cost are: the
+ * revealing fields here are `amount` and `description`, names that appear all
+ * over payloads this requester is entitled to. The list is omitted at source
+ * instead — see `getSalesByDate`.
+ */
+function canViewExpenses(req) {
+  if (!req || !req.user) return false;
+  if (req.isAdmin || req.user.isOwner) return true;
+  return req.user.permissions?.expenses?.view === true;
+}
+
+/**
  * Sanitize product document or object
  */
 function sanitizeProductDoc(doc, allowCost) {
@@ -207,7 +229,15 @@ const PROFIT_KEYS = new Set([
   'profit', 'totalProfit', 'todayProfit', 'profitLoss', 'grossProfit',
   'netProfit', 'profitMargin', 'profitReduction', 'cogs',
   // Derived: profit minus expenses. Named nothing like "profit", leaks all of it.
+  // `netEarnings` was renamed to `netProfit` when the day-book split
+  // performance from cash (report.service, DAY-STABLE ACCOUNTING). Both stay
+  // listed: the old name can still arrive from a cached payload written before
+  // the rename, and a stripped key that no longer exists costs nothing.
   'netEarnings',
+  // The day-book's own terms. `netProfit` and `grossProfit` are already above;
+  // these two are the returns side of the same subtraction, and either of them
+  // beside `netProfit` would let the withheld figures be reassembled.
+  'returnProfitLoss',
   // The returns summary's own name for `profitReduction` — how much profit the
   // day's returns gave back.
   'totalProfitLoss', 'returnsLoss',
@@ -272,6 +302,7 @@ module.exports = {
   canViewCost,
   canViewProfit,
   canViewPurchaseCost,
+  canViewExpenses,
   sanitizeProducts,
   sanitizeBatches,
   sanitizeSales,

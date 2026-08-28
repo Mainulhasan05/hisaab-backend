@@ -100,7 +100,7 @@ class ExpenseService {
     // somewhere real. Null throughout for a shop without
     // `features.fundAccounts`, which makes the delta below a no-op (I-1).
     const account = expenseData.account
-      ? (await paymentAccountService.assertUsableAccount(shopId, expenseData.account, req))._id
+      ? (await paymentAccountService.assertUsableAccount(shopId, expenseData.account, req, paymentMethod || 'cash'))._id
       : await paymentAccountService.resolveAccountForMethod(
           req?.shop || { _id: shopId }, paymentMethod || 'cash', req
         );
@@ -299,7 +299,14 @@ class ExpenseService {
     const priorAccount = expense.account;
 
     if ('account' in updateData && updateData.account) {
-      await paymentAccountService.assertUsableAccount(shopId, updateData.account, req);
+      // Against the method the expense will HAVE once saved, not the one it
+      // had: an edit that switches ক্যাশ → বিকাশ and names a bKash account is
+      // a valid pairing, and checking against the stale method would refuse it
+      // while letting the reverse mistake through.
+      const effectiveMethod = updateData.paymentMethod || expense.paymentMethod;
+      await paymentAccountService.assertUsableAccount(
+        shopId, updateData.account, req, effectiveMethod
+      );
     }
 
     Object.assign(expense, updateData);

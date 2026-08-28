@@ -573,7 +573,7 @@ class SaleService {
      */
     for (const leg of payments) {
       if (leg.account) {
-        await paymentAccountService.assertUsableAccount(shopId, leg.account, req);
+        await paymentAccountService.assertUsableAccount(shopId, leg.account, req, leg.method);
       } else {
         leg.account = await paymentAccountService.resolveAccountForMethod(
           req?.shop || { _id: shopId },
@@ -2403,7 +2403,7 @@ class SaleService {
        * `features.fundAccounts`, which makes the delta below a no-op (I-1).
        */
       const account = rawAccount
-        ? (await paymentAccountService.assertUsableAccount(shopId, rawAccount, req))._id
+        ? (await paymentAccountService.assertUsableAccount(shopId, rawAccount, req, method))._id
         : await paymentAccountService.resolveAccountForMethod(
             req?.shop || { _id: shopId },
             method || 'cash',
