@@ -45,6 +45,10 @@ const stubRegistration = () => {
   jest.spyOn(User, 'findOne').mockResolvedValue(null);
   jest.spyOn(authService, 'resolveDefaultVariantTypes').mockResolvedValue(['size']);
   jest.spyOn(authService, 'seedDefaultRoles').mockResolvedValue(undefined);
+  // The fund accounts every new shop is seeded with. Not the subject here
+  // either, and unstubbed it reaches for a database that is not attached —
+  // which shows up as a five-second timeout rather than as anything readable.
+  jest.spyOn(authService, 'seedDefaultAccounts').mockResolvedValue(undefined);
 
   jest.spyOn(Shop, 'create').mockResolvedValue({
     _id: SHOP_ID,

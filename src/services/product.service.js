@@ -12,6 +12,7 @@ const {
   quantityUnit,
   storageUnit,
   quantize,
+  quantizeMoney,
 } = require('../utils/quantity.util');
 const { unitsForShop, DEFAULT_UNIT } = require('../config/units');
 const { normalizePackaging } = require('../utils/packaging.util');
@@ -1758,6 +1759,189 @@ class ProductService {
         after: { stock: newStock },
       },
     });
+
+    return this._transformProduct(product);
+  }
+
+  /**
+   * ক্ষতি — write goods off the shelf as a LOSS.
+   *
+   * ── Why this is not `updateStock` with a reason attached ──────────────────
+   *
+   * The two look like the same operation and are not, in the way that matters
+   * to the P&L:
+   *
+   *   · A recount says "my count was wrong." Nothing was gained or lost by
+   *     saying so — the shelf and the screen are being made to agree, and the
+   *     shop is exactly as rich afterwards as it was before.
+   *   · A write-off says "these goods are gone." Value left the business.
+   *
+   * Before this method existed there was only the first, so every packet that
+   * expired, broke, or walked out of the door left inventory through
+   * `updateStock` — which records no cost and reaches no report. `getProfitLoss`
+   * derives COGS as `merchandiseRevenue − Sale.profit`, so by construction it
+   * can only ever contain the cost of goods that were SOLD. Shrinkage had
+   * nowhere to land, and net profit was overstated by every taka of it.
+   *
+   * At the 2–4% shrinkage a grocery or pharmacy actually runs, that is roughly
+   * a full month of net profit a year, reported in the direction that makes an
+   * owner over-draw and under-price.
+   *
+   * ── Why the value is taken HERE and not derived later ────────────────────
+   *
+   * `totalCost` is snapshotted onto the row at write-off time from the product's
+   * current `buyingPrice` — the moving weighted average `costing.util` maintains.
+   * Deriving it at report time from today's `buyingPrice` would revalue last
+   * March's loss every time a supplier changed their price, so a closed month's
+   * profit would move on its own. Same rule `Sale.items.buyingPrice` follows,
+   * for the same reason.
+   *
+   * ── Not backdatable, deliberately ────────────────────────────────────────
+   *
+   * `StockTransaction` has no `date` separate from `createdAt`, and a write-off
+   * is discovered on the day it is discovered — a shopkeeper finding a spoiled
+   * carton does not know which day it spoiled. Giving this a backdate field
+   * would invite a precision nobody has. If that changes, it has to change for
+   * the whole stock ledger at once, not for this one row type.
+   *
+   * @param {object} data `{ quantity, variantId, reason, notes }`. `quantity` is
+   *   always POSITIVE — how much was lost. Direction is implied by the
+   *   operation, the same way `AccountEntry.directionFor` implies it from type.
+   */
+  async writeOffStock(shopId, userId, productId, data, req = null) {
+    const { quantity, variantId, reason, notes } = data;
+
+    const product = await Product.findOne(
+      branchFilter(req, { _id: productId, shop: shopId, isDeleted: { $ne: true } })
+    );
+    if (!product) {
+      throw new AppError('পণ্যটি পাওয়া যায়নি', 'Product not found', 404);
+    }
+    // A combo holds no stock of its own — its availability is its components'.
+    // Writing one off would destroy nothing and record a cost for it.
+    assertNotCombo(product, 'ক্ষতি');
+
+    // Writing to a product implies its branch. `requireBranch` still runs so an
+    // owner in "All Branches" is told to pick one rather than writing stock off
+    // an arbitrary branch's copy of the item.
+    if (req) requireBranch(req);
+    const branchId = product.branch || null;
+
+    // `allowZero: false` — a zero-quantity write-off is a row that says a loss
+    // happened and values it at nothing. Refused rather than stored.
+    const qty = parseQuantity(quantity, quantityUnit(req, product), {
+      label: product.name,
+    });
+    const stkUnit = storageUnit(product);
+
+    let previousStock, newStock, unitCost;
+    let variant = null;
+
+    if (variantId) {
+      variant = (product.variants && typeof product.variants.id === 'function')
+        ? product.variants.id(variantId)
+        : product.variants?.find(v => String(v._id || v.id) === String(variantId));
+      if (!variant) {
+        throw new AppError('ভেরিয়েন্ট পাওয়া যায়নি', 'Variant not found', 404);
+      }
+      previousStock = variant.stock || 0;
+      unitCost = variant.buyingPrice ?? product.buyingPrice ?? 0;
+    } else {
+      previousStock = product.stock || 0;
+      unitCost = product.buyingPrice || 0;
+    }
+
+    /**
+     * You cannot lose what you do not have.
+     *
+     * Writing off 30 when 8 are on the shelf drives stock negative AND books
+     * ৳22-worth of cost for goods the shop never held — a loss that did not
+     * happen, in a figure the owner reads as one that did. A recount is the
+     * right tool for a count that is wrong, and it is one screen away.
+     */
+    if (qty > previousStock) {
+      throw new AppError(
+        `"${product.name}" এর স্টকে আছে ${previousStock}, ক্ষতি লেখা যাবে না ${qty}। গণনা ভুল হলে স্টক সমন্বয় করুন।`,
+        `Cannot write off ${qty} of "${product.name}" — only ${previousStock} in stock. Use a stock adjustment if the count is wrong.`,
+        400
+      );
+    }
+
+    newStock = quantize(previousStock - qty, stkUnit);
+    if (variant) {
+      variant.stock = newStock;
+    } else {
+      product.stock = newStock;
+    }
+
+    // Goods written off are goods off the shelf, so the batches that described
+    // them go too — soonest-expiry-first, which for the commonest reason
+    // (`expired`) is not a heuristic but the exact right rows. Same helper and
+    // same ordering a recount-down uses; see `updateStock`.
+    if (capBatchesToStock(product, variantId || null, newStock)) {
+      product.markModified('batches');
+    }
+
+    await product.save();
+
+    const totalCost = quantizeMoney(unitCost * qty);
+
+    await StockTransaction.create({
+      shop: shopId,
+      branch: branchId,
+      product: productId,
+      productName: product.name,
+      productCode: product.code,
+      variantId: variantId || null,
+      variantSku: variant?.sku,
+      variantAttributes: variant?.attributes,
+      type: 'damage',
+      // Signed, like every other writer in this collection — a sale of 5 stores
+      // `-5` and so does a write-off of 5. The ledger's own arithmetic
+      // (`previousStock + quantity === newStock`) has to hold for this row too.
+      quantity: quantize(-qty, stkUnit),
+      previousStock,
+      newStock,
+      unitCost,
+      totalCost,
+      writeOffReason: reason,
+      reference: {
+        type: 'damage',
+      },
+      notes,
+      createdBy: userId,
+    });
+
+    await AuditLog.create({
+      shop: shopId,
+      user: userId,
+      action: 'stock_write_off',
+      actionBn: 'ক্ষতি লেখা',
+      description: `Wrote off ${qty} of ${product.name} (${reason}) — cost ৳${totalCost}. Stock: ${previousStock} → ${newStock}${branchId ? ` (Branch: ${branchId})` : ''}`,
+      descriptionBn: `${product.name} এর ${qty} ক্ষতি লেখা হয়েছে (${reason}) — মূল্য ৳${totalCost}। স্টক: ${previousStock} → ${newStock}${branchId ? ` (শাখা: ${branchId})` : ''}`,
+      entity: {
+        type: 'product',
+        id: product._id,
+        name: product.name,
+      },
+      changes: {
+        before: { stock: previousStock },
+        after: { stock: newStock, writeOffReason: reason, totalCost },
+      },
+    });
+
+    /**
+     * Retire the shop's cached report generation IMMEDIATELY (`0`, not the
+     * default 30s debounce).
+     *
+     * A write-off moves `netProfit`, and unlike a sale it is a deliberate,
+     * one-off act the owner performs and then goes to look at. Serving them the
+     * P&L they had before, for up to five minutes, reads as the feature not
+     * working — and the natural response is to do it again, which writes the
+     * loss off twice. The debounce is right for a stream of sales and wrong
+     * here, for the same reason `bulkUpdateOnlineSettings` passes `0`.
+     */
+    await cacheService.bumpShopCacheVersion(shopId, 0).catch(() => {});
 
     return this._transformProduct(product);
   }

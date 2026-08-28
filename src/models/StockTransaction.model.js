@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const { STOCK_TRANSACTION_TYPES } = require('../config/constants');
+const { STOCK_TRANSACTION_TYPES, WRITE_OFF_REASONS } = require('../config/constants');
 
 // See the `viaCombo` field below. A named schema rather than an inline object
 // so the nested keys can never be misread as SchemaType options.
@@ -93,6 +93,28 @@ const stockTransactionSchema = new mongoose.Schema({
     id: mongoose.Schema.Types.ObjectId,
     invoiceNo: String
   },
+  /**
+   * Why the goods were written off. Set on `type: 'damage'` rows and on
+   * nothing else — `undefined` by default so every row already in the
+   * collection is untouched and no existing query sees a new key.
+   *
+   * The service requires it for a write-off. See `WRITE_OFF_REASONS` in
+   * config/constants.js for why it is an enum rather than free text: the
+   * report is the point, and "৳12,000 lost" is a number an owner can do
+   * nothing with while "৳9,000 of it expired" tells them to order smaller.
+   *
+   * Not on `adjustment`. A recount is not a loss — it is the shelf and the
+   * screen being made to agree — and asking a shopkeeper to pick a reason for
+   * one teaches them to pick a reason for the other.
+   */
+  writeOffReason: {
+    type: String,
+    enum: {
+      values: Object.values(WRITE_OFF_REASONS),
+      message: 'অবৈধ কারণ'
+    },
+    default: undefined
+  },
   supplier: {
     type: String,
     trim: true
@@ -125,6 +147,22 @@ const stockTransactionSchema = new mongoose.Schema({
 stockTransactionSchema.index({ shop: 1, branch: 1, product: 1, createdAt: -1 }); // Product stock history with branch
 stockTransactionSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Main listing with branch
 stockTransactionSchema.index({ shop: 1, product: 1, createdAt: -1 }); // Product history when branch unscoped
+
+/**
+ * The P&L's shrinkage term: sum `totalCost` over `type: 'damage'` in a date
+ * range, for one shop, branch-scoped or not.
+ *
+ * `type` sits ahead of `createdAt` because it is the selective key — write-offs
+ * are a handful of rows against a collection that grows by every sale line the
+ * shop has ever rung up, and putting the range first would walk all of them.
+ *
+ * `branch` is deliberately NOT in the key. An owner in All Branches sends no
+ * branch, and a leading-`shop`/second-`branch` index cannot be used past `shop`
+ * when the second key is absent — so it would help the scoped read and abandon
+ * the unscoped one. With `type` this selective, filtering a branch out of the
+ * matched set costs nothing.
+ */
+stockTransactionSchema.index({ shop: 1, type: 1, createdAt: -1 });
 
 // Virtual: Is stock in
 stockTransactionSchema.virtual('isStockIn').get(function() {

@@ -5,6 +5,7 @@ const paymentAccountService = require('./paymentAccount.service');
 const { AppError } = require('../middleware/error.middleware');
 const { endOfBangladeshDay, getBangladeshTodayRange, getBangladeshMonthRange, toBangladeshMonthStr } = require('../utils/bdTime.util');
 const { branchFilter, requireBranch, branchMatch } = require('../utils/branchScope.util');
+const { assertPeriodOpen } = require('../utils/periodLock.util');
 const { AI_MAX_EXPENSE_LINES } = require('../config/constants');
 
 class ExpenseService {
@@ -104,6 +105,15 @@ class ExpenseService {
           req?.shop || { _id: shopId }, paymentMethod || 'cash', req
         );
 
+    // The books may be closed through a date. `Expense.date` is freely settable
+    // — there is no `resolveExpenseDate` gate the way sales and collections
+    // have — so the check is made here, at the only place the field is written
+    // on create. An expense with no date is today's and passes (rule 1).
+    const expenseDate = date ? new Date(date) : new Date();
+    assertPeriodOpen({
+      when: expenseDate, shop: req?.shop, label: 'expense', labelBn: 'খরচ',
+    });
+
     const expense = await Expense.create({
       shop: shopId,
       branch: req ? requireBranch(req) : null,
@@ -111,7 +121,7 @@ class ExpenseService {
       categoryName: categoryDoc.name,
       amount,
       description,
-      date: date || new Date(),
+      date: expenseDate,
       paymentMethod: paymentMethod || 'cash',
       account,
       createdBy: userId,

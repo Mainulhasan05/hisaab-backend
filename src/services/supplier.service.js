@@ -1,6 +1,10 @@
+const mongoose = require('mongoose');
 const Supplier = require('../models/Supplier.model');
 const SupplierBalance = require('../models/SupplierBalance.model');
 const SupplierDueAdjustment = require('../models/SupplierDueAdjustment.model');
+// Read by the payables aging report only — the bills themselves are where the
+// age of a debt lives; `Supplier.totalDue` is a rollup and carries no dates.
+const Purchase = require('../models/Purchase.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { requireBranch } = require('../utils/branchScope.util');
@@ -490,6 +494,211 @@ class SupplierService {
     });
 
     return { success: true };
+  }
+
+  /**
+   * পাওনাদার বয়স — what the shop OWES, bucketed by how long it has owed it.
+   *
+   * ── Why this exists ─────────────────────────────────────────────────────
+   *
+   * `customer.service.getDueAging` has answered "who owes me, and for how
+   * long" since early on. There was no counterpart, so a shop could see its
+   * receivables by age and could see only a single `totalDue` number per
+   * supplier for its payables — no way to tell a bill raised last week from
+   * one that has been sitting since April.
+   *
+   * That asymmetry is the wrong way round for these businesses. An unprofitable
+   * month is survivable and slow; a cash-flow squeeze is neither, and it
+   * arrives through the payables side. This is the screen an owner decides who
+   * to pay first from.
+   *
+   * ── Aged on `date`, NOT `createdAt` ─────────────────────────────────────
+   *
+   * The one place this deliberately differs from the customer report. A
+   * `Purchase` carries a backdatable business `date` — the day the bill is
+   * dated — and every other purchase reader (the list, the supplier statement,
+   * the P&L's purchase bucket) filters on it. A bill dated the 3rd and entered
+   * on the 20th has been owed since the 3rd, and that is what the supplier
+   * will say when they call.
+   *
+   * Sales have no such field, which is why `getDueAging` uses `createdAt`
+   * there. The two reports look symmetric and are not, and merging them onto
+   * one date field would silently mis-age one side.
+   *
+   * ── Branch ──────────────────────────────────────────────────────────────
+   *
+   * Follows `req.branchId` when one is active — the branch that bought the
+   * goods is the branch that owes for them, the same rule `getSuppliers`'
+   * figures follow. With no branch (single-branch shop, or an owner in All
+   * Branches) it is shop-wide, and the sum across branches IS that figure. No
+   * `customerScope` equivalent to consult: suppliers have never had a shared /
+   * separate book toggle.
+   */
+  async getPayableAging(shopId, req = null) {
+    const now = new Date();
+    const days30 = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const days60 = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000);
+
+    const shopObjId = new mongoose.Types.ObjectId(shopId);
+    // I-3: `$match` does not cast. Both ids reach an aggregation, so both are
+    // built as real ObjectIds — a string here matches nothing and the report
+    // reads ৳0 with no error raised.
+    const branchObjId = req?.branchId ? new mongoose.Types.ObjectId(req.branchId) : null;
+
+    const purchaseMatch = {
+      shop: shopObjId,
+      due: { $gt: 0 },
+      status: { $ne: 'cancelled' },
+      ...(branchObjId ? { branch: branchObjId } : {}),
+    };
+
+    const bucket = (field, dateField) => ({
+      due0to30: { $sum: { $cond: [{ $gte: [dateField, days30] }, field, 0] } },
+      due31to60: {
+        $sum: {
+          $cond: [
+            { $and: [{ $lt: [dateField, days30] }, { $gte: [dateField, days60] }] },
+            field,
+            0,
+          ],
+        },
+      },
+      due60plus: { $sum: { $cond: [{ $lt: [dateField, days60] }, field, 0] } },
+    });
+
+    const result = await Purchase.aggregate([
+      { $match: purchaseMatch },
+      {
+        $group: {
+          _id: '$supplier',
+          supplierName: { $first: '$supplierName' },
+          totalDue: { $sum: '$due' },
+          ...bucket('$due', '$date'),
+          oldestDue: { $min: '$date' },
+          purchaseCount: { $sum: 1 },
+        },
+      },
+      { $sort: { totalDue: -1 } },
+    ]);
+
+    /**
+     * ── Debt with no bill behind it ────────────────────────────────────────
+     *
+     * The exact counterpart of the `DueAdjustment` pass in `getDueAging`, and
+     * omitting it would produce the same failure: aging reads `Purchase.due`,
+     * so a shop that onboarded ৳2 lakh of paper-খাতা payables would see ৳0 aged
+     * here while every other screen showed the real figure — a gap on the one
+     * report that exists to close it.
+     *
+     * Aged from `createdAt`, because that is the only date these rows have and
+     * an onboarding import has no bill date to borrow. So old debt opens in the
+     * 0–30 bucket and ages out of it on its own. That is the honest age of the
+     * CLAIM rather than of the debt, which is the same compromise the customer
+     * report documents and accepts.
+     *
+     * Signed: `amount` is a delta and a correction can be negative, so the sum
+     * per supplier can legitimately reduce a payable. The `$gt: 0` filter is
+     * applied after grouping, never per row.
+     */
+    const adjMatch = {
+      shop: shopObjId,
+      ...(branchObjId ? { branch: branchObjId } : {}),
+    };
+
+    const adjustments = await SupplierDueAdjustment.aggregate([
+      { $match: adjMatch },
+      {
+        $group: {
+          _id: '$supplier',
+          totalDue: { $sum: '$amount' },
+          ...bucket('$amount', '$createdAt'),
+          oldestDue: { $min: '$createdAt' },
+        },
+      },
+      { $match: { totalDue: { $gt: 0 } } },
+    ]);
+
+    if (adjustments.length > 0) {
+      const bySupplier = new Map(result.map((r) => [String(r._id), r]));
+      // Adjustment rows carry no name — they are keyed by supplier id, so a
+      // supplier with opening debt and no bill yet needs one looked up.
+      const missing = adjustments
+        .filter((a) => !bySupplier.has(String(a._id)))
+        .map((a) => a._id);
+      const names = missing.length
+        ? await Supplier.find({ _id: { $in: missing } }).select('name companyName phone').lean()
+        : [];
+      const nameById = new Map(names.map((s) => [String(s._id), s]));
+
+      for (const a of adjustments) {
+        const key = String(a._id);
+        const row = bySupplier.get(key);
+        if (row) {
+          row.totalDue += a.totalDue;
+          row.due0to30 += a.due0to30;
+          row.due31to60 += a.due31to60;
+          row.due60plus += a.due60plus;
+          if (a.oldestDue && a.oldestDue < row.oldestDue) row.oldestDue = a.oldestDue;
+        } else {
+          const s = nameById.get(key);
+          bySupplier.set(key, {
+            _id: a._id,
+            supplierName: s?.name || s?.companyName || '',
+            totalDue: a.totalDue,
+            due0to30: a.due0to30,
+            due31to60: a.due31to60,
+            due60plus: a.due60plus,
+            oldestDue: a.oldestDue,
+            purchaseCount: 0,
+          });
+        }
+      }
+
+      result.length = 0;
+      result.push(...bySupplier.values());
+    }
+
+    // A supplier settled in full is not aging — leaving them at ৳0 pads the
+    // list with rows there is nothing to pay. A negative total (over-paid, or
+    // corrected past zero) is dropped for the same reason: it is not a payable,
+    // and it belongs on the statement where it can be explained.
+    const aged = result
+      .filter((s) => s.totalDue > 0)
+      .sort((x, y) => y.totalDue - x.totalDue);
+
+    /**
+     * Deleted suppliers.
+     *
+     * Same population every other payable figure counts. Without this the aging
+     * total is the one number on the page that still includes soft-deleted
+     * suppliers, and a shop reconciling it against the supplier list finds a
+     * gap with nothing to explain it.
+     *
+     * Queried for the INACTIVE ones so the filter can drop only what it
+     * positively knows to be deleted — a purchase with no supplier attached
+     * groups under `_id: null` and has no document to look up. Inverting this
+     * ("keep what came back active") would silently drop that debt.
+     */
+    const ids = aged.map((s) => s._id).filter(Boolean);
+    let visible = aged;
+    if (ids.length > 0) {
+      const removed = await Supplier.find({ _id: { $in: ids }, isActive: false })
+        .select('_id').lean();
+      if (removed.length > 0) {
+        const removedIds = new Set(removed.map((s) => String(s._id)));
+        visible = aged.filter((s) => !removedIds.has(String(s._id)));
+      }
+    }
+
+    const summary = visible.reduce((acc, s) => ({
+      totalDue: quantizeMoney(acc.totalDue + s.totalDue),
+      due0to30: quantizeMoney(acc.due0to30 + s.due0to30),
+      due31to60: quantizeMoney(acc.due31to60 + s.due31to60),
+      due60plus: quantizeMoney(acc.due60plus + s.due60plus),
+      supplierCount: acc.supplierCount + 1,
+    }), { totalDue: 0, due0to30: 0, due31to60: 0, due60plus: 0, supplierCount: 0 });
+
+    return { suppliers: visible, summary };
   }
 }
 

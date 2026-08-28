@@ -23,6 +23,11 @@ router.get('/date-wise', rbac('reports', 'view'), reportController.getDateWiseSu
 router.get('/date-wise/:date', rbac('reports', 'view'), reportController.getSalesByDate);
 router.get('/trending-products', rbac('reports', 'view'), reportController.getTrendingProducts);
 router.get('/due-aging', rbac('reports', 'view'), reportController.getDueAging);
+// The payables half. `reports.view` like its receivables twin and like every
+// other route on this router — reports are their own module in the permission
+// matrix, and `suppliers.view` is not additionally required for the same reason
+// `customers.view` is not required above.
+router.get('/payable-aging', rbac('reports', 'view'), reportController.getPayableAging);
 
 // Printable documents. Registered before the `/:type/export/:format` catch-all
 // below — that route is three segments deep so it cannot shadow these, but

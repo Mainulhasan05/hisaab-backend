@@ -443,6 +443,66 @@ const updateShopSettings = asyncHandler(async (req, res) => {
     }
   }
 
+  // ── খাতা বন্ধ: the period lock ────────────────────────────────────────────
+  //
+  // NOT in `allowedSettings`, for two of the three reasons the discount cap is
+  // not, plus one of its own.
+  //
+  // 1. IT IS OWNER-ONLY. `rbac('settings','update')` can be granted to a
+  //    manager, and this is the one setting whose whole purpose is to bind the
+  //    people who hold `sales.backdate` — a manager who could move the line
+  //    could open a closed month, post into it, and close it again. The lock
+  //    would then be exactly as strong as the honesty it was built to stop
+  //    relying on.
+  //
+  // 2. `null` IS A REAL VALUE. Clearing the box means "nothing is closed", and
+  //    it must reach the database as `null` rather than being skipped. An
+  //    ABSENT key still means untouched.
+  //
+  // 3. MOVING IT BACKWARD IS NOT REFUSED, BUT IT IS LOUD. A shop that closed
+  //    July and then finds a missing invoice has to be able to reopen it —
+  //    refusing would leave them with a book they know is wrong and no way to
+  //    fix it, which is how people go back to paper. So the move is allowed and
+  //    AUDITED: the entry below names both dates, so "who reopened June, and
+  //    when" has an answer. That is the same trade the credit-limit override
+  //    makes, for the same reason.
+  if ('booksClosedThrough' in req.body) {
+    const raw = req.body.booksClosedThrough;
+
+    if (!req.user?.isOwner && !req.isAdmin) {
+      return ApiResponse.forbidden(res, {
+        message: 'Only the shop owner can close or reopen the books',
+        messageBn: 'শুধুমাত্র দোকান মালিক খাতা বন্ধ বা খুলতে পারবেন',
+      });
+    }
+
+    if (raw === null || raw === '') {
+      updates['settings.booksClosedThrough'] = null;
+    } else {
+      const { getBangladeshDayRange, getBangladeshTodayStr } = require('../utils/bdTime.util');
+      const bare = typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw.trim())
+        ? raw.trim() : null;
+      const when = bare ? getBangladeshDayRange(bare).endOfDay : new Date(raw);
+
+      if (Number.isNaN(when.getTime())) {
+        return ApiResponse.badRequest(res, {
+          message: 'Invalid closing date',
+          messageBn: 'খাতা বন্ধের তারিখ ঠিকভাবে দিন',
+        });
+      }
+      // Closing a day that has not finished trading would refuse the rest of
+      // today's sales — the one thing this feature must never do.
+      const todayEnd = getBangladeshDayRange(getBangladeshTodayStr()).endOfDay;
+      if (when.getTime() >= todayEnd.getTime()) {
+        return ApiResponse.badRequest(res, {
+          message: 'The books can only be closed through a day that has already ended',
+          messageBn: 'আজ বা পরের তারিখ পর্যন্ত খাতা বন্ধ করা যাবে না — গতকাল পর্যন্ত করুন',
+        });
+      }
+      updates['settings.booksClosedThrough'] = when;
+    }
+  }
+
   // ── The shop's own variant vocabulary ─────────────────────────────────────
   //
   // Only the three things that CANNOT be derived from the shop's products: a
@@ -625,6 +685,44 @@ const updateShopSettings = asyncHandler(async (req, res) => {
   );
 
   await invalidateShopAuthCache(req.shop._id);
+
+  /**
+   * ── Moving the period lock is on the record ──────────────────────────────
+   *
+   * The only setting on this route that gets its own audit entry, because it is
+   * the only one that decides whether OTHER records can be rewritten. Closing
+   * the books is a sign-off; reopening them is the act that makes a signed-off
+   * month editable again, and "who reopened June, and when" has to have an
+   * answer — otherwise the lock protects nothing that honesty was not already
+   * protecting.
+   *
+   * Both dates are recorded, so a reopen is distinguishable from a close at a
+   * glance rather than by reading two entries side by side.
+   *
+   * Fire-and-forget: a settings save that failed because its logging did would
+   * leave the owner unable to close their books at all.
+   */
+  if ('settings.booksClosedThrough' in updates) {
+    const AuditLog = require('../models/AuditLog.model');
+    const before = req.shop?.settings?.booksClosedThrough || null;
+    const after = updates['settings.booksClosedThrough'];
+    const fmt = (d) => (d ? new Date(d).toISOString().slice(0, 10) : 'none');
+    const reopened = Boolean(before) && (!after || new Date(after) < new Date(before));
+
+    AuditLog.create({
+      shop: req.shop._id,
+      user: req.user?._id,
+      action: reopened ? 'books_reopened' : 'books_closed',
+      actionBn: reopened ? 'খাতা খোলা হয়েছে' : 'খাতা বন্ধ করা হয়েছে',
+      description: `Books closed-through moved: ${fmt(before)} → ${fmt(after)}`,
+      descriptionBn: `খাতা বন্ধের তারিখ পরিবর্তন: ${fmt(before)} → ${fmt(after)}`,
+      entity: { type: 'shop', id: req.shop._id, name: req.shop?.name },
+      changes: {
+        before: { booksClosedThrough: before },
+        after: { booksClosedThrough: after },
+      },
+    }).catch(() => {});
+  }
 
   return ApiResponse.success(res, {
     data: { shop },

@@ -209,6 +209,21 @@ const createSale = Joi.object({
     account: Joi.string().trim().allow('', null),
   }).allow(null),
 
+  /**
+   * "Sell even though this pushes the customer past their বাকির সীমা."
+   *
+   * MUST be listed here or `stripUnknown` deletes it before `createSale` sees
+   * it — the same trap `saleDate` documents below — and an approved override
+   * would arrive as a plain refusal with nothing to explain why the approval
+   * did nothing.
+   *
+   * Shape only. WHETHER the caller may pass the limit is decided by
+   * `utils/creditLimit.util.assertWithinCreditLimit`, which holds the
+   * permission check and the projection arithmetic in one place, so the two
+   * layers cannot disagree about the policy.
+   */
+  creditOverride: Joi.boolean(),
+
   notes: Joi.string().trim().max(500).allow('', null).messages({
     'string.max': 'নোট ৫০০ অক্ষরের বেশি হতে পারবে না',
   }),

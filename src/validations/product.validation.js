@@ -1,5 +1,6 @@
 const { Joi, commonSchemas } = require('../middleware/validate.middleware');
 const { ALL_UNITS, SAFE_QUANTITY_MAX } = require('../config/units');
+const { WRITE_OFF_REASONS } = require('../config/constants');
 
 /**
  * Quantity/stock fields used to be `Joi.number().integer()`. They are not any
@@ -314,6 +315,25 @@ const updateStock = Joi.object({
   notes: Joi.string().trim().max(500).allow('', null),
 });
 
+/**
+ * ক্ষতি — writing goods off as a loss.
+ *
+ * No `type`. `updateStock` takes set/add/subtract because a recount can land
+ * anywhere; a write-off only ever goes one way, so the direction is implied
+ * rather than accepted. Offering `add` here would let a shopkeeper record a
+ * NEGATIVE loss, which is a purchase with no supplier and no bill.
+ *
+ * `reason` is required — see `WRITE_OFF_REASONS` in config/constants.js. The
+ * report is the point of the feature, and a write-off with no reason
+ * contributes a number to it that answers nothing.
+ */
+const writeOffStock = Joi.object({
+  quantity: quantityField.greater(0).required(),
+  variantId: commonSchemas.objectId.allow(null, ''),
+  reason: Joi.string().valid(...Object.values(WRITE_OFF_REASONS)).required(),
+  notes: Joi.string().trim().max(500).allow('', null),
+});
+
 // ── Batch endpoints ─────────────────────────────────────────────────────────
 //
 // Separate from the product form on purpose. A batch carries a QUANTITY, and
@@ -393,6 +413,7 @@ module.exports = {
   createProduct,
   updateProduct,
   updateStock,
+  writeOffStock,
   toggleStatus,
   bulkUpdateStock,
   bulkImportProducts,

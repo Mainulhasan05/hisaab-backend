@@ -7,6 +7,9 @@ const Expense = require('../models/Expense.model');
 const SalesReturn = require('../models/SalesReturn.model');
 const Purchase = require('../models/Purchase.model');
 const AccountTransfer = require('../models/AccountTransfer.model');
+// The stock ledger. Read by the P&L for one thing only: the ক্ষতি term, which
+// exists in no sales figure — see the shrinkage aggregation in getProfitLoss.
+const StockTransaction = require('../models/StockTransaction.model');
 const CashRegister = require('../models/CashRegister.model');
 const Branch = require('../models/Branch.model');
 const User = require('../models/User.model');
@@ -1262,6 +1265,7 @@ class ReportService {
       dailySales,
       dailyExpenses,
       transferCharges,
+      shrinkageAgg,
     ] = await Promise.all([
       // 1. Sales: revenue, COGS, profit, count
       Sale.aggregate([
@@ -1465,6 +1469,50 @@ class ReportService {
           },
         },
       ]),
+
+      /**
+       * 9. ক্ষতি — stock written off as a loss.
+       *
+       * ── Why this cannot be derived and has to be its own query ────────────
+       *
+       * `cogs` above is `merchandiseRevenue − Sale.profit`. That identity comes
+       * out of `Sale.pre('save')`, which builds profit from line margins — so
+       * by construction it can only ever contain the cost of goods that were
+       * SOLD. Goods that expired, broke or walked out of the door never appear
+       * in a Sale, so no amount of rearranging the sales figures can find them.
+       * They are only in the stock ledger, which is where this reads them from.
+       *
+       * `totalCost` was snapshotted onto each row at write-off time from the
+       * cost basis of the day (product.service.writeOffStock). Re-deriving it
+       * here from today's `buyingPrice` would revalue a closed month's loss
+       * every time a supplier moved their price.
+       *
+       * Grouped by reason as well as summed, because the split is the whole
+       * management value: "৳12,000 lost" is a number an owner can do nothing
+       * with, and "৳9,000 of it expired" tells them to order smaller and more
+       * often.
+       *
+       * ZERO for every shop that has never written anything off — which on the
+       * day this shipped was all of them — so `netProfit` is unchanged until
+       * the feature is used.
+       */
+      StockTransaction.aggregate([
+        {
+          $match: {
+            ...this._baseMatch(shopId, branchId),
+            type: 'damage',
+            ...dateMatch,
+          },
+        },
+        {
+          $group: {
+            _id: '$writeOffReason',
+            total: { $sum: { $ifNull: ['$totalCost', 0] } },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { total: -1 } },
+      ]),
     ]);
 
     const sales = salesAgg[0] || {
@@ -1533,7 +1581,36 @@ class ReportService {
      */
     const charges = transferCharges[0]?.total || 0;
 
-    const netProfit = sales.totalProfit - expenses.totalExpenses - charges;
+    /**
+     * ── ক্ষতি: the cost of goods that never got sold ─────────────────────────
+     *
+     * This is the term `netProfit` was missing. `grossProfit` is margin on
+     * goods that LEFT through the till; `shrinkage` is the cost of goods that
+     * left any other way — expired, broke, or walked. Both reduce what the
+     * owner is actually left with at the end of the month, and only one of them
+     * used to be counted.
+     *
+     * ── Why it is subtracted here and not folded into `cogs` ────────────────
+     *
+     * Because `merchandiseRevenue − cogs === grossProfit` is an identity that
+     * has to keep holding — it is what `Sale.pre('save')` computes per invoice,
+     * and the P&L strips tax and delivery out of revenue specifically so the
+     * three figures tie out. Adding shrinkage to `cogs` would break that tie
+     * and make gross margin unreadable, since there is no revenue on the other
+     * side of a write-off to earn it against.
+     *
+     * So it sits beside `totalExpenses` and `transferCharges` as a third thing
+     * that comes off gross profit — reported on its own line, for the same
+     * reason those two are: an owner can act on "৳9,000 of stock expired this
+     * month" and cannot act on the same ৳9,000 buried inside cost of sales.
+     */
+    const shrinkage = quantizeMoney(
+      (shrinkageAgg || []).reduce((sum, r) => sum + (r.total || 0), 0)
+    );
+
+    const netProfit = quantizeMoney(
+      sales.totalProfit - expenses.totalExpenses - charges - shrinkage
+    );
 
     // Merge daily sales and expenses into a single chart dataset
     const dailyMap = new Map();
@@ -1567,6 +1644,10 @@ class ReportService {
       // fixable by banking less often or using a different channel, and merging
       // it into expenses hides that it is fixable at all.
       transferCharges: charges,
+      // ক্ষতি. Its own line beside `returnsLoss` — goods that walked back
+      // through the door and goods that never made it out are both losses the
+      // owner can do something about, and they call for different actions.
+      shrinkage,
       netProfit,
 
       // Details
@@ -1588,6 +1669,25 @@ class ReportService {
         total: returns.totalReturns,
         profitLoss: returns.totalProfitLoss,
         count: returns.count,
+      },
+      // The reason split. An empty array for a shop that has written nothing
+      // off, which is what lets the client hide the panel entirely rather than
+      // render a section of zeroes at every shop that will never use it.
+      //
+      // `totalCost`, not `total`, on both levels — deliberately. That key is
+      // already in the sanitiser's `COST_KEYS`, so a staff member without
+      // `products.view_cost` cannot read these. It matters: a write-off row
+      // carries a quantity, so anyone who can see its value can divide the two
+      // and recover the buying price this shop keeps from them. Naming it
+      // `total` would have leaked the cost basis through a report that never
+      // mentions cost. Same trap the `packUnitCost` note in that file describes.
+      writeOffs: {
+        totalCost: shrinkage,
+        byReason: (shrinkageAgg || []).map((r) => ({
+          reason: r._id,
+          totalCost: quantizeMoney(r.total || 0),
+          count: r.count,
+        })),
       },
       purchases: {
         total: purchases.totalPurchases,

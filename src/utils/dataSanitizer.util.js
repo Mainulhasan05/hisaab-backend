@@ -220,6 +220,16 @@ const COST_KEYS = new Set([
   // pack twin unlisted would let anyone divide by `packSize` and read the cost
   // this set exists to withhold.
   'packUnitCost',
+  // The P&L's ক্ষতি line — what the goods written off this period cost the
+  // shop. A cost figure by construction, and one that reveals the cost basis:
+  // the write-off rows behind it carry quantities, so value ÷ quantity is the
+  // buying price. Stripped for anyone who may not see `buyingPrice` directly.
+  //
+  // `netProfit` already accounts for it, and `netProfit` is in PROFIT_KEYS — so
+  // a viewer with profit but not cost sees a net figure they cannot fully
+  // decompose. That is the same trade `cogs` already makes and is correct: the
+  // permission says they may see what the shop earned, not what it paid.
+  'shrinkage',
 ]);
 
 function isPlainObject(val) {

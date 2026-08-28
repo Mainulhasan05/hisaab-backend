@@ -88,6 +88,17 @@ exports.updateStock = asyncHandler(async (req, res) => {
   });
 });
 
+// ক্ষতি — write stock off as a loss. Separate from `updateStock` because it
+// carries a cost into the P&L and a recount does not; see the service.
+exports.writeOffStock = asyncHandler(async (req, res) => {
+  const product = await productService.writeOffStock(req.shop._id, req.user._id, req.params.id, req.body, req);
+  return ApiResponse.success(res, {
+    data: product,
+    message: 'Stock written off',
+    messageBn: 'ক্ষতি লেখা হয়েছে',
+  });
+});
+
 // ── Batch / expiry ──────────────────────────────────────────────────────────
 //
 // All four go through `sanitizeBatches`, which strips `costPrice` from anyone

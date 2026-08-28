@@ -240,6 +240,40 @@ module.exports = {
     TRANSFER_IN: 'transfer_in',
   },
 
+  /**
+   * Why stock was written off (ক্ষতি). Required on every `damage` row.
+   *
+   * ── Why a reason is mandatory ────────────────────────────────────────────
+   *
+   * A write-off is the one movement that destroys value with no counter-party:
+   * no customer, no supplier, no invoice, nothing to reconcile it against
+   * later. The same argument `AccountEntry` makes about `adjustment` applies
+   * exactly — an unexplained figure is one nobody can account for six months
+   * on, and without a reason the write-off becomes the tidy way a stock
+   * discrepancy (or a theft) disappears.
+   *
+   * ── Why these four and not a free-text box ───────────────────────────────
+   *
+   * Because the whole point is the report. "৳12,000 lost this quarter" is a
+   * number an owner can do nothing with; "৳9,000 of it expired" tells them to
+   * order smaller and more often, and "৳9,000 of it walked" is a different
+   * conversation entirely. A free-text box collects neither. `notes` is still
+   * there for the detail.
+   */
+  WRITE_OFF_REASONS: {
+    /** Broken, spoiled, crushed in transit — physically unsellable. */
+    DAMAGED: 'damaged',
+    /** Past its date. The one the batch/expiry screen leads to. */
+    EXPIRED: 'expired',
+    /** Missing and not explainable — theft, or a count that never reconciled. */
+    LOST: 'lost',
+    /**
+     * Given away or consumed by the shop: samples, staff use, the packet the
+     * owner took home. Real stock leaving for a real reason that is not a sale.
+     */
+    USED: 'used',
+  },
+
   // SMS Types
   SMS_TYPES: {
     SINGLE: 'single',

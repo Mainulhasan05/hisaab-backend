@@ -49,6 +49,7 @@ const {
 const { priceTierFor, sellingPriceFor, hasWholesalePrice } = require('../utils/pricing.util');
 const { resolveLineRate } = require('../utils/lineDiscount.util');
 const { resolveSaleDate } = require('../utils/saleDate.util');
+const { assertWithinCreditLimit } = require('../utils/creditLimit.util');
 const { resolveCustomInvoiceNo } = require('../utils/invoiceNo.util');
 const { LIVE_PAYMENT } = require('../utils/paymentDate.util');
 const { buildPaymentReceiptNo } = require('../utils/receiptNo.util');
@@ -455,7 +456,19 @@ class SaleService {
        * Absent on every ordinary sale, from every older client, and from the
        * offline queue — so this whole feature is inert unless asked for (I-1).
        */
-      dueSettlement: rawDueSettlement = null
+      dueSettlement: rawDueSettlement = null,
+      /**
+       * "Yes, I know this customer is over their বাকির সীমা — sell anyway."
+       *
+       * Absent on every ordinary checkout and from every older client, so the
+       * limit behaves as a plain block until a POS deliberately asks to pass
+       * it. Requires `customers.credit_override`; asking for it without the
+       * permission is a 403, not a silent downgrade to a refusal — a cashier
+       * who tapped "approve" needs to be told the tap did nothing.
+       *
+       * See utils/creditLimit.util.js for why the block is passable at all.
+       */
+      creditOverride = false
     } = saleData;
     const customerId = rawCustomerId || rawCustomer;
 
@@ -1607,6 +1620,35 @@ class SaleService {
       dueSettled = settleAmount;
     }
 
+    /**
+     * ── বাকির সীমা ─────────────────────────────────────────────────────────
+     *
+     * Checked HERE — after `dueSettled` is final and before anything is
+     * written. Both halves of that placement matter:
+     *
+     *   · After the settlement, because a customer at their ceiling who pays
+     *     ৳5,000 off and then buys ৳3,000 more has gone DOWN. Checking before
+     *     it would refuse the one transaction shape the limit wants to
+     *     encourage.
+     *   · Before `Sale.create`, because the alternative is a sale that exists
+     *     and then has to be unwound — and unwinding a checkout is the path
+     *     every drift bug in this codebase has come through.
+     *
+     * Returns `null` for a walk-in, for any customer with no limit set (which
+     * is every customer on the platform until an owner sets one), and for any
+     * sale that stays inside it. So this is a no-op for the shops that have
+     * never heard of the feature — I-1's rule, applied to a capability rather
+     * than to a branch.
+     *
+     * A non-null return means someone with `customers.credit_override`
+     * deliberately pushed past the ceiling, and that fact is the entire
+     * control. It is audited below, next to the sale it approved.
+     */
+    const creditOverrideRecord = assertWithinCreditLimit(
+      { customer, dueSettled, newDue: due, override: Boolean(creditOverride) },
+      req
+    );
+
     // Create sale with retry for invoice number collision
     let sale;
     const maxRetries = 3;
@@ -2166,6 +2208,56 @@ class SaleService {
           },
         },
       }).catch((err) => logger.error(`Audit log (sale_line_discount) failed: ${err.message}`));
+    }
+
+    /**
+     * ── The credit-limit override ───────────────────────────────────────────
+     *
+     * Its own entry, for the reason the line-discount entry above is its own:
+     * `sale_create` answers "what was sold", and this answers "who let this
+     * customer past their ceiling, and by how much" — which is the only reason
+     * the limit is a soft block rather than a hard one.
+     *
+     * The whole control lives in this write. A block a cashier can pass is
+     * worth having ONLY because passing it is visible; without the entry, the
+     * override is just a checkbox that turns the feature off.
+     *
+     * Fire-and-forget and outside the transaction, exactly like the two above:
+     * a checkout that fails because its logging did would send the shop back to
+     * the paper খাতা, which is the outcome every part of this feature is trying
+     * to avoid.
+     */
+    if (creditOverrideRecord) {
+      AuditLog.create({
+        shop: shopId,
+        user: userId,
+        action: 'sale_credit_override',
+        actionBn: 'বাকির সীমা অতিক্রম',
+        description:
+          `Credit limit overridden on ${sale.invoiceNo} for ${creditOverrideRecord.customerName}: ` +
+          `limit ৳${creditOverrideRecord.limit}, balance ৳${creditOverrideRecord.previousDue} → ` +
+          `৳${creditOverrideRecord.projectedDue} (৳${creditOverrideRecord.exceededBy} over)`,
+        descriptionBn:
+          `${sale.invoiceNo} — ${creditOverrideRecord.customerName} এর বাকির সীমা অতিক্রম: ` +
+          `সীমা ৳${creditOverrideRecord.limit}, বাকি ৳${creditOverrideRecord.previousDue} → ` +
+          `৳${creditOverrideRecord.projectedDue} (৳${creditOverrideRecord.exceededBy} বেশি)`,
+        entity: {
+          type: 'sale',
+          id: sale._id,
+          name: sale.invoiceNo,
+        },
+        changes: {
+          after: {
+            invoiceNo: sale.invoiceNo,
+            customer: customer?._id || null,
+            customerName: creditOverrideRecord.customerName,
+            creditLimit: creditOverrideRecord.limit,
+            previousDue: creditOverrideRecord.previousDue,
+            projectedDue: creditOverrideRecord.projectedDue,
+            exceededBy: creditOverrideRecord.exceededBy,
+          },
+        },
+      }).catch((err) => logger.error(`Audit log (sale_credit_override) failed: ${err.message}`));
     }
 
     // Send SMS receipt (non-blocking - runs in background)

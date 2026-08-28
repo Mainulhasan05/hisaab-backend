@@ -21,6 +21,7 @@ const {
   buildStockUpdate,
   buildVariantStockUpdate,
 } = require('../utils/quantity.util');
+const { assertPeriodOpen } = require('../utils/periodLock.util');
 const { resolveLineQuantity } = require('../utils/packaging.util');
 const { deductBatches, batchWriteOp, sameOwner } = require('../utils/batch.util');
 const { assertNotCombo } = require('../utils/combo.util');
@@ -466,6 +467,17 @@ class PurchaseService {
       }
     }
 
+    // The books may be closed through a date. `Purchase.date` is the
+    // backdatable business date every purchase reader filters on — the list,
+    // the supplier statement, the P&L's purchase bucket and now the payables
+    // aging — so a bill posted behind the line moves a period the owner has
+    // already signed off on. Checked before anything is written; a bill with no
+    // date is today's and passes (rule 1).
+    const purchaseDate = date ? new Date(date) : new Date();
+    assertPeriodOpen({
+      when: purchaseDate, shop: req?.shop, label: 'purchase', labelBn: 'কেনা',
+    });
+
     // Create purchase
     const branchId = req ? requireBranch(req) : null;
     const [purchase] = await Purchase.create([{
@@ -495,7 +507,7 @@ class PurchaseService {
       paid: paidAmount,
       paymentMethod: primaryMethod,
       payments,
-      date: date ? new Date(date) : new Date(),
+      date: purchaseDate,
       notes: notes?.trim(),
       createdBy: userId,
     }], sessionOpt);

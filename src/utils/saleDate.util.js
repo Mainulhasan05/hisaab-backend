@@ -65,6 +65,7 @@
  */
 const { toBangladeshDateStr, getBangladeshDayRange } = require('./bdTime.util');
 const { hasPermission } = require('../middleware/permission.middleware');
+const { assertPeriodOpen } = require('./periodLock.util');
 
 /** A minute of tolerance for a client clock that runs slightly fast. */
 const FUTURE_SKEW_MS = 60 * 1000;
@@ -167,6 +168,16 @@ function resolveSaleDate({ raw, req = null, shop = null } = {}) {
       400
     );
   }
+
+  // 6. The owner has signed off on everything up to a date, and this would land
+  //    inside it.
+  //
+  //    NOT the policy window rule 5 rejects — that comment stands, and there is
+  //    still no rolling limit on how far back a date may reach. This is an
+  //    explicit line the owner draws after they are done with a period, and the
+  //    way past it is to move the line in settings, not to write behind it. See
+  //    utils/periodLock.util.js.
+  assertPeriodOpen({ when, shop, label: 'invoice', labelBn: 'বিক্রয়' });
 
   return when;
 }

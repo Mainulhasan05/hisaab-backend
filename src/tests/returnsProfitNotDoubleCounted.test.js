@@ -37,6 +37,7 @@ const Expense = require('../models/Expense.model');
 const SalesReturn = require('../models/SalesReturn.model');
 const Purchase = require('../models/Purchase.model');
 const AccountTransfer = require('../models/AccountTransfer.model');
+const StockTransaction = require('../models/StockTransaction.model');
 const cacheService = require('../services/cache.service');
 const reportService = require('../services/report.service');
 
@@ -90,6 +91,14 @@ beforeEach(() => {
   jest.spyOn(Purchase, 'aggregate').mockResolvedValue([
     { totalPurchases: 0, totalPaid: 0, totalDue: 0, count: 0 },
   ]);
+
+  // No write-offs either, for the same reason: this fixture is about RETURNS,
+  // and a ক্ষতি row would move `netProfit` by a term these assertions are not
+  // describing. Stubbed rather than left alone because `getProfitLoss` queries
+  // the stock ledger unconditionally — an unmocked model here reaches for a
+  // database that is not there and the suite hangs to its timeout rather than
+  // failing with anything readable.
+  jest.spyOn(StockTransaction, 'aggregate').mockResolvedValue([]);
 });
 
 afterEach(() => jest.restoreAllMocks());

@@ -1,5 +1,6 @@
 const User = require('../models/User.model');
 const Role = require('../models/Role.model');
+const PaymentAccount = require('../models/PaymentAccount.model');
 const Shop = require('../models/Shop.model');
 const Admin = require('../models/Admin.model');
 const AuditLog = require('../models/AuditLog.model');
@@ -166,6 +167,23 @@ class AuthService {
     shop.owner = user._id;
     await shop.save();
 
+    // Seed the shop's fund accounts.
+    //
+    // AFTER the owner user, not beside `seedDefaultRoles` above, because
+    // `PaymentAccount.createdBy` is required and the owner is the only user
+    // that exists — a role has no such field, which is why the two seeds sit
+    // apart.
+    //
+    // Non-fatal, exactly like the category and role seeds: these rows are read
+    // by nothing until `features.fundAccounts` is turned on, so a shop that
+    // registered while this failed is a working shop, and the migration script
+    // is still there to fill them in.
+    try {
+      await this.seedDefaultAccounts(shop._id, user._id);
+    } catch (error) {
+      console.error('Failed to seed default accounts:', error.message);
+    }
+
     // Generate OTP for verification
     const otp = user.generateOTP();
     await user.save();
@@ -248,6 +266,88 @@ class AuthService {
     }
     await Role.insertMany(roleDocs, { ordered: false }).catch(() => {
       // Ignore duplicate key errors (roles already seeded)
+    });
+  }
+
+  /**
+   * One fund account per payment method, at registration.
+   *
+   * ── Why this exists ────────────────────────────────────────────────────────
+   *
+   * `features.fundAccounts` is off by default, and until now a shop had NOTHING
+   * behind it — no `PaymentAccount` was created anywhere in the signup path. So
+   * turning the capability on for a shop meant first running
+   * `scripts/migrate-create-default-accounts.js`, and that script's own header
+   * warns what happens if you do it the other way round:
+   *
+   *     "flip the flag last — an interruption then leaves the shop with unused
+   *      accounts, which is harmless, rather than with the capability on and
+   *      nothing behind it, which is a broken screen."
+   *
+   * A capability whose admin toggle produces a broken screen unless someone
+   * remembers to SSH in first is a capability that does not really have a
+   * toggle. Seeding here makes the flag safe to flip on its own, for every shop
+   * created from now on.
+   *
+   * ── Why all five, and not just cash ───────────────────────────────────────
+   *
+   * `resolveAccountForMethod` returns `null` when a shop has no account for the
+   * method on a payment leg, and a null account is a silent no-op — the money
+   * lands on the Sale and moves no balance. Seeding cash alone would therefore
+   * give a shop that takes bKash an accounts screen that quietly understates
+   * what it holds, which is worse than no screen at all. The methods are known
+   * up front (`PAYMENT_METHODS`), so there is no reason to seed a subset.
+   *
+   * ── What it deliberately does NOT do ──────────────────────────────────────
+   *
+   * Guess a balance. Every account starts at zero and the owner types their
+   * opening figure on the accounts screen (FUND_ACCOUNT_PLAN D-4). Same rule the
+   * migration follows, for the same reason: a bank account holds money that
+   * never passed through this app.
+   *
+   * ── Invisible until the flag is on ────────────────────────────────────────
+   *
+   * These rows are read by nothing while `features.fundAccounts` is off —
+   * `resolveAccountForMethod` returns `null` on the flag before it queries, and
+   * the accounts screen does not exist. So this changes nothing a new shop sees
+   * (I-1); it only removes the migration step from ever enabling it.
+   *
+   * `branch: null` throughout. A new shop is single-branch by definition, and
+   * `enableMultiBranch` already owns the question of what a second branch's
+   * cash box is called.
+   */
+  async seedDefaultAccounts(shopId, userId) {
+    // Same five, same Bengali names and same `type` mapping the migration uses.
+    // Kept in step deliberately: a shop seeded here and a shop back-filled by
+    // the script must end up with accounts the owner cannot tell apart.
+    const METHOD_ACCOUNTS = {
+      cash:  { type: 'cash', name: 'ক্যাশ বাক্স' },
+      bkash: { type: 'mfs',  name: 'বিকাশ' },
+      nagad: { type: 'mfs',  name: 'নগদ' },
+      card:  { type: 'card', name: 'কার্ড' },
+      bank:  { type: 'bank', name: 'ব্যাংক' },
+    };
+
+    const docs = Object.entries(METHOD_ACCOUNTS).map(([method, { type, name }]) => ({
+      shop: shopId,
+      branch: null,
+      name,
+      type,
+      method,
+      // The default for its method, so a POS posting a bare `method` resolves
+      // here. One account per method at this point, so there is nothing to
+      // compete with — see `resolveAccountForMethod`'s sort.
+      isDefault: true,
+      isActive: true,
+      openingBalance: 0,
+      balance: 0,
+      createdBy: userId,
+    }));
+
+    await PaymentAccount.insertMany(docs, { ordered: false }).catch(() => {
+      // Ignore duplicate key errors on {shop, branch, name} — the same
+      // tolerance `seedDefaultRoles` has, and for the same reason: a retried
+      // registration must not fail on rows that are already correct.
     });
   }
 

@@ -221,6 +221,48 @@ const shopSchema = new mongoose.Schema({
       type: Boolean,
       default: true
     },
+    /**
+     * খাতা বন্ধ — the last day whose books the owner has signed off on.
+     *
+     * ── The gap this fills ───────────────────────────────────────────────────
+     *
+     * Backdating is permission-gated and honest: a sale backdated to Thursday
+     * IS a Thursday sale everywhere, which is the whole model
+     * (`utils/saleDate.util.js`). What it was not, was BOUNDED. Anyone holding
+     * `sales.backdate` or `customers.backdate` could post into any prior month
+     * or year, and `saleDate.util` names the consequence in its own header:
+     *
+     *     "you read it on Friday; after a Saturday backdate it is ৳45,000."
+     *
+     * For a product whose entire proposition is a number the owner trusts, a
+     * figure that changes retroactively is the fastest available way to lose
+     * that trust — and the owner has no way to notice, because the report simply
+     * reads differently the next time they open it.
+     *
+     * ── This is NOT the policy window `saleDate.util` rule 5 rejects ─────────
+     *
+     * That comment is right and stands: "an owner entering last year's books is
+     * doing something legitimate", so there is no rolling limit on how far back
+     * a date may reach. This is the opposite kind of thing — not a window that
+     * moves on its own, but an explicit line the OWNER draws once they are done
+     * with a period. A shop entering last year's books sets it to nothing until
+     * they have finished, then closes the year in one move.
+     *
+     * ── `null` is the default and means nothing is closed ───────────────────
+     *
+     * Every shop on the platform, until an owner deliberately draws the line.
+     * The dated-write paths return early on `null`, so the feature costs a shop
+     * that has never used it exactly one falsy check.
+     *
+     * Stored as an instant, compared against the END of that Bangladesh day —
+     * closing "31 July" must close all of 31 July, not everything before its
+     * midnight. `utils/periodLock.util.js` is the single place that comparison
+     * is made, so no caller can get the boundary a taka wrong on its own.
+     */
+    booksClosedThrough: {
+      type: Date,
+      default: null
+    },
     enabledVariantTypes: {
       type: [String],
       default: ['size', 'color']

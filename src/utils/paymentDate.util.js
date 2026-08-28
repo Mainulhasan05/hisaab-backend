@@ -46,6 +46,7 @@ const {
   getBangladeshDayRange,
   toBangladeshDateStr,
 } = require('./bdTime.util');
+const { assertPeriodOpen } = require('./periodLock.util');
 
 /**
  * The effective date of a payment, for use inside an aggregation expression.
@@ -176,6 +177,14 @@ function resolvePaidAt({ raw, req = null, shop = null, label = 'আদায়�
       400
     );
   }
+
+  // 7. The books are closed through a date and this would land inside it.
+  //
+  //    Placed after rule 2, deliberately, and that ordering is load-bearing: a
+  //    collection dated TODAY returned early and never reaches here, so closing
+  //    the books can never stop the till taking money. It only ever stops the
+  //    past being rewritten. See utils/periodLock.util.js.
+  assertPeriodOpen({ when, shop: shopDoc, label: 'collection', labelBn: 'আদায়' });
 
   return when;
 }

@@ -108,6 +108,50 @@ const customerSchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
+  /**
+   * বাকির সীমা — the most this customer may owe.
+   *
+   * ── The gap this fills ─────────────────────────────────────────────────────
+   *
+   * `creditLimit` was already named in `auditDiff.util.js`'s tracked-field list
+   * and in `auditDiff.test.js`, and no such field existed — a dangling
+   * reference to a control that was never built. Until now any staff member
+   * could extend unlimited credit to anyone, and the owner found out at the
+   * aging report, which is to say after the money was already out of the door.
+   * For a বাকি-driven shop that is the most valuable control the product was
+   * missing.
+   *
+   * ── `0` means NO LIMIT, and that is why it is the default ─────────────────
+   *
+   * Every customer already in the database gets `0`, so nothing about any
+   * existing shop's checkout changes until an owner deliberately sets a figure.
+   * A default of `null` would read the same way and cost a null check at every
+   * site; a default of some number would silently start refusing sales at
+   * shops that never asked for the feature.
+   *
+   * ── SHOP-WIDE, like `isWholesale` and for the same reason ────────────────
+   *
+   * `Customer` is one document per human (I-4), and creditworthiness is a
+   * property of the human, not of the till they walk up to. The check is made
+   * against `totalDue` — the shop-wide rollup — rather than against the branch
+   * book, even for a shop keeping SEPARATE books. Checking the branch figure
+   * would let a ৳10,000 limit become ৳30,000 across three branches, which is
+   * the exact hole the limit exists to close.
+   *
+   * ── OWNER-ONLY to write ───────────────────────────────────────────────────
+   *
+   * Gated on `customers.credit_override`, the same permission that lets someone
+   * push a sale past the limit. If a cashier could set the field they could
+   * raise their own ceiling and the block would be decorative. Enforced in
+   * `customer.service`, on the FIELD rather than the route — `PUT /customers/:id`
+   * stays open to anyone with `customers.update`, exactly as `openingDue` and
+   * `isWholesale` are.
+   */
+  creditLimit: {
+    type: Number,
+    default: 0,
+    min: [0, 'বাকির সীমা ০ এর কম হতে পারবে না']
+  },
   purchaseCount: {
     type: Number,
     default: 0

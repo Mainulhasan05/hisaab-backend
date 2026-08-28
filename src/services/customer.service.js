@@ -15,6 +15,7 @@ const paymentAccountService = require('./paymentAccount.service');
 const dueSettlementService = require('./dueSettlement.service');
 const { auditSnapshot, auditDiff, AUDIT_FIELDS } = require('../utils/auditDiff.util');
 const { resolveWholesaleFlag } = require('../utils/pricing.util');
+const { resolveCreditLimit } = require('../utils/creditLimit.util');
 const { toMoney } = require('../utils/invoiceMath.util');
 const { quantizeMoney } = require('../utils/quantity.util');
 const { resolvePaidAt, paidAtMatch, LIVE_PAYMENT } = require('../utils/paymentDate.util');
@@ -735,6 +736,12 @@ class CustomerService {
     // is open to anyone with `customers.create`, only this FIELD is restricted.
     const isWholesale = resolveWholesaleFlag(customerData.isWholesale, req);
 
+    // বাকির সীমা, optional. Gated on `customers.credit_override` — see
+    // `resolveCreditLimit` for why that permission rather than owner-only.
+    // Checked on the FIELD here, like the two beside it, because the route is
+    // open to anyone holding `customers.create`.
+    const creditLimit = resolveCreditLimit(customerData.creditLimit, req);
+
     // Pre-software debt, optional. Owner-only — writing this conjures a
     // receivable out of nothing, so it is the one part of the customer form a
     // cashier must not reach. Checked here rather than on the route because the
@@ -849,6 +856,9 @@ class CustomerService {
       // Spread rather than assigned, so an untouched field falls to the schema
       // default instead of being written as an explicit `undefined`.
       ...(isWholesale === undefined ? {} : { isWholesale }),
+      // Spread for the reason above: an untouched limit must fall to the
+      // schema's `0` (= no limit), not be written as an explicit `undefined`.
+      ...(creditLimit === undefined ? {} : { creditLimit }),
       createdBy: userId,
     });
 
@@ -981,6 +991,17 @@ class CustomerService {
     const nextWholesale = resolveWholesaleFlag(updateData.isWholesale, req);
     if (nextWholesale !== undefined) {
       sharedUpdate.isWholesale = nextWholesale;
+    }
+
+    // Same peel, same reason — the `Object.assign` below copies whatever the
+    // body held, so the key has to leave and come back resolved rather than be
+    // validated in place. Shop-wide for the reason `isWholesale` is:
+    // creditworthiness belongs to the human, and a per-branch ceiling is three
+    // ceilings (I-4).
+    delete sharedUpdate.creditLimit;
+    const nextCreditLimit = resolveCreditLimit(updateData.creditLimit, req);
+    if (nextCreditLimit !== undefined) {
+      sharedUpdate.creditLimit = nextCreditLimit;
     }
     let localNameChanged = false;
     const previousLocalName = balanceRow?.localName || null;

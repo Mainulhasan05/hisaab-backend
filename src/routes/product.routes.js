@@ -54,6 +54,14 @@ router.get('/:id', rbac('products', 'view'), productController.getProduct);
 router.put('/:id', rbac('products', 'update'), validate(productValidation.updateProduct), productController.updateProduct);
 router.delete('/:id', rbac('products', 'delete'), productController.deleteProduct);
 router.patch('/:id/stock', rbacAny([['products', 'update'], ['stock', 'manual_adjust']]), validate(productValidation.updateStock), productController.updateStock);
+// ক্ষতি — write stock off as a loss.
+//
+// `rbac`, NOT `rbacAny`. The adjustment route above grandfathers `products.update`
+// so existing roles keep working; doing the same here would hand a write-off to
+// every role that can edit a product, which is most of them. This one carries a
+// cost straight into the P&L, so it takes its own permission and nothing else —
+// which means owner-only until an owner grants it deliberately.
+router.post('/:id/write-off', rbac('stock', 'write_off'), validate(productValidation.writeOffStock), productController.writeOffStock);
 router.patch('/:id/status', rbac('products', 'update'), validate(productValidation.toggleStatus), productController.toggleStatus);
 router.get('/:id/stock-transactions', rbacAny([['products', 'view'], ['stock', 'view']]), productController.getStockTransactions);
 router.post('/:id/images', rbac('products', 'update'), upload.array('images', 5), productController.uploadProductImages);

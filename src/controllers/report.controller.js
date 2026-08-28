@@ -2,6 +2,9 @@ const mongoose = require('mongoose');
 const reportService = require('../services/report.service');
 const detailedReportService = require('../services/detailedReport.service');
 const customerService = require('../services/customer.service');
+// Payable aging lives with the suppliers it ages, the same way receivable aging
+// lives in `customer.service` — the report router is the caller, not the owner.
+const supplierService = require('../services/supplier.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 const { sanitizeReport } = require('../utils/dataSanitizer.util');
@@ -251,5 +254,21 @@ exports.getDueAging = asyncHandler(async (req, res) => {
     data: sanitizeReport(result, req),
     message: 'Due aging report generated',
     messageBn: 'বাকি এজিং রিপোর্ট তৈরি হয়েছে',
+  });
+});
+
+// Payable Aging — the same question asked of what the shop OWES.
+//
+// `sanitizeReport` like every other report on this controller. It strips
+// nothing here today (a payable is neither a cost basis nor a margin), and it
+// stays because the rule is that reports go through the sanitiser — the one
+// that is exempted "because it has nothing to hide" is the one that grows a
+// field later and leaks it.
+exports.getPayableAging = asyncHandler(async (req, res) => {
+  const result = await supplierService.getPayableAging(req.shop._id, req);
+  return ApiResponse.success(res, {
+    data: sanitizeReport(result, req),
+    message: 'Payable aging report generated',
+    messageBn: 'পাওনাদার এজিং রিপোর্ট তৈরি হয়েছে',
   });
 });

@@ -14,6 +14,7 @@ const {
   startStorageMaintenanceJob,
   stopStorageMaintenanceJob,
 } = require('./jobs/storageMaintenance.job');
+const { startDriftCheckJob, stopDriftCheckJob } = require('./jobs/driftCheck.job');
 const telegramService = require('./services/telegram.service');
 const smsService = require('./services/sms.service');
 const { createSmsWorker, closeQueue } = require('./config/queue.config');
@@ -201,6 +202,13 @@ async function start() {
     // is "uploads started failing" with nothing in the logs. See the job file.
     startStorageMaintenanceJob();
 
+    // Nightly (03:00 BD) verification that every stored rollup still
+    // reconciles with the source documents it was derived from. Read-only —
+    // it never repairs, because a mismatch means a write path updates one book
+    // and not the other, and rewriting the rollup would hide that. Drift used
+    // to be found by a person reading a supplier statement months later.
+    startDriftCheckJob();
+
     // ── SMS campaign worker ────────────────────────────────────────────────
     //
     // Primary worker only, like everything else in this block — but for a
@@ -257,6 +265,7 @@ async function shutdown(code = 0) {
     stopDigestJob();
     stopPulseJob();
     stopStorageMaintenanceJob();
+    stopDriftCheckJob();
     telegramService.shutdown();
 
     // Close the worker BEFORE the HTTP server and before Mongo.

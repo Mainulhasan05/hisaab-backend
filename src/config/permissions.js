@@ -49,7 +49,16 @@ const MODULES = {
   // Enforced inside `collectDuePayment` via `utils/paymentDate.util`, never at
   // the door: the collect-due form always posts a date, and a date of TODAY is
   // not backdating. A gate at the route would 403 every ordinary collection.
-  customers:     { key: 'customers',     label: 'কাস্টমার',          labelEn: 'Customers',       actions: ['view', 'create', 'update', 'delete', 'backdate'] },
+  // `credit_override` lets a sale go through that would push the customer past
+  // their বাকির সীমা. It is NOT the permission to SET the limit — that stays
+  // owner-only on the field, like `openingDue` and `isWholesale`, because
+  // anyone who could raise their own ceiling would make the block decorative.
+  //
+  // The point of the override is not that it is hard to get. It is that every
+  // use writes an audit entry naming who approved what, so "who let them run up
+  // ৳40,000" has an answer. A block a cashier cannot pass at 9pm with the owner
+  // asleep is a block that gets worked around by not recording the sale at all.
+  customers:     { key: 'customers',     label: 'কাস্টমার',          labelEn: 'Customers',       actions: ['view', 'create', 'update', 'delete', 'backdate', 'credit_override'] },
   // A purchase record IS cost data (unit prices, invoice totals, dues), so
   // `view` alone only reveals *that* a purchase happened — supplier, date,
   // invoice no, quantities. The money is behind `view_cost`.
@@ -84,7 +93,19 @@ const MODULES = {
   // Staff mutations are deliberately owner-only (a staff member who can edit
   // other staff could escalate their own privileges) — so only `view` is offered
   staff:         { key: 'staff',         label: 'স্টাফ ম্যানেজমেন্ট', labelEn: 'Staff Management', actions: ['view'] },
-  stock:         { key: 'stock',         label: 'স্টক সমন্বয়',       labelEn: 'Stock Adjustment', actions: ['view', 'manual_adjust'] },
+  // `write_off` is separate from `manual_adjust` on purpose, and the two look
+  // similar enough that merging them is the obvious-looking mistake.
+  //
+  //   · `manual_adjust` says "my count was wrong" — the shelf is being made to
+  //     agree with reality, and no value is created or destroyed by saying so.
+  //   · `write_off` says "these goods are gone" — value leaves the business,
+  //     it lands in the P&L as ক্ষতি, and nothing outside the shop can be
+  //     reconciled against it.
+  //
+  // One is bookkeeping and one is spending authority. A cashier who may fix a
+  // miscount must not thereby be able to make ৳20,000 of stock disappear into a
+  // reason code.
+  stock:         { key: 'stock',         label: 'স্টক সমন্বয়',       labelEn: 'Stock Adjustment', actions: ['view', 'manual_adjust', 'write_off'] },
   stock_transfers: { key: 'stock_transfers', label: 'শাখা ট্রান্সফার', labelEn: 'Stock Transfers', actions: ['view', 'create', 'update'] },
   // ── The online panel ───────────────────────────────────────────────────────
   //
@@ -150,9 +171,11 @@ const ACTION_LABELS = {
   view_cost:     { label: 'ক্রয়মূল্য দেখা', labelEn: 'View cost' },
   view_profit:   { label: 'লাভ দেখা',       labelEn: 'View profit' },
   manual_adjust: { label: 'স্টক সমন্বয়',    labelEn: 'Adjust stock' },
+  write_off:     { label: 'ক্ষতি লেখা',      labelEn: 'Write off stock' },
   discount:      { label: 'ছাড় দেওয়া',      labelEn: 'Give discount' },
   // Shared by `sales` and `customers`, so the label names neither.
   backdate:      { label: 'আগের তারিখ দেওয়া', labelEn: 'Backdate an entry' },
+  credit_override: { label: 'বাকির সীমা অতিক্রম', labelEn: 'Exceed credit limit' },
   revise:        { label: 'বিক্রয় সংশোধন',   labelEn: 'Revise a sale' },
   cancel:        { label: 'বাতিল',           labelEn: 'Cancel' },
   publish:       { label: 'প্রকাশ',          labelEn: 'Publish' },
@@ -299,6 +322,10 @@ const ROLE_PRESETS = {
       settings:      ['view'],
       sms:           ['view', 'create'],
       staff:         ['view'],
+      // `write_off` withheld, for the same reason as `accounts.transfer`
+      // below: writing goods off is destroying value, with nothing outside the
+      // shop to reconcile it against. It stays with the owner unless they hand
+      // it over deliberately.
       stock:         ['view', 'manual_adjust'],
       stock_transfers: ['view', 'create', 'update'],
       // A manager runs the parcel desk end to end and may draft the site.
