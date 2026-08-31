@@ -1088,10 +1088,14 @@ async function cancelDueCollection(
     throw new AppError('Payment not found', 'পেমেন্ট পাওয়া যায়নি', 404);
   }
 
-  if (payment.type !== 'due_collection') {
+  // A deposit is cancellable through the same door, and must be: the delete
+  // guard refuses to remove a customer holding one, so without a reversal the
+  // account could never be closed — and a deposit taken in error is money the
+  // shop is holding that nobody meant it to hold.
+  if (!['due_collection', 'advance'].includes(payment.type)) {
     throw new AppError(
-      'Only due collections can be cancelled here',
-      'শুধু বাকি আদায় এখান থেকে বাতিল করা যায়',
+      'Only due collections and advances can be cancelled here',
+      'শুধু বাকি আদায় বা অগ্রিম এখান থেকে বাতিল করা যায়',
       400
     );
   }

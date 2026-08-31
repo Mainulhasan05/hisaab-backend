@@ -54,6 +54,24 @@ router.post('/:id([0-9a-fA-F]{24})/collect-due', idempotency(), rbac('customers'
 // Owner-only, and not merely `customers.update`: this writes a receivable that
 // no invoice backs, which is the one customer-desk action a counter-sale cannot
 // undo. A cashier who could reach it could manufacture or erase debt.
+/**
+ * অগ্রিম জমা — money taken with no debt for it to settle.
+ *
+ * Same permission as বাকি আদায়, deliberately. Both are a counter taking money
+ * from a customer, and a shop that trusts someone to collect a debt trusts them
+ * to accept a deposit. The DIFFERENCE — that this one creates a liability the
+ * shop must honour later — is handled by the confirmation the UI shows and the
+ * fat-finger threshold, not by withholding the ability.
+ *
+ * Idempotent: a double-tapped জমা on a slow connection must not take the
+ * customer's money twice.
+ */
+router.post(
+  '/:id([0-9a-fA-F]{24})/advance',
+  idempotency(),
+  rbac('customers', 'update'),
+  customerController.takeAdvance
+);
 router.post('/:id([0-9a-fA-F]{24})/opening-due', idempotency(), ownerOnly, customerController.setOpeningDue);
 // Re-printing a বাকি আদায় receipt. `customers.view`, not `update`: handing a
 // customer a copy of a receipt they already have is reading, and a staff member

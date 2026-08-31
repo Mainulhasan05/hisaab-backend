@@ -91,6 +91,18 @@ exports.collectDue = asyncHandler(async (req, res) => {
   });
 });
 
+// অগ্রিম জমা — take a deposit with no debt behind it. See the route for the gate.
+exports.takeAdvance = asyncHandler(async (req, res) => {
+  const result = await customerService.takeAdvance(
+    req.shop._id, req.user._id, req.params.id, req.body, req
+  );
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Advance recorded',
+    messageBn: 'অগ্রিম জমা হয়েছে',
+  });
+});
+
 // Set a customer's opening (pre-software) due — owner only, see route
 exports.setOpeningDue = asyncHandler(async (req, res) => {
   const result = await customerService.setOpeningDue(
