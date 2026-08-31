@@ -207,6 +207,16 @@ async function settleCustomerDue(
     appliedTo = null,
     transactionId,
     notes,
+    /**
+     * Permit money beyond the debt to be held as অগ্রিম জমা.
+     *
+     * `false` for every caller that existed before advances did, so the ceiling
+     * those callers have always had is preserved BY CONSTRUCTION rather than by
+     * everyone remembering to keep it. Only the doors built for it — the
+     * standalone deposit, the surplus collection, and the till's
+     * change-to-hand-back toggle — pass it.
+     */
+    allowAdvance = false,
     req = null,
   },
   session = null
@@ -242,7 +252,7 @@ async function settleCustomerDue(
       sessionOpt
     );
     dueBefore = branchBalance?.totalDue || 0;
-    if (amount > dueBefore) {
+    if (amount > dueBefore && !allowAdvance) {
       throw new AppError(
         'Payment amount exceeds this branch due balance',
         'পেমেন্টের পরিমাণ এই শাখার বাকির চেয়ে বেশি',
@@ -251,7 +261,7 @@ async function settleCustomerDue(
     }
   } else {
     dueBefore = customer.totalDue || 0;
-    if (amount > dueBefore) {
+    if (amount > dueBefore && !allowAdvance) {
       throw new AppError(
         'Payment amount exceeds due balance',
         'পেমেন্টের পরিমাণ বাকির চেয়ে বেশি',
@@ -259,6 +269,25 @@ async function settleCustomerDue(
       );
     }
   }
+
+  /**
+   * ── The split, and why it is TWO ROWS ────────────────────────────────────
+   *
+   * A customer owing ৳2,000 who hands over ৳3,000 has done two things at once:
+   * discharged a debt and made a deposit. They are different economic events —
+   * one REDUCES A RECEIVABLE the shop had already earned, the other CREATES A
+   * LIABILITY it is merely holding — and a single row carrying ৳3,000 would
+   * force every report to mislabel one of them forever. The daily summary would
+   * report ৳3,000 of "বাকি আদায়", and an owner judging whether their customers
+   * are paying up would be reading a number that answers a different question.
+   *
+   * So each half is its own row, and the pair shares `paidAt`, `method`,
+   * `account` and a `receiptGroup` so the UI can present the one event it was.
+   * Where the two genuinely belong together — the cash drawer, the reallocation
+   * pool — the match is an explicit `$in` naming both.
+   */
+  const appliedToDue = quantizeMoney(Math.min(amount, dueBefore));
+  const advancePart = quantizeMoney(amount - appliedToDue);
 
   // Which fund account the money came into. Named by the caller, or resolved
   // from the method's default so an older client posting a bare
@@ -281,7 +310,17 @@ async function settleCustomerDue(
   // it has to be on the document the customer is handed, not patched in by a
   // second write that could fail on its own.
   const paymentId = new mongoose.Types.ObjectId();
-  const dueAfter = quantizeMoney(dueBefore - amount);
+  // What the customer still owes AFTER this collection. Measured on the part
+  // that actually settled debt — a deposit does not reduce a receivable, and a
+  // receipt claiming otherwise would tell the customer their খাতা is smaller
+  // than it is.
+  const dueAfter = quantizeMoney(dueBefore - appliedToDue);
+  // Ties the pair together when a payment straddles the boundary. Absent on the
+  // single-row case, which is every collection ever written before advances
+  // existed (I-1).
+  const receiptGroup = advancePart > 0 && appliedToDue > 0
+    ? new mongoose.Types.ObjectId()
+    : undefined;
 
   // Validated BEFORE the row is written, not filtered afterwards. A target that
   // names another customer's invoice, or another branch's under separate books,
@@ -293,17 +332,22 @@ async function settleCustomerDue(
     shopId, customerId: customer._id, branchId, branchScoped, amount, appliedTo, session,
   });
 
+  const advanceId = advancePart > 0 ? new mongoose.Types.ObjectId() : null;
+
   const [payment] = await Payment.create(
     [
       {
         _id: paymentId,
         shop: shopId,
+        ...(receiptGroup ? { receiptGroup } : {}),
         branch: branchId,
         customer: customer._id,
         // NOT `sale`. See the note on `viaSale` in Payment.model.js — this money
         // settles older invoices, not the one it was handed over at.
         viaSale,
-        amount,
+        // The DEBT half only. `amount` is what crossed the counter; this row
+        // is what it settled.
+        amount: appliedToDue,
         method: method || 'cash',
         account,
         transactionId,
@@ -333,6 +377,40 @@ async function settleCustomerDue(
     sessionOpt
   );
 
+  /**
+   * The deposit half — its own row, its own type.
+   *
+   * Written only when money went past the debt, so an ordinary collection
+   * creates exactly the one row it always did. `dueBefore`/`dueAfter` are
+   * deliberately NOT set on it: those describe a receivable, and this row did
+   * not touch one.
+   */
+  let advanceRow = null;
+  if (advancePart > 0) {
+    [advanceRow] = await Payment.create(
+      [
+        {
+          _id: advanceId,
+          shop: shopId,
+          branch: branchId,
+          customer: customer._id,
+          viaSale,
+          ...(receiptGroup ? { receiptGroup } : {}),
+          amount: advancePart,
+          method: method || 'cash',
+          account,
+          transactionId,
+          type: 'advance',
+          paidAt,
+          notes,
+          receivedBy: userId,
+          receiptNo: buildPaymentReceiptNo(advanceId, paidAt),
+        },
+      ],
+      sessionOpt
+    );
+  }
+
   // Money in. `atCheckout` stays false by default on this row, which is what
   // tells `recalc-account-balances.js` and the cash register to count it HERE
   // rather than assume it was already counted as a sale leg. For a checkout
@@ -352,8 +430,14 @@ async function settleCustomerDue(
   // `Customer.addPayment`. Unrounded, a customer who pays their book off in
   // instalments settles at 1e-13 rather than 0 and never leaves the বাকি list
   // (`totalDue: { $gt: 0 }`), with nothing left to pay that could clear them.
+  //
+  // `totalPaid` takes the WHOLE amount — deposit included, because the customer
+  // really handed it over — and both money halves are then DERIVED from the
+  // three components. Subtracting `amount` from `totalDue` directly, as this
+  // did, cannot express the other half: a customer who overpays would simply
+  // clamp at zero and the deposit would stop existing.
   customer.totalPaid = quantizeMoney((customer.totalPaid || 0) + amount);
-  customer.totalDue = quantizeMoney((customer.totalDue || 0) - amount);
+  Customer.applyBalances(customer);
   await customer.save(sessionOpt);
 
   // A collection is not tied to an invoice, so it is allocated to the branches
@@ -363,15 +447,40 @@ async function settleCustomerDue(
   // The return value is kept, not discarded: it is the only record of WHICH
   // branches' books this money reduced, and a cancellation has to put it back
   // exactly there. See `Payment.branchAllocation`.
-  const branchAllocation = await CustomerBalance.settleDue(
-    {
-      shop: shopId,
-      customer: customer._id,
-      preferBranch: branchId,
-      amount,
-    },
-    session
-  );
+  // Only the DEBT half is allocated across branches: `settleDue` exists to
+  // decide whose receivable this money reduces, and a deposit reduces none.
+  const branchAllocation = appliedToDue > 0
+    ? await CustomerBalance.settleDue(
+      {
+        shop: shopId,
+        customer: customer._id,
+        preferBranch: branchId,
+        amount: appliedToDue,
+      },
+      session
+    )
+    : [];
+
+  /**
+   * The deposit lands on the branch that took it, and nowhere else.
+   *
+   * There is no allocation question to answer — no branch holds a receivable
+   * for it — and spreading it would credit branches that never saw the money.
+   * `recomputeBalances` afterwards because `applyDelta` can only `$inc`, and an
+   * `$inc` cannot tell a payable from a deposit.
+   *
+   * A no-op for single-branch shops, where `branchId` is null (I-1).
+   */
+  if (advancePart > 0 && branchId) {
+    await CustomerBalance.applyDelta(
+      { shop: shopId, customer: customer._id, branch: branchId, paid: advancePart },
+      session
+    );
+    await CustomerBalance.recomputeBalances(
+      { shop: shopId, customer: customer._id, branch: branchId },
+      session
+    );
+  }
 
   if (branchAllocation.length > 0) {
     await Payment.updateOne(
@@ -399,7 +508,13 @@ async function settleCustomerDue(
 
   return {
     payment,
+    // The deposit half, when there was one. Callers show it: a cashier who has
+    // just taken ৳700 of someone's money needs to say so out loud, and the
+    // customer's receipt has to name it or they will believe it was pocketed.
+    advancePayment: advanceRow,
     amount,
+    appliedToDue,
+    advancePart,
     dueBefore: quantizeMoney(dueBefore),
     dueAfter,
     // Which invoices this collection moved, so the till and the customer page
