@@ -1152,6 +1152,27 @@ class CustomerService {
       throw new AppError('কাস্টমার পাওয়া যায়নি', 'Customer not found', 404);
     }
 
+    /**
+     * Money the shop is HOLDING for them blocks deletion too.
+     *
+     * The due guard below has always been here. Its mirror had not, because
+     * until advances existed the figure was always zero — and the moment it can
+     * be non-zero, deleting such a customer takes a LIABILITY off every
+     * `isActive`-filtered screen while the shop keeps their cash. They will come
+     * back for it, and nothing will remember.
+     *
+     * Blocks rather than warns, unlike the supplier payable: a debt deleted away
+     * is money someone else must chase, but a deposit deleted away is money the
+     * shop is quietly keeping. Refund it first — that door exists.
+     */
+    if ((customer.advanceBalance || 0) > 0) {
+      throw new AppError(
+        'Cannot delete a customer holding an advance — refund it first',
+        `৳${customer.advanceBalance} অগ্রিম জমা আছে — আগে ফেরত দিন`,
+        400
+      );
+    }
+
     // Check if customer has due balance
     if (customer.totalDue > 0) {
       throw new AppError('বাকি আছে এমন কাস্টমার ডিলিট করা যাবে না', 'Cannot delete customer with due balance', 400);
@@ -1233,6 +1254,79 @@ class CustomerService {
       due: sale.due || 0,
       status: sale.status,
     }));
+  }
+
+  /**
+   * অগ্রিম জমা — take money from a customer with no debt for it to settle.
+   *
+   * ── Why a separate door and not a bigger বাকি আদায় ───────────────────────
+   *
+   * `collectDuePayment` refuses an amount larger than the debt, and must keep
+   * refusing: a fat-fingered ৳20,000 for ৳2,000 should bounce, not silently
+   * become an ৳18,000 liability the shop must honour later. Taking a deposit is
+   * a deliberate act and gets a door of its own.
+   *
+   * ── What it is, in accounting terms ──────────────────────────────────────
+   *
+   * A LIABILITY. The shop is holding money it has not earned. It is spendable
+   * cash, so the drawer and the fund account must show it — but it is not
+   * revenue, it is not a reduction in receivables, and it is discharged only
+   * when goods are delivered against it. The P&L never sees it: `getProfitLoss`
+   * reads `Sale`, `Expense`, `SalesReturn` and `Purchase`, never `Payment`.
+   *
+   * Any existing debt is settled FIRST — a customer cannot owe the shop and be
+   * in credit with it at the same time.
+   */
+  async takeAdvance(shopId, userId, customerId, paymentData, req) {
+    return runInTransaction(async (session) => {
+      const paidAt = resolvePaidAt({ raw: paymentData.paidAt ?? paymentData.date, req });
+
+      const customer = await Customer.findOne({ _id: customerId, shop: shopId })
+        .session(session || null);
+      if (!customer) {
+        throw new AppError('কাস্টমার পাওয়া যায়নি', 'Customer not found', 404);
+      }
+      // Money must not be recorded against someone no screen will show.
+      if (customer.isActive === false) {
+        throw new AppError(
+          'Cannot take money from a deleted customer — restore them first',
+          'ডিলিট করা কাস্টমারের টাকা নেওয়া যাবে না — আগে ফিরিয়ে আনুন',
+          400
+        );
+      }
+
+      const result = await dueSettlementService.settleCustomerDue({
+        shopId,
+        userId,
+        customer,
+        amount: paymentData.amount,
+        branchId: req ? requireBranch(req) : null,
+        branchScoped: isBranchCustomerScope(req),
+        method: paymentData.method,
+        rawAccount: paymentData.account,
+        paidAt,
+        transactionId: paymentData.transactionId,
+        notes: paymentData.notes,
+        allowAdvance: true,
+        req,
+      }, session);
+
+      await AuditLog.create([{
+        shop: shopId,
+        branch: req?.branchId || null,
+        user: userId,
+        action: 'customer_advance',
+        actionBn: 'অগ্রিম জমা',
+        description: `Advance of ৳${result.advancePart} taken from ${customer.name}`,
+        descriptionBn: `${customer.name} থেকে ৳${result.advancePart} অগ্রিম জমা`,
+        entity: { type: 'customer', id: customer._id, name: customer.name },
+        changes: {
+          after: { advanceBalance: customer.advanceBalance, totalDue: customer.totalDue },
+        },
+      }], session ? { session } : {});
+
+      return result;
+    });
   }
 
   async collectDuePayment(shopId, userId, customerId, paymentData, req) {
