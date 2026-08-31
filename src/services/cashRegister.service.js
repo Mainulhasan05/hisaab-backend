@@ -286,7 +286,19 @@ class CashRegisterService {
             shop: shopOid,
             ...branchMatch,
             method: 'cash',
-            type: 'purchase_payment',
+            // `supplier_advance` rides in the same bucket, and must.
+            //
+            // An advance handed to a vendor is cash out of THIS drawer today —
+            // economically a purchase paid before the goods arrive. Left out,
+            // the till reads OVER by every taka prepaid, every day, and the
+            // shopkeeper counting the box finds money missing that the software
+            // says should be there.
+            //
+            // Joined by an explicit `$in` rather than by giving the two one
+            // type, so the fact that two different economic events share this
+            // bucket is visible where it happens (constants.js says why they
+            // are separate types at all).
+            type: { $in: ['purchase_payment', 'supplier_advance'] },
             ...LIVE_PAYMENT,
             ...paidAtMatch({ $gte: start, $lte: end }),
           },

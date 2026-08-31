@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const Supplier = require('./Supplier.model');
 
 /**
  * Per-branch supplier ledger.
@@ -81,6 +82,31 @@ const supplierBalanceSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  /**
+   * This branch's prepayment with this vendor — the other half of `totalDue`.
+   *
+   * Mirrors `Supplier.advanceBalance`, and carries the same exclusivity: a row
+   * never holds both. See that field for why it is an ASSET and must never be
+   * netted against another vendor's payable.
+   *
+   * ── The Σ invariant survives on the NET, not on this column ───────────────
+   *
+   * Under separate branch books a shop may be ৳1,000 in credit with a vendor at
+   * Dhaka while owing them ৳3,000 at নয়াগোলা. The branch advances sum to
+   * ৳1,000; shop-wide the position is simply ৳2,000 owed, so
+   * `Supplier.advanceBalance` is 0. Both figures are correct, and anyone
+   * expecting `Σ advanceBalance === Supplier.advanceBalance` will hunt a bug
+   * that does not exist. What holds is:
+   *
+   *     Σ (totalDue − advanceBalance) === Supplier.totalDue − Supplier.advanceBalance
+   *
+   * The same correction the customer side had to make to INV-A4.
+   */
+  advanceBalance: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
   // This branch's share of the pre-software debt. `totalDue` includes it, and
   // Σ across branches is `Supplier.openingDue` — the same invariant the money
   // columns keep. See Supplier.model.js for the formula.
@@ -155,28 +181,33 @@ supplierBalanceSchema.statics.applyDelta = async function (delta, session = null
 };
 
 /**
- * Re-derive `totalDue` from amount plus opening minus paid, clamped at zero.
+ * Re-derive BOTH halves of this row from its three components.
  *
- * Used only where `Supplier` does the same clamped recompute rather than a
- * plain `$inc` — the purchase-cancel path. Mirroring the clamp is what keeps
- * the Σ invariant true on an over-paid supplier.
+ * Delegates to `Supplier.applyBalances` rather than repeating the arithmetic,
+ * so the branch book and the shop-wide rollup cannot disagree about what a
+ * payable IS. Every path that moves a component calls this afterwards.
  *
- * The `openingDue` term is load-bearing and easy to drop, exactly as it is on
- * `CustomerBalance.recomputeBalances`: `Supplier.totalDue` is only ever `$inc`-ed
- * (cancel subtracts the purchase's own due and nothing else), so leaving it out
- * here would silently wipe a shop's carried-over payable from the branch book
- * the first time any purchase from that supplier was cancelled — while the
- * shop-wide rollup kept it. That is the drift `recalc-supplier-balances.js`
- * would then report forever with nothing to explain it.
+ * ── Renamed from `recomputeDue`, with no alias kept ───────────────────────
+ *
+ * Deliberately. A call site still using the old name is one nobody thought
+ * about when the second half was added, and a `TypeError` finds it far more
+ * cheaply than a branch row whose `advanceBalance` silently stayed at zero.
+ * `CustomerBalance` made the same rename for the same reason.
+ *
+ * The `openingDue` term is load-bearing and easy to drop: leaving it out would
+ * silently wipe a shop's carried-over payable from the branch book the first
+ * time any purchase from that supplier was cancelled, while the shop-wide
+ * rollup kept it — drift `recalc-supplier-balances.js` would then report
+ * forever with nothing to explain it.
  */
-supplierBalanceSchema.statics.recomputeDue = async function ({ shop, supplier, branch }, session = null) {
+supplierBalanceSchema.statics.recomputeBalances = async function ({ shop, supplier, branch }, session = null) {
   if (!shop || !supplier || !branch) return null;
 
   const sessionOpt = session ? { session } : {};
   const row = await this.findOne({ shop, supplier, branch }, null, sessionOpt);
   if (!row) return null;
 
-  row.totalDue = Math.max(0, (row.totalAmount || 0) + (row.openingDue || 0) - (row.totalPaid || 0));
+  Supplier.applyBalances(row);
   await row.save(sessionOpt);
   return row;
 };
@@ -188,7 +219,7 @@ supplierBalanceSchema.statics.getBalance = async function ({ shop, supplier, bra
   const row = await this.findOne({ shop, supplier, branch }).lean();
   return row || {
     shop, supplier, branch,
-    totalAmount: 0, totalPaid: 0, totalDue: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null,
+    totalAmount: 0, totalPaid: 0, totalDue: 0, advanceBalance: 0, openingDue: 0, purchaseCount: 0, lastPurchase: null,
   };
 };
 
@@ -221,6 +252,9 @@ supplierBalanceSchema.statics.overlayBranchFigures = async function (suppliers, 
       totalAmount: row?.totalAmount || 0,
       totalPaid: row?.totalPaid || 0,
       totalDue: row?.totalDue || 0,
+      // Overlaid for the same reason as `totalDue`: without it a branch holding
+      // no prepayment would offer to spend another branch's.
+      advanceBalance: row?.advanceBalance || 0,
       // Overlaid like every other money column. Left out, the edit form would
       // show the shop-wide opening beside this branch's due and an owner
       // correcting it would restate the wrong book — the bug

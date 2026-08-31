@@ -99,7 +99,11 @@ describe('checkout cash is not counted twice', () => {
     await cashRegisterService._calculateCashFlows(SHOP, new Date(0), new Date(), BRANCH);
 
     const refunds = matchForTypes(paymentAgg, (m) => m.type === 'refund');
-    const supplier = matchForTypes(paymentAgg, (m) => m.type === 'purchase_payment');
+    // The supplier bucket now matches an `$in`: settling a bill and paying an
+    // advance are different economic events that leave the SAME drawer.
+    const supplier = matchForTypes(
+      paymentAgg, (m) => (m.type?.$in || []).includes('purchase_payment')
+    );
     expect(refunds.atCheckout).toBeUndefined();
     expect(supplier.atCheckout).toBeUndefined();
   });

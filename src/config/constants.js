@@ -196,7 +196,30 @@ module.exports = {
      *                      `adjustment` return moves the খাতা, and that is
      *                      recorded on the return document, not here).
      */
-    PURCHASE_REFUND: 'purchase_refund'
+    PURCHASE_REFUND: 'purchase_refund',
+    /**
+     * Money paid to a SUPPLIER ahead of the goods — অগ্রিম দেওয়া.
+     *
+     * ── Why not reuse `ADVANCE` ──────────────────────────────────────────────
+     *
+     * `advance` is money the shop RECEIVES and holds for a customer: a
+     * liability, and cash INTO the drawer. This is its mirror in every respect
+     * — money the shop HANDS OVER and has a claim on: an asset, and cash OUT.
+     *
+     * Folding them together would put supplier prepayments in the customer
+     * deposit column and, worse, in the cash register's money-IN bucket, so
+     * every taka paid out in advance would read as a taka taken in. That is the
+     * same failure `PURCHASE_REFUND` exists to avoid against `REFUND`, and the
+     * reasoning there applies here unchanged.
+     *
+     * ── What carries it ──────────────────────────────────────────────────────
+     *
+     * These rows name their `supplier` directly and carry NO `purchase` —
+     * there is no bill yet, which is the whole point. That absence is also what
+     * `scripts/recalc-supplier-balances.js` keys on to count them exactly once:
+     * money that landed on a bill is already inside `purchase.paid`.
+     */
+    SUPPLIER_ADVANCE: 'supplier_advance'
   },
 
   // Platform billing — money a shop pays HisaabBD (models/PlatformPayment)

@@ -583,9 +583,21 @@ class PurchaseReturnService {
         // and branch was cancelled — that path calls `recomputeDue`, which
         // would recompute the credit straight back out of existence.
         if (purchase.supplier) {
-          await Supplier.findByIdAndUpdate(purchase.supplier, {
-            $inc: { totalAmount: -totalCredit, totalDue: -totalCredit },
-          }, sessionOpt);
+          // `totalAmount` alone moves; the payable is DERIVED from it.
+          //
+          // The old form `$inc`-ed both, which said the same thing only while a
+          // supplier's position could never go negative. A credit larger than
+          // what is owed now resolves to an `advanceBalance` — the vendor is
+          // holding our money — instead of clamping at zero and losing it.
+          const supplierDoc = await Supplier.findById(purchase.supplier).session(session || null);
+          if (supplierDoc) {
+            Supplier.backfillTotalPaid(supplierDoc);
+            supplierDoc.totalAmount = Math.max(
+              0, quantizeMoney((supplierDoc.totalAmount || 0) - totalCredit)
+            );
+            Supplier.applyBalances(supplierDoc);
+            await supplierDoc.save(sessionOpt);
+          }
 
           await SupplierBalance.applyDelta({
             shop: shopId,
@@ -593,6 +605,12 @@ class PurchaseReturnService {
             branch: purchase.branch,
             amount: -totalCredit,
             due: -totalCredit,
+          }, session);
+          // Both halves re-derived, for the same reason the shop-wide rollup is:
+          // a credit larger than this branch's payable is a prepayment, not a
+          // zero. No-op for single-branch shops (I-1).
+          await SupplierBalance.recomputeBalances({
+            shop: shopId, supplier: purchase.supplier, branch: purchase.branch,
           }, session);
         }
       } else if (refundMethod === 'cash' && totalCredit > 0) {

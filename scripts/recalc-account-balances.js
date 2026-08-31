@@ -27,9 +27,15 @@
  *                 − Σ money out  (purchases, supplier payments, expenses,
  *                                 refunds, transfers out)
  *
- * Everything is bounded by `openingDate`: day one is the day the account was
- * created (FUND_ACCOUNT_PLAN Q-3, settled), so movements before it are NOT
- * replayed — they are already inside the opening figure the owner typed in.
+ * Everything is bounded by the account's creation (FUND_ACCOUNT_PLAN Q-3,
+ * settled: today is day one), so movements from before it are NOT replayed —
+ * they are already inside the opening figure the owner typed in.
+ *
+ * **The bound is on when a row was INSERTED, never on the date it claims** —
+ * see `since()`. A bill dated yesterday and entered today moved the balance
+ * today, and a rebuild that reads its business date replays nothing while the
+ * balance has already moved. That mistake reported ৳4,14,610 of phantom drift
+ * on a shop whose books were correct.
  *
  * ── This is a second opinion, so it reads source rows only ──────────────────
  *
@@ -66,10 +72,60 @@ const SHOP_ARG = shopArgIdx !== -1 ? process.argv[shopArgIdx + 1] : null;
  */
 const { quantizeMoney: round } = require('../src/utils/quantity.util');
 
-/** Money is only counted from the day the account's opening figure was struck. */
-const since = (account, field = 'createdAt') => ({
-  [field]: { $gte: account.openingDate || new Date(0) },
+/**
+ * Money is counted from the moment the account's opening figure was struck —
+ * and "the moment" means **when the row was inserted**, not what date it claims.
+ *
+ * ── Why `_id` and not `createdAt`, `date` or `paidAt` ───────────────────────
+ *
+ * `openingBalance` is a snapshot the owner types at account creation, covering
+ * everything that happened before the account existed. Every delta applied
+ * AFTERWARDS must be replayed, because `applyAccountDelta` really did move
+ * `balance` when the row was written. What the document says about its business
+ * date has nothing to do with whether that happened.
+ *
+ * Bounding on the business date was wrong, and it was silently wrong in one
+ * direction only — the balance moved, the rebuild did not replay it:
+ *
+ *   · a বাকি আদায় backdated to yesterday (`paidAt` is backdatable since
+ *     2026-08-18), entered today;
+ *   · a purchase or expense dated **today**, entered a few hours after the
+ *     account was created. `Purchase.date` and `Expense.date` are anchored to
+ *     midnight while `openingDate` is a precise timestamp, so an account made
+ *     at 04:23 excluded every same-day bill entered after it. Not an edge case:
+ *     that is the account's FIRST DAY, for every shop.
+ *
+ * On মেসার্স নাঈম ফিস those two shapes accounted for ৳4,14,610 of reported
+ * drift — ৳-47,320 on the cash box and ৳+3,67,290 on a bank account — to the
+ * paisa, with nothing wrong in the books at all.
+ *
+ * `createdAt` is not the answer either: `createSale` deliberately MOVES it when
+ * an invoice is backdated (see its `pinnedAt`), so a backdated sale's legs
+ * would drop out of the window the same way. `_id` is the only field that
+ * carries the true insert time, because no write path can rewrite it.
+ *
+ * The ObjectId boundary has one-second granularity, so a row inserted in the
+ * same second as the account is included. That errs toward counting, which is
+ * the safe direction: a row written before the account existed cannot name it,
+ * so it matches nothing anyway.
+ */
+const since = (account) => ({
+  _id: {
+    $gte: mongoose.Types.ObjectId.createFromTime(
+      Math.floor((account.openingDate || new Date(0)).getTime() / 1000)
+    ),
+  },
 });
+
+/**
+ * A voided row moved the balance BACK, so it must not be replayed as if it
+ * still stood. `dueSettlement.voidPayment` and `cancelPurchase` both mark the
+ * row `cancelled` and call `applyAccountDelta` with the opposite sign.
+ *
+ * Inert on every shop that has never voided anything, and wrong by the full
+ * amount the first time one does.
+ */
+const LIVE = { status: { $ne: 'cancelled' } };
 
 /**
  * Re-derive one shop's account balances from source documents.
@@ -129,7 +185,8 @@ async function rebuildShop(db, shopId, accounts) {
           // opinion, and a second opinion missing a payment type is worse than
           // none. Mirrors the `$in` in cashRegister._calculateCashFlows.
           type: { $in: ['sale_payment', 'due_collection', 'advance'] },
-          ...since(account, 'paidAt'),
+          ...since(account),
+          ...LIVE,
         },
       },
       { $group: { _id: null, total: { $sum: '$amount' } } },
@@ -138,7 +195,7 @@ async function rebuildShop(db, shopId, accounts) {
 
     // ── OUT: paid to suppliers, at purchase time and after ──────────────────
     const purchaseLegs = await db.collection('purchases').aggregate([
-      { $match: { shop: shopId, status: { $ne: 'cancelled' }, ...since(account, 'date') } },
+      { $match: { shop: shopId, status: { $ne: 'cancelled' }, ...since(account) } },
       { $unwind: '$payments' },
       { $match: { 'payments.account': accountId } },
       { $group: { _id: null, total: { $sum: '$payments.amount' } } },
@@ -151,8 +208,14 @@ async function rebuildShop(db, shopId, accounts) {
           shop: shopId,
           account: accountId,
           atCheckout: { $ne: true },
-          type: 'purchase_payment',
-          ...since(account, 'paidAt'),
+          // Both kinds of money going OUT to a vendor: settling a bill, and an
+          // advance paid ahead of the goods. A rebuild that omitted the second
+          // would DESTROY that movement from the account it left — and this
+          // script's whole purpose is to be a second opinion, so one missing a
+          // payment type is worse than none.
+          type: { $in: ['purchase_payment', 'supplier_advance'] },
+          ...since(account),
+          ...LIVE,
         },
       },
       { $group: { _id: null, total: { $sum: '$amount' } } },
@@ -169,7 +232,7 @@ async function rebuildShop(db, shopId, accounts) {
           shop: shopId,
           account: accountId,
           isVoided: { $ne: true },
-          ...since(account, 'date'),
+          ...since(account),
         },
       },
       { $group: { _id: null, total: { $sum: '$amount' } } },
@@ -183,7 +246,8 @@ async function rebuildShop(db, shopId, accounts) {
           shop: shopId,
           account: accountId,
           type: 'refund',
-          ...since(account, 'paidAt'),
+          ...since(account),
+          ...LIVE,
         },
       },
       { $group: { _id: null, total: { $sum: '$amount' } } },
@@ -199,13 +263,13 @@ async function rebuildShop(db, shopId, accounts) {
     //
     // Harmless before Phase 3 lands — the collection simply does not exist yet.
     const transfersOut = await db.collection('accounttransfers').aggregate([
-      { $match: { shop: shopId, fromAccount: accountId, ...since(account, 'date') } },
+      { $match: { shop: shopId, fromAccount: accountId, ...since(account) } },
       { $group: { _id: null, total: { $sum: '$amountOut' } } },
     ]).toArray();
     add(accountId, -(transfersOut[0]?.total || 0));
 
     const transfersIn = await db.collection('accounttransfers').aggregate([
-      { $match: { shop: shopId, toAccount: accountId, ...since(account, 'date') } },
+      { $match: { shop: shopId, toAccount: accountId, ...since(account) } },
       { $group: { _id: null, total: { $sum: '$amountIn' } } },
     ]).toArray();
     add(accountId, transfersIn[0]?.total || 0);
@@ -215,7 +279,7 @@ async function rebuildShop(db, shopId, accounts) {
     // These move the balance and never touch profit — a withdrawal is not an
     // expense. Same note as transfers: the collection does not exist yet.
     const entries = await db.collection('accountentries').aggregate([
-      { $match: { shop: shopId, account: accountId, ...since(account, 'date') } },
+      { $match: { shop: shopId, account: accountId, ...since(account) } },
       {
         $group: {
           _id: '$direction',

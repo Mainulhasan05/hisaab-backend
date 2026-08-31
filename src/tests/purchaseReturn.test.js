@@ -193,19 +193,23 @@ beforeEach(() => {
   supplierDoc = {
     _id: SUPPLIER,
     totalAmount: 1000,
+    totalPaid: 0,
+    openingDue: 0,
     totalDue: 1000,
+    advanceBalance: 0,
     totalPurchases: 1,
-    // `cancelPurchase` reaches the document and saves it; the return paths use
-    // `$inc` through `findByIdAndUpdate`. Both shapes have to work off the one
-    // fixture so the Σ invariant is asserted on the same numbers either way.
+    // Both the cancel path and the return path now READ this document, move a
+    // component and re-derive, so one fixture serves both and the Σ invariant
+    // is asserted on the same numbers either way.
     save: jest.fn().mockResolvedValue(undefined),
   };
-  jest.spyOn(Supplier, 'findByIdAndUpdate').mockImplementation(async (_id, update) => {
-    for (const [key, delta] of Object.entries(update.$inc || {})) {
-      supplierDoc[key] = (supplierDoc[key] || 0) + delta;
-    }
-    return supplierDoc;
+  jest.spyOn(Supplier, 'findById').mockReturnValue({
+    session: () => Promise.resolve(supplierDoc),
   });
+  // Kept mocked so a stray call is observable rather than a live query. Nothing
+  // should reach it any more: the `$inc` form could not tell a payable from a
+  // prepayment, which is why every path was moved onto the components.
+  jest.spyOn(Supplier, 'findByIdAndUpdate').mockResolvedValue(supplierDoc);
 
   balanceRow = { totalAmount: 1000, totalPaid: 0, totalDue: 1000, openingDue: 0, purchaseCount: 1 };
   jest.spyOn(SupplierBalance, 'applyDelta').mockImplementation(async (d) => {
@@ -214,7 +218,7 @@ beforeEach(() => {
     balanceRow.totalDue += d.due || 0;
     balanceRow.purchaseCount += d.count || 0;
   });
-  jest.spyOn(SupplierBalance, 'recomputeDue').mockImplementation(async () => {
+  jest.spyOn(SupplierBalance, 'recomputeBalances').mockImplementation(async () => {
     balanceRow.totalDue = Math.max(
       0, balanceRow.totalAmount + balanceRow.openingDue - balanceRow.totalPaid
     );
@@ -745,8 +749,8 @@ describe('the supplier invariant holds after every path', () => {
     expect(balanceRow.totalDue).toBe(supplierDoc.totalDue);
   });
 
-  it('brings `totalAmount` down with `totalDue`, so `recomputeDue` cannot undo the credit', async () => {
-    // `SupplierBalance.recomputeDue` re-derives
+  it('brings `totalAmount` down with `totalDue`, so `recomputeBalances` cannot undo the credit', async () => {
+    // `SupplierBalance.recomputeBalances` re-derives
     // `totalDue = totalAmount + openingDue − totalPaid`. Moving the due alone
     // would hold until the next cancellation on this supplier+branch called it.
     stubEverything();
@@ -756,7 +760,7 @@ describe('the supplier invariant holds after every path', () => {
       refundMethod: 'adjustment',
     });
 
-    await SupplierBalance.recomputeDue({ shop: SHOP, supplier: SUPPLIER, branch: BRANCH });
+    await SupplierBalance.recomputeBalances({ shop: SHOP, supplier: SUPPLIER, branch: BRANCH });
 
     expect(balanceRow.totalDue).toBe(700);
     expect(supplierDoc.totalAmount).toBe(700);
@@ -773,6 +777,7 @@ describe('the supplier invariant holds after every path', () => {
 
     expect(supplierDoc.totalDue).toBe(1000);
     expect(balanceRow.totalDue).toBe(1000);
+    expect(supplierDoc.save).not.toHaveBeenCalled();
     expect(Supplier.findByIdAndUpdate).not.toHaveBeenCalled();
   });
 

@@ -282,14 +282,24 @@ class SupplierService {
         floorSource = { openingDue: row?.openingDue || 0, totalDue: row?.totalDue || 0 };
       }
       const floor = -Math.min(floorSource.openingDue, floorSource.totalDue);
+      // Read before anything moves, for the audit entry at the end.
+      const openingBefore = supplier.openingDue || 0;
+      const dueBefore = supplier.totalDue || 0;
+      const advanceBefore = supplier.advanceBalance || 0;
       const applied = quantizeMoney(amount < 0 ? Math.max(amount, floor) : amount);
 
       if (applied === 0) {
         return { supplier, adjustment: null, applied: 0 };
       }
 
+      // The carried-in payable moves; both money halves are derived from it.
+      // Adding `applied` straight onto `totalDue` said the same thing until a
+      // supplier could hold our money — at which point recording old debt
+      // against a vendor we have prepaid must CONSUME that credit rather than
+      // leave the shop owing and in credit at once.
+      Supplier.backfillTotalPaid(supplier);
       supplier.openingDue = quantizeMoney((supplier.openingDue || 0) + applied);
-      supplier.totalDue = quantizeMoney((supplier.totalDue || 0) + applied);
+      Supplier.applyBalances(supplier);
       await supplier.save(sessionOpt);
 
       const [adjustment] = await SupplierDueAdjustment.create([{
@@ -312,6 +322,9 @@ class SupplierService {
         opening: applied,
         due: applied,
       }, session);
+      await SupplierBalance.recomputeBalances({
+        shop: shopId, supplier: supplierId, branch: branchId,
+      }, session);
 
       await AuditLog.create([{
         shop: shopId,
@@ -322,8 +335,15 @@ class SupplierService {
         descriptionBn: `সরবরাহকারীর পূর্বের বাকি ${applied > 0 ? 'যোগ' : 'কমানো'}: ${supplier.name}`,
         entity: { type: 'supplier', id: supplierId, name: supplier.name },
         changes: {
-          before: { openingDue: supplier.openingDue - applied, totalDue: supplier.totalDue - applied },
-          after: { openingDue: supplier.openingDue, totalDue: supplier.totalDue },
+          // Captured, not reconstructed as `totalDue − applied`: that arithmetic
+          // was only ever right while the opening due and the payable moved in
+          // lockstep, which they stop doing the moment a prepayment is involved.
+          before: { openingDue: openingBefore, totalDue: dueBefore, advanceBalance: advanceBefore },
+          after: {
+            openingDue: supplier.openingDue,
+            totalDue: supplier.totalDue,
+            advanceBalance: supplier.advanceBalance,
+          },
         },
       }], sessionOpt);
 
@@ -475,6 +495,45 @@ class SupplierService {
       throw new AppError('সরবরাহকারী পাওয়া যায়নি', 'Supplier not found', 404);
     }
 
+    /**
+     * Neither half of an open position may be deleted away.
+     *
+     * ── The payable half closes a door that was open ─────────────────────────
+     *
+     * `_applyOpeningDue` already refuses to ADD debt to a deleted supplier,
+     * with a comment saying why: every read filters `isActive`, so the shop
+     * ends up owing money no screen will show. Deleting a supplier the shop
+     * ALREADY owes does exactly the same damage from the other side, and
+     * nothing stopped it. `deleteCustomer` has refused the mirror case since it
+     * was written; the two sides should not disagree about whether a live debt
+     * can be tidied off the screen.
+     *
+     * This is the one part of the phase that changes existing behaviour — see
+     * SUPPLIER_DUE_ADVANCE_PLAN.md §6.6.
+     *
+     * ── The prepayment half is inert today ───────────────────────────────────
+     *
+     * Nothing can write an `advanceBalance` yet. It ships now because the delete
+     * path must already refuse before the door opens: deleting a vendor holding
+     * ৳50,000 of the shop's money would take the CLAIM off every screen while
+     * the vendor kept the cash, and without a refund door (Phase E's D4) the
+     * owner would have no way to get it back.
+     */
+    if ((supplier.totalDue || 0) > 0) {
+      throw new AppError(
+        'Cannot delete a supplier with an outstanding due',
+        'বাকি আছে এমন সরবরাহকারী ডিলিট করা যাবে না',
+        400
+      );
+    }
+    if ((supplier.advanceBalance || 0) > 0) {
+      throw new AppError(
+        'Cannot delete a supplier holding an advance',
+        'অগ্রিম জমা আছে এমন সরবরাহকারী ডিলিট করা যাবে না',
+        400
+      );
+    }
+
     supplier.isActive = false;
     await supplier.save();
 
@@ -605,6 +664,22 @@ class SupplierService {
       ...(branchObjId ? { branch: branchObjId } : {}),
     };
 
+    /**
+     * ── An advance never enters this report, and that is correct ────────────
+     *
+     * Ageing is built from `Purchase.due` and the adjustment rows, so a
+     * prepayment — which lives on neither — cannot appear as aged debt, and
+     * cannot net against another vendor's payable either (R1). Verified rather
+     * than changed: the safety is structural, and it stays that way only while
+     * this report keeps deriving from documents instead of from
+     * `Supplier.totalDue`.
+     *
+     * Phase G owes the other half of this: once an advance can exist, it must
+     * be CONSUMED against open bills rather than sitting beside them, or this
+     * report will show bills as due while the vendor position says nothing is
+     * owed. Auto-consumption on the next purchase is what keeps the two
+     * agreeing.
+     */
     const adjustments = await SupplierDueAdjustment.aggregate([
       { $match: adjMatch },
       {

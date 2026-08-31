@@ -150,7 +150,7 @@ beforeEach(() => {
     balanceRow.totalDue += d.due || 0;
     balanceRow.purchaseCount += d.count || 0;
   });
-  jest.spyOn(SupplierBalance, 'recomputeDue').mockImplementation(async () => {
+  jest.spyOn(SupplierBalance, 'recomputeBalances').mockImplementation(async () => {
     balanceRow.totalDue = Math.max(
       0,
       balanceRow.totalAmount + balanceRow.openingDue - balanceRow.totalPaid

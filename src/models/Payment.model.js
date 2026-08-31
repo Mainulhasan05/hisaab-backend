@@ -60,6 +60,30 @@ const paymentSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Purchase'
   },
+  /**
+   * The vendor this money went to, when no bill carries that fact.
+   *
+   * A `purchase_payment` has always found its supplier through `purchase`. Two
+   * kinds of supplier money have no bill to find it through: settling a
+   * paper-খাতা `openingDue`, and an advance paid ahead of the goods. Those name
+   * the vendor here.
+   *
+   * ── The pairing with `purchase` is load-bearing ──────────────────────────
+   *
+   * `purchase: null` is what marks a row as money that did NOT land on a bill,
+   * and `scripts/recalc-supplier-balances.js` counts exactly those — because
+   * anything that DID land is already inside `purchase.paid`, which
+   * `recordPayment` increments. A payment that settles bills must therefore
+   * carry its `purchase` (its split on `allocations[]`) and only its remainder
+   * may be written bill-less, or the settled portion is counted twice.
+   *
+   * Absent on every row written before supplier doors existed, and on every
+   * customer payment (I-1).
+   */
+  supplier: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Supplier'
+  },
   customer: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Customer'

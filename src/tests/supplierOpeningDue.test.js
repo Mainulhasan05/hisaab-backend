@@ -8,7 +8,7 @@
  *
  * Every path that RE-DERIVES supplier due rather than `$inc`-ing it has to
  * carry the opening term. There is exactly one such path in the app
- * (`SupplierBalance.recomputeDue`, reached from purchase-cancel) and one in the
+ * (`SupplierBalance.recomputeBalances`, reached from purchase-cancel) and one in the
  * repair script, and dropping the term in either is invisible until a shop's
  * carried-over debt quietly disappears from a branch's book.
  */
@@ -62,7 +62,7 @@ describe('Supplier schema', () => {
 });
 
 describe('SupplierBalance mirrors the formula', () => {
-  it('recomputeDue carries the opening term', async () => {
+  it('recomputeBalances carries the opening term', async () => {
     // This is the purchase-cancel path. Without the term, cancelling any
     // purchase from a supplier the shop already owed would recompute that
     // branch's due from purchases alone and wipe the carried-over payable,
@@ -70,7 +70,7 @@ describe('SupplierBalance mirrors the formula', () => {
     const row = { totalAmount: 1000, openingDue: 5000, totalPaid: 200, totalDue: 0, save: jest.fn() };
     jest.spyOn(SupplierBalance, 'findOne').mockResolvedValue(row);
 
-    await SupplierBalance.recomputeDue({ shop: SHOP, supplier: SUPPLIER, branch: BRANCH });
+    await SupplierBalance.recomputeBalances({ shop: SHOP, supplier: SUPPLIER, branch: BRANCH });
 
     expect(row.totalDue).toBe(5800);
     expect(row.save).toHaveBeenCalled();
@@ -80,7 +80,7 @@ describe('SupplierBalance mirrors the formula', () => {
     const row = { totalAmount: 100, openingDue: 50, totalPaid: 400, totalDue: 0, save: jest.fn() };
     jest.spyOn(SupplierBalance, 'findOne').mockResolvedValue(row);
 
-    await SupplierBalance.recomputeDue({ shop: SHOP, supplier: SUPPLIER, branch: BRANCH });
+    await SupplierBalance.recomputeBalances({ shop: SHOP, supplier: SUPPLIER, branch: BRANCH });
 
     expect(row.totalDue).toBe(0);
   });
@@ -336,7 +336,12 @@ describe('_applyOpeningDue', () => {
   it('caps a reduction against the BRANCH row when one is active', async () => {
     const doc = { _id: SUPPLIER, name: 'করিম', isActive: true, openingDue: 15000, totalDue: 15000, save: jest.fn() };
     stubSupplier(doc);
+    // Read twice, in two shapes: `.lean()` for the reduction floor, and as a
+    // savable document by `recomputeBalances`, which re-derives both halves
+    // after the delta lands. One fixture answers both.
     jest.spyOn(SupplierBalance, 'findOne').mockReturnValue({
+      openingDue: 5000, totalDue: 5000, totalAmount: 0, totalPaid: 0, advanceBalance: 0,
+      save: jest.fn().mockResolvedValue(undefined),
       lean: async () => ({ openingDue: 5000, totalDue: 5000 }),
     });
     jest.spyOn(SupplierDueAdjustment, 'create').mockResolvedValue([{ _id: new mongoose.Types.ObjectId() }]);

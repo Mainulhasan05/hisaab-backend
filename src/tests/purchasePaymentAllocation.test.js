@@ -79,6 +79,7 @@ function bill({ invoiceNo, totalAmount, paid, supplier = SUPPLIER, date, created
 
 let accountDeltas;
 let sortArgs;
+let supplierDoc;
 
 function stubPrimary(doc) {
   jest.spyOn(Purchase, 'findOne').mockReturnValue({ session: () => Promise.resolve(doc) });
@@ -99,8 +100,19 @@ beforeEach(() => {
   sortArgs = null;
   transactionUtil.__state.session = null;
   jest.spyOn(Payment, 'create').mockImplementation(async (rows) => rows.map((r) => ({ ...r, _id: new mongoose.Types.ObjectId() })));
-  jest.spyOn(Supplier, 'findByIdAndUpdate').mockResolvedValue({});
+  // The rollup is now READ, moved on its components and re-derived, so the stub
+  // is a document rather than an `$inc` sink. Started at ৳2,000 owed on ৳2,000
+  // billed so the arithmetic below has something to move.
+  supplierDoc = {
+    _id: SUPPLIER, totalAmount: 2000, totalPaid: 0, openingDue: 0,
+    totalDue: 2000, advanceBalance: 0,
+    save: jest.fn().mockResolvedValue(undefined),
+  };
+  jest.spyOn(Supplier, 'findById').mockReturnValue({
+    session: () => Promise.resolve(supplierDoc),
+  });
   jest.spyOn(SupplierBalance, 'applyDelta').mockResolvedValue({});
+  jest.spyOn(SupplierBalance, 'recomputeBalances').mockResolvedValue({});
   jest.spyOn(paymentAccountService, 'applyAccountDelta').mockImplementation(async (d) => {
     accountDeltas.push(d);
   });
@@ -155,10 +167,20 @@ describe('an over-payment settles the supplier\'s older bills, oldest first', ()
     // The supplier books move ONCE, by the total, mirrored on both sides —
     // Σ SupplierBalance.totalDue === Supplier.totalDue survives because the
     // two deltas are the same arithmetic.
-    expect(Supplier.findByIdAndUpdate).toHaveBeenCalledTimes(1);
-    expect(Supplier.findByIdAndUpdate.mock.calls[0][1]).toEqual({ $inc: { totalDue: -700 } });
+    //
+    // Shop-wide that is now `totalPaid += 700` and BOTH halves re-derived, not
+    // `$inc: { totalDue: -700 }`. The figures agree — ৳2,000 billed less ৳700
+    // paid is ৳1,300 owed — but only the component form can land the money in
+    // `advanceBalance` when a vendor ends up holding it.
+    expect(supplierDoc.save).toHaveBeenCalledTimes(1);
+    expect(supplierDoc.totalPaid).toBe(700);
+    expect(supplierDoc.totalDue).toBe(1300);
+    expect(supplierDoc.advanceBalance).toBe(0);
     expect(SupplierBalance.applyDelta).toHaveBeenCalledTimes(1);
     expect(SupplierBalance.applyDelta.mock.calls[0][0]).toMatchObject({ paid: 700, due: -700 });
+    // The branch row cannot derive its own halves from an `$inc`, so it is
+    // re-derived right after — or a branch holding credit keeps both figures.
+    expect(SupplierBalance.recomputeBalances).toHaveBeenCalledTimes(1);
 
     // Money left the drawer once.
     expect(accountDeltas).toEqual([
@@ -270,7 +292,7 @@ describe('recordPayment is transactional', () => {
     expect(other.save).toHaveBeenCalledWith({ session: FAKE_SESSION });
     expect(Payment.create.mock.calls[0][1]).toEqual({ session: FAKE_SESSION });
     expect(accountDeltas[0].session).toBe(FAKE_SESSION);
-    expect(Supplier.findByIdAndUpdate.mock.calls[0][2]).toEqual({ session: FAKE_SESSION });
+    expect(supplierDoc.save).toHaveBeenCalledWith({ session: FAKE_SESSION });
     expect(SupplierBalance.applyDelta.mock.calls[0][1]).toBe(FAKE_SESSION);
     expect(AuditLog.create.mock.calls[0][1]).toEqual({ session: FAKE_SESSION });
   });

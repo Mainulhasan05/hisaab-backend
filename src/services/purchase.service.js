@@ -454,6 +454,47 @@ class PurchaseService {
       payments = [{ method: primaryMethod, amount: paidAmount }];
     }
 
+    /**
+     * A purchase cannot be paid more than it is worth.
+     *
+     * ── Why this is a 400 and not a clamp ─────────────────────────────────────
+     *
+     * `Purchase.pre('save')` ALREADY clamps: `paid = min(paid, totalAmount)`.
+     * The fund-account debit loop twelve lines below does not — it runs off the
+     * raw legs. So ৳50,000 entered against a ৳9,000 bill debited the account by
+     * ৳50,000, stored `paid: 9000`, moved the supplier's খাতা by ৳9,000, and
+     * raised nothing. ৳41,000 left the drawer and landed nowhere: not on the
+     * bill, not on the supplier, not in any report.
+     *
+     * Neither recalc script can find it either — `recalc-supplier-balances.js`
+     * sums `purchase.paid`, which is the CLAMPED figure, so the money is
+     * invisible to the one tool that exists to catch this class of error, and
+     * `recalc-account-balances.js` reports the account short with nothing to
+     * explain it.
+     *
+     * Refusing is the honest answer rather than clamping quietly, because the
+     * shopkeeper meant something by the surplus. `recordPayment` has made
+     * exactly this call since it was written (see its `primaryDue` guard) and
+     * this is the same sentence in the other door.
+     *
+     * ── What the surplus actually IS, and why it is refused for now ───────────
+     *
+     * It is almost always old bills being cleared at the same counter — মাল
+     * ৯,০০০ টাকার, সাথে পুরোনো বাকির ৫০,০০০. The sale side records that shape
+     * as a separate `Payment` row via `dueSettlement`; the purchase side has no
+     * equivalent yet (SUPPLIER_DUE_ADVANCE_PLAN.md S-3, Phase F). Until it
+     * does, the shop's route is: create the bill, then use the payment modal,
+     * whose F-4 overflow already walks the supplier's older bills oldest-first.
+     * The error names that maximum so the number in the box can just be fixed.
+     */
+    if (paidAmount > totalAmount) {
+      throw new AppError(
+        `Paid amount ৳${paidAmount} exceeds this purchase's total of ৳${totalAmount}`,
+        `পরিশোধ ৳${paidAmount} — এই ক্রয়ের মোট ৳${totalAmount} এর বেশি হতে পারবে না`,
+        400
+      );
+    }
+
     // Resolve each leg to a fund account. Null throughout for a shop without
     // `features.fundAccounts` (I-1); a named account is checked against the
     // caller's branch because visibility is not authority.
@@ -872,9 +913,20 @@ class PurchaseService {
 
     // Update supplier stats
     if (supplierDoc) {
+      // Seeded before anything moves — see the field's header. A supplier from
+      // before the column existed would otherwise derive a payable of
+      // everything ever billed.
+      Supplier.backfillTotalPaid(supplierDoc);
       supplierDoc.totalPurchases += 1;
-      supplierDoc.totalAmount += totalAmount;
-      supplierDoc.totalDue += purchase.due;
+      // The components move; the two money halves are DERIVED from them.
+      //
+      // Identical arithmetic to the `totalDue += purchase.due` this replaces —
+      // `due` at creation IS `totalAmount − paid` — but expressed as the three
+      // stored components, so a supplier the shop has prepaid resolves to an
+      // `advanceBalance` instead of clamping at zero and losing the money.
+      supplierDoc.totalAmount = quantizeMoney(supplierDoc.totalAmount + totalAmount);
+      supplierDoc.totalPaid = quantizeMoney((supplierDoc.totalPaid || 0) + purchase.paid);
+      Supplier.applyBalances(supplierDoc);
       await supplierDoc.save(sessionOpt);
 
       // Same arithmetic, split by the branch the goods were bought for.
@@ -886,10 +938,21 @@ class PurchaseService {
         supplier: supplierDoc._id,
         branch: branchId,
         amount: totalAmount,
-        paid: totalAmount - purchase.due,
+        paid: purchase.paid,
         due: purchase.due,
         count: 1,
         lastPurchase: purchase.date || new Date(),
+      }, session);
+
+      // `applyDelta` can only `$inc`, and an `$inc` cannot tell a payable from
+      // a prepayment. Re-derived here so a branch that was holding credit with
+      // this vendor spends it on this bill instead of carrying both figures at
+      // once. A no-op for single-branch shops, where `branchId` is null and
+      // there is no row (I-1).
+      await SupplierBalance.recomputeBalances({
+        shop: shopId,
+        supplier: supplierDoc._id,
+        branch: branchId,
       }, session);
     }
 
@@ -1294,14 +1357,21 @@ class PurchaseService {
     if (purchase.supplier) {
       const supplier = await Supplier.findById(purchase.supplier).session(session || null);
       if (supplier) {
+        Supplier.backfillTotalPaid(supplier);
         supplier.totalPurchases = Math.max(0, supplier.totalPurchases - 1);
-        supplier.totalAmount = Math.max(0, supplier.totalAmount - purchase.totalAmount);
-        supplier.totalDue = Math.max(0, supplier.totalDue - purchase.due);
+        supplier.totalAmount = Math.max(0, quantizeMoney(supplier.totalAmount - purchase.totalAmount));
+        // Everything this bill was ever paid comes back out, later settlements
+        // included — `purchase.paid` carries them, and the void loop below
+        // returns the cash to the accounts. Then both halves are re-derived,
+        // which is what makes the bill's lifetime contribution net to zero on
+        // every column rather than only on `totalDue`.
+        supplier.totalPaid = Math.max(0, quantizeMoney(supplier.totalPaid - (purchase.paid || 0)));
+        Supplier.applyBalances(supplier);
         await supplier.save(sessionOpt);
       }
 
       // Unwound at the branch that raised the purchase — the only branch whose
-      // figures it ever moved. `recomputeDue` rather than `$inc`-ing totalDue,
+      // figures it ever moved. `recomputeBalances` rather than `$inc`-ing totalDue,
       // because the Supplier rollup above clamps at zero and clamping on only
       // one side is precisely how two books drift apart.
       await SupplierBalance.applyDelta({
@@ -1309,10 +1379,13 @@ class PurchaseService {
         supplier: purchase.supplier,
         branch: purchase.branch,
         amount: -purchase.totalAmount,
-        paid: -(purchase.totalAmount - purchase.due),
+        // `purchase.paid` directly, not `totalAmount − due`. The two agree on
+        // an ordinary bill and diverge by `returnedAmount` on one that took a
+        // কেনা ফেরত — where the old form unwound credit the shop never paid.
+        paid: -(purchase.paid || 0),
         count: -1,
       }, session);
-      await SupplierBalance.recomputeDue({
+      await SupplierBalance.recomputeBalances({
         shop: shopId,
         supplier: purchase.supplier,
         branch: purchase.branch,
@@ -1609,17 +1682,30 @@ class PurchaseService {
       // the Supplier mutation and its SupplierBalance mirror carry the same
       // arithmetic in the same transaction (Σ branch due === supplier due).
       if (purchase.supplier) {
-        await Supplier.findByIdAndUpdate(purchase.supplier, {
-          $inc: { totalDue: -amount },
-        }, sessionOpt);
+        // `$inc: { totalDue: -amount }` no longer says enough: the payable and
+        // the prepayment are two halves of one net, and only the components can
+        // decide which half this money lands in. Read, move `totalPaid`,
+        // re-derive — inside the transaction that wrote the payment.
+        const supplierDoc = await Supplier.findById(purchase.supplier).session(session || null);
+        if (supplierDoc) {
+          Supplier.backfillTotalPaid(supplierDoc);
+          supplierDoc.totalPaid = quantizeMoney(supplierDoc.totalPaid + amount);
+          Supplier.applyBalances(supplierDoc);
+          await supplierDoc.save(sessionOpt);
+        }
 
-        // The same reduction on the branch that owed it.
+        // The same movement on the branch that owed it.
         await SupplierBalance.applyDelta({
           shop: shopId,
           supplier: purchase.supplier,
           branch: purchase.branch,
           paid: amount,
           due: -amount,
+        }, session);
+        await SupplierBalance.recomputeBalances({
+          shop: shopId,
+          supplier: purchase.supplier,
+          branch: purchase.branch,
         }, session);
       }
 

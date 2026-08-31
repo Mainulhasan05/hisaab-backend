@@ -89,7 +89,7 @@ describe('applyDelta', () => {
   });
 });
 
-describe('recomputeDue', () => {
+describe('recomputeBalances', () => {
   it('mirrors the Math.max clamp the Supplier rollup uses', async () => {
     // An over-paid supplier clamps at zero on the Supplier document. If the
     // branch row went negative instead, the two books would disagree on
@@ -97,7 +97,7 @@ describe('recomputeDue', () => {
     const row = { totalAmount: 1000, totalPaid: 4000, totalDue: 0, save: jest.fn() };
     jest.spyOn(SupplierBalance, 'findOne').mockResolvedValue(row);
 
-    await SupplierBalance.recomputeDue({ shop: SHOP, supplier: SUPPLIER, branch: BRANCH_A });
+    await SupplierBalance.recomputeBalances({ shop: SHOP, supplier: SUPPLIER, branch: BRANCH_A });
 
     expect(row.totalDue).toBe(0);
     expect(row.save).toHaveBeenCalled();
@@ -106,13 +106,13 @@ describe('recomputeDue', () => {
   it('derives due from amount minus paid', async () => {
     const row = { totalAmount: 5000, totalPaid: 3000, totalDue: 999, save: jest.fn() };
     jest.spyOn(SupplierBalance, 'findOne').mockResolvedValue(row);
-    await SupplierBalance.recomputeDue({ shop: SHOP, supplier: SUPPLIER, branch: BRANCH_A });
+    await SupplierBalance.recomputeBalances({ shop: SHOP, supplier: SUPPLIER, branch: BRANCH_A });
     expect(row.totalDue).toBe(2000);
   });
 
   it('is a no-op without a branch', async () => {
     const findOne = jest.spyOn(SupplierBalance, 'findOne');
-    expect(await SupplierBalance.recomputeDue({ shop: SHOP, supplier: SUPPLIER, branch: null })).toBeNull();
+    expect(await SupplierBalance.recomputeBalances({ shop: SHOP, supplier: SUPPLIER, branch: null })).toBeNull();
     expect(findOne).not.toHaveBeenCalled();
   });
 });

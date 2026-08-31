@@ -96,9 +96,14 @@ describe('purchase cash-out is summed from the cash legs', () => {
 
     const supplier = payment.mock.calls
       .map(([p]) => p[0].$match)
-      .find((m) => m.type === 'purchase_payment');
+      .find((m) => (m.type?.$in || []).includes('purchase_payment'));
     expect(supplier).toBeDefined();
     expect(supplier.method).toBe('cash');
     expect(supplier.status).toEqual({ $ne: 'cancelled' });
+
+    // An advance handed to a vendor is cash out of this same drawer. Left out
+    // of this bucket the till reads OVER by every taka prepaid, every day —
+    // the money-out twin of the customer `advance` the cash-IN bucket counts.
+    expect(supplier.type.$in).toContain('supplier_advance');
   });
 });
