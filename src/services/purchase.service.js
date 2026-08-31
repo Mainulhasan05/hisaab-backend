@@ -11,6 +11,7 @@ const { endOfBangladeshDay, getBangladeshTodayRange, getBangladeshMonthRange, to
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
 const paymentAccountService = require('./paymentAccount.service');
+const supplierSettlement = require('./supplierSettlement.service');
 const {
   // `parseQuantity` is reached through `resolveLineQuantity` now, so the pack
   // branch and the loose branch cannot validate a quantity two different ways.
@@ -521,6 +522,77 @@ class PurchaseService {
 
     // Create purchase
     const branchId = req ? requireBranch(req) : null;
+
+    /**
+     * ── What the shop owed this vendor BEFORE this delivery ─────────────────
+     *
+     * Read once, here, and frozen onto the document. `Sale.previousDue` exists
+     * for exactly this reason and its header says why: a slip describes ONE
+     * transaction at ONE moment, so deriving the balance at print time would
+     * make a reprint of last month's challan show today's figure. Snapshot or
+     * do not print it at all (PURCHASE_PLAN F-3).
+     *
+     * Read BEFORE `Purchase.create` so it cannot include this bill, and
+     * server-side rather than trusting the client's copy — the figure on the
+     * shopkeeper's screen is for their eyes, never for the books.
+     */
+    let previousDue = null;
+    if (supplierDoc) {
+      const before = await supplierSettlement.readPayable(
+        { shopId, supplier: supplierDoc, branchId }, session
+      );
+      previousDue = before.totalDue;
+    }
+
+    /**
+     * ── পুরোনো বাকি পরিশোধ at the same counter ──────────────────────────────
+     *
+     * "আজ ৯,০০০ টাকার মাল নিলাম, আর পুরোনো বাকির ৫০,০০০ দিলাম" — one visit, two
+     * money events. The sale side has recorded this shape since split payments
+     * shipped (`Sale.dueSettled`); the purchase side could only refuse it, and
+     * before 2026-08-31 it silently destroyed the surplus (S-1).
+     *
+     * `paid` stays what it has always meant — money against THIS bill, clamped
+     * to its total — because the P&L, the supplier statement and
+     * `cancelPurchase`'s reversal all read it that way. The old-due money
+     * travels as its own `Payment` rows through the one service that knows how
+     * to allocate them.
+     *
+     * Settled BEFORE the purchase is created, deliberately: run afterwards it
+     * would find the new bill in its own oldest-first walk and pay down debt
+     * the shopkeeper had not yet incurred when they handed the money over.
+     */
+    let dueSettlement = null;
+    const settleRequested = toMoney(purchaseData.dueSettlement);
+    if (settleRequested > 0) {
+      if (!supplierDoc) {
+        throw new AppError(
+          'Cannot settle old dues without a supplier on the purchase',
+          'সরবরাহকারী ছাড়া পুরোনো বাকি পরিশোধ করা যাবে না',
+          400
+        );
+      }
+      dueSettlement = await supplierSettlement.settleSupplierDue({
+        shopId,
+        userId,
+        supplierId: supplierDoc._id,
+        amount: settleRequested,
+        branchId,
+        method: purchaseData.dueSettlementMethod || primaryMethod,
+        rawAccount: purchaseData.dueSettlementAccount || null,
+        reference: purchaseData.dueSettlementReference,
+        notes: `ক্রয়ের সাথে পুরোনো বাকি পরিশোধ`,
+        req,
+      }, session);
+
+      // The document was re-read and re-derived inside that call, so the copy
+      // held here is stale by exactly the amount just paid. Refreshed rather
+      // than re-fetched: the rollup below adds to these figures.
+      supplierDoc.totalPaid = dueSettlement.supplier.totalPaid;
+      supplierDoc.totalDue = dueSettlement.supplier.totalDue;
+      supplierDoc.advanceBalance = dueSettlement.supplier.advanceBalance;
+    }
+
     const [purchase] = await Purchase.create([{
       shop: shopId,
       branch: branchId,
@@ -551,6 +623,20 @@ class PurchaseService {
       date: purchaseDate,
       notes: notes?.trim(),
       createdBy: userId,
+      /**
+       * ABSENT, not zero, when there is no supplier — readers have to be able
+       * to tell "no snapshot was taken" from "they were owed nothing", and a
+       * default of 0 would make every reprint of an older bill claim the
+       * second. Same distinction `Sale.previousDue` draws.
+       */
+      ...(previousDue === null ? {} : {
+        previousDue,
+        // What is owed AFTER this delivery and anything settled with it. Stored
+        // rather than derived at print time for the same reason as the line
+        // above — and computed here rather than in the template so the slip and
+        // the খতিয়ান cannot disagree about the arithmetic.
+        dueSettled: dueSettlement ? dueSettlement.openingApplied + dueSettlement.billsApplied : 0,
+      }),
     }], sessionOpt);
 
     // Money out, leg by leg — the bank account drops ৳1,50,000 and the cash box
@@ -926,8 +1012,31 @@ class PurchaseService {
       // `advanceBalance` instead of clamping at zero and losing the money.
       supplierDoc.totalAmount = quantizeMoney(supplierDoc.totalAmount + totalAmount);
       supplierDoc.totalPaid = quantizeMoney((supplierDoc.totalPaid || 0) + purchase.paid);
+      // Captured BEFORE the rollup: what the vendor was holding for us when
+      // this delivery arrived. After it, the derived figure has already fallen
+      // by this bill's share and cannot answer the question.
+      const advanceHeld = supplierDoc.advanceBalance || 0;
+
       Supplier.applyBalances(supplierDoc);
       await supplierDoc.save(sessionOpt);
+
+      /**
+       * ── অগ্রিম is spent on the goods it was paid for ───────────────────────
+       *
+       * `Supplier.advanceBalance` falls on its own here, because it is derived
+       * from `totalAmount` and `totalAmount` just went up. The BILL has to
+       * learn about it too, or the vendor reads as owing nothing while their
+       * challan reads as fully due — and the payables ageing, which sums
+       * `Purchase.due`, would age debt that is already covered.
+       *
+       * Guarded on a figure already in memory, so the overwhelming majority of
+       * deliveries — nobody prepaid anything — cost one comparison and no
+       * write.
+       */
+      if (advanceHeld > 0 && purchase.due > 0) {
+        purchase.advanceApplied = quantizeMoney(Math.min(advanceHeld, purchase.due));
+        await purchase.save(sessionOpt);
+      }
 
       // Same arithmetic, split by the branch the goods were bought for.
       // Written whatever the shop's setup — a no-op for single-branch shops,
@@ -985,6 +1094,18 @@ class PurchaseService {
     // Populate for response
     await purchase.populate('supplier', 'name phone');
     await purchase.populate('createdBy', 'name');
+
+    // The old-due allocation rides along so the till can say "পুরোনো বাকিতে
+    // ৳৫০,০০০ বসেছে" without a second fetch — the same shape `recordPayment`
+    // returns. Absent when nothing was settled, so an ordinary purchase's
+    // response is unchanged (I-1).
+    if (dueSettlement) {
+      purchase.set('dueSettlementResult', {
+        openingApplied: dueSettlement.openingApplied,
+        billsApplied: dueSettlement.billsApplied,
+        allocations: dueSettlement.allocations,
+      }, { strict: false });
+    }
 
     return purchase;
     });

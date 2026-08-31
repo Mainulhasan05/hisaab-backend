@@ -80,6 +80,18 @@ exports.paySupplier = asyncHandler(async (req, res) => {
   });
 });
 
+// অগ্রিম — pay ahead of the goods. Owner only, see route
+exports.paySupplierAdvance = asyncHandler(async (req, res) => {
+  const result = await supplierService.paySupplierAdvance(
+    req.shop._id, req.user._id, req.params.id, req.body, req
+  );
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Supplier advance recorded',
+    messageBn: 'অগ্রিম রেকর্ড হয়েছে',
+  });
+});
+
 // Void a supplier payment — owner only, see route
 exports.voidSupplierPayment = asyncHandler(async (req, res) => {
   const result = await supplierService.voidSupplierPayment(

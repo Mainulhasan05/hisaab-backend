@@ -671,7 +671,19 @@ class DetailedReportService {
     const purchaseScope = { shop: oid(shopId), supplier: { $in: ids }, status: { $ne: 'cancelled' } };
     if (branchId) purchaseScope.branch = oid(branchId);
 
-    const paymentScope = { shop: oid(shopId), type: PAYMENT_TYPES.PURCHASE_PAYMENT };
+    /**
+     * Both kinds of money going OUT to a vendor.
+     *
+     * `supplier_advance` is its own type precisely so reports can tell a debt
+     * settlement from a prepayment — but the খতিয়ান needs BOTH, because it is
+     * the running account of everything that passed between the shop and this
+     * vendor. Leaving advances out would show a balance the vendor's own paper
+     * disagrees with by exactly the money the shop has already handed them.
+     */
+    const paymentScope = {
+      shop: oid(shopId),
+      type: { $in: [PAYMENT_TYPES.PURCHASE_PAYMENT, PAYMENT_TYPES.SUPPLIER_ADVANCE] },
+    };
     if (branchId) paymentScope.branch = oid(branchId);
 
     const adjustmentScope = { shop: oid(shopId), supplier: { $in: ids } };
@@ -935,6 +947,10 @@ class DetailedReportService {
             // Null on a payment that settled the carried-in খাতা — there is no
             // challan to name, and printing one would be a lie.
             invoiceNo: '$p.invoiceNo',
+            // Carried through so the ledger row can say অগ্রিম rather than
+            // পরিশোধ. `type` is the ledger's own entry kind, so the payment's
+            // kind needs a name of its own here.
+            paymentType: '$type',
             amount: 1,
             method: 1,
             notes: 1,
@@ -993,10 +1009,17 @@ class DetailedReportService {
     }
 
     for (const q of payments) {
+      // Three shapes, and the label has to tell them apart: money against a
+      // named bill, money against the carried-in খাতা, and money handed over
+      // before any goods existed. A vendor reading "পরিশোধ" against all three
+      // cannot reconcile the third against anything.
+      const isAdvance = q.paymentType === PAYMENT_TYPES.SUPPLIER_ADVANCE;
       push(q.supplier, {
         type: 'payment',
         date: q.paidAt || q.createdAt,
-        label: q.invoiceNo ? `পরিশোধ (${q.invoiceNo})` : 'পরিশোধ',
+        label: isAdvance
+          ? 'অগ্রিম প্রদান'
+          : (q.invoiceNo ? `পরিশোধ (${q.invoiceNo})` : 'পরিশোধ (পূর্বের বাকি)'),
         ref: q.invoiceNo || null,
         method: q.method || null,
         note: q.notes || null,

@@ -639,6 +639,40 @@ class SupplierService {
     }, session));
   }
 
+  /**
+   * অগ্রিম — pay a vendor ahead of the goods.
+   *
+   * ── Why this is its own door and not just a bigger পরিশোধ ────────────────
+   *
+   * `paySupplier` refuses to pay past what is owed, and must keep refusing: a
+   * mistyped ৳50,000 for ৳5,000 at the ordinary counter should bounce, not
+   * quietly become a ৳45,000 claim on a vendor. Creating a prepayment is a
+   * deliberate act — the shop is choosing to hand money over for goods it has
+   * not received — so it gets a door of its own, and an owner-only one.
+   *
+   * Debt is still settled FIRST. A shop that owes ৳5,000 and hands over
+   * ৳50,000 clears the ৳5,000 and holds ৳45,000 on account; it does not end up
+   * owing and in credit with the same vendor at once, which the exclusivity
+   * invariant forbids anyway.
+   */
+  async paySupplierAdvance(shopId, userId, supplierId, data = {}, req = null) {
+    return runInTransaction(async (session) => supplierSettlement.settleSupplierDue({
+      shopId,
+      userId,
+      supplierId,
+      amount: data.amount,
+      branchId: req ? requireBranch(req) : null,
+      method: data.method || 'cash',
+      rawAccount: data.account || null,
+      paidAt: data.paidAt || null,
+      reference: data.reference,
+      transactionId: data.transactionId,
+      notes: data.notes || 'অগ্রিম প্রদান',
+      allowAdvance: true,
+      req,
+    }, session));
+  }
+
   /** Reverse one, putting every book back exactly as it was. Owner-only route. */
   async voidSupplierPayment(shopId, userId, paymentId, data = {}, req = null) {
     return runInTransaction(async (session) => supplierSettlement.voidSupplierPayment({

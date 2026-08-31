@@ -463,10 +463,41 @@ const INVOICE_SMS_TOKENS = [
   { token: '{total_due}', kind: 'money', labelBn: 'সর্বমোট বাকি' },
 ];
 
-const INVOICE_TOKEN_KINDS = INVOICE_SMS_TOKENS.reduce((map, t) => {
+/**
+ * The same machinery, pointed at a SUPPLIER.
+ *
+ * The money tokens deliberately keep the same names — `{total}`, `{paid}`,
+ * `{due}`, `{previous_due}`, `{due_settled}`, `{total_due}` mean the same thing
+ * on a challan as on an invoice, and giving them second names would mean a
+ * second empty-line rule and a second typo net to keep in step. Only the party
+ * and the vendor's own bill number differ.
+ *
+ * The two sets stay SEPARATE rather than merging, because a token that is valid
+ * on the wrong document is a template that renders "সরবরাহকারী" on a customer's
+ * receipt. `validateInvoiceTemplate` is what catches that, by not recognising
+ * it — so which set it is handed is a correctness decision, not a detail.
+ */
+const PURCHASE_SMS_TOKENS = [
+  { token: '{shop_name}', kind: 'text', labelBn: 'দোকানের নাম' },
+  { token: '{supplier_name}', kind: 'text', labelBn: 'সরবরাহকারীর নাম' },
+  { token: '{invoice_no}', kind: 'plain', labelBn: 'আমাদের চালান নম্বর' },
+  { token: '{supplier_invoice_no}', kind: 'plain', labelBn: 'তাদের বিল নম্বর' },
+  { token: '{date}', kind: 'plain', labelBn: 'তারিখ' },
+  { token: '{total}', kind: 'money', labelBn: 'মোট ক্রয়' },
+  { token: '{paid}', kind: 'money', labelBn: 'পরিশোধ' },
+  { token: '{due}', kind: 'money', labelBn: 'এই চালানে বাকি' },
+  { token: '{previous_due}', kind: 'money', labelBn: 'পূর্বের বাকি' },
+  { token: '{due_settled}', kind: 'money', labelBn: 'পুরোনো বাকি পরিশোধ' },
+  { token: '{total_due}', kind: 'money', labelBn: 'মোট বাকি' },
+];
+
+const kindsOf = (tokens) => tokens.reduce((map, t) => {
   map[t.token] = t.kind;
   return map;
 }, {});
+
+const INVOICE_TOKEN_KINDS = kindsOf(INVOICE_SMS_TOKENS);
+const PURCHASE_TOKEN_KINDS = kindsOf(PURCHASE_SMS_TOKENS);
 
 /**
  * Anything shaped like a token, known or not — the typo detector's net.
@@ -573,7 +604,13 @@ const resolveInvoiceTokens = (facts = {}, numerals = 'en') => {
   const rendered = {
     '{shop_name}': gsmSafeShopName(facts.shopName),
     '{customer_name}': String(facts.customerName || 'কাস্টমার'),
+    // Resolved for both documents, and harmless on the wrong one: which tokens
+    // a template may USE is decided by the `kinds` set handed to
+    // `validateInvoiceTemplate`, so a sale template naming `{supplier_name}` is
+    // refused before it can ever be saved.
+    '{supplier_name}': String(facts.supplierName || 'সরবরাহকারী'),
     '{invoice_no}': toLocalDigits(facts.invoiceNo ?? '', numerals),
+    '{supplier_invoice_no}': toLocalDigits(facts.supplierInvoiceNo ?? '', numerals),
     '{date}': formatTemplateDate(facts.date, numerals),
   };
 
@@ -612,14 +649,14 @@ const resolveInvoiceTokens = (facts = {}, numerals = 'en') => {
  * admin preview shows the cash scenario precisely so the shape is visible
  * before it is saved.
  */
-const renderInvoiceTemplate = (template, facts = {}, numerals = 'en') => {
+const renderInvoiceTemplate = (template, facts = {}, numerals = 'en', kinds = INVOICE_TOKEN_KINDS) => {
   const { rendered, money } = resolveInvoiceTokens(facts, numerals);
 
   const lines = String(template || '')
     .split('\n')
     .filter((line) => {
       const used = line.match(tokenPattern()) || [];
-      const moneyTokens = used.filter((t) => INVOICE_TOKEN_KINDS[t] === 'money');
+      const moneyTokens = used.filter((t) => kinds[t] === 'money');
       if (moneyTokens.length === 0) return true;
       return !moneyTokens.every((t) => money[t] === 0);
     })
@@ -654,6 +691,15 @@ const validateInvoiceTemplate = (template, options = {}) => {
     numerals = 'en',
     maxSegments = MAX_INVOICE_TEMPLATE_SEGMENTS,
     countSegments = null,
+    /**
+     * Which document this template is for.
+     *
+     * The gate that keeps the two sets apart: a sale template naming
+     * `{supplier_name}` is an unknown token here and is refused, so a customer
+     * can never be texted the word সরবরাহকারী.
+     */
+    kinds = INVOICE_TOKEN_KINDS,
+    samples = INVOICE_SMS_SAMPLES,
   } = options;
 
   const body = String(template ?? '').trim();
@@ -673,7 +719,7 @@ const validateInvoiceTemplate = (template, options = {}) => {
   }
 
   const unknownTokens = [
-    ...new Set((body.match(tokenPattern()) || []).filter((t) => !(t in INVOICE_TOKEN_KINDS))),
+    ...new Set((body.match(tokenPattern()) || []).filter((t) => !(t in kinds))),
   ];
   if (unknownTokens.length) {
     return {
@@ -689,9 +735,9 @@ const validateInvoiceTemplate = (template, options = {}) => {
   // Priced against the LARGEST sample, with the sign-off the server will append
   // on the way out — the message that actually goes, not the draft.
   if (typeof countSegments === 'function') {
-    const worst = INVOICE_SMS_SAMPLES[0];
+    const worst = samples[0];
     const preview = appendShopSignature(
-      renderInvoiceTemplate(body, { ...worst.facts, shopName }, numerals),
+      renderInvoiceTemplate(body, { ...worst.facts, shopName }, numerals, kinds),
       shopName
     );
     const segments = countSegments(preview);
@@ -731,6 +777,172 @@ const validateInvoiceTemplate = (template, options = {}) => {
  * An empty render — a template that was nothing but zero-valued money lines —
  * falls back for the same reason.
  */
+/**
+ * The samples a PURCHASE template is previewed and priced against.
+ *
+ * Largest first, because that is the one the segment ceiling is checked
+ * against — a template validated on small numbers starts failing the day the
+ * shop's biggest delivery arrives.
+ */
+const PURCHASE_SMS_SAMPLES = [
+  {
+    id: 'khata',
+    labelBn: 'বাকিতে কেনা (পুরোনো বাকিসহ)',
+    labelEn: 'Credit purchase, shop carries a khata',
+    facts: {
+      supplierName: 'মেসার্স রহমান ট্রেডার্স',
+      invoiceNo: 'PUR2026080014',
+      supplierInvoiceNo: 'RT-9912',
+      date: '2026-08-17T06:00:00.000Z',
+      total: 223550,
+      paid: 10000,
+      due: 213550,
+      previousDue: 180350,
+      dueSettled: 0,
+      totalDue: 393900,
+    },
+  },
+  {
+    id: 'settled',
+    labelBn: 'কেনার সাথে পুরোনো বাকি পরিশোধ',
+    labelEn: 'Old dues cleared at the same counter',
+    facts: {
+      supplierName: 'করিম ভাই',
+      invoiceNo: 'PUR2026080015',
+      supplierInvoiceNo: '',
+      date: '2026-08-17T06:00:00.000Z',
+      total: 9000,
+      paid: 9000,
+      due: 0,
+      previousDue: 180350,
+      dueSettled: 50000,
+      totalDue: 130350,
+    },
+  },
+  {
+    id: 'cash',
+    labelBn: 'নগদে কেনা, কোনো বাকি নেই',
+    labelEn: 'Cash purchase, nothing outstanding',
+    facts: {
+      supplierName: 'করিম ভাই',
+      invoiceNo: 'PUR2026080016',
+      supplierInvoiceNo: '',
+      date: '2026-08-17T06:00:00.000Z',
+      total: 2440,
+      paid: 2440,
+      due: 0,
+      previousDue: 0,
+      dueSettled: 0,
+      totalDue: 0,
+    },
+  },
+];
+
+/**
+ * The built-in চালান confirmation, sent to a SUPPLIER.
+ *
+ * ── Manual only, and that is a cost decision ─────────────────────────────
+ *
+ * There is no `autoSendOnPurchase`. A shop texting every vendor on every
+ * delivery is a bill it did not ask for, and unlike a customer the supplier
+ * already has the paper — they wrote it. This exists for the case that
+ * actually matters: confirming what the shop believes it now owes, so a
+ * disagreement surfaces this week rather than at month end.
+ *
+ * ── The lines, and why each is conditional ───────────────────────────────
+ *
+ * Billed by the segment, so a line that says nothing still costs money. The
+ * two that carry the substance:
+ *
+ *   `বাকি`      — what THIS challan left unpaid.
+ *   `মোট বাকি`  — what the shop owes the vendor across everything.
+ *
+ * The second only prints when it differs from the first, for the same reason
+ * `showsTotalDue` exists on the sale receipt: a vendor with no খাতা would
+ * otherwise read the same figure twice and take it as two debts.
+ */
+const buildPurchaseReceipt = ({
+  invoiceNo,
+  supplierInvoiceNo = '',
+  total,
+  paid,
+  due,
+  dueSettled = 0,
+  totalDue = null,
+  shopName,
+}) => {
+  const money = (label, amount) => `${label} ৳${formatSmsAmount(amount)}`;
+  const settled = Number(dueSettled) || 0;
+
+  // Their bill number when we have it, ours otherwise. The vendor can look up
+  // theirs; ours means nothing to them.
+  const ref = String(supplierInvoiceNo || '').trim() || invoiceNo;
+  const lines = [`চালান ${ref}`, money('মোট', total)];
+
+  if (formatSmsAmount(paid) !== '0') lines.push(money('পরিশোধ', paid));
+  if (settled > 0) lines.push(money('পুরোনো বাকি জমা', settled));
+  if (formatSmsAmount(due) !== '0') lines.push(money('বাকি', due));
+  if (showsTotalDue(totalDue, due)) lines.push(money('মোট বাকি', totalDue));
+
+  lines.push(`- ${gsmSafeShopName(shopName)}`);
+  return lines.join('\n');
+};
+
+/**
+ * A purchase confirmation, custom template if the shop has one.
+ *
+ * Mirrors `buildInvoiceSms` exactly, including the fallback: a template that
+ * leaves an unrecognised token behind is DISCARDED in favour of the built-in
+ * body, because a supplier receiving `৳{previus_due}` is the shop looking
+ * broken to its own vendor, at its own expense.
+ */
+const buildPurchaseSms = ({
+  template = '',
+  numerals = 'en',
+  invoiceNo,
+  supplierInvoiceNo = '',
+  date = null,
+  supplierName = '',
+  total,
+  paid,
+  due,
+  previousDue = 0,
+  dueSettled = 0,
+  totalDue = null,
+  shopName,
+}) => {
+  const body = String(template ?? '').trim();
+
+  if (body) {
+    const rendered = renderInvoiceTemplate(
+      body,
+      {
+        invoiceNo,
+        supplierInvoiceNo,
+        date,
+        supplierName,
+        total,
+        paid,
+        due,
+        previousDue,
+        dueSettled,
+        totalDue,
+        shopName,
+      },
+      numerals,
+      PURCHASE_TOKEN_KINDS
+    );
+
+    if (rendered && !tokenPattern().test(rendered)) {
+      return rendered;
+    }
+  }
+
+  return buildPurchaseReceipt({
+    invoiceNo, supplierInvoiceNo, total, paid, due, dueSettled, totalDue, shopName,
+  });
+};
+
 const buildInvoiceSms = ({
   template = '',
   numerals = 'en',
@@ -797,6 +1009,14 @@ module.exports = {
   // Per-shop invoice templates. See the section header above.
   INVOICE_SMS_TOKENS,
   INVOICE_SMS_SAMPLES,
+  // The supplier side of the same machinery. Kept as a SEPARATE token set so a
+  // template cannot name a party the document does not have.
+  PURCHASE_SMS_TOKENS,
+  PURCHASE_SMS_SAMPLES,
+  PURCHASE_TOKEN_KINDS,
+  INVOICE_TOKEN_KINDS,
+  buildPurchaseReceipt,
+  buildPurchaseSms,
   MAX_INVOICE_TEMPLATE_SEGMENTS,
   MAX_INVOICE_TEMPLATE_LENGTH,
   toLocalDigits,

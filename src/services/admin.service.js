@@ -2586,6 +2586,40 @@ class AdminService {
         }
       }
 
+      /**
+       * The supplier চালান template, validated against ITS OWN token set.
+       *
+       * Handing this the sale set would accept `{customer_name}` on a body that
+       * goes to a vendor, and reject `{supplier_name}` on the one body where it
+       * belongs. Which set the validator is given is the entire guard keeping
+       * the two documents apart — see `PURCHASE_SMS_TOKENS`.
+       *
+       * Same "only when the key is present" rule as its twin above: a settings
+       * save that does not mention this template must not re-validate one that
+       * is already stored and already live.
+       */
+      if ('purchaseTemplate' in settingsData.smsSettings) {
+        const {
+          validateInvoiceTemplate,
+          PURCHASE_TOKEN_KINDS,
+          PURCHASE_SMS_SAMPLES,
+        } = require('../utils/smsTemplates.util');
+        const { countSms } = require('../utils/smsCounter.util');
+
+        const check = validateInvoiceTemplate(settingsData.smsSettings.purchaseTemplate, {
+          shopName: shop.name,
+          numerals:
+            settingsData.smsSettings.numerals ?? shop.settings.smsSettings?.numerals ?? 'en',
+          countSegments: (message) => countSms(message).segments,
+          kinds: PURCHASE_TOKEN_KINDS,
+          samples: PURCHASE_SMS_SAMPLES,
+        });
+
+        if (!check.valid) {
+          throw new AppError(check.reasonBn, check.reason, 400);
+        }
+      }
+
       shop.settings.smsSettings = {
         ...shop.settings.smsSettings,
         ...settingsData.smsSettings,

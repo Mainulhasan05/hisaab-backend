@@ -67,13 +67,24 @@
  * can present them as the one event they were.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * NO ADVANCE YET
+ * PAYING PAST THE PAYABLE — অগ্রিম
  * ─────────────────────────────────────────────────────────────────────────────
  *
- * Paying past the supplier's total payable is refused, naming the maximum.
- * `Supplier.advanceBalance` exists and every surface is wired for it (Phase D),
- * but the DOOR is Phase G — and opening it here by accident would create a
- * prepayment with no screen to see it on and no way to refund it.
+ * Refused unless the caller passes `allowAdvance: true`, and every legacy
+ * caller does not — so the ceiling that has always been there is preserved by
+ * construction, and only the door built for it (`POST /suppliers/:id/advance`)
+ * can create a prepayment.
+ *
+ * With the flag, the surplus becomes a `supplier_advance` row. The split is the
+ * same two-row rule as above, one level out:
+ *
+ *     amount = settled against debt   -> purchase_payment row(s)
+ *            + surplus                -> supplier_advance row
+ *
+ * A single mixed row would force every report to choose between mislabelling
+ * debt settlement or prepayment, forever. Two rows are self-describing and each
+ * sums into its own bucket — the same call the customer side made, for the same
+ * reason.
  */
 
 const mongoose = require('mongoose');
@@ -140,6 +151,14 @@ async function settleSupplierDue(
     reference,
     transactionId,
     notes,
+    /**
+     * Permit the surplus to become a prepayment.
+     *
+     * `false` for every caller that existed before advances did, so their
+     * ceiling is preserved BY CONSTRUCTION rather than by everyone remembering
+     * — the same guarantee `settleCustomerDue`'s flag gives on the other side.
+     */
+    allowAdvance = false,
     req = null,
   },
   session = null
@@ -176,7 +195,7 @@ async function settleSupplierDue(
 
   const { totalDue, openingDue } = await readPayable({ shopId, supplier, branchId }, session);
 
-  if (amount > totalDue) {
+  if (amount > totalDue && !allowAdvance) {
     throw new AppError(
       `Payment exceeds this supplier's outstanding of ৳${totalDue}`,
       totalDue > 0
@@ -186,9 +205,16 @@ async function settleSupplierDue(
     );
   }
 
-  // ── 1. Allocate: carried-in খাতা first, then the bills oldest first ────────
-  const openingApplied = quantizeMoney(Math.min(amount, openingDue));
-  let remaining = quantizeMoney(amount - openingApplied);
+  // ── 1. Allocate: debt first, and only what is left becomes অগ্রিম ──────────
+  //
+  // Debt before prepayment, always. Handing a vendor money while owing them and
+  // booking it as a prepayment would leave the shop owing AND in credit with
+  // the same party — the one state the exclusivity invariant forbids.
+  const againstDebt = quantizeMoney(Math.min(amount, totalDue));
+  const advancePart = quantizeMoney(amount - againstDebt);
+
+  const openingApplied = quantizeMoney(Math.min(againstDebt, openingDue));
+  let remaining = quantizeMoney(againstDebt - openingApplied);
 
   const billAllocations = [];
   if (remaining > 0) {
@@ -214,10 +240,13 @@ async function settleSupplierDue(
   // The payable read and the documents disagree. Rather than silently keeping
   // the difference — which is how money goes missing — refuse and say so; the
   // reconciler is the tool for finding out why.
+  //
+  // Measured against the DEBT portion only: a deliberate prepayment has no bill
+  // to land on by definition and must not be mistaken for unallocatable money.
   if (remaining > 0) {
     throw new AppError(
-      `Only ৳${quantizeMoney(amount - remaining)} could be allocated — the books disagree with the bills`,
-      `৳${quantizeMoney(amount - remaining)} পর্যন্ত বসানো গেল — হিসাব মেলাতে সমস্যা হয়েছে`,
+      `Only ৳${quantizeMoney(againstDebt - remaining)} could be allocated — the books disagree with the bills`,
+      `৳${quantizeMoney(againstDebt - remaining)} পর্যন্ত বসানো গেল — হিসাব মেলাতে সমস্যা হয়েছে`,
       409
     );
   }
@@ -272,9 +301,23 @@ async function settleSupplierDue(
     rows.push({
       ...common,
       _id,
-      amount: quantizeMoney(amount - openingApplied),
+      amount: quantizeMoney(againstDebt - openingApplied),
       purchase: billAllocations[0].doc._id,
       allocations: billAllocations.map((a) => ({ purchase: a.doc._id, amount: a.amount })),
+      receiptNo: buildPaymentReceiptNo(_id, paidAt),
+    });
+  }
+  if (advancePart > 0) {
+    // Its OWN type, not `purchase_payment`. The two are different economic
+    // events — one discharges an obligation, the other creates a claim — and a
+    // shopkeeper reading a পরিশোধ figure that silently included prepayments
+    // would be told something false about how much debt they had cleared.
+    const _id = new mongoose.Types.ObjectId();
+    rows.push({
+      ...common,
+      _id,
+      type: PAYMENT_TYPES.SUPPLIER_ADVANCE,
+      amount: advancePart,
       receiptNo: buildPaymentReceiptNo(_id, paidAt),
     });
   }
@@ -324,7 +367,8 @@ async function settleSupplierDue(
     supplier,
     payments,
     openingApplied,
-    billsApplied: quantizeMoney(amount - openingApplied),
+    billsApplied: quantizeMoney(againstDebt - openingApplied),
+    advanceApplied: advancePart,
     // Invoice numbers included so the UI can say "PUR… এ ৳X বসেছে" with no
     // second fetch — the same shape `recordPayment` returns.
     allocations: billAllocations.map((a) => ({
@@ -362,7 +406,12 @@ async function voidSupplierPayment(
   if (!payment) {
     throw new AppError('Payment not found', 'পেমেন্ট পাওয়া যায়নি', 404);
   }
-  if (payment.type !== PAYMENT_TYPES.PURCHASE_PAYMENT) {
+  // Both kinds of money going out to a vendor. An advance especially needs
+  // this door: `deleteSupplier` refuses to remove a vendor holding our money,
+  // so without a way to reverse a mis-keyed one the account could never be
+  // closed at all.
+  const VOIDABLE = [PAYMENT_TYPES.PURCHASE_PAYMENT, PAYMENT_TYPES.SUPPLIER_ADVANCE];
+  if (!VOIDABLE.includes(payment.type)) {
     throw new AppError(
       'Only supplier payments can be voided here',
       'শুধু সরবরাহকারীর পেমেন্ট এখান থেকে বাতিল করা যায়',

@@ -1,4 +1,5 @@
 const purchaseService = require('../services/purchase.service');
+const smsService = require('../services/sms.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 const { sanitizePurchases } = require('../utils/dataSanitizer.util');
@@ -58,6 +59,17 @@ exports.getSummary = asyncHandler(async (req, res) => {
 });
 
 // Record payment for a purchase
+// Text the supplier this challan's figures. Manual only — see the service.
+exports.sendPurchaseSms = asyncHandler(async (req, res) => {
+  const purchase = await purchaseService.getPurchaseById(req.shop._id, req.params.id, req);
+  const result = await smsService.sendPurchaseSms(req.shop._id, req.user._id, purchase, req);
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Purchase SMS sent',
+    messageBn: 'সরবরাহকারীকে এসএমএস পাঠানো হয়েছে',
+  });
+});
+
 exports.recordPayment = asyncHandler(async (req, res) => {
   const result = await purchaseService.recordPayment(
     req.shop._id,

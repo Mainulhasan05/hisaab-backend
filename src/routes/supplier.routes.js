@@ -36,6 +36,22 @@ router.post(
 router.get('/:id/payments', rbac('purchases', 'view'), supplierController.getSupplierPayments);
 
 /**
+ * অগ্রিম — money handed over BEFORE the goods.
+ *
+ * Owner-only, and deliberately a higher bar than পরিশোধ above. Settling a bill
+ * discharges an obligation the shop already had; paying ahead creates a CLAIM
+ * on a vendor and parts with cash for nothing yet received. That is a decision
+ * about the shop's money rather than a record of one already made.
+ */
+router.post(
+  '/:id/advance',
+  idempotency(),
+  ownerOnly,
+  validate(supplierValidation.paySupplier),
+  supplierController.paySupplierAdvance
+);
+
+/**
  * Voiding one is owner-only, and deliberately a different bar from making one.
  *
  * Recording a payment states what happened at the counter; reversing one

@@ -254,6 +254,32 @@ async function rebuildShop(db, shopId, accounts) {
     ]).toArray();
     add(accountId, -(refunds[0]?.total || 0));
 
+    // ── IN: cash a SUPPLIER handed back ─────────────────────────────────────
+    //
+    // `purchase_refund` — a কেনা ফেরত settled in cash, or an unused advance
+    // returned. `purchaseReturn.service` credits the account with
+    // `applyAccountDelta(+totalCredit)`, and this rebuild counted none of it:
+    // every such refund made the account read as drifted by its full amount,
+    // with nothing to explain it.
+    //
+    // Inert on every shop that has never taken a cash কেনা ফেরত, which is why
+    // it went unnoticed — and wrong by the whole amount the first time one does.
+    // It is money IN, never `refund` (which is money OUT to a CUSTOMER); see
+    // the type's own note in constants.js for what reusing that would poison.
+    const purchaseRefunds = await db.collection('payments').aggregate([
+      {
+        $match: {
+          shop: shopId,
+          account: accountId,
+          type: 'purchase_refund',
+          ...since(account),
+          ...LIVE,
+        },
+      },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]).toArray();
+    add(accountId, purchaseRefunds[0]?.total || 0);
+
     // ── Transfers, both directions (Phase 3) ────────────────────────────────
     //
     // `amountOut` and `amountIn` differ by the MFS or bank charge, which is why

@@ -182,6 +182,15 @@ const PURCHASE_MONEY_KEYS = new Set([
   // and the invoice charges can put the cost back together arithmetically,
   // which is the same full-bypass shape `netEarnings` had on the reports side.
   // So the whole set goes, not just the obvious one.
+  // ── The supplier খাতা snapshots ─────────────────────────────────────────
+  //
+  // What the shop owed this vendor before the delivery, and what was cleared at
+  // the same counter. Neither is named like a price, and both are exactly the
+  // kind of figure `view_cost` withholds: `previousDue` is the vendor
+  // relationship in one number, and `previousDue − dueSettled + due` is the
+  // মোট বাকি the slip prints. Listed the moment they existed, because the
+  // print payload is gated by THIS function and nothing else.
+  'previousDue', 'dueSettled',
   'landedUnitPrice', 'landedTotal', 'lineDiscount', 'discountShare', 'chargeShare',
   'subtotal', 'itemDiscount', 'discount', 'discountAmount',
   'freightCharge', 'otherCharge', 'merchandise',

@@ -21,8 +21,10 @@ const {
   buildOtp,
   buildPasswordResetOtp,
   appendShopSignature,
+  buildPurchaseSms,
 } = require('../utils/smsTemplates.util');
 const { normalizeRecipients, chunk, MAX_SKIPPED_STORED } = require('../utils/smsRecipients.util');
+const { AppError } = require('../middleware/error.middleware');
 const { isPersonalized, personalizeMessage } = require('../utils/smsPersonalize.util');
 // Which gateway sends, what happens when it refuses, and what it cost us. The
 // service below no longer speaks any gateway's dialect — see services/sms/.
@@ -1864,6 +1866,64 @@ class SMSService {
    * Send sale receipt SMS (non-blocking - runs async in background)
    * This method returns immediately and sends SMS in the background
    */
+  /**
+   * চালান confirmation to a SUPPLIER — manual, never automatic.
+   *
+   * ── Why there is no `autoSendOnPurchase` ─────────────────────────────────
+   *
+   * A shop texting every vendor on every delivery is a bill it did not ask
+   * for, and unlike a customer the supplier already has the paper — they wrote
+   * it. This exists for the case that earns its segment: confirming what the
+   * shop believes it now owes, so a disagreement surfaces this week instead of
+   * at month end.
+   *
+   * Awaited rather than fired into the background like the sale receipt,
+   * because a human pressed a button and is owed an answer: if the vendor has
+   * no phone number, or the quota is out, they need to know now.
+   */
+  async sendPurchaseSms(shopId, userId, purchase, req = null) {
+    const Shop = require('../models/Shop.model');
+
+    const phone = purchase?.supplier?.phone;
+    if (!phone) {
+      throw new AppError(
+        'This supplier has no phone number',
+        'এই সরবরাহকারীর ফোন নম্বর নেই',
+        400
+      );
+    }
+
+    const shop = await Shop.findById(shopId).select('name settings.smsSettings').lean();
+    const smsSettings = shop?.settings?.smsSettings || {};
+
+    const message = buildPurchaseSms({
+      template: smsSettings.purchaseTemplate || '',
+      numerals: smsSettings.numerals || 'en',
+      invoiceNo: purchase.invoiceNo,
+      supplierInvoiceNo: purchase.supplierInvoiceNo || '',
+      date: purchase.date,
+      supplierName: purchase.supplier?.name || purchase.supplierName || '',
+      total: purchase.totalAmount,
+      paid: purchase.paid,
+      due: purchase.due,
+      previousDue: purchase.previousDue || 0,
+      dueSettled: purchase.dueSettled || 0,
+      // Derived from the SNAPSHOTS, never from a live read — the message has to
+      // say what the challan says, and the vendor's balance has moved since.
+      totalDue: purchase.previousDue == null
+        ? null
+        : (purchase.previousDue || 0) - (purchase.dueSettled || 0) + (purchase.due || 0),
+      shopName: shop?.name,
+    });
+
+    // `customerId` is null and the log's `customer` stays empty — this
+    // recipient is a supplier. `SMSLog.recipients[].customer` has always been
+    // optional, so the transport needs no change.
+    return this.sendSingle(shopId, userId, phone, message, null, req, {
+      audience: 'purchase_receipt',
+    });
+  }
+
   sendSaleReceiptAsync(shopId, userId, saleData) {
     const Shop = require('../models/Shop.model');
     const Customer = require('../models/Customer.model');

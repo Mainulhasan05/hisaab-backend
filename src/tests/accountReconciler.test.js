@@ -92,10 +92,16 @@ describe('voided rows are not replayed', () => {
     // the row as if it still stood double-counts the reversal.
     expect(source).toContain("const LIVE = { status: { $ne: 'cancelled' } }");
 
-    // Three aggregates read the payments collection — collections in, supplier
-    // payments out, refunds out. Every one of them must carry it.
-    const liveUses = source.match(/\.\.\.LIVE,/g) || [];
-    expect(liveUses).toHaveLength(3);
+    // The RULE, not a count: every aggregate that reads the payments collection
+    // must carry it. Asserting a fixed number would fail on a legitimate
+    // ADDITION — which is exactly what happened when the `purchase_refund`
+    // money-in bucket was added — and that tests the punctuation rather than
+    // the invariant.
+    const paymentReads = (source.match(/collection\('payments'\)/g) || []).length;
+    const liveUses = (source.match(/\.\.\.LIVE,/g) || []).length;
+
+    expect(paymentReads).toBeGreaterThanOrEqual(4);
+    expect(liveUses).toBe(paymentReads);
   });
 });
 

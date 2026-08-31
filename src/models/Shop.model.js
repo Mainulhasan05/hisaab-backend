@@ -410,6 +410,26 @@ const shopSchema = new mongoose.Schema({
         maxlength: 480
       },
       /**
+       * The same, for the চালান confirmation sent to a SUPPLIER.
+       *
+       * Its own field rather than reusing `invoiceTemplate` because the two
+       * documents have different parties and different token sets: a body
+       * naming `{customer_name}` on a purchase would text a vendor the word
+       * কাস্টমার, and one naming `{supplier_name}` on a sale would do the
+       * reverse. `PURCHASE_SMS_TOKENS` is what keeps them apart, and a shared
+       * field would have no way to know which set to validate against.
+       *
+       * Admin-only by construction, exactly like its twin: the shop-side
+       * settings allowlist must NOT learn `smsSettings`, or a shop could route
+       * around the segment ceiling and multiply its own bill.
+       */
+      purchaseTemplate: {
+        type: String,
+        default: '',
+        trim: true,
+        maxlength: 480
+      },
+      /**
        * Which digits the figures in that template are printed with.
        *
        * `en` by default so a shop that never gets a custom template renders

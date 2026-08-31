@@ -434,6 +434,86 @@ const purchaseSchema = new mongoose.Schema({
     type: Number,
     min: [0, 'ফেরত ০ এর কম হতে পারবে না']
   },
+  /**
+   * What the shop owed this supplier BEFORE this delivery.
+   *
+   * ── Why a snapshot and not a live read ────────────────────────────────────
+   *
+   * A challan describes ONE transaction at ONE moment. Deriving the supplier's
+   * balance when the slip is printed would make a reprint of last month's bill
+   * show TODAY's figure — a different document every time it comes off the
+   * printer, and useless for the one thing it is for: reconciling against the
+   * vendor's own paper. `Sale.previousDue` exists for exactly this reason and
+   * its header says the same (PURCHASE_PLAN F-3).
+   *
+   * Read server-side inside the transaction, before the bill is written, so it
+   * cannot include the bill it sits on. The figure the shopkeeper saw on screen
+   * is never trusted for it.
+   *
+   * ── ABSENT is a third answer ──────────────────────────────────────────────
+   *
+   * No `default`, deliberately. A purchase with no supplier, and every purchase
+   * written before this field existed, carries nothing here — and readers must
+   * be able to tell "no snapshot was taken" from "they were owed ৳0". A default
+   * of 0 would make every reprint of an older bill assert the second, which is
+   * a claim the document cannot support. Absent also keeps those documents
+   * byte-identical (I-1).
+   */
+  /**
+   * অগ্রিম consumed by this bill.
+   *
+   * ── Why a fourth term and not a bigger `paid` ─────────────────────────────
+   *
+   * The money left the drawer WEEKS AGO, as a `supplier_advance` row. Adding it
+   * to `paid` would claim the shop handed cash over on the day the goods
+   * arrived, which the cash register and the supplier statement both read
+   * literally — and, worse, `scripts/recalc-supplier-balances.js` would then
+   * count it twice: once inside `Σ purchase.paid` and once as the bill-less
+   * advance row it already counts. That is the S-11 double count, rebuilt.
+   *
+   * ── Why an accumulator and not a smaller `due` ────────────────────────────
+   *
+   * `due` is DERIVED in `pre('save')`. A smaller `due` written directly would
+   * survive exactly until the next `save()` of this document, at which point
+   * the hook would recompute the old figure and the credit would vanish. That
+   * is precisely the bug `returnedAmount` was introduced to end on this same
+   * model, and this is the same fix in the same shape.
+   *
+   * ── What it makes true ────────────────────────────────────────────────────
+   *
+   * `Supplier.advanceBalance` falls on its own the moment a bill is booked,
+   * because it is derived from `totalAmount`. Without this field the SUPPLIER
+   * would read as owing nothing while the BILL still read as fully due — and
+   * the payables ageing, which sums `Purchase.due`, would age debt the vendor
+   * position says does not exist.
+   *
+   * No `default`, like `returnedAmount` and for the same reason: absent on
+   * every purchase ever written, absent reads as 0, and nothing changes shape.
+   */
+  advanceApplied: {
+    type: Number,
+    min: [0, 'অগ্রিম ০ এর কম হতে পারবে না']
+  },
+  previousDue: {
+    type: Number
+  },
+  /**
+   * Old debt cleared at the same counter, with this delivery.
+   *
+   * "আজ ৯,০০০ টাকার মাল নিলাম, আর পুরোনো বাকির ৫০,০০০ দিলাম" — one visit, two
+   * money events. This is the SECOND one, and it is emphatically not `paid`:
+   * `paid` is money against this bill and is clamped to its total, because the
+   * P&L, the supplier statement and `cancelPurchase`'s reversal all read it
+   * that way. The money itself lives in its own `Payment` rows, written by
+   * `supplierSettlement`; this field is the slip's copy of the figure.
+   *
+   * Stored beside `previousDue` so the printed মোট বাকি can be computed as
+   * `previousDue − dueSettled + due` without a second read — and so a reprint
+   * shows what the paper showed on the day.
+   */
+  dueSettled: {
+    type: Number
+  },
   paymentMethod: {
     type: String,
     enum: ['cash', 'bkash', 'nagad', 'card', 'bank', 'credit'],
@@ -581,7 +661,20 @@ purchaseSchema.pre('save', function(next) {
     ? Math.min(Math.max(0, this.returnedAmount), Math.max(0, this.totalAmount - this.paid))
     : 0;
 
-  this.due = Math.max(0, this.totalAmount - this.paid - returnedCredit);
+  /**
+   * অগ্রিম this bill consumed. Read through a fallback and clamped to what is
+   * still outstanding after cash and returns, so it can never drive `due`
+   * below zero and can never be mistaken for money owed BACK to the shop —
+   * that half lives on `Supplier.advanceBalance`, where it belongs.
+   */
+  const advanceCredit = Number.isFinite(this.advanceApplied)
+    ? Math.min(
+        Math.max(0, this.advanceApplied),
+        Math.max(0, this.totalAmount - this.paid - returnedCredit)
+      )
+    : 0;
+
+  this.due = Math.max(0, this.totalAmount - this.paid - returnedCredit - advanceCredit);
 
   // Payment status is derived — EXCEPT for a cancelled purchase, which is a
   // lifecycle state and not a payment state.
