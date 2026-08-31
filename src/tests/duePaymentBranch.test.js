@@ -39,11 +39,23 @@ const reqAt = (branchId, scope) => ({
   user: { _id: USER, isOwner: true },
 });
 
-/** The customer owes ৳5,000 shop-wide — all of it raised at BRANCH_A. */
+/**
+ * The customer owes ৳5,000 shop-wide — all of it raised at BRANCH_A.
+ *
+ * `totalPurchases` carries the debt rather than `totalDue` standing alone,
+ * because the shop-wide halves are DERIVED from the three components:
+ *
+ *     totalDue = max(0, totalPurchases + openingDue − totalPaid)
+ *
+ * A fixture asserting `totalDue: 5000` with nothing bought is not a customer
+ * that can exist, and testing against one would prove the derivation wrong for
+ * the wrong reason. `advanceBalance` is the other half of the same expression.
+ */
 const stubCustomer = (totalDue = 5000) => {
   const doc = {
     _id: CUSTOMER, shop: SHOP, name: 'করিম', phone: '01700000000',
-    totalPaid: 0, totalDue,
+    totalPurchases: totalDue, openingDue: 0,
+    totalPaid: 0, totalDue, advanceBalance: 0,
     save: jest.fn().mockResolvedValue(undefined),
   };
   jest.spyOn(Customer, 'findOne').mockReturnValue({ session: () => Promise.resolve(doc) });

@@ -96,6 +96,9 @@ const RECEIPT_TEXT = {
     paid: 'জমা',
     due: 'বাকি',
     oldDuePaid: 'আগের বাকি জমা',
+    // The deposit the shop is HOLDING. Not a debt and not a payment — the one
+    // line that stops a customer believing their surplus was pocketed.
+    advance: 'অগ্রিম জমা',
     totalDue: 'মোট বাকি',
     thanks: 'ধন্যবাদ',
   },
@@ -107,6 +110,7 @@ const RECEIPT_TEXT = {
     paid: 'Paid',
     due: 'Due',
     oldDuePaid: 'Old due paid',
+    advance: 'Advance held',
     totalDue: 'Total due',
     thanks: 'Thanks for visiting',
   },
@@ -169,6 +173,7 @@ const buildSaleReceipt = ({
   paid,
   due,
   dueSettled = 0,
+  advanceHeld = 0,
   totalDue = null,
   shopName,
   language = 'bn',
@@ -182,6 +187,17 @@ const buildSaleReceipt = ({
   if (formatSmsAmount(paid) !== '0') lines.push(money(t.paid, paid));
   if (formatSmsAmount(due) !== '0') lines.push(money(t.due, due));
   if (settled > 0) lines.push(money(t.oldDuePaid, settled));
+  /**
+   * অগ্রিম জমা — money of theirs the shop is keeping.
+   *
+   * THE customer-trust line. A customer who hands over ৳1,000 on a ৳300 bill
+   * and does not take ৳700 back needs to see that the shop recorded it; without
+   * this the receipt says `বিল ৳300` and nothing else, and the only reasonable
+   * conclusion is that the surplus was pocketed. Worth its characters even on a
+   * UCS-2 body.
+   */
+  const held = Number(advanceHeld) || 0;
+  if (held > 0) lines.push(money(t.advance, held));
   if (showsTotalDue(totalDue, due)) lines.push(money(t.totalDue, totalDue));
 
   lines.push(t.thanks, `- ${gsmSafeShopName(shopName)}`);
