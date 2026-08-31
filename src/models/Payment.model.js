@@ -253,6 +253,22 @@ const paymentSchema = new mongoose.Schema({
    * `dueSettlement.service` is where new ones are minted; see
    * `utils/receiptNo.util.js` for why it is derived rather than counted.
    */
+  /**
+   * Ties the rows of ONE money event together.
+   *
+   * A payment that straddles a boundary is written as two rows — the half that
+   * settled bills and the half that settled a carried-in খাতা — because the
+   * reconciler tells them apart by `purchase` and would otherwise count one of
+   * them twice. They are still one thing that happened at one counter, and the
+   * UI has to be able to say so.
+   *
+   * No `default`, deliberately: absent on every row written before this field
+   * and on every single-row payment, so nothing about an ordinary collection
+   * changes shape (I-1).
+   */
+  receiptGroup: {
+    type: mongoose.Schema.Types.ObjectId
+  },
   receiptNo: {
     type: String,
     trim: true

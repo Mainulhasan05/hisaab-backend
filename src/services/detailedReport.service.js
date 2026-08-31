@@ -842,12 +842,27 @@ class DetailedReportService {
           },
         },
       ]),
+      /**
+       * Supplier payments — found BOTH ways.
+       *
+       * A payment made against a bill carries no `supplier` of its own and is
+       * reached through the purchase. A payment that settled the carried-in
+       * খাতা has no bill at all and names its vendor directly
+       * (SUPPLIER_DUE_ADVANCE_PLAN.md D1).
+       *
+       * `preserveNullAndEmptyArrays` is what makes the second kind survive the
+       * join: a plain `$unwind` DROPS every row whose lookup found nothing, so
+       * before this the whole opening-খাতা settlement was silently absent from
+       * the statement — the vendor's balance would read as if the shop had
+       * never paid them.
+       */
       Payment.aggregate([
         { $match: { ...paymentScope, ...LIVE_PAYMENT, ...paidAtMatch(before) } },
         { $lookup: { from: 'purchases', localField: 'purchase', foreignField: '_id', as: 'p' } },
-        { $unwind: '$p' },
-        { $match: { 'p.supplier': { $in: ids } } },
-        { $group: { _id: '$p.supplier', total: { $sum: '$amount' } } },
+        { $unwind: { path: '$p', preserveNullAndEmptyArrays: true } },
+        { $addFields: { supplierId: { $ifNull: ['$p.supplier', '$supplier'] } } },
+        { $match: { supplierId: { $in: ids } } },
+        { $group: { _id: '$supplierId', total: { $sum: '$amount' } } },
       ]),
       SupplierDueAdjustment.aggregate([
         { $match: { ...adjustmentScope, createdAt: before } },
@@ -900,20 +915,25 @@ class DetailedReportService {
           },
         },
       ]),
+      // Both kinds, for the reason spelled out on the opening-balance twin
+      // above: a bill-less payment is dropped outright by a plain `$unwind`.
       Payment.aggregate([
         { $match: { ...paymentScope, ...LIVE_PAYMENT, ...paidAtMatch(range) } },
         { $lookup: { from: 'purchases', localField: 'purchase', foreignField: '_id', as: 'p' } },
-        { $unwind: '$p' },
+        { $unwind: { path: '$p', preserveNullAndEmptyArrays: true } },
+        { $addFields: { supplierId: { $ifNull: ['$p.supplier', '$supplier'] } } },
         // The cap comes AFTER the supplier filter, deliberately. Capping first
         // would count purchase payments belonging to suppliers this run does
         // not cover against the same ceiling, and could drop every row that
         // actually belongs on the statement.
-        { $match: { 'p.supplier': { $in: ids } } },
+        { $match: { supplierId: { $in: ids } } },
         { $sort: { createdAt: 1 } },
         { $limit: MAX_ROWS_PER_COLLECTION },
         {
           $project: {
-            supplier: '$p.supplier',
+            supplier: '$supplierId',
+            // Null on a payment that settled the carried-in খাতা — there is no
+            // challan to name, and printing one would be a lie.
             invoiceNo: '$p.invoiceNo',
             amount: 1,
             method: 1,

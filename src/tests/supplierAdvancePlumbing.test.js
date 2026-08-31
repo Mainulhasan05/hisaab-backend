@@ -104,31 +104,64 @@ describe('a supplier with an open position cannot be deleted away', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  it('refuses one the shop still owes', async () => {
+  it('warns before deleting one the shop still owes, naming the figure', async () => {
     // `_applyOpeningDue` already refuses to ADD debt to a deleted supplier,
     // because every read filters `isActive` and the shop ends up owing money no
     // screen will show. Deleting a supplier already owed does the same damage
     // from the other side, and nothing stopped it until now.
+    //
+    // The refusal carries the AMOUNT, because that is the point: a warning that
+    // does not say what is at stake is a speed bump.
     const doc = stub({ totalDue: 200000 });
 
     await expect(supplierService.deleteSupplier(SHOP, USER, SUPPLIER))
-      .rejects.toMatchObject({ statusCode: 400 });
+      .rejects.toMatchObject({ statusCode: 400, messageBn: expect.stringContaining('200000') });
 
     expect(doc.isActive).toBe(true);
     expect(doc.save).not.toHaveBeenCalled();
   });
 
-  it('refuses one holding the shop\'s money', async () => {
-    // Inert today — nothing can write an `advanceBalance`. It ships now because
-    // deleting such a vendor would take the CLAIM off every screen while they
-    // kept the cash, and without a refund door the owner could not get it back.
+  it('goes ahead once the owner has acknowledged that figure', async () => {
+    // Warn, do not block — the posture the customer-side fat-finger threshold
+    // settled on. A shop closing an account it settled off the books has a real
+    // reason to remove a row that still shows a payable, and the software
+    // cannot know it is wrong.
+    const doc = stub({ totalDue: 200000 });
+
+    await expect(
+      supplierService.deleteSupplier(SHOP, USER, SUPPLIER, { acknowledgeDue: true })
+    ).resolves.toEqual({ success: true });
+
+    expect(doc.isActive).toBe(false);
+  });
+
+  it('records what was owed at the moment it was removed', async () => {
+    // Otherwise the only trace of a deleted-with-debt supplier is a row nothing
+    // will show.
+    stub({ totalDue: 200000 });
+
+    await supplierService.deleteSupplier(SHOP, USER, SUPPLIER, { acknowledgeDue: true });
+
+    const entry = AuditLog.create.mock.calls[0][0];
+    expect(entry.changes.before.totalDue).toBe(200000);
+    expect(entry.description).toContain('200000');
+  });
+
+  it('BLOCKS one holding our money — acknowledging does not help', async () => {
+    // Inert today. It blocks rather than warns because a payable deleted away
+    // is money someone else will come and ask for, while a PREPAYMENT deleted
+    // away is the shop's own claim on a vendor holding its cash — and with no
+    // refund door (E's D4) and no supplier restore endpoint, acknowledging it
+    // would not make it recoverable, only deliberate.
     const doc = stub({ advanceBalance: 50000 });
 
-    await expect(supplierService.deleteSupplier(SHOP, USER, SUPPLIER))
-      .rejects.toMatchObject({ statusCode: 400 });
+    await expect(
+      supplierService.deleteSupplier(SHOP, USER, SUPPLIER, { acknowledgeDue: true })
+    ).rejects.toMatchObject({ statusCode: 400 });
 
     expect(doc.isActive).toBe(true);
   });
+
 
   it('still deletes a supplier who is square', async () => {
     // The ordinary case must be untouched: this is a tidy-up action and most

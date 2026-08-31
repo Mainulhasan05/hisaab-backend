@@ -68,9 +68,47 @@ exports.getOpeningDueHistory = asyncHandler(async (req, res) => {
   });
 });
 
+// পরিশোধ — pay a supplier, oldest debt first (carried-in খাতা, then bills)
+exports.paySupplier = asyncHandler(async (req, res) => {
+  const result = await supplierService.paySupplier(
+    req.shop._id, req.user._id, req.params.id, req.body, req
+  );
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Supplier payment recorded',
+    messageBn: 'সরবরাহকারীকে পরিশোধ রেকর্ড হয়েছে',
+  });
+});
+
+// Void a supplier payment — owner only, see route
+exports.voidSupplierPayment = asyncHandler(async (req, res) => {
+  const result = await supplierService.voidSupplierPayment(
+    req.shop._id, req.user._id, req.params.paymentId, req.body, req
+  );
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Supplier payment voided',
+    messageBn: 'পেমেন্ট বাতিল হয়েছে',
+  });
+});
+
+// One supplier's payment history, newest first
+exports.getSupplierPayments = asyncHandler(async (req, res) => {
+  const data = await supplierService.getSupplierPayments(
+    req.shop._id, req.params.id, req, req.query
+  );
+  return ApiResponse.success(res, { data });
+});
+
 // Delete supplier
 exports.deleteSupplier = asyncHandler(async (req, res) => {
-  await supplierService.deleteSupplier(req.shop._id, req.user._id, req.params.id);
+  // The owner has been shown the outstanding figure and chose to go ahead.
+  // Sent as a query flag rather than a body, because a DELETE body is dropped
+  // by enough proxies and clients that a silent loss here would turn every
+  // confirmed delete back into a refusal.
+  await supplierService.deleteSupplier(req.shop._id, req.user._id, req.params.id, {
+    acknowledgeDue: req.query.acknowledgeDue === 'true' || req.query.acknowledgeDue === '1',
+  });
   return ApiResponse.success(res, {
     message: 'Supplier deleted successfully',
     messageBn: 'সরবরাহকারী সফলভাবে মুছে ফেলা হয়েছে',

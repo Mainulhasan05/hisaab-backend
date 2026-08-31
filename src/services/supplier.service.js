@@ -5,6 +5,9 @@ const SupplierDueAdjustment = require('../models/SupplierDueAdjustment.model');
 // Read by the payables aging report only — the bills themselves are where the
 // age of a debt lives; `Supplier.totalDue` is a rollup and carries no dates.
 const Purchase = require('../models/Purchase.model');
+const Payment = require('../models/Payment.model');
+const supplierSettlement = require('./supplierSettlement.service');
+const { PAYMENT_TYPES } = require('../config/constants');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { requireBranch } = require('../utils/branchScope.util');
@@ -485,7 +488,7 @@ class SupplierService {
   }
 
   // Delete supplier (soft delete)
-  async deleteSupplier(shopId, userId, supplierId) {
+  async deleteSupplier(shopId, userId, supplierId, { acknowledgeDue = false } = {}) {
     const supplier = await Supplier.findOne({
       _id: supplierId,
       shop: shopId,
@@ -496,43 +499,54 @@ class SupplierService {
     }
 
     /**
-     * Neither half of an open position may be deleted away.
+     * An open position must be SEEN before it is deleted away.
      *
-     * ── The payable half closes a door that was open ─────────────────────────
+     * ── The payable half warns; it does not block ────────────────────────────
      *
      * `_applyOpeningDue` already refuses to ADD debt to a deleted supplier,
      * with a comment saying why: every read filters `isActive`, so the shop
      * ends up owing money no screen will show. Deleting a supplier the shop
-     * ALREADY owes does exactly the same damage from the other side, and
-     * nothing stopped it. `deleteCustomer` has refused the mirror case since it
-     * was written; the two sides should not disagree about whether a live debt
-     * can be tidied off the screen.
+     * ALREADY owes does the same damage from the other side, and nothing
+     * stopped it — there was no guard here at all.
      *
-     * This is the one part of the phase that changes existing behaviour — see
-     * SUPPLIER_DUE_ADVANCE_PLAN.md §6.6.
+     * But refusing outright is the wrong instrument. A shop closing an account
+     * it has genuinely settled off the books, or clearing a vendor recorded
+     * twice, has a real reason to remove a row that still shows a payable, and
+     * the software has no way to know it is wrong. So the rule is the one the
+     * fat-finger threshold already uses on the customer side: **warn, do not
+     * block.** The first call is refused with the FIGURE in the message, and a
+     * caller that comes back having shown the owner that figure may proceed.
      *
-     * ── The prepayment half is inert today ───────────────────────────────────
+     * `acknowledgeDue` is therefore not a formality to be passed by default —
+     * it is the record that a human was told what they were deleting, and the
+     * audit entry below stores what the position was at that moment.
      *
-     * Nothing can write an `advanceBalance` yet. It ships now because the delete
-     * path must already refuse before the door opens: deleting a vendor holding
-     * ৳50,000 of the shop's money would take the CLAIM off every screen while
-     * the vendor kept the cash, and without a refund door (Phase E's D4) the
-     * owner would have no way to get it back.
+     * ── The prepayment half still blocks, and that is not an oversight ───────
+     *
+     * A payable deleted away is money the shop owes someone else; the vendor
+     * will come and ask. A PREPAYMENT deleted away is the shop's own claim on a
+     * vendor holding its cash, and there is no refund door yet (Phase E's D4)
+     * and no supplier restore endpoint at all — so acknowledging it would not
+     * make it recoverable, it would only make it deliberate. Blocked until
+     * there is a way to get the money back.
      */
-    if ((supplier.totalDue || 0) > 0) {
-      throw new AppError(
-        'Cannot delete a supplier with an outstanding due',
-        'বাকি আছে এমন সরবরাহকারী ডিলিট করা যাবে না',
-        400
-      );
-    }
     if ((supplier.advanceBalance || 0) > 0) {
       throw new AppError(
-        'Cannot delete a supplier holding an advance',
-        'অগ্রিম জমা আছে এমন সরবরাহকারী ডিলিট করা যাবে না',
+        'Cannot delete a supplier holding an advance — refund or use it first',
+        `অগ্রিম জমা ৳${supplier.advanceBalance} আছে — আগে ফেরত নিন বা ব্যবহার করুন`,
         400
       );
     }
+    if ((supplier.totalDue || 0) > 0 && !acknowledgeDue) {
+      throw new AppError(
+        `This supplier is still owed ৳${supplier.totalDue} — confirm to delete anyway`,
+        `এই সরবরাহকারীর ৳${supplier.totalDue} বাকি আছে — ডিলিট করলে হিসাব থেকে হারিয়ে যাবে`,
+        400
+      );
+    }
+
+    // Read before the flag flips, for the audit entry.
+    const outstanding = supplier.totalDue || 0;
 
     supplier.isActive = false;
     await supplier.save();
@@ -543,13 +557,18 @@ class SupplierService {
       user: userId,
       action: 'supplier_delete',
       actionBn: 'সরবরাহকারী মুছে ফেলা',
-      description: `Deleted supplier: ${supplier.name}`,
-      descriptionBn: `সরবরাহকারী মুছে ফেলা: ${supplier.name}`,
+      description: `Deleted supplier: ${supplier.name}`
+        + (outstanding > 0 ? ` (acknowledged outstanding due ৳${outstanding})` : ''),
+      descriptionBn: `সরবরাহকারী মুছে ফেলা: ${supplier.name}`
+        + (outstanding > 0 ? ` (৳${outstanding} বাকি রেখে)` : ''),
       entity: {
         type: 'supplier',
         id: supplier._id,
         name: supplier.name,
       },
+      // What the books said at the moment it was removed. Without this the only
+      // record of a deleted-with-debt supplier is a row nothing will show.
+      ...(outstanding > 0 ? { changes: { before: { totalDue: outstanding } } } : {}),
     });
 
     return { success: true };
@@ -593,6 +612,89 @@ class SupplierService {
    * `customerScope` equivalent to consult: suppliers have never had a shared /
    * separate book toggle.
    */
+  /**
+   * পরিশোধ — pay a supplier, oldest debt first.
+   *
+   * A thin wrapper: the arithmetic, the allocation and both books live in
+   * `supplierSettlement.service`, which is the ONE place money reduces a
+   * supplier's payable. Everything here is the shape the route needs.
+   *
+   * `requireBranch` because this is a write: a multi-branch shop always has one
+   * branch active, and the payable being paid down is that branch's.
+   */
+  async paySupplier(shopId, userId, supplierId, data = {}, req = null) {
+    return runInTransaction(async (session) => supplierSettlement.settleSupplierDue({
+      shopId,
+      userId,
+      supplierId,
+      amount: data.amount,
+      branchId: req ? requireBranch(req) : null,
+      method: data.method || 'cash',
+      rawAccount: data.account || null,
+      paidAt: data.paidAt || null,
+      reference: data.reference,
+      transactionId: data.transactionId,
+      notes: data.notes,
+      req,
+    }, session));
+  }
+
+  /** Reverse one, putting every book back exactly as it was. Owner-only route. */
+  async voidSupplierPayment(shopId, userId, paymentId, data = {}, req = null) {
+    return runInTransaction(async (session) => supplierSettlement.voidSupplierPayment({
+      shopId, userId, paymentId, reason: data.reason, req,
+    }, session));
+  }
+
+  /**
+   * One supplier's payment history, newest first.
+   *
+   * Includes voided rows, marked. A payment history that hides reversals shows
+   * a shop money it no longer has — and the reversal is usually the thing the
+   * owner opened the screen to check.
+   *
+   * Rows are found BOTH ways: by `supplier` for money with no bill under it,
+   * and through the bills for everything `recordPayment` ever wrote, which
+   * carries no `supplier` of its own.
+   */
+  async getSupplierPayments(shopId, supplierId, req = null, options = {}) {
+    const limit = Math.min(parseInt(options.limit, 10) || 50, 200);
+    const branchId = req?.branchId || null;
+
+    const bills = await Purchase.find(
+      { shop: shopId, supplier: supplierId, ...(branchId ? { branch: branchId } : {}) },
+      '_id invoiceNo'
+    ).lean();
+    const invoiceById = new Map(bills.map((b) => [String(b._id), b.invoiceNo]));
+
+    // cancelled-inclusive: a payment history that hides reversals shows a shop
+    // money it no longer has, and the reversal is usually the thing the owner
+    // opened this screen to check. Each row carries `voided` so the UI can
+    // strike it through rather than pretend it never happened.
+    const rows = await Payment.find({
+      shop: shopId,
+      type: PAYMENT_TYPES.PURCHASE_PAYMENT,
+      ...(branchId ? { branch: branchId } : {}),
+      $or: [
+        { supplier: supplierId },
+        { purchase: { $in: bills.map((b) => b._id) } },
+      ],
+    })
+      .sort({ paidAt: -1, createdAt: -1 })
+      .limit(limit)
+      .populate('receivedBy', 'name')
+      .lean();
+
+    return rows.map((r) => ({
+      ...r,
+      voided: r.status === 'cancelled',
+      // What it settled, in the shopkeeper's vocabulary: a row with no bill
+      // behind it paid down the carried-in খাতা.
+      invoiceNo: r.purchase ? invoiceById.get(String(r.purchase)) || null : null,
+      againstOpeningDue: !r.purchase,
+    }));
+  }
+
   async getPayableAging(shopId, req = null) {
     const now = new Date();
     const days30 = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
