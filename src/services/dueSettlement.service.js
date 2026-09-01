@@ -334,7 +334,16 @@ async function settleCustomerDue(
 
   const advanceId = advancePart > 0 ? new mongoose.Types.ObjectId() : null;
 
-  const [payment] = await Payment.create(
+  /**
+   * The debt row is written only when there IS debt.
+   *
+   * A pure deposit — the customer owes nothing and hands over ৳5,000 — settles
+   * no receivable, so there is no collection to record. Writing one anyway
+   * produced a `due_collection` for ৳0, which `Payment.amount`'s `min: 0.01`
+   * rejects outright, and which every collections report would have counted as
+   * a row that happened.
+   */
+  const [payment] = appliedToDue > 0 ? await Payment.create(
     [
       {
         _id: paymentId,
@@ -375,7 +384,7 @@ async function settleCustomerDue(
       },
     ],
     sessionOpt
-  );
+  ) : [null];
 
   /**
    * The deposit half — its own row, its own type.
@@ -507,6 +516,9 @@ async function settleCustomerDue(
   );
 
   return {
+    // Null on a pure deposit: nothing settled a due, so there is no collection
+    // row to hand back. Callers that print a রসিদ read `advancePayment` in that
+    // case — both carry their own `receiptNo`.
     payment,
     // The deposit half, when there was one. Callers show it: a cashier who has
     // just taken ৳700 of someone's money needs to say so out loud, and the

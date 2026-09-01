@@ -1572,9 +1572,15 @@ class CustomerService {
         // `sort({ createdAt })` above only orders the fetch; the real ordering
         // is the in-memory one, so no index changes hands here.
         date: p.paidAt || p.createdAt,
+        // Three things a credit row can be, and the খতিয়ান has to say which.
+        // An advance is NOT বাকি আদায়: the shop earned nothing and reduced no
+        // receivable, it took a deposit — and a customer reading their own
+        // ledger needs to see money they can still spend, not money they paid.
         label: isRefund
           ? 'ফেরত (নগদ প্রদান)'
-          : (p.type === 'due_collection' ? 'বাকি আদায়' : 'পেমেন্ট'),
+          : (p.type === 'due_collection'
+            ? 'বাকি আদায়'
+            : (p.type === 'advance' ? 'অগ্রিম জমা' : 'পেমেন্ট')),
         method: p.method,
         note: p.notes,
         saleId: p.sale ? String(p.sale) : null,

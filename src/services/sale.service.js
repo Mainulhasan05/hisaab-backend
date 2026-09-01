@@ -1610,7 +1610,19 @@ class SaleService {
       // a return settled — quietly applying less than was handed over leaves
       // the difference unaccounted for and tells nobody. An error at the till
       // is recoverable; a silent shortfall in the book is not.
-      if (settleAmount > (previousDue || 0)) {
+      /**
+       * ── The cashier CHOSE to hold the surplus ─────────────────────────────
+       *
+       * `advanceDeposit` is the till saying "they left ৳700 with us". It is
+       * never inferred from the tendered amount: a cashier keying ৳1,000 on a
+       * ৳300 bill is recording what crossed the counter, which is the normal
+       * case and the reason `computeInvoiceTotals` clamps `paid` at all.
+       * Auto-crediting it would manufacture phantom deposits at every till in
+       * the country. The cashier must click.
+       */
+      const wantsAdvance = toMoney(saleData?.advanceDeposit) > 0;
+
+      if (settleAmount > (previousDue || 0) && !wantsAdvance) {
         throw new AppError(
           `Due settlement of ${settleAmount} exceeds the outstanding due of ${previousDue || 0}`,
           `আগের বাকি এখন ৳${previousDue || 0} — জমার পরিমাণ ঠিক করে আবার চেষ্টা করুন`,
@@ -1908,12 +1920,33 @@ class SaleService {
      * against `previousDue`, read before any of it, so the ceiling is the debt
      * the customer walked in with and not one this sale just created.
      */
-    if (settleAmount > 0 && customer) {
+    /**
+     * The deposit the cashier chose to hold, on top of anything that settled
+     * the খাতা.
+     *
+     * Requires a customer, and REFUSES rather than ignores when there is none:
+     * a walk-in has no account to hold credit in, and silently handing the
+     * money back while the till says it was kept is the worst of both. Mirrors
+     * the `dueSettlement` guard a few lines up.
+     */
+    const advanceDeposit = toMoney(saleData?.advanceDeposit);
+    if (advanceDeposit > 0 && !customer) {
+      throw new AppError(
+        'Cannot hold an advance without a customer on the sale',
+        'কাস্টমার ছাড়া অগ্রিম জমা রাখা যাবে না',
+        400
+      );
+    }
+
+    if ((settleAmount > 0 || advanceDeposit > 0) && customer) {
       const settled = await dueSettlementService.settleCustomerDue({
         shopId,
         userId,
         customer,
-        amount: settleAmount,
+        // One movement: what cleared the খাতা plus what is being held. The
+        // service splits it back into two rows by the debt it found.
+        amount: quantizeMoney(settleAmount + advanceDeposit),
+        allowAdvance: advanceDeposit > 0,
         branchId,
         branchScoped: branchCustomerScope,
         // The invoice's dominant method unless the cashier named another — a
@@ -1943,8 +1976,13 @@ class SaleService {
        * Idempotent today, but this write exists to record one figure the hook
        * knows nothing about. Same reason `reviseSale` renames by update.
        */
-      if (settled.amount !== dueSettled) {
-        dueSettled = settled.amount;
+      // `settled.appliedToDue`, not `settled.amount`. With a deposit in play the
+      // two differ by exactly the held money, and `Sale.dueSettled` means "old
+      // debt this invoice cleared" — it is summed by the daily collections
+      // figure and printed on the receipt. Writing the combined movement here
+      // would report a deposit as debt collection on both.
+      if (settled.appliedToDue !== dueSettled) {
+        dueSettled = settled.appliedToDue;
         await Sale.updateOne({ _id: sale._id }, { $set: { dueSettled } }, sessionOpt);
         sale.dueSettled = dueSettled;
       }
@@ -2271,6 +2309,10 @@ class SaleService {
       customerId: customer?._id,
       customerName: finalCustomerName,
       customerPhone: finalCustomerPhone,
+      // What the shop KEPT of their money. The customer-trust line: without it
+      // a receipt for a ৳300 bill paid with ৳1,000 says nothing about the ৳700,
+      // and the only reasonable conclusion is that it was pocketed.
+      advanceHeld: advanceDeposit,
       sendSms: saleData.sendSms || false,
     });
 

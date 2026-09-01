@@ -2056,6 +2056,9 @@ class SMSService {
            */
           date: saleDoc?.createdAt || new Date(),
           customerName,
+          // Money of theirs the shop is holding, from this sale. Absent on every
+          // ordinary receipt, where it reads as 0 and prints no line.
+          advanceHeld: saleData.advanceHeld || 0,
           total: saleData.total,
           paid: saleData.paid,
           due: saleData.due,
