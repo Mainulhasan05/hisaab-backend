@@ -345,6 +345,22 @@ async function settleSupplierDue(
     shop: shopId, supplier: supplier._id, branch: branchId,
   }, session);
 
+  /**
+   * No `reallocateSupplierAdvance` here, deliberately — the other four money
+   * paths call it and this one does not need to.
+   *
+   * The walk above pays each bill exactly `bill.due`, which is already NET of
+   * whatever অগ্রিম that bill is carrying. So a bill's
+   * `outstandingBeforeAdvance` falls by precisely what was paid and lands back
+   * on its existing `advanceApplied`: the allocation this function would
+   * recompute is the allocation that is already there. Adding the call would
+   * put a pool aggregate and a full bill scan on the busiest supplier path in
+   * the app to discover, every single time, that there was nothing to do.
+   *
+   * `openingApplied` does not disturb it either — it settles debt that has no
+   * bill behind it, so no bill's capacity moves.
+   */
+
   await AuditLog.create([{
     shop: shopId,
     branch: branchId || null,
@@ -427,6 +443,9 @@ async function voidSupplierPayment(
   }
 
   const amount = quantizeMoney(payment.amount || 0);
+  // Which challans the vendor's remaining অগ্রিম re-spread onto once this row
+  // stopped counting. Empty for every vendor nobody has prepaid.
+  let reallocated = [];
 
   /**
    * Which bills this money landed on, and how much each took.
@@ -492,6 +511,33 @@ async function voidSupplierPayment(
     await SupplierBalance.recomputeBalances({
       shop: shopId, supplier: supplierId, branch: payment.branch,
     }, session);
+
+    /**
+     * ── And the bills the voided money was covering ─────────────────────────
+     *
+     * The three writes above put the VENDOR position back. They cannot put the
+     * bills back, and for an advance there is nothing above that even tries:
+     * the `slices` loop is the only thing that touches a challan, and an
+     * advance row carries neither `allocations` nor a `purchase`, so it walks
+     * zero bills.
+     *
+     * Left there, voiding a ৳1,00,000 prepayment re-raised the vendor's payable
+     * to ৳55,200 while the two challans holding that debt stayed at `due: 0,
+     * status: 'completed'` — money owed that no screen would ever show and that
+     * nobody could pay without editing the database. See
+     * `reallocateSupplierAdvance`'s header.
+     *
+     * Run for a voided PURCHASE_PAYMENT too, not only an advance. That path
+     * does put its own slices back, and it needs this as well: returning
+     * ৳20,000 of room to a bill means the vendor's remaining prepayment can now
+     * sit on it, and the recompute is what discovers that. Idempotent, so on
+     * the overwhelming majority of voids — a vendor who has never been paid
+     * ahead — it is one indexed aggregate that finds an empty pool and returns.
+     */
+    reallocated = await reallocateSupplierAdvance(
+      { shopId, supplierId, branchId: payment.branch || null },
+      session
+    );
   }
 
   await AuditLog.create([{
@@ -505,7 +551,193 @@ async function voidSupplierPayment(
     entity: { type: 'payment', id: payment._id, name: payment.receiptNo || String(payment._id) },
   }], sessionOpt);
 
-  return { payment, reversed: amount, bills: slices.length };
+  return { payment, reversed: amount, bills: slices.length, reallocated };
 }
 
-module.exports = { settleSupplierDue, voidSupplierPayment, readPayable };
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * SPREAD অগ্রিম BACK OVER THE BILLS IT IS SUPPOSED TO BE PAYING
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * `Purchase.advanceApplied` is the fourth term in a bill's `due`. Until this
+ * function existed it was written in exactly ONE place — `createPurchase`, at
+ * the moment the bill was raised — and never looked at again. That is the same
+ * mistake `reallocateCustomerInvoices` was written to avoid, and its header
+ * says why in one line: an ALLOCATION IS NOT AN EVENT. Both sides of it keep
+ * moving afterwards.
+ *
+ * ── What it cost ────────────────────────────────────────────────────────────
+ *
+ * A vendor holding ৳1,00,000 of the shop's money delivers ৳35,200 and then
+ * ৳20,000 of goods. Both bills are covered by the prepayment, so both read
+ * `due: 0, status: 'completed'`. The owner then discovers the advance was keyed
+ * against the wrong vendor and voids it. `voidSupplierPayment` correctly
+ * re-raises `Supplier.totalDue` to ৳55,200 — and touches no bill, because an
+ * advance row carries neither `allocations` nor a `purchase`. So the vendor
+ * position says ৳55,200 is owed while `Σ Purchase.due` says ৳0, and the two
+ * bills that hold the debt are marked COMPLETED, which is the part that makes
+ * it unrecoverable by hand: nobody will ever open them to pay.
+ *
+ * Cancelling a bill that consumed অগ্রিম frees the same money and strands it
+ * the same way. SUPPLIER_DUE_ADVANCE_PLAN.md P5 predicted both — "Phase G owes
+ * the other half: an advance must be CONSUMED against open bills, or ageing
+ * will show bills as due while the vendor position says nothing is owed".
+ *
+ * ── Why a recompute and not a delta ─────────────────────────────────────────
+ *
+ * Four things move the pool or the bills after an allocation is made: the
+ * advance is voided, a bill is cancelled, a কেনা ফেরত shrinks what a bill can
+ * absorb, a payment settles part of one directly. Four reversals would each
+ * need to get their own arithmetic right, they would drift, and the drift would
+ * be invisible — the exact shape of the bug being fixed. So this derives the
+ * whole allocation from scratch every time and discards whatever was there.
+ * Idempotent, safe to call from anywhere, and self-healing: a bill stranded by
+ * a void before this shipped repairs itself the next time anything touches the
+ * vendor.
+ *
+ * ── The pool is the GROSS advance, not `Supplier.advanceBalance` ────────────
+ *
+ * `advanceBalance` is `max(0, totalPaid − totalAmount − openingDue)` — what is
+ * LEFT after the bills consumed their share. Spreading that over the bills
+ * again would credit them twice. The pool is every live `supplier_advance` row,
+ * and what the bills cannot absorb is precisely what `advanceBalance` reports.
+ * The two then agree by construction rather than by maintenance, which is the
+ * relationship the customer pool already has with `Customer.advanceBalance`.
+ *
+ * ── Branch ──────────────────────────────────────────────────────────────────
+ *
+ * Both halves scoped to one branch, matching `settleSupplierDue`, which already
+ * walks only `branch: branchId || null` bills. Supplier money is partitioned
+ * that way throughout — a payment made at Dhaka may not write down
+ * Chittagong's payable — and an advance is a payment made early.
+ * `createPurchase` used to read the SHOP-WIDE `supplier.advanceBalance` to
+ * decide what a branch's bill could consume; that is the inconsistency, not the
+ * rule. A no-op distinction for single-branch shops, where every row carries
+ * `branch: null` (I-1).
+ *
+ * ── What is deliberately NOT allocated ──────────────────────────────────────
+ *
+ * `openingDue` — the pre-software খাতা figure — has no bill behind it, so
+ * anything the open bills cannot absorb simply stays unallocated and goes on
+ * reporting as `advanceBalance`. The same call `reallocateCustomerInvoices`
+ * makes, for the same reason: `Supplier.deriveDue` already carries the opening
+ * term, and inventing a bill to hang it on would be worse than leaving it be.
+ *
+ * @param {Object} p
+ * @param {ObjectId} p.shopId
+ * @param {ObjectId} p.supplierId
+ * @param {ObjectId|null} [p.branchId]
+ * @param {Object|null} session
+ * @returns {Promise<Array<{purchase, invoiceNo, applied, dueBefore, dueAfter, cleared}>>}
+ *   only the bills whose allocation CHANGED — the list a caller can show as
+ *   "এই অগ্রিম কোন চালানে বসেছে".
+ */
+async function reallocateSupplierAdvance(
+  { shopId, supplierId, branchId = null },
+  session = null
+) {
+  if (!supplierId) return [];
+
+  const sessionOpt = session ? { session } : {};
+  const branchMatch = branchId ? new mongoose.Types.ObjectId(String(branchId)) : null;
+
+  /**
+   * The pool, FIRST and deliberately.
+   *
+   * This runs on every purchase, every cancellation, every void and every কেনা
+   * ফেরত, and for the overwhelming majority of vendors — anyone who has never
+   * been paid ahead — the answer is "nothing to allocate". Served straight off
+   * `{shop, supplier}`, so the common case costs one indexed aggregate and
+   * stops: no bill scan and no writes.
+   */
+  const [pool] = await Payment.aggregate(
+    [
+      {
+        $match: {
+          shop: new mongoose.Types.ObjectId(String(shopId)),
+          supplier: new mongoose.Types.ObjectId(String(supplierId)),
+          branch: branchMatch,
+          type: PAYMENT_TYPES.SUPPLIER_ADVANCE,
+          // A voided advance is not money the vendor is holding, so it must not
+          // pay down a bill. `$ne` rather than `status: 'active'`: rows written
+          // before the field existed carry no `status` at all, and an equality
+          // test would exclude every one of them — emptying the pool and
+          // un-allocating every prepayment ever made.
+          status: { $ne: 'cancelled' },
+        },
+      },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ],
+    sessionOpt
+  );
+
+  let remaining = quantizeMoney(pool?.total || 0);
+
+  /**
+   * Every live bill, INCLUDING the ones with nothing left to absorb.
+   *
+   * Not `due: { $gt: 0 }`, which is what the debt-first walk in
+   * `settleSupplierDue` filters on — and reusing that filter here is the whole
+   * trap. A bill that a now-voided advance had driven to `due: 0` is exactly
+   * the bill that has to be found and reset; skipping it would leave the stale
+   * `advanceApplied` sitting on the one document this function exists to
+   * correct.
+   *
+   * Oldest first, on `date` then `createdAt` — the order `settleSupplierDue`
+   * uses, and what a shopkeeper means by "পুরোনো বাকি আগে শোধ". `date` is the
+   * backdatable business date every purchase reader filters on, so a bill
+   * entered late still queues on the day it happened.
+   */
+  const bills = await Purchase.find({
+    shop: shopId,
+    supplier: supplierId,
+    branch: branchId || null,
+    status: { $ne: 'cancelled' },
+  })
+    .sort({ date: 1, createdAt: 1 })
+    .session(session || null);
+
+  // Nothing in the pool and no bill carrying a stale share: the common path
+  // leaves without a single write.
+  if (remaining <= 0 && !bills.some((b) => (b.advanceApplied || 0) > 0)) return [];
+
+  const changed = [];
+
+  for (const bill of bills) {
+    // The SAME ceiling the `due` hook clamps to — see that static's note.
+    // Asking it here rather than repeating the arithmetic is what guarantees
+    // the amount this function decides is the amount the bill actually credits.
+    const capacity = Purchase.outstandingBeforeAdvance(bill);
+    const take = quantizeMoney(Math.min(Math.max(0, remaining), capacity));
+    const before = quantizeMoney(bill.advanceApplied || 0);
+
+    remaining = quantizeMoney(remaining - take);
+    if (take === before) continue;
+
+    const dueBefore = quantizeMoney(bill.due || 0);
+    bill.advanceApplied = take;
+    // `save()`, not `updateOne`: `due` and `status` are derived by the pre-save
+    // hook from this field among four, and patching them here by hand is how
+    // the two would come to disagree. Same reason `recordPayment` re-reads and
+    // saves rather than writing `due` itself.
+    await bill.save(sessionOpt);
+
+    changed.push({
+      purchase: bill._id,
+      invoiceNo: bill.invoiceNo,
+      applied: take,
+      dueBefore,
+      dueAfter: quantizeMoney(bill.due || 0),
+      cleared: (bill.due || 0) <= 0,
+    });
+  }
+
+  return changed;
+}
+
+module.exports = {
+  settleSupplierDue,
+  voidSupplierPayment,
+  readPayable,
+  reallocateSupplierAdvance,
+};

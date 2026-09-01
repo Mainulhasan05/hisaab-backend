@@ -39,6 +39,7 @@ jest.mock('../utils/transaction.util', () => ({
 
 const mongoose = require('mongoose');
 const purchaseService = require('../services/purchase.service');
+const supplierSettlement = require('../services/supplierSettlement.service');
 const paymentAccountService = require('../services/paymentAccount.service');
 const Purchase = require('../models/Purchase.model');
 const Product = require('../models/Product.model');
@@ -122,6 +123,11 @@ let balanceRow;
 let accountDeltas;
 
 beforeEach(() => {
+  // Re-spreading the vendor's অগ্রিম over their open bills is its own concern
+  // with its own suite (`supplierAdvanceReallocation.test.js`). Stubbed here so
+  // these tests stay about the path under them, and so the allocator does not
+  // reach for a connection this file does not have.
+  jest.spyOn(supplierSettlement, 'reallocateSupplierAdvance').mockResolvedValue([]);
   accountDeltas = [];
 
   // No কেনা ফেরত against this bill. `cancelPurchase` now asks first (D-4): a

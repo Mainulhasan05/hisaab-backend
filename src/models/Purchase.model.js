@@ -633,6 +633,33 @@ purchaseSchema.index({ shop: 1, status: 1, date: -1 }); // Status-filtered listi
 purchaseSchema.index({ shop: 1, createdAt: -1 }); // Invoice-number day count, unbranched listing
 
 // Pre-save: calculate due and status with numeric boundary checks
+/**
+ * How much of this bill is still unsettled BEFORE any অগ্রিম is credited.
+ *
+ * The ceiling on what the vendor's prepayment pool may put against this one
+ * bill, and the same quantity the `due` hook clamps `advanceApplied` to. It
+ * lives here, as one function, because two callers need it and they must agree
+ * exactly — see the note beside `advanceCredit` in the hook.
+ *
+ * `returnedAmount` is netted off for the reason the hook gives: a কেনা ফেরত
+ * shrinks the obligation, so it shrinks what a prepayment can be spent on. A
+ * bill that has been paid and returned down to nothing reports 0 and the
+ * allocator skips it, leaving that money for the next open bill instead of
+ * parking it where it would be clamped away.
+ *
+ * Takes a plain object as well as a document, so the allocator can ask the
+ * question of a `.lean()` row without hydrating it.
+ */
+purchaseSchema.statics.outstandingBeforeAdvance = function (doc) {
+  if (!doc) return 0;
+  const totalAmount = Number(doc.totalAmount) || 0;
+  const paid = Number(doc.paid) || 0;
+  const returned = Number.isFinite(doc.returnedAmount)
+    ? Math.min(Math.max(0, doc.returnedAmount), Math.max(0, totalAmount - paid))
+    : 0;
+  return Math.max(0, totalAmount - paid - returned);
+};
+
 purchaseSchema.pre('save', function(next) {
   if (!Number.isFinite(this.totalAmount) || this.totalAmount > 1e11) {
     this.totalAmount = Math.min(Math.max(0, this.totalAmount || 0), 1e11);
@@ -662,15 +689,23 @@ purchaseSchema.pre('save', function(next) {
     : 0;
 
   /**
-   * অগ্রিম this bill consumed. Read through a fallback and clamped to what is
-   * still outstanding after cash and returns, so it can never drive `due`
-   * below zero and can never be mistaken for money owed BACK to the shop —
-   * that half lives on `Supplier.advanceBalance`, where it belongs.
+   * অগ্রিম this bill consumed, clamped to the room it actually has left.
+   *
+   * Through `outstandingBeforeAdvance` rather than the arithmetic inline,
+   * because `reallocateSupplierAdvance` has to decide how much of the pool this
+   * bill can absorb and must reach the SAME number. Written out twice they
+   * drift, and the drift is silent: the allocator would hand the bill ৳9,000,
+   * this hook would clamp it to ৳7,000, and ৳2,000 of the vendor's money would
+   * stop existing with no book reporting an error.
+   *
+   * It can never drive `due` below zero and can never be mistaken for money
+   * owed BACK to the shop — that half lives on `Supplier.advanceBalance`,
+   * where it belongs.
    */
   const advanceCredit = Number.isFinite(this.advanceApplied)
     ? Math.min(
         Math.max(0, this.advanceApplied),
-        Math.max(0, this.totalAmount - this.paid - returnedCredit)
+        this.constructor.outstandingBeforeAdvance(this)
       )
     : 0;
 

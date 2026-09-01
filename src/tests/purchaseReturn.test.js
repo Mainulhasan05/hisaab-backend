@@ -37,6 +37,7 @@ jest.mock('../utils/transaction.util', () => ({
 
 const mongoose = require('mongoose');
 const purchaseReturnService = require('../services/purchaseReturn.service');
+const supplierSettlement = require('../services/supplierSettlement.service');
 const purchaseService = require('../services/purchase.service');
 const detailedReportService = require('../services/detailedReport.service');
 const paymentAccountService = require('../services/paymentAccount.service');
@@ -167,6 +168,11 @@ function stubEverything({
 }
 
 beforeEach(() => {
+  // Re-spreading the vendor's অগ্রিম over their open bills is its own concern
+  // with its own suite (`supplierAdvanceReallocation.test.js`). Stubbed here so
+  // these tests stay about the path under them, and so the allocator does not
+  // reach for a connection this file does not have.
+  jest.spyOn(supplierSettlement, 'reallocateSupplierAdvance').mockResolvedValue([]);
   bulkOps = [];
   bulkResults = [];
   stockTxns = [];

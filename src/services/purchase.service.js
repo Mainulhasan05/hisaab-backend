@@ -563,6 +563,10 @@ class PurchaseService {
      * the shopkeeper had not yet incurred when they handed the money over.
      */
     let dueSettlement = null;
+    // Which challans this vendor's অগ্রিম ended up sitting on. Filled by the
+    // rollup below and handed back so the till can say "৳৩৫,২০০ অগ্রিম থেকে
+    // বসেছে" rather than showing a bill that silently settled itself.
+    let advanceAllocations = [];
     const settleRequested = toMoney(purchaseData.dueSettlement);
     if (settleRequested > 0) {
       if (!supplierDoc) {
@@ -1012,11 +1016,6 @@ class PurchaseService {
       // `advanceBalance` instead of clamping at zero and losing the money.
       supplierDoc.totalAmount = quantizeMoney(supplierDoc.totalAmount + totalAmount);
       supplierDoc.totalPaid = quantizeMoney((supplierDoc.totalPaid || 0) + purchase.paid);
-      // Captured BEFORE the rollup: what the vendor was holding for us when
-      // this delivery arrived. After it, the derived figure has already fallen
-      // by this bill's share and cannot answer the question.
-      const advanceHeld = supplierDoc.advanceBalance || 0;
-
       Supplier.applyBalances(supplierDoc);
       await supplierDoc.save(sessionOpt);
 
@@ -1024,18 +1023,49 @@ class PurchaseService {
        * ── অগ্রিম is spent on the goods it was paid for ───────────────────────
        *
        * `Supplier.advanceBalance` falls on its own here, because it is derived
-       * from `totalAmount` and `totalAmount` just went up. The BILL has to
+       * from `totalAmount` and `totalAmount` just went up. The BILLS have to
        * learn about it too, or the vendor reads as owing nothing while their
-       * challan reads as fully due — and the payables ageing, which sums
+       * challans read as fully due — and the payables ageing, which sums
        * `Purchase.due`, would age debt that is already covered.
        *
-       * Guarded on a figure already in memory, so the overwhelming majority of
-       * deliveries — nobody prepaid anything — cost one comparison and no
-       * write.
+       * This used to be a one-shot `min(advanceHeld, purchase.due)` written
+       * onto THIS bill and never revisited. Two things were wrong with that and
+       * both are the same thing: it read the SHOP-WIDE `advanceBalance` to
+       * decide what a BRANCH's bill could take, and it made an allocation no
+       * later event could correct. See `reallocateSupplierAdvance`'s header for
+       * the ৳55,200 that went missing between the two books.
+       *
+       * A full recompute instead — which also picks up the case the one-shot
+       * could not see at all: a prepayment that has been sitting unspent while
+       * OLDER bills went unpaid now lands on the oldest of them, not on
+       * whichever one happens to be arriving.
+       *
+       * Costs one indexed aggregate for a vendor nobody has prepaid, which is
+       * very nearly all of them, and returns before touching a bill.
        */
-      if (advanceHeld > 0 && purchase.due > 0) {
-        purchase.advanceApplied = quantizeMoney(Math.min(advanceHeld, purchase.due));
-        await purchase.save(sessionOpt);
+      advanceAllocations = await supplierSettlement.reallocateSupplierAdvance(
+        { shopId, supplierId: supplierDoc._id, branchId },
+        session
+      );
+
+      /**
+       * Re-read, because the allocator saved a DIFFERENT instance of this same
+       * document — it walks the vendor's bills from the database, and this
+       * bill is one of them. Without this the copy held here still carries the
+       * pre-advance `due` and `status`, which is what the audit entry records
+       * and what the till is handed back: a challan the shopkeeper is told is
+       * fully due while the database has it settled.
+       *
+       * Only when the allocator actually moved this bill, so an ordinary
+       * delivery to a vendor nobody has prepaid costs no extra read.
+       */
+      if (advanceAllocations.some((a) => String(a.purchase) === String(purchase._id))) {
+        const fresh = await Purchase.findById(purchase._id).session(session || null);
+        if (fresh) {
+          purchase.advanceApplied = fresh.advanceApplied;
+          purchase.due = fresh.due;
+          purchase.status = fresh.status;
+        }
       }
 
       // Same arithmetic, split by the branch the goods were bought for.
@@ -1099,6 +1129,10 @@ class PurchaseService {
     // ৳৫০,০০০ বসেছে" without a second fetch — the same shape `recordPayment`
     // returns. Absent when nothing was settled, so an ordinary purchase's
     // response is unchanged (I-1).
+    if (advanceAllocations.length > 0) {
+      purchase.set('advanceAllocations', advanceAllocations, { strict: false });
+    }
+
     if (dueSettlement) {
       purchase.set('dueSettlementResult', {
         openingApplied: dueSettlement.openingApplied,
@@ -1578,6 +1612,33 @@ class PurchaseService {
     }
     await purchase.save(sessionOpt);
 
+    /**
+     * ── অগ্রিম this bill was consuming is now free ───────────────────────────
+     *
+     * Cancelling a challan covered by a prepayment hands that money back to the
+     * vendor's pool: `Supplier.advanceBalance` rises on its own, because
+     * `totalAmount` came down in the rollup above. Nothing moved it onto the
+     * NEXT open bill, so the shop read as holding ৳25,000 of credit with a
+     * vendor while a live challan from that same vendor sat at ৳10,200 due —
+     * and the payables ageing, which sums `Purchase.due`, aged debt the
+     * prepayment had already covered.
+     *
+     * ORDER IS LOAD-BEARING: this runs AFTER `status = 'cancelled'` is saved,
+     * not beside the rollups. The allocator walks `status: { $ne: 'cancelled' }`
+     * straight from the database, so run any earlier it would find this bill
+     * still live and put the freed money straight back onto the document being
+     * voided.
+     *
+     * Guarded on a supplier, because a সরাসরি কেনা has no vendor to hold a
+     * prepayment for.
+     */
+    if (purchase.supplier) {
+      await supplierSettlement.reallocateSupplierAdvance(
+        { shopId, supplierId: purchase.supplier, branchId: purchase.branch || null },
+        session
+      );
+    }
+
     // Audit log
     await AuditLog.create([{
       shop: shopId,
@@ -1828,6 +1889,22 @@ class PurchaseService {
           supplier: purchase.supplier,
           branch: purchase.branch,
         }, session);
+
+        /**
+         * Paying a bill by hand SHRINKS what it can absorb from the vendor's
+         * prepayment, so any অগ্রিম already sitting on it may now overflow.
+         *
+         * Concretely: a ৳20,000 challan carrying ৳20,000 of অগ্রিম is paid
+         * ৳20,000 in cash. Without this the bill would still claim the whole
+         * prepayment it no longer has room for, the `due` hook would clamp it
+         * away, and that money would stop existing rather than moving to the
+         * next open challan. The customer side calls its reallocator from
+         * `recordPayment` for exactly this reason.
+         */
+        await supplierSettlement.reallocateSupplierAdvance(
+          { shopId, supplierId: purchase.supplier, branchId: purchase.branch || null },
+          session
+        );
       }
 
       // Audit log

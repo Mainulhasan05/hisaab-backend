@@ -76,6 +76,10 @@ const stub = ({ openingDue = 0, totalAmount = 0, totalPaid = 0, bills = [] } = {
 beforeEach(() => {
   created = [];
   accountDeltas = [];
+  // The advance pool `reallocateSupplierAdvance` reads. Empty by default, so a
+  // test that does not care about the re-spread does not have to say so; the
+  // one that does overrides it.
+  jest.spyOn(Payment, 'aggregate').mockResolvedValue([]);
   jest.spyOn(Payment, 'create').mockImplementation(async (rows) => {
     created.push(...rows);
     return rows;
@@ -220,13 +224,25 @@ describe('a bill spends the advance it was paid for', () => {
     expect(Purchase.schema.path('advanceApplied').defaultValue).toBeUndefined();
   });
 
-  it('is consumed at checkout, guarded on a figure already in memory', () => {
-    // Without this the SUPPLIER reads as owing nothing — `advanceBalance` is
-    // derived and falls the moment `totalAmount` rises — while the BILL still
-    // reads as fully due, and the ageing report ages debt already covered.
+  it('is consumed when a bill arrives, by a recompute and not a one-shot', () => {
+    /**
+     * Without consumption the SUPPLIER reads as owing nothing — `advanceBalance`
+     * is derived and falls the moment `totalAmount` rises — while the BILL still
+     * reads as fully due, and the ageing report ages debt already covered.
+     *
+     * This used to assert a one-shot: `min(advanceHeld, purchase.due)` written
+     * onto the arriving bill from the SHOP-WIDE `supplier.advanceBalance`, and
+     * never revisited. Two faults in one line — it let a shop-wide pool decide
+     * what a BRANCH's bill could take, and it made an allocation that no later
+     * event could correct. Voiding the advance afterwards left ৳55,200 owed on
+     * the vendor and ৳0 across the challans, all of them marked completed.
+     *
+     * The recompute replaces it and is pinned in full by
+     * `supplierAdvanceReallocation.test.js`.
+     */
     const body = read('../services/purchase.service');
-    expect(body).toContain('purchase.advanceApplied = quantizeMoney(Math.min(advanceHeld, purchase.due))');
-    expect(body).toContain('const advanceHeld = supplierDoc.advanceBalance || 0;');
+    expect(body).toContain('reallocateSupplierAdvance');
+    expect(body).not.toContain('const advanceHeld = supplierDoc.advanceBalance || 0;');
   });
 });
 
@@ -257,6 +273,54 @@ describe('an advance can be taken back off the books', () => {
     expect(res.reversed).toBe(45000);
     expect(accountDeltas).toEqual([expect.objectContaining({ amount: 45000 })]);
     expect(supplierDoc.advanceBalance).toBe(0);
+  });
+
+  it('re-opens the challans the voided advance was covering', async () => {
+    /**
+     * THE REGRESSION, at the door rather than in the allocator.
+     *
+     * An advance row carries neither `allocations` nor a `purchase`, so the
+     * slices loop above walks ZERO bills. The vendor position was put back
+     * correctly and the challans it had settled were not: ৳55,200 owed on the
+     * supplier, ৳0 across the bills, and both of them marked `completed` — a
+     * debt no screen could show and no counter could take money for.
+     */
+    const bill = new Purchase({
+      shop: SHOP, supplier: SUPPLIER, supplierName: 'করিম ট্রেডার্স',
+      invoiceNo: 'P-1', items: [], totalAmount: 35200, paid: 0,
+      advanceApplied: 35200,
+    });
+    const fire = () => (Purchase.schema.s.hooks._pres.get('save') || [])
+      .forEach((h) => h.fn.call(bill, () => {}));
+    fire();
+    bill.save = jest.fn(async () => { fire(); return bill; });
+    expect(bill.due).toBe(0);
+
+    const doc = {
+      _id: new mongoose.Types.ObjectId(),
+      shop: SHOP, supplier: SUPPLIER, branch: null,
+      type: PAYMENT_TYPES.SUPPLIER_ADVANCE, status: 'active',
+      amount: 45000, account: ACCOUNT, allocations: [], purchase: null,
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    jest.spyOn(Payment, 'findOne').mockResolvedValue(doc);
+    // The bill is still live; the pool is empty because the row just voided was
+    // the only one.
+    stub({ totalAmount: 35200, totalPaid: 45000, bills: [bill] });
+    jest.spyOn(Supplier, 'findOne').mockReturnValue({
+      session: () => Promise.resolve(supplierDoc),
+    });
+
+    const res = await settlement.voidSupplierPayment({
+      shopId: SHOP, userId: USER, paymentId: doc._id, reason: 'ভুল সরবরাহকারী',
+    });
+
+    expect(bill.advanceApplied).toBe(0);
+    expect(bill.due).toBe(35200);
+    expect(bill.status).not.toBe('completed');
+    // The two books say the same number again.
+    expect(supplierDoc.totalDue).toBe(bill.due);
+    expect(res.reallocated).toHaveLength(1);
   });
 });
 

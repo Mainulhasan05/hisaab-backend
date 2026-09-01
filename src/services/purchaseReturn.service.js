@@ -7,6 +7,7 @@ const Payment = require('../models/Payment.model');
 const StockTransaction = require('../models/StockTransaction.model');
 const AuditLog = require('../models/AuditLog.model');
 const paymentAccountService = require('./paymentAccount.service');
+const supplierSettlement = require('./supplierSettlement.service');
 const { AppError } = require('../middleware/error.middleware');
 const { AUDIT_ACTIONS, PAYMENT_TYPES, STOCK_TRANSACTION_TYPES } = require('../config/constants');
 const { branchFilter } = require('../utils/branchScope.util');
@@ -612,6 +613,28 @@ class PurchaseReturnService {
           await SupplierBalance.recomputeBalances({
             shop: shopId, supplier: purchase.supplier, branch: purchase.branch,
           }, session);
+
+          /**
+           * ── A ফেরত shrinks what a bill can hold, so the অগ্রিম re-spreads ──
+           *
+           * `Purchase.advanceApplied` is clamped by the `due` hook to what is
+           * outstanding AFTER returns, so the credit this bill was taking from
+           * the vendor's prepayment just fell — silently, and with nowhere for
+           * the freed money to go. The bill's own figures stayed right; the
+           * vendor's pool and the next open challan did not, and the difference
+           * would sit there until some unrelated event days later happened to
+           * recompute it.
+           *
+           * The allocator is a full recompute over `outstandingBeforeAdvance`,
+           * which is the same ceiling the hook clamps to, so it hands the
+           * released amount to the next bill in the queue with no reversal
+           * arithmetic of its own to get wrong. Idempotent, and one indexed
+           * aggregate for a vendor nobody has prepaid.
+           */
+          await supplierSettlement.reallocateSupplierAdvance(
+            { shopId, supplierId: purchase.supplier, branchId: purchase.branch || null },
+            session
+          );
         }
       } else if (refundMethod === 'cash' && totalCredit > 0) {
         // Money IN. `purchase_refund`, never `refund` — see the type's note in

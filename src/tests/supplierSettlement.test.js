@@ -90,6 +90,11 @@ const stub = ({ openingDue = 0, totalAmount = 0, totalPaid = 0, bills = [] } = {
 beforeEach(() => {
   created = [];
   accountDeltas = [];
+  // The advance pool. Empty, so `reallocateSupplierAdvance` short-circuits
+  // before it reaches for a real connection — this suite pins the SETTLEMENT
+  // writes, and the allocation onto bills has its own file
+  // (`supplierAdvanceReallocation.test.js`).
+  jest.spyOn(Payment, 'aggregate').mockResolvedValue([]);
   jest.spyOn(Payment, 'create').mockImplementation(async (rows) => {
     created.push(...rows);
     return rows;
@@ -322,6 +327,11 @@ describe('voiding a supplier payment', () => {
       totalDue: 15000, advanceBalance: 0,
       save: jest.fn().mockResolvedValue(undefined),
     };
+    // Voiding now re-spreads whatever অগ্রিম the vendor still holds over their
+    // open bills. Empty queue here; the spread itself is pinned elsewhere.
+    jest.spyOn(Purchase, 'find').mockReturnValue({
+      sort: () => ({ session: () => Promise.resolve([]) }),
+    });
   });
 
   it('puts the cash back and raises the payable again', async () => {
