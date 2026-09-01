@@ -210,6 +210,21 @@ const createSale = Joi.object({
   }).allow(null),
 
   /**
+   * "They left ৳700 with us rather than taking it back."
+   *
+   * MUST be listed here or `stripUnknown` deletes it before `createSale` sees
+   * it, and the failure is the worst shape available: the cashier ticks অগ্রিম
+   * জমা, the screen says the money is being kept, the server never hears about
+   * it, the surplus is handed back as change — and nothing anywhere reports an
+   * error. Same trap `creditOverride` and `saleDate` document.
+   *
+   * Bounded here only as a number. The real rules — that there must be a
+   * customer to hold it for, and that any debt is settled before anything
+   * becomes a deposit — are the server's, because only it knows the book.
+   */
+  advanceDeposit: money,
+
+  /**
    * "Sell even though this pushes the customer past their বাকির সীমা."
    *
    * MUST be listed here or `stripUnknown` deletes it before `createSale` sees

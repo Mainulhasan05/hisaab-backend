@@ -365,6 +365,28 @@ describe('the field survives the route it arrives on', () => {
     expect(value.dueSettlement).toEqual({ amount: 2200 });
   });
 
+  it('carries advanceDeposit through validation instead of stripping it', () => {
+    // The same trap, one field along, and the failure is the worst shape
+    // available: the cashier ticks অগ্রিম জমা, the screen says the money is
+    // being kept, the server never hears about it, the surplus is handed back
+    // as change — and nothing anywhere reports an error.
+    const { error, value } = schema.validate(body({ advanceDeposit: 700 }), {
+      abortEarly: false,
+      stripUnknown: true,
+    });
+
+    expect(error).toBeUndefined();
+    expect(value.advanceDeposit).toBe(700);
+  });
+
+  it('refuses a negative deposit at the boundary', () => {
+    const { error } = schema.validate(body({ advanceDeposit: -700 }), {
+      abortEarly: false,
+      stripUnknown: true,
+    });
+    expect(error).toBeDefined();
+  });
+
   it('accepts a named method and account for the collection leg', () => {
     const { error, value } = schema.validate(
       body({ dueSettlement: { amount: 2200, method: 'bkash', account: 'b'.repeat(24) } }),
