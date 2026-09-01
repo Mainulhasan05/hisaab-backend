@@ -1156,11 +1156,28 @@ async function cancelDueCollection(
     session: session || null,
   });
 
-  // 3 — the shop-wide rollup. Quantized per write, like every other mutation of
-  // these two fields, so a customer settled in instalments does not end on a
-  // 1e-13 residue that keeps them on the বাকি list forever.
+  // 3 — the shop-wide rollup. The COMPONENT moves; both money halves are
+  // derived from it.
+  //
+  // This used to patch `totalDue` by hand — `+= amount` — and never touch
+  // `advanceBalance` at all. On a `due_collection` that was merely fragile; on
+  // an `advance` it was simply wrong twice over. Void a ৳400 deposit taken from
+  // a customer who owed nothing and the old arithmetic left them owing ৳400
+  // they had never been billed for AND still holding ৳400 of credit — both
+  // stored invariants of `Customer` broken by one button, in the direction a
+  // shopkeeper reads as "the software invented a debt".
+  //
+  // `applyBalances` cannot produce that pair: it recomputes both halves from
+  // `totalPurchases + openingDue − totalPaid` and clamps each at zero, so
+  // exactly one of them can be non-zero. Same two-step as `cancelSale` and the
+  // returns paths — the reversal paths disagreeing on how the headline figure
+  // is produced is what let them drift apart in the first place.
+  //
+  // Quantized per write, like every other mutation of these fields, so a
+  // customer settled in instalments does not end on a 1e-13 residue that keeps
+  // them on the বাকি list forever.
   customer.totalPaid = quantizeMoney((customer.totalPaid || 0) - amount);
-  customer.totalDue = quantizeMoney((customer.totalDue || 0) + amount);
+  Customer.applyBalances(customer);
   await customer.save(sessionOpt);
 
   // 4 — each branch row gets back exactly what it gave.
@@ -1180,14 +1197,23 @@ async function cancelDueCollection(
   for (const entry of toRestore) {
     const share = quantizeMoney(Number(entry.amount) || 0);
     if (share <= 0) continue;
+    // The COMPONENT only, then a re-derive — mirroring the shop-wide clamp
+    // above. `due: share` used to ride along here and had to go with it:
+    // clamping one book and `$inc`-ing the other is precisely how
+    // `Σ CustomerBalance.totalDue === Customer.totalDue` stops holding, and on
+    // a voided deposit the `$inc` was pushing a branch row into debt for money
+    // the branch had only ever been holding.
     await CustomerBalance.applyDelta(
       {
         shop: shopId,
         customer: customer._id,
         branch: entry.branch,
         paid: -share,
-        due: share,
       },
+      session
+    );
+    await CustomerBalance.recomputeBalances(
+      { shop: shopId, customer: customer._id, branch: entry.branch },
       session
     );
   }

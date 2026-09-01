@@ -1938,6 +1938,40 @@ class SaleService {
       );
     }
 
+    /**
+     * How the খাতা money was tendered, and into which drawer.
+     *
+     * ── Why `?.` and not `.` ──────────────────────────────────────────────
+     *
+     * `rawDueSettlement` defaults to NULL, and the block below is entered on
+     * `settleAmount > 0 || advanceDeposit > 0`. Only the first of those implies
+     * a `dueSettlement` was posted. A pure deposit — the customer owes nothing,
+     * hands over ৳3,000 on a ৳2,600 bill and the cashier taps অগ্রিম জমা রাখুন
+     * — sends `advanceDeposit` alone, so reading `.method` off the null threw a
+     * TypeError and the whole checkout came back as a 500. The deposit path was
+     * unreachable for exactly the customers it was built for.
+     *
+     * ── Why the leg's account and not the method default ──────────────────
+     *
+     * The deposit is the SAME notes as the bill: one customer, one counter, one
+     * handover. Falling through to `resolveAccountForMethod` books the ৳2,600
+     * into the drawer the cashier picked and the ৳400 into whichever account
+     * happens to be that method's default — two accounts for one movement, and
+     * a cash count that comes up short in one and over in the other with no row
+     * to explain either. So the dominant leg's account is the fallback, exactly
+     * as the `atCheckout` Payment row below uses it.
+     *
+     * Guarded on the methods MATCHING, because they need not: a cashier can pay
+     * the bill by bKash and settle the খাতা in cash. When they differ there is
+     * no leg to borrow from and the method's own default is the right answer —
+     * and `assertUsableAccount` would refuse the mismatched pair anyway.
+     */
+    const settlementMethod = rawDueSettlement?.method || paymentMethod;
+    const settlementAccount = rawDueSettlement?.account
+      || (settlementMethod === paymentMethod
+        ? payments.find((leg) => leg.method === paymentMethod)?.account || null
+        : null);
+
     if ((settleAmount > 0 || advanceDeposit > 0) && customer) {
       const settled = await dueSettlementService.settleCustomerDue({
         shopId,
@@ -1951,8 +1985,8 @@ class SaleService {
         branchScoped: branchCustomerScope,
         // The invoice's dominant method unless the cashier named another — a
         // customer can settle the খাতা in cash while paying the bill by bKash.
-        method: rawDueSettlement.method || paymentMethod,
-        rawAccount: rawDueSettlement.account || null,
+        method: settlementMethod,
+        rawAccount: settlementAccount,
         /**
          * Dated to the sale it rode in on, not to now.
          *
@@ -2488,32 +2522,68 @@ class SaleService {
       // Update customer balance if applicable
       if (claimed.customer) {
         /**
-         * `new: true` so the post-payment balance comes back from the write
-         * that produced it.
+         * The COMPONENT moves; both money halves are derived from it.
          *
-         * The receipt SMS used to re-read this document from a background
-         * callback scheduled before the commit — a race it lost often enough
-         * to text customers the balance they had BEFORE paying. Taking the
-         * figure from the update itself removes the second read entirely, and
-         * it is the same number the sale page's preview showed the shopkeeper
-         * (`customer.totalDue` minus the amount).
+         * This was the last `$inc: { totalDue: -amount }` left in the codebase,
+         * and `Customer.advanceBalance` says in its own field note that it is
+         * derived and NEVER `$inc`-ed. Settling an invoice by hand is the one
+         * path that had not been converted, and it fails in the two directions
+         * a shopkeeper notices:
+         *
+         *   · PAST ZERO. `amount` is bounded by `sale.due`, which is the
+         *     INVOICE's book. `Customer.totalDue` is the customer's, and the
+         *     two legitimately differ — a customer holding a deposit at one
+         *     branch while another branch's invoice is open, a write-off
+         *     through `DueAdjustment`, an over-refund. Subtracting the invoice
+         *     figure from the customer figure then lands below zero, and the
+         *     customer page shows a negative বাকি.
+         *   · A STALE DEPOSIT. Nothing here recomputed `advanceBalance`, so a
+         *     customer who was in credit stayed "in credit" by the stored
+         *     figure after spending it — the shop's book claiming to hold money
+         *     it had just been paid with.
+         *
+         * `applyBalances` cannot express either: it recomputes both halves from
+         * `totalPurchases + openingDue − totalPaid` and clamps each at zero, so
+         * it is self-correcting rather than cumulative. Same two-step as
+         * `cancelSale`, `cancelDueCollection` and the returns paths.
+         *
+         * Read-modify-save inside the transaction rather than a `$inc`, and the
+         * balance still comes back from the write that produced it — which is
+         * the property this block was built for. The receipt SMS used to
+         * re-read the document from a background callback scheduled before the
+         * commit, a race it lost often enough to text customers the balance
+         * they had BEFORE paying. That second read stays gone.
          */
-        const updatedCustomer = await Customer.findByIdAndUpdate(claimed.customer, {
-          $inc: { totalPaid: amount, totalDue: -amount },
-        }, { ...sessionOpt, new: true });
-        customerDueAfter = Math.max(0, quantizeMoney(updatedCustomer?.totalDue || 0));
+        const payingCustomer = await Customer
+          .findById(claimed.customer)
+          .session(session || null);
+        if (payingCustomer) {
+          payingCustomer.totalPaid = quantizeMoney((payingCustomer.totalPaid || 0) + amount);
+          Customer.applyBalances(payingCustomer);
+          await payingCustomer.save(sessionOpt);
+          customerDueAfter = quantizeMoney(payingCustomer.totalDue || 0);
+        }
 
         // Attributed to the SALE's branch, not the collector's. The due being
         // cleared belongs to whichever branch raised the invoice; crediting it to
         // the branch that happened to take the cash would leave the issuing
         // branch permanently overstated and the collecting one negative. The
         // Payment row above keeps `sale.branch` for the same reason.
+        // The component only, then a re-derive — mirroring the clamp above, for
+        // the reason `cancelSale` spells out beside its own pair: clamping the
+        // shop-wide book while `$inc`-ing the per-branch rows is exactly how
+        // `Σ CustomerBalance.totalDue === Customer.totalDue` stops holding
+        // without anything looking broken.
         await CustomerBalance.applyDelta({
           shop: shopId,
           customer: claimed.customer,
           branch: claimed.branch,
           paid: amount,
-          due: -amount,
+        }, session);
+        await CustomerBalance.recomputeBalances({
+          shop: shopId,
+          customer: claimed.customer,
+          branch: claimed.branch,
         }, session);
 
         // Settling an invoice directly SHRINKS what it can absorb from the

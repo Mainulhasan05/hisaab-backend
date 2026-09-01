@@ -241,6 +241,56 @@ describe('the cashier must click', () => {
     expect(sale).toContain('Cannot hold an advance without a customer');
   });
 
+  it('takes a deposit when NOTHING was posted to settle', async () => {
+    /**
+     * THE REGRESSION — a 500 at the till, on the exact shape this feature was
+     * built for.
+     *
+     * `dueSettlement` defaults to `null`, and the settlement block is entered
+     * on `settleAmount > 0 || advanceDeposit > 0`. Only the FIRST of those
+     * implies a `dueSettlement` was posted. A customer who owes nothing, buys
+     * ৳2,600, hands over ৳3,000 and has the cashier tap অগ্রিম জমা রাখুন sends
+     * `advanceDeposit` alone — so reading `.method` off the null threw
+     * `Cannot read properties of null (reading 'method')` and the whole
+     * checkout came back as a 500. Nothing was written; the sale simply could
+     * not be rung up.
+     *
+     * The client is not at fault and must not be changed to compensate: the
+     * POS deliberately sends `dueSettlement` only when the cashier left an
+     * amount in the box (see the note beside the payload in the sale page), so
+     * an ordinary deposit legitimately carries no settlement at all.
+     */
+    const src = read('../services/sale.service');
+
+    // No un-guarded read of the two fields the deposit path needs. `.amount`
+    // is deliberately not in this list: it is read inside
+    // `else if (rawDueSettlement && ...)`, which is a branch a deposit-only
+    // payload never enters. These two are read on the way OUT of that branch,
+    // where the null is still live.
+    expect(src).not.toContain('rawDueSettlement.method');
+    expect(src).not.toContain('rawDueSettlement.account');
+
+    // And the fallback resolves without one.
+    expect(src).toContain('rawDueSettlement?.method || paymentMethod');
+  });
+
+  it('books the deposit into the drawer the bill was paid into', () => {
+    /**
+     * One customer, one counter, one handover — the deposit is the same notes
+     * as the bill. Falling through to the method's DEFAULT account books the
+     * ৳2,600 where the cashier chose and the ৳400 somewhere else: two accounts
+     * for one movement, and a cash count over in one and short in the other
+     * with no row to explain either.
+     *
+     * Guarded on the methods matching, because they need not — a cashier can
+     * pay the bill by bKash and settle the খাতা in cash, and then there is no
+     * leg to borrow from.
+     */
+    const src = read('../services/sale.service');
+    expect(src).toContain('settlementMethod === paymentMethod');
+    expect(src).toContain("payments.find((leg) => leg.method === paymentMethod)?.account");
+  });
+
   it('records only the debt portion as `Sale.dueSettled`', () => {
     // That field is summed by the daily collections figure and printed on the
     // receipt. Writing the combined movement would report a deposit as debt

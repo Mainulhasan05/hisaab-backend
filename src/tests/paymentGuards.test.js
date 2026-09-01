@@ -62,10 +62,34 @@ function stubSale(over = {}) {
   return doc;
 }
 
+/**
+ * The customer `recordPayment` settles against, built from COMPONENTS.
+ *
+ * `recordPayment` no longer `$inc`s `totalDue` — it moves `totalPaid` and
+ * re-derives both money halves, the same two-step every other reversal path
+ * uses. So the stub has to be a document that can be re-derived, not a pair of
+ * free-standing totals.
+ */
+let paidCustomer;
+const stubPayingCustomer = ({ purchases = 1000, paid = 500, opening = 0 } = {}) => {
+  const net = purchases + opening - paid;
+  paidCustomer = {
+    _id: CUSTOMER, shop: SHOP,
+    totalPurchases: purchases, openingDue: opening, totalPaid: paid,
+    totalDue: Math.max(0, net), advanceBalance: Math.max(0, -net),
+    save: jest.fn().mockResolvedValue(undefined),
+  };
+  return paidCustomer;
+};
+
 beforeEach(() => {
   jest.spyOn(Payment, 'create').mockResolvedValue([{ _id: new mongoose.Types.ObjectId() }]);
-  jest.spyOn(Customer, 'findByIdAndUpdate').mockResolvedValue({});
+  stubPayingCustomer();
+  jest.spyOn(Customer, 'findById').mockReturnValue({
+    session: () => Promise.resolve(paidCustomer),
+  });
   jest.spyOn(CustomerBalance, 'applyDelta').mockResolvedValue({});
+  jest.spyOn(CustomerBalance, 'recomputeBalances').mockResolvedValue(null);
   jest.spyOn(CustomerBalance, 'settleDue').mockResolvedValue([]);
   // The allocation pool. Empty, so `reallocateCustomerInvoices` short-circuits
   // before it reads a shop or an invoice — these suites pin the ROLLUP writes,
@@ -91,7 +115,7 @@ describe('A. a payment cannot be negative or zero', () => {
     // Nothing may have moved.
     expect(Sale.updateOne).not.toHaveBeenCalled();
     expect(Payment.create).not.toHaveBeenCalled();
-    expect(Customer.findByIdAndUpdate).not.toHaveBeenCalled();
+    expect(paidCustomer.save).not.toHaveBeenCalled();
   });
 
   test('recordPayment refuses zero and non-numeric amounts', async () => {
@@ -175,7 +199,7 @@ describe('B. two collections cannot both settle the same due', () => {
     // Critically: no Payment row and no customer decrement for a payment that
     // did not land. Both used to survive the lost race.
     expect(Payment.create).not.toHaveBeenCalled();
-    expect(Customer.findByIdAndUpdate).not.toHaveBeenCalled();
+    expect(paidCustomer.save).not.toHaveBeenCalled();
     expect(CustomerBalance.applyDelta).not.toHaveBeenCalled();
   });
 
@@ -197,6 +221,36 @@ describe('B. two collections cannot both settle the same due', () => {
 
     expect(CustomerBalance.applyDelta).toHaveBeenCalledTimes(1);
     const [delta] = CustomerBalance.applyDelta.mock.calls[0];
-    expect(delta).toMatchObject({ branch, paid: 200, due: -200 });
+    // The COMPONENT only, then a re-derive. `due: -200` used to ride along
+    // here; it had to go, because clamping the shop-wide book while `$inc`-ing
+    // the branch row is how the two stop agreeing.
+    expect(delta).toMatchObject({ branch, paid: 200 });
+    expect(delta.due).toBeUndefined();
+    expect(CustomerBalance.recomputeBalances).toHaveBeenCalledWith(
+      expect.objectContaining({ branch, customer: CUSTOMER }), null
+    );
+  });
+
+  test('settling an invoice cannot push the customer below zero', async () => {
+    /**
+     * THE REGRESSION. `amount` is bounded by `sale.due` — the INVOICE's book.
+     * `Customer.totalDue` is the customer's, and the two legitimately differ: a
+     * deposit held at one branch while another branch's invoice is open, a
+     * write-off through `DueAdjustment`, an over-refund. The old
+     * `$inc: { totalDue: -amount }` subtracted one from the other and landed
+     * below zero — the customer page showing a negative বাকি — while
+     * `advanceBalance` sat stale beside it, the shop's book claiming to hold
+     * money it had just been paid with.
+     */
+    // Owes ৳200 on paper, but shop-wide they are ৳300 in credit.
+    stubPayingCustomer({ purchases: 1000, paid: 1300 });
+    stubSale({ due: 200 });
+    jest.spyOn(Sale, 'updateOne').mockResolvedValue({ modifiedCount: 1 });
+
+    await saleService.recordPayment(SHOP, USER, 'sale-id', { amount: 200 });
+
+    expect(paidCustomer.totalPaid).toBe(1500);
+    expect(paidCustomer.totalDue).toBe(0);
+    expect(paidCustomer.advanceBalance).toBe(500);
   });
 });

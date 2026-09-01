@@ -51,11 +51,22 @@ const ACCOUNT = new mongoose.Types.ObjectId();
 
 const req = { shop: { _id: SHOP }, user: { _id: USER, isOwner: true } };
 
-/** The customer as they stand AFTER the collection being cancelled. */
-const stubCustomer = ({ totalDue = 3000, totalPaid = 2000 } = {}) => {
+/**
+ * The customer as they stand AFTER the collection being cancelled.
+ *
+ * Built from the three COMPONENTS, with both money halves derived from them —
+ * because that is the only shape the real document is ever in. A stub that sets
+ * `totalDue` freely can assert arithmetic the model forbids: `totalDue: 3000`
+ * beside `totalPaid: 2000` and no purchases describes a customer who cannot
+ * exist, and a reversal validated against it is validated against nothing.
+ */
+const stubCustomer = ({ purchases = 5000, paid = 2000, opening = 0 } = {}) => {
+  const net = purchases + opening - paid;
   const doc = {
     _id: CUSTOMER, shop: SHOP, name: 'করিম', phone: '01700000000',
-    totalPaid, totalDue,
+    totalPurchases: purchases, openingDue: opening, totalPaid: paid,
+    totalDue: Math.max(0, net),
+    advanceBalance: Math.max(0, -net),
     save: jest.fn().mockResolvedValue(undefined),
   };
   jest.spyOn(Customer, 'findOne').mockResolvedValue(doc);
@@ -84,6 +95,7 @@ const stubPayment = (overrides = {}) => {
 
 let accountDeltas;
 let balanceDeltas;
+let recomputed;
 
 beforeEach(() => {
   accountDeltas = [];
@@ -93,6 +105,13 @@ beforeEach(() => {
   });
   jest.spyOn(CustomerBalance, 'applyDelta').mockImplementation(async (d) => {
     balanceDeltas.push(d);
+  });
+  // The re-derive that follows every delta. Stubbed because the real static
+  // reads the row back off a connection these suites do not have.
+  recomputed = [];
+  jest.spyOn(CustomerBalance, 'recomputeBalances').mockImplementation(async (d) => {
+    recomputed.push(d);
+    return null;
   });
   // Empty allocation pool, so `reallocateCustomerInvoices` short-circuits
   // before it reaches for a real connection.
@@ -145,7 +164,9 @@ describe('cancelDueCollection — undoing the settlement', () => {
   it('puts the due back on the customer and removes the credit', async () => {
     // Both halves. Moving `totalDue` without `totalPaid` leaves the customer's
     // lifetime-paid figure permanently overstating what they handed over.
-    const customer = stubCustomer({ totalDue: 3000, totalPaid: 2000 });
+    // ৳5,000 of goods, ৳2,000 of it collected — void the collection and they
+    // are back to owing the lot.
+    const customer = stubCustomer({ purchases: 5000, paid: 2000 });
     stubPayment();
 
     await cancel();
@@ -153,6 +174,32 @@ describe('cancelDueCollection — undoing the settlement', () => {
     expect(customer.totalDue).toBe(5000);
     expect(customer.totalPaid).toBe(0);
     expect(customer.save).toHaveBeenCalled();
+  });
+
+  it('voiding an অগ্রিম does not manufacture a debt', async () => {
+    /**
+     * THE REGRESSION. This used to read `totalDue += amount` and never touch
+     * `advanceBalance` at all, so voiding a ৳400 deposit taken from a customer
+     * who owed nothing left them owing ৳400 they had never been billed for AND
+     * still holding ৳400 of credit — both of `Customer`'s stored invariants
+     * broken by one button, in the direction a shopkeeper reads as "the
+     * software invented a debt".
+     *
+     * A deposit is cancellable through this same door on purpose (the delete
+     * guard refuses to remove a customer holding one), so this is not a
+     * theoretical shape.
+     */
+    // Bought ৳2,600, handed over ৳3,000 — ৳400 of it held as অগ্রিম.
+    const customer = stubCustomer({ purchases: 2600, paid: 3000 });
+    expect(customer.advanceBalance).toBe(400);
+    stubPayment({ type: 'advance', amount: 400, branchAllocation: [] });
+
+    await cancel('ভুল করে অগ্রিম রাখা হয়েছিল');
+
+    // The deposit is gone and NOTHING took its place.
+    expect(customer.totalPaid).toBe(2600);
+    expect(customer.totalDue).toBe(0);
+    expect(customer.advanceBalance).toBe(0);
   });
 
   it('re-derives the invoice allocation instead of reversing it by hand', async () => {
@@ -195,10 +242,15 @@ describe('branch attribution', () => {
 
     await cancel();
 
+    // The COMPONENT only — `due` is re-derived per branch, not `$inc`-ed.
+    // Clamping the shop-wide book while incrementing the branch rows is exactly
+    // how `Σ CustomerBalance.totalDue === Customer.totalDue` stops holding.
     expect(balanceDeltas).toEqual([
-      expect.objectContaining({ branch: BRANCH_A, paid: -1500, due: 1500 }),
-      expect.objectContaining({ branch: BRANCH_B, paid: -500, due: 500 }),
+      expect.objectContaining({ branch: BRANCH_A, paid: -1500 }),
+      expect.objectContaining({ branch: BRANCH_B, paid: -500 }),
     ]);
+    expect(balanceDeltas.every((d) => d.due === undefined)).toBe(true);
+    expect(recomputed.map((r) => r.branch)).toEqual([BRANCH_A, BRANCH_B]);
   });
 
   it('falls back to the payment\'s own branch when there is no snapshot', async () => {
@@ -212,7 +264,10 @@ describe('branch attribution', () => {
     await cancel();
 
     expect(balanceDeltas).toEqual([
-      expect.objectContaining({ branch: BRANCH_A, paid: -2000, due: 2000 }),
+      expect.objectContaining({ branch: BRANCH_A, paid: -2000 }),
+    ]);
+    expect(recomputed).toEqual([
+      expect.objectContaining({ branch: BRANCH_A }),
     ]);
   });
 
@@ -223,6 +278,7 @@ describe('branch attribution', () => {
     await cancel();
 
     expect(balanceDeltas).toEqual([]);
+    expect(recomputed).toEqual([]);
   });
 });
 
