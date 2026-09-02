@@ -568,7 +568,61 @@ class PurchaseService {
     // বসেছে" rather than showing a bill that silently settled itself.
     let advanceAllocations = [];
     const settleRequested = toMoney(purchaseData.dueSettlement);
-    if (settleRequested > 0) {
+
+    /**
+     * ── আগাম, handed over with the goods ────────────────────────────────────
+     *
+     * The other half of the surplus, and the half this door could not take.
+     * "মাল ১২০ টাকার, দিলাম ৫,০০০" is an ordinary thing to do at a vendor's
+     * counter, and until now it was refused with a message pointing at the
+     * supplier page — a two-step workaround for something the open form was
+     * one field away from doing.
+     *
+     * Sent SPLIT by the client, exactly as the till splits a customer's
+     * tendered note: `paid` stays money against THIS bill and never exceeds it,
+     * so the guard above, `Purchase.pre('save')`'s clamp, `cancelPurchase`'s
+     * reversal and every report that reads `purchase.paid` keep their meaning
+     * untouched. The surplus travels as its own `Payment` rows through the one
+     * service that knows how to allocate them.
+     *
+     * It is added to `settleRequested` rather than sent separately because
+     * `settleSupplierDue` already does the allocation this needs: debt first,
+     * and only what is left over becomes অগ্রিম. Handing a vendor money while
+     * owing them and booking it as a prepayment would leave the shop owing AND
+     * in credit with the same party — the one state the exclusivity invariant
+     * forbids. So the shopkeeper's "রাখুন অগ্রিম হিসেবে" is honoured as "clear
+     * what I owe first, hold the rest", which is what they meant and what the
+     * form now says out loud.
+     */
+    const advanceDeposit = toMoney(purchaseData.advanceDeposit);
+    if (advanceDeposit > 0) {
+      /**
+       * Owner-only, mirroring `POST /suppliers/:id/advance`'s `ownerOnly` gate.
+       *
+       * Enforced HERE and not by route middleware because the route also
+       * carries ordinary deliveries a cashier must keep being able to record —
+       * `rbac('purchases','create')` is right for the bill and too weak for the
+       * prepayment. Settling a bill discharges an obligation the shop already
+       * had; paying ahead parts with cash for nothing yet received, which is a
+       * decision about the shop's money rather than a record of one.
+       */
+      if (req && !req.isAdmin && !req.user?.isOwner) {
+        throw new AppError(
+          'Only the shop owner can pay a supplier in advance',
+          'শুধুমাত্র দোকান মালিক সরবরাহকারীকে অগ্রিম দিতে পারবেন',
+          403
+        );
+      }
+      if (!supplierDoc) {
+        throw new AppError(
+          'Cannot hold an advance without a supplier on the purchase',
+          'সরবরাহকারী ছাড়া অগ্রিম দেওয়া যাবে না',
+          400
+        );
+      }
+    }
+
+    if (settleRequested > 0 || advanceDeposit > 0) {
       if (!supplierDoc) {
         throw new AppError(
           'Cannot settle old dues without a supplier on the purchase',
@@ -580,12 +634,21 @@ class PurchaseService {
         shopId,
         userId,
         supplierId: supplierDoc._id,
-        amount: settleRequested,
+        // One movement across one counter: what clears the খাতা plus what is
+        // being left ahead. The service splits it back into two rows by the
+        // debt it finds, which is the two-row rule this must not break — a
+        // single mixed row either double-counts or vanishes.
+        amount: quantizeMoney(settleRequested + advanceDeposit),
+        // Off unless a prepayment was actually asked for, so an ordinary
+        // পুরোনো বাকি payment keeps its over-payment ceiling by construction.
+        allowAdvance: advanceDeposit > 0,
         branchId,
         method: purchaseData.dueSettlementMethod || primaryMethod,
         rawAccount: purchaseData.dueSettlementAccount || null,
         reference: purchaseData.dueSettlementReference,
-        notes: `ক্রয়ের সাথে পুরোনো বাকি পরিশোধ`,
+        notes: settleRequested > 0
+          ? `ক্রয়ের সাথে পুরোনো বাকি পরিশোধ`
+          : `ক্রয়ের সাথে অগ্রিম`,
         req,
       }, session);
 
