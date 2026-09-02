@@ -99,6 +99,20 @@ const BALANCE_PROJECTION = {
   totalPurchases: 1,
   totalPaid: 1,
   totalDue: 1,
+  // The exact field this constant's note warns about, and it was missing.
+  //
+  // `withBranchFigures` overlays the branch's `advanceBalance` for every
+  // single-document read, but this projection — the branch-scoped LIST — never
+  // emitted it, so a branch-scoped shop received rows with no advance on them
+  // at all. `advanceBalance` then read `undefined` on the client and every
+  // credit the branch was holding rendered as ৳0: no chip on the card, and the
+  // deposit modal telling a shopkeeper their customer had nothing on deposit
+  // while the branch row said otherwise.
+  //
+  // Deliberately the BRANCH row's figure, like `totalDue` beside it. Under
+  // separate books the shop-wide advance is the wrong number to show here — a
+  // branch holding nothing would offer to spend another branch's deposit.
+  advanceBalance: 1,
   openingDue: 1,
   purchaseCount: 1,
   lastPurchase: 1,
