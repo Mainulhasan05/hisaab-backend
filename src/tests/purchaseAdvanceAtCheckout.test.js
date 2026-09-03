@@ -114,6 +114,43 @@ describe('the prepayment never leaks into purchase.paid', () => {
   });
 });
 
+/* ── B2. THE VISIT LEAVES A TRACE ─────────────────────────────────────────── */
+
+describe('the prepayment is written onto the bill it arrived with', () => {
+  it('snapshots advanceSettled beside dueSettled', () => {
+    /**
+     * The figure came back on the settlement result and NOTHING READ IT:
+     * `dueSettled` took `openingApplied + billsApplied` and left
+     * `advanceApplied` on the floor. Every ledger moved correctly — a
+     * `supplier_advance` row, a fund-account debit, a risen
+     * `Supplier.advanceBalance` — while the one piece of paper the shopkeeper
+     * and the vendor both hold reprinted a ৳5,000 visit as a plain ৳120 bill.
+     *
+     * A snapshot rather than a join, for the same reason `previousDue` and
+     * `dueSettled` are: a reprint months later must show what the paper showed
+     * on the day, not what the vendor's position happens to be now.
+     */
+    expect(SRC).toMatch(/advanceSettled:\s*dueSettlement \? \(dueSettlement\.advanceApplied \|\| 0\) : 0/);
+  });
+
+  it('carries the field on the model', () => {
+    const model = read('../models/Purchase.model');
+    expect(model).toMatch(/advanceSettled:\s*\{/);
+  });
+
+  it('rides in the same absent-not-zero group as previousDue', () => {
+    // Grouped under `previousDue === null ? {} : {...}` so a bill with no
+    // supplier stores neither, and "no snapshot taken" stays distinguishable
+    // from "nothing was handed over".
+    const group = SRC.slice(
+      SRC.indexOf('...(previousDue === null ? {} : {'),
+      SRC.indexOf('}], sessionOpt);')
+    );
+    expect(group).toContain('advanceSettled');
+    expect(group).toContain('dueSettled');
+  });
+});
+
 /* ── C. THE CEILING STILL HOLDS FOR EVERY OTHER CALLER ────────────────────── */
 
 describe('an ordinary পুরোনো বাকি payment keeps its refusal', () => {

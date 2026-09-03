@@ -703,6 +703,17 @@ class PurchaseService {
         // above — and computed here rather than in the template so the slip and
         // the খতিয়ান cannot disagree about the arithmetic.
         dueSettled: dueSettlement ? dueSettlement.openingApplied + dueSettlement.billsApplied : 0,
+        /**
+         * The prepayment half of the same visit, and it used to be dropped
+         * here — `advanceApplied` came back on the settlement result beside the
+         * two terms above and nothing read it.
+         *
+         * That is the whole reason a ৳5,000 আগাম left no trace on the paper:
+         * the money moved correctly in every ledger and the invoice reprinted
+         * as a plain ৳120 bill. Stored so the slip, the list and a reprint
+         * months later all say what actually crossed the counter.
+         */
+        advanceSettled: dueSettlement ? (dueSettlement.advanceApplied || 0) : 0,
       }),
     }], sessionOpt);
 

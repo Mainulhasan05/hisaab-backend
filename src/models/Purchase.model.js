@@ -514,6 +514,33 @@ const purchaseSchema = new mongoose.Schema({
   dueSettled: {
     type: Number
   },
+  /**
+   * অগ্রিম handed over at the same counter, with this delivery.
+   *
+   * The THIRD money event of one visit, and the mirror of `dueSettled` above:
+   * not money against this bill, not old debt cleared, but cash left ahead of
+   * goods not yet delivered.
+   *
+   * Snapshotted for the same reason `dueSettled` is, and it is not optional
+   * bookkeeping. Without it the prepayment is real in the ledger — a
+   * `supplier_advance` Payment row, a fund-account debit, a risen
+   * `Supplier.advanceBalance` — and completely absent from the one piece of
+   * paper the shopkeeper and the vendor both hold. The purchase invoice
+   * reprints as "মোট ১২০, পরিশোধ ১২০" for a visit where ৳5,000 changed hands,
+   * which is the version of events a vendor can dispute and the shop cannot
+   * evidence.
+   *
+   * The service computed this figure and discarded it: `dueSettled` took
+   * `openingApplied + billsApplied` off the settlement result and left
+   * `advanceApplied` on the floor.
+   *
+   * The SERVER's figure, never the box's — `settleSupplierDue` clears debt
+   * first, so ৳5,000 handed to a vendor already owed ৳2,000 leaves ৳3,000
+   * here, and the other ৳2,000 shows up in `dueSettled` where it belongs.
+   */
+  advanceSettled: {
+    type: Number
+  },
   paymentMethod: {
     type: String,
     enum: ['cash', 'bkash', 'nagad', 'card', 'bank', 'credit'],
