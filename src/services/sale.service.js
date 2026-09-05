@@ -3759,6 +3759,131 @@ class SaleService {
     return sales;
   }
 
+  /**
+   * What this customer paid for this product, the last few times.
+   *
+   * ── Why the till asks ──────────────────────────────────────────────────────
+   *
+   * A shopkeeper who gave a regular ৳২৮০ last month cannot ring up ৳৩০০ today
+   * without an argument at the counter, and today they have no way to check
+   * except memory or leaving the sale to open the customer's page. This is that
+   * lookup, scoped to the one product on the line in front of them.
+   *
+   * ── Why it is a separate endpoint and not part of the cart payload ─────────
+   *
+   * It is asked for by exception, not by default. Bundling it into the product
+   * search or the customer lookup would make every cashier at every till pay
+   * for a query almost none of them wanted — the POS product search fires per
+   * keystroke. The client renders nothing until a customer is picked and calls
+   * nothing until the button is pressed; see the POS component's header.
+   *
+   * ── The filters that decide whether the answer is true ────────────────────
+   *
+   * `status: { $ne: 'cancelled' }` covers BOTH cancelled and superseded sales,
+   * and that is not a coincidence: a superseded invoice IS cancelled — see the
+   * revision-chain note on the Sale model. Without it, a price that was revised
+   * away last week would come back as "what they paid".
+   *
+   * `agreedUnitPrice` is what the customer actually agreed to; `unitPrice`
+   * remains the list rate on a negotiated line. Both are returned and
+   * `paidUnitPrice` is resolved HERE rather than on the client, so the till, a
+   * future report and any other reader cannot disagree about which is which.
+   *
+   * Every rate is per BASE unit — `unitPrice` already is, on pack lines too —
+   * so a carton line and a loose line are comparable without the client
+   * knowing anything about packs.
+   *
+   * `buyingPrice` is deliberately NOT projected. This runs for anyone with
+   * `sales.view`, which every cashier has, and cost is `products.view_cost`.
+   *
+   * @param {string} shopId
+   * @param {Object} opts               { customerId, productId, variantId, limit }
+   * @param {Object} req                for branch scope
+   */
+  async getCustomerProductHistory(shopId, { customerId, productId, variantId = null, limit = 5 }, req = null) {
+    if (!mongoose.Types.ObjectId.isValid(customerId) || !mongoose.Types.ObjectId.isValid(productId)) {
+      throw new AppError('customer and product are required', 'কাস্টমার ও পণ্য দিন', 400);
+    }
+
+    const lineLimit = Math.min(Math.max(parseInt(limit, 10) || 5, 1), 20);
+
+    // How many of this customer's invoices to look through. The compound index
+    // {shop, customer, createdAt} makes this a bounded index scan, and a
+    // customer with more than fifty purchases OF THIS PRODUCT does not need a
+    // fifty-first to answer "what do I usually charge them".
+    const SCAN_LIMIT = 50;
+
+    const query = branchFilter(req, {
+      shop: shopId,
+      customer: customerId,
+      status: { $ne: 'cancelled' },
+      'items.product': productId,
+    });
+
+    const sales = await Sale.find(query)
+      // Projection, not post-filtering: an invoice carries payments, addresses
+      // and a courier block this has no business shipping to a till.
+      .select('invoiceNo createdAt items.product items.variantId items.productName items.quantity items.unit items.saleUnit items.packUnit items.packSize items.packQuantity items.unitPrice items.packUnitPrice items.agreedUnitPrice items.total')
+      .sort({ createdAt: -1 })
+      .limit(SCAN_LIMIT)
+      .lean();
+
+    const lines = [];
+
+    for (const sale of sales) {
+      for (const item of sale.items || []) {
+        if (String(item.product) !== String(productId)) continue;
+        // A variant asked for must match exactly. XL's price is not S's price,
+        // and answering with the wrong size is worse than answering nothing.
+        if (variantId && String(item.variantId || '') !== String(variantId)) continue;
+
+        const listPrice = Number(item.unitPrice) || 0;
+        const agreed = Number.isFinite(Number(item.agreedUnitPrice))
+          ? Number(item.agreedUnitPrice)
+          : null;
+
+        lines.push({
+          saleId: sale._id,
+          invoiceNo: sale.invoiceNo,
+          date: sale.createdAt,
+          productName: item.productName,
+          quantity: Number(item.quantity) || 0,
+          unit: item.unit || 'piece',
+          saleUnit: item.saleUnit || 'base',
+          packUnit: item.packUnit || null,
+          packSize: item.packSize || null,
+          packQuantity: item.packQuantity || null,
+          unitPrice: listPrice,
+          agreedUnitPrice: agreed,
+          // The one figure the screen quotes. Resolved here so no reader has to
+          // remember which of the two above the customer actually agreed to.
+          paidUnitPrice: agreed !== null ? agreed : listPrice,
+          total: Number(item.total) || 0,
+        });
+      }
+    }
+
+    // Stats over EVERY matching line found, not just the few returned — "সবচেয়ে
+    // কম ৳২৭০" is only useful if it looked past the page being shown.
+    const rates = lines.map((l) => l.paidUnitPrice);
+    const summary = lines.length
+      ? {
+          timesBought: lines.length,
+          totalQuantity: quantizeMoney(lines.reduce((sum, l) => sum + l.quantity, 0)),
+          lastPrice: lines[0].paidUnitPrice,
+          lastDate: lines[0].date,
+          minPrice: Math.min(...rates),
+          maxPrice: Math.max(...rates),
+          avgPrice: quantizeMoney(rates.reduce((a, b) => a + b, 0) / rates.length),
+          // True when the scan hit its ceiling — the client says "শেষ ৫০টি
+          // বিক্রির মধ্যে" rather than implying it counted a lifetime.
+          truncated: sales.length >= SCAN_LIMIT,
+        }
+      : null;
+
+    return { summary, lines: lines.slice(0, lineLimit) };
+  }
+
   // Get payments for a sale
   async getSalePayments(shopId, saleId, branchId = null) {
     const saleQuery = { _id: saleId, shop: shopId };

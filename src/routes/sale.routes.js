@@ -17,6 +17,16 @@ router.post('/', idempotency(), rbac('sales', 'create'), validate(saleValidation
 router.get('/summary', rbac('sales', 'view'), saleController.getSalesSummary);
 router.get('/today-summary', rbac('sales', 'view'), saleController.getTodaySummary);
 router.get('/recent', rbac('sales', 'view'), saleController.getRecentSales);
+// "কত টাকায় দিয়েছিলাম?" — one customer, one product, at the till.
+//
+// Declared BEFORE `/:id` for the usual Express reason: that route would
+// otherwise take 'customer-history' as a sale id and answer 404 for a
+// malformed ObjectId.
+//
+// `sales.view` and not `customers.view`: this is asked from inside a sale, by
+// whoever is ringing it up, about a line they are already holding. A cashier
+// who can see the invoice can see what the last one said.
+router.get('/customer-history', rbac('sales', 'view'), saleController.getCustomerProductHistory);
 router.get('/:id/payments', rbac('sales', 'view'), saleController.getSalePayments);
 router.get('/:id', rbac('sales', 'view'), saleController.getSale);
 router.patch('/:id/payment', idempotency(), rbac('sales', 'update'), saleController.recordPayment);

@@ -127,6 +127,36 @@ exports.getTodaySummary = asyncHandler(async (req, res) => {
 });
 
 // Get recent sales
+/**
+ * "Has this customer bought this before, and at what price?"
+ *
+ * Answers for ONE customer and ONE product, because that is the question the
+ * till asks — the cashier is looking at a single cart line with a single
+ * customer attached. Nothing is returned when the pair has no history; the
+ * client renders that as "আগে নেননি" rather than as an error.
+ *
+ * No `sanitizeReport`: the service never projects `buyingPrice` in the first
+ * place, so there is no cost figure in this payload to strip.
+ */
+exports.getCustomerProductHistory = asyncHandler(async (req, res) => {
+  const result = await saleService.getCustomerProductHistory(
+    req.shop._id,
+    {
+      customerId: req.query.customer,
+      productId: req.query.product,
+      variantId: req.query.variant || null,
+      limit: req.query.limit,
+    },
+    req
+  );
+
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Customer purchase history retrieved',
+    messageBn: 'আগের কেনাকাটার তথ্য লোড হয়েছে',
+  });
+});
+
 exports.getRecentSales = asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
   const sales = await saleService.getRecentSales(req.shop._id, limit, req.branchId);
