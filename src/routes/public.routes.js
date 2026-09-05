@@ -3,7 +3,8 @@ const router = express.Router();
 const publicStorefrontController = require('../controllers/publicStorefront.controller');
 const publicOrderController = require('../controllers/publicOrder.controller');
 const publicLandingController = require('../controllers/publicLanding.controller');
-const { storefrontLimiter } = require('../middleware/rateLimiter.middleware');
+const platformCheckoutController = require('../controllers/platformCheckout.controller');
+const { storefrontLimiter, paymentReturnLimiter } = require('../middleware/rateLimiter.middleware');
 const { orderAbuseGuard, markSuspicious } = require('../middleware/orderAbuse.middleware');
 const idempotency = require('../middleware/idempotency.middleware');
 const { validate, Joi } = require('../middleware/validate.middleware');
@@ -18,11 +19,19 @@ const { validate, Joi } = require('../middleware/validate.middleware');
  * A guard that is applied by default and skipped by exception eventually gets
  * skipped by accident; a router with no guard at all cannot lose one.
  *
- * For the same reason nothing here is a write. Every verb is GET. When checkout
- * arrives it is an unauthenticated POST — a genuinely different risk with a
- * different set of mitigations (idempotency key, honeypot, per-phone caps,
- * server-derived prices — §13) — and it should arrive as its own reviewed
- * change, not as one more line appended to this list.
+ * This file was GET-only to begin with. It no longer is, and each write that
+ * arrived came as its own reviewed change rather than a line appended to a
+ * list — which is the standard the next one is held to as well:
+ *
+ *   · the two checkout POSTs (storefront and landing) each stack an abuse
+ *     guard, an idempotency key, a honeypot, per-phone caps and server-derived
+ *     prices, and refuse a body carrying a price rather than ignoring it;
+ *   · the PayStation return reads NOTHING from its request — not the body, not
+ *     the query — and settles the payment by asking the gateway directly.
+ *
+ * The rule is not "no writes here". It is that a write reachable without a
+ * session has to be safe when the request is entirely attacker-controlled, and
+ * has to say in its own comment why it is.
  *
  * ── RATE LIMITING ───────────────────────────────────────────────────────────
  *
@@ -39,6 +48,45 @@ const { validate, Joi } = require('../middleware/validate.middleware');
  * full collection scan. §13 notes the validations directory has five files and
  * that public routes must not be the sixth omission.
  */
+
+/* ── The payment gateway's return redirect ──────────────────────────────────
+ *
+ * PayStation sends the customer's browser here after checkout. It belongs on
+ * this router for the reason the header gives: it carries no session, so it
+ * lives where nothing carries a session rather than as an exception inside a
+ * protected tree.
+ *
+ * REGISTERED ABOVE `router.use(storefrontLimiter)` ON PURPOSE. Express applies
+ * middleware in registration order, so a route declared after that line picks
+ * the storefront limiter up as well as its own — and this codebase says three
+ * separate times that limiters are ALTERNATIVES, never layers: a request
+ * counted against two buckets makes a 429 impossible to attribute, and the
+ * tighter ceiling silently becomes the only one that matters. Declaring it here
+ * is what makes that structurally true rather than a comment claiming it.
+ *
+ * `paymentReturnLimiter` is deliberately looser than the storefront tier: the
+ * cost of a false 429 on this path is a customer who has ALREADY PAID being
+ * told something went wrong.
+ *
+ * `router.all` because PayStation's documentation never states whether the
+ * redirect is a GET or a POST — and the answer must not matter, since the
+ * handler reads neither the body nor the query. The `:orderId` is a lookup key
+ * that selects which invoice number we go and ask the gateway about; the
+ * gateway's server-to-server answer is the only thing that moves money. See the
+ * block comment on `paystationReturn`.
+ *
+ * Validated as an ObjectId so a malformed id is a 400 rather than a cast error
+ * inside the service.
+ */
+router.all(
+  '/payments/paystation/return/:orderId',
+  paymentReturnLimiter,
+  validate(
+    Joi.object({ orderId: Joi.string().hex().length(24).required() }),
+    'params'
+  ),
+  platformCheckoutController.paystationReturn
+);
 
 router.use(storefrontLimiter);
 

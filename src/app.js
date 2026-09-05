@@ -11,6 +11,7 @@ const {
   apiLimiter,
   authLimiter,
   isPublicStorefrontPath,
+  isPaymentReturnPath,
 } = require('./middleware/rateLimiter.middleware');
 const { errorHandler, notFoundHandler } = require('./middleware/error.middleware');
 const { requestContext } = require('./middleware/requestContext.middleware');
@@ -64,7 +65,26 @@ const corsOptions = {
   // panel; without it in this list the browser strips the header entirely.
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-active-branch', 'x-shop-id', 'x-idempotency-key']
 };
-app.use(cors(corsOptions));
+/* One CORS mount, with one exception.
+ *
+ * The payment gateway returns a paying customer's BROWSER to us. If it does so
+ * with a form POST, that navigation carries `Origin: https://api.paystation.com.bd`
+ * — an origin that is not in ALLOWED_ORIGINS and must never be added to it,
+ * because that list governs who may make credentialed XHR calls against this
+ * API. The callback above answers a disallowed origin with an Error, which the
+ * error handler turns into a 500, so the customer would be shown a server error
+ * instead of the subscription they had just paid for.
+ *
+ * `cors` accepts a per-request delegate for exactly this. See
+ * `isPaymentReturnPath` for why waving this one path through costs nothing:
+ * CORS governs whether a browser may READ a cross-origin response, and has
+ * never applied to top-level navigations, which is what this request is. */
+app.use(cors((req, callback) => {
+  if (isPaymentReturnPath(req)) {
+    return callback(null, { ...corsOptions, origin: true });
+  }
+  return callback(null, corsOptions);
+}));
 
 // Rate Limiting — BEFORE body parsing so rejected/flooding requests never pay
 // for a multi-MB JSON.parse + sanitize walk (previously the limiter ran last)

@@ -19,20 +19,42 @@ const {
 } = require('../config/constants');
 
 /**
- * One SMS pack, as offered in the allocation sheet.
+ * One SMS pack.
  *
- * `price` is the pack's OWN price, not `quantity × defaultSmsUnitPrice`. That
- * distinction is the whole point of the tier list: a ladder where every rung
- * works out to the same per-SMS rate is a quantity picker, not a price list,
- * and the "Best value" badge on its top rung is decoration. The admin panel
- * prints the derived ৳/SMS on every tile so a flat ladder is visible as one.
+ * @deprecated SMS is priced at a FLAT rate — `defaultSmsUnitPrice`, or the
+ * shop's negotiated `billing.smsUnitPrice` — with a ৳100 minimum purchase.
+ * Nothing reads this ladder for pricing any more: self-serve checkout and the
+ * admin allocation sheet both compute `taka ÷ rate`, so the two screens cannot
+ * disagree about what an SMS costs.
  *
- * A shop with a negotiated `billing.smsUnitPrice` is quoted `quantity × its own
- * rate` instead — a bargained rate wins over the list price, which is the same
- * rule `Shop.billing` has with every other figure here.
+ * The field is retained rather than dropped so existing documents still load,
+ * and its editor has been removed from the admin settings page — an editor for
+ * a list nothing reads is precisely the bug this file's own history records
+ * (the panel once showed ৳40 for a pack the database priced at ৳50, and editing
+ * a tier changed nothing anybody could see).
  */
 const smsTierSchema = new mongoose.Schema({
   quantity: { type: Number, required: true, min: 1 },
+  price: { type: Number, required: true, min: 0 },
+  label: { type: String },
+  badge: { type: String },
+}, { _id: false });
+
+/**
+ * One subscription package, as offered on the owner's billing page.
+ *
+ * `price` is the package's OWN price, not `months × defaultMonthlyPrice` — that
+ * gap IS the volume discount, and it is the only reason to buy a year rather
+ * than twelve months one at a time.
+ *
+ * A shop with a negotiated `billing.monthlyPrice` keeps BOTH its bargain and
+ * this ladder's discount: the quote is `months × negotiatedMonthly × (this
+ * package's discount factor)`. Quoting a negotiated shop `months ×
+ * negotiatedMonthly` flat would price its year ABOVE the list year — a shop
+ * punished for having bargained. See `platformCheckout.service.quote`.
+ */
+const subscriptionPackageSchema = new mongoose.Schema({
+  months: { type: Number, required: true, min: 1, max: 120 },
   price: { type: Number, required: true, min: 0 },
   label: { type: String },
   badge: { type: String },
@@ -91,6 +113,44 @@ const platformSettingSchema = new mongoose.Schema({
     ]),
   },
 
+  /**
+   * The subscription price list, as the owner's billing page shows it.
+   *
+   * Editable here rather than compiled in so a promotion is a settings change,
+   * not a redeploy. `SUBSCRIPTION_PRICE` (৳800) stays the anchor at one month,
+   * so this ladder and `defaultMonthlyPrice` agree about what "the standard
+   * rate" means — the same relationship `smsTiers` used to have with
+   * `defaultSmsUnitPrice`.
+   */
+  subscriptionPackages: {
+    type: [subscriptionPackageSchema],
+    default: () => ([
+      { months: 1, price: 800, label: '১ মাস' },
+      { months: 6, price: 4000, label: '৬ মাস', badge: 'জনপ্রিয়' },
+      { months: 12, price: 8000, label: '১ বছর', badge: 'সেরা মূল্য' },
+    ]),
+  },
+
+  /**
+   * The minimum a shop may spend on SMS in one go, in taka.
+   *
+   * Not a business whim: below roughly this figure the gateway fee we absorb
+   * plus the support cost of the top-up exceeds the margin on it. It is also
+   * what stops a ৳5 purchase creating a `PlatformOrder`, a `PlatformPayment`
+   * and a gateway round-trip to sell twelve messages.
+   */
+  minSmsPurchaseAmount: { type: Number, default: 100, min: 0 },
+
+  /**
+   * The ceiling on one self-serve purchase, in taka.
+   *
+   * A typo guard, not a policy: nobody means to buy ৳50,000 of SMS by hand, and
+   * a shop that genuinely wants to should be talking to a person. Applies to
+   * SMS top-ups only — subscription amounts come from the package ladder and
+   * cannot be typed at all.
+   */
+  maxSelfServeAmount: { type: Number, default: 50000, min: 0 },
+
   supportPhone: { type: String, default: '01757995016' },
 
   /**
@@ -115,13 +175,23 @@ const platformSettingSchema = new mongoose.Schema({
    */
   autoSeedCategoriesOnSignup: { type: Boolean, default: false },
 
-  // Phase 2. While this is 'none' the owner-facing renew flow is a "call us"
-  // card and no webhook route is mounted. Switching it on is a config change:
-  // manual entry and a gateway callback already funnel through the same
-  // service method. See SUBSCRIPTION_PLAN.md §7.
+  /**
+   * Which gateway the owner-facing checkout uses, or 'none' to hide it.
+   *
+   * While this is 'none' the billing page falls back to the "call us" card and
+   * every checkout endpoint refuses — so the switch is genuinely a switch, not
+   * just a hidden button. Turning it on requires the gateway's credentials to
+   * be present too; `platformCheckout.service.isCheckoutAvailable` checks both,
+   * because a provider named here with no credentials behind it looks armed on
+   * the settings screen and 502s on the first customer who taps Renew.
+   *
+   * Manual admin entry and a gateway payment funnel through the same
+   * `billing.service` methods, which is what kept this to one adapter.
+   * See SUBSCRIPTION_PLAN.md §7.
+   */
   billingProvider: {
     type: String,
-    enum: ['none', 'bkash', 'sslcommerz', 'shurjopay'],
+    enum: ['none', 'paystation', 'bkash', 'sslcommerz', 'shurjopay'],
     default: 'none',
   },
 

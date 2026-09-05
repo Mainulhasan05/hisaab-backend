@@ -15,6 +15,10 @@ const {
   stopStorageMaintenanceJob,
 } = require('./jobs/storageMaintenance.job');
 const { startDriftCheckJob, stopDriftCheckJob } = require('./jobs/driftCheck.job');
+const {
+  startPaymentReconcileJob,
+  stopPaymentReconcileJob,
+} = require('./jobs/paymentReconcile.job');
 const telegramService = require('./services/telegram.service');
 const smsService = require('./services/sms.service');
 const { createSmsWorker, closeQueue } = require('./config/queue.config');
@@ -209,6 +213,15 @@ async function start() {
     // to be found by a person reading a supplier statement months later.
     startDriftCheckJob();
 
+    // Every five minutes, ask the payment gateway about checkouts nobody told
+    // us about. NOT a safety net: PayStation has no server-side IPN, so for
+    // every customer who paid in the bKash app and never returned to the
+    // browser tab, this loop is the ONLY thing that gives them what they
+    // bought. Primary worker only — a second copy would double every outbound
+    // gateway call, though the atomic claim in `fulfilOrder` means it could
+    // never double-fulfil.
+    startPaymentReconcileJob();
+
     // ── SMS campaign worker ────────────────────────────────────────────────
     //
     // Primary worker only, like everything else in this block — but for a
@@ -266,6 +279,7 @@ async function shutdown(code = 0) {
     stopPulseJob();
     stopStorageMaintenanceJob();
     stopDriftCheckJob();
+    stopPaymentReconcileJob();
     telegramService.shutdown();
 
     // Close the worker BEFORE the HTTP server and before Mongo.

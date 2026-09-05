@@ -10,7 +10,9 @@
     "sync-indexes": "node scripts/sync-indexes.js",
     "sync-indexes:apply": "node scripts/sync-indexes.js --apply",
     "backup": "node scripts/backup-db.js",
-    "restore": "node scripts/restore-db.js"
+    "restore": "node scripts/restore-db.js",
+    "paystation:preflight": "node scripts/paystation-preflight.js",
+    "paystation:enable": "node scripts/paystation-preflight.js --probe --enable"
   },
   "keywords": [
     "pos",

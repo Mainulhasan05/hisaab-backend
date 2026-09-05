@@ -207,6 +207,80 @@ exports.getPlatformSettings = asyncHandler(async (req, res) => {
  * tiles the operator cannot tell apart. Sorted ascending on the way in so the
  * panel never has to sort a list that is supposed to be a ladder.
  */
+/**
+ * Same job as `normalizeSmsTiers`, for the subscription ladder.
+ *
+ * Rejects what Mongoose would happily store: a package with a blank price casts
+ * to 0 and becomes a free year, and two rungs at the same month count render as
+ * duplicate tiles an owner cannot tell apart. Sorted ascending on the way in, so
+ * neither panel has to sort a list that is supposed to already be a ladder.
+ *
+ * It does NOT reject a flat or inverted ladder. That is a pricing judgement, not
+ * a data error — the admin form flags it on the row instead, because an operator
+ * mid-way through re-pricing has a legitimate reason to save an odd-looking
+ * intermediate state, and refusing the save would lose the rest of their edits.
+ */
+const normalizeSubscriptionPackages = (packages) => {
+  if (!Array.isArray(packages)) {
+    throw new AppError('Subscription packages must be a list', 'প্যাকেজ তালিকা সঠিক নয়', 400);
+  }
+
+  const seen = new Set();
+  const clean = packages.map((pkg, index) => {
+    const months = Number(pkg?.months);
+
+    /* Blank is NOT zero.
+     *
+     * `Number('')` is 0, which is finite and non-negative, so a price field the
+     * operator simply never filled in would sail through a `Number.isFinite`
+     * check and be stored as a free package. ৳0 is a legitimate value — a
+     * complimentary period is recorded that way elsewhere — so it cannot be
+     * rejected outright; what has to be rejected is the ABSENCE of a value,
+     * before the coercion erases the difference. */
+    const rawPrice = pkg?.price;
+    if (rawPrice === '' || rawPrice === null || rawPrice === undefined) {
+      throw new AppError(
+        `Package ${index + 1}: price must be zero or more`,
+        `${index + 1} নম্বর প্যাকেজের দাম সঠিক নয়`,
+        400
+      );
+    }
+    const price = Number(rawPrice);
+
+    if (!Number.isInteger(months) || months < 1 || months > 120) {
+      throw new AppError(
+        `Package ${index + 1}: months must be a whole number between 1 and 120`,
+        `${index + 1} নম্বর প্যাকেজের মেয়াদ সঠিক নয়`,
+        400
+      );
+    }
+    if (!Number.isFinite(price) || price < 0) {
+      throw new AppError(
+        `Package ${index + 1}: price must be zero or more`,
+        `${index + 1} নম্বর প্যাকেজের দাম সঠিক নয়`,
+        400
+      );
+    }
+    if (seen.has(months)) {
+      throw new AppError(
+        `Two packages both offer ${months} month(s)`,
+        `${months} মাসের প্যাকেজ দুইবার আছে`,
+        400
+      );
+    }
+    seen.add(months);
+
+    return {
+      months,
+      price,
+      label: typeof pkg?.label === 'string' ? pkg.label.trim() : '',
+      badge: typeof pkg?.badge === 'string' ? pkg.badge.trim() : '',
+    };
+  });
+
+  return clean.sort((a, b) => a.months - b.months);
+};
+
 const normalizeSmsTiers = (tiers) => {
   if (!Array.isArray(tiers)) {
     throw new AppError('SMS tiers must be a list', 'এসএমএস প্যাকেজ তালিকা সঠিক নয়', 400);
@@ -261,6 +335,13 @@ exports.updatePlatformSettings = asyncHandler(async (req, res) => {
     'smsTiers',
     'supportPhone',
     'billingProvider',
+    // Self-serve checkout. A key absent from this list is DROPPED SILENTLY —
+    // the operator saves, gets a success toast, and the price list is unchanged
+    // — so every new settings field has to be added here as well as to the
+    // model and the form.
+    'subscriptionPackages',
+    'minSmsPurchaseAmount',
+    'maxSelfServeAmount',
     // The way back to pre-creating a shop's category taxonomy at signup.
     // Defaults false; see PlatformSetting.model.js for why.
     'autoSeedCategoriesOnSignup',
@@ -272,6 +353,9 @@ exports.updatePlatformSettings = asyncHandler(async (req, res) => {
 
   if (patch.smsTiers !== undefined) {
     patch.smsTiers = normalizeSmsTiers(patch.smsTiers);
+  }
+  if (patch.subscriptionPackages !== undefined) {
+    patch.subscriptionPackages = normalizeSubscriptionPackages(patch.subscriptionPackages);
   }
   // Clearing the cost is meaningful — it is the difference between "we sell at
   // cost" and "nobody has told this system what a message costs". An empty

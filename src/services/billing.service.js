@@ -961,11 +961,35 @@ class BillingService {
    *
    * SMS credits are bought separately from the subscription and are never
    * touched by expiry or block — sending stops, the balance does not.
+   *
+   * Manual entry passes `source: 'manual'`; a verified gateway payment passes
+   * `source: 'gateway'` with `gateway.paymentId`, exactly as
+   * `applySubscriptionPayment` does. The gateway branch is idempotent on that
+   * id — without it this path had NO dedupe at all, and a customer's browser
+   * returning at the same moment as the reconciliation sweep would have handed
+   * out the credits twice.
    */
-  async recordSmsPurchase(actor, { shopId, quantity, amount, unitPrice, method = 'cash', transactionId, notes } = {}) {
+  async recordSmsPurchase(actor, {
+    shopId, quantity, amount, unitPrice, method = 'cash', transactionId,
+    receivedAt, notes, source = 'manual', gateway,
+  } = {}) {
     const qty = Number(quantity);
     if (!Number.isFinite(qty) || qty <= 0) {
       throw new AppError('SMS quantity must be a positive number', 'এসএমএস সংখ্যা সঠিক নয়', 400);
+    }
+
+    // Idempotency: a re-verified payment must not buy a second pack.
+    if (source === 'gateway' && gateway?.paymentId) {
+      const existing = await PlatformPayment.findOne({
+        source: 'gateway',
+        type: PLATFORM_PAYMENT_TYPES.SMS,
+        'gateway.paymentId': gateway.paymentId,
+      });
+      if (existing) {
+        logger.warn(`[billing] duplicate gateway SMS purchase ignored: ${gateway.paymentId}`);
+        const quota = await SMSQuota.findOne({ shop: existing.shop });
+        return { quota, payment: existing, duplicate: true };
+      }
     }
 
     const shop = await this._loadShop(shopId);
@@ -984,6 +1008,36 @@ class BillingService {
       throw new AppError('SMS amount cannot be negative', 'এসএমএস মূল্য ঋণাত্মক হতে পারবে না', 400);
     }
 
+    /* Ledger row FIRST, credits second.
+     *
+     * This used to run the other way round, and the failure it allowed was
+     * silent: `PlatformPayment` has a `method` enum and a required `shop`, so a
+     * rejected write left the shop holding credits it had no record of paying
+     * for — free SMS, invisible in every revenue report.
+     *
+     * Both orderings can fail halfway. The difference is the DIRECTION of the
+     * damage. This way the bad case is "the shop paid and has not got its
+     * credits yet", which the gateway order sits at `paid` describing, the
+     * reconciliation sweep retries, and the admin orders screen shows. That is a
+     * recoverable, visible debt we owe them. The other way the bad case was an
+     * invisible gift, and nothing in the system was ever going to notice it. */
+    const payment = await PlatformPayment.create({
+      shop: shop._id,
+      type: PLATFORM_PAYMENT_TYPES.SMS,
+      amount: total,
+      currency: shop.billing?.currency || 'BDT',
+      method,
+      transactionId,
+      receivedAt: receivedAt ? new Date(receivedAt) : new Date(),
+      smsQuantity: qty,
+      smsUnitPrice: effectiveUnit,
+      status: total === 0 ? 'waived' : 'paid',
+      source,
+      gateway,
+      recordedBy: { kind: actor?.kind || 'admin', id: actor?.id, name: actor?.name },
+      notes,
+    });
+
     const quota = await SMSQuota.getOrCreate(shop._id);
     await quota.addAllocation({
       quantity: qty,
@@ -994,21 +1048,19 @@ class BillingService {
       notes,
     });
 
-    const payment = await PlatformPayment.create({
-      shop: shop._id,
-      type: PLATFORM_PAYMENT_TYPES.SMS,
-      amount: total,
-      currency: shop.billing?.currency || 'BDT',
-      method,
-      transactionId,
-      receivedAt: new Date(),
-      smsQuantity: qty,
-      smsUnitPrice: effectiveUnit,
-      status: total === 0 ? 'waived' : 'paid',
-      source: 'manual',
-      recordedBy: { kind: actor?.kind || 'admin', id: actor?.id, name: actor?.name },
-      notes,
-    });
+    /* Drop the cached blended sell rate for this shop.
+     *
+     * `sms/earnings.sellRateFor` derives revenue-per-segment from the shop's own
+     * top-up history and caches it for 60s, and nothing used to bust that cache.
+     * With manual allocation that was a rare minute of slightly wrong margin;
+     * with self-serve top-ups it is every purchase, and the first messages a
+     * shop sends after buying credit are exactly the ones it sends immediately. */
+    try {
+      require('./sms/earnings').invalidate();
+    } catch (err) {
+      // Cache invalidation must never be the thing that fails a completed sale.
+      logger.warn(`[billing] could not invalidate SMS rate cache: ${err.message}`);
+    }
 
     await this._recordEvent({
       shop,

@@ -6,6 +6,7 @@ const adminStorefrontController = require('../controllers/adminStorefront.contro
 const adminMediaController = require('../controllers/adminMedia.controller');
 const adminLandingController = require('../controllers/adminLanding.controller');
 const billingController = require('../controllers/billing.controller');
+const platformCheckoutController = require('../controllers/platformCheckout.controller');
 const platformSmsController = require('../controllers/platformSms.controller');
 const smsProviderController = require('../controllers/smsProvider.controller');
 const adminTelegramController = require('../controllers/adminTelegram.controller');
@@ -239,6 +240,23 @@ router.post('/shops/:id/trial', billingController.startTrial);
 router.post('/shops/:id/subscription/extend', billingController.extendSubscription);
 router.post('/shops/:id/access', billingController.setAccess);
 router.patch('/shops/:id/billing', billingController.updateBillingProfile);
+
+/* ── Self-serve checkout orders ───────────────────────────────────────────
+ *
+ * The operator's window onto payments the shops made themselves. Its reason to
+ * exist is the `paid` state: an order whose money arrived but whose fulfilment
+ * threw is a shop we OWE, and without a screen it is invisible — the shop knows
+ * it paid, and nothing on our side says so.
+ *
+ * `verify` re-asks the gateway; `fulfil` releases the claim and retries. Both
+ * are deliberately human actions rather than automatic retries, because
+ * whatever made fulfilment fail is usually still true and a person should look
+ * before it is tried again. See platformCheckout.service.refulfilOrder.
+ */
+router.get('/billing/gateway', platformCheckoutController.adminGatewayStatus);
+router.get('/billing/orders', platformCheckoutController.adminListOrders);
+router.post('/billing/orders/:id/verify', platformCheckoutController.adminVerifyOrder);
+router.post('/billing/orders/:id/fulfil', platformCheckoutController.adminFulfilOrder);
 
 // Platform defaults (trial length, standard prices, SMS tiers, support phone).
 // Settings, not policy enforcement — the per-shop negotiated figures always win.

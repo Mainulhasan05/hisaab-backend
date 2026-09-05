@@ -29,6 +29,14 @@ module.exports = {
   // Platform billing — what shops pay HisaabBD. Separate from `Payment`, which
   // is what a shop's customers pay the shop.
   PlatformPayment: require('./PlatformPayment.model'),
+  // One attempt to pay us through the gateway — the intent that sits between
+  // "the owner tapped a package" and "the money arrived". Registered here or
+  // `sync-indexes` never ships them to production, where autoIndex is off, and
+  // the two that matter most are lost: the unique `invoiceNumber` that stops a
+  // mint collision becoming a gateway `1008`, and `{status, createdAt}`, which
+  // is the reconciliation sweep's only query — without it the sweep is a
+  // collection scan every five minutes, forever.
+  PlatformOrder: require('./PlatformOrder.model'),
   SubscriptionEvent: require('./SubscriptionEvent.model'),
   PlatformSetting: require('./PlatformSetting.model'),
   // Where the shop's own money sits — the cash box, each bank account, each

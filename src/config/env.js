@@ -39,6 +39,36 @@ function validateEnv(env = process.env) {
   if (env.TELEGRAM_BOT_TOKEN && !/^\d+:[\w-]{20,}$/.test(env.TELEGRAM_BOT_TOKEN.trim())) {
     throw new Error('TELEGRAM_BOT_TOKEN is malformed — expected "<digits>:<secret>" from @BotFather');
   }
+
+  /* PayStation. Optional as a whole — with no merchant id the owner-facing
+   * checkout stays hidden and billing carries on being keyed in by hand.
+   *
+   * Half-configured is fatal, and this is the integration where that rule earns
+   * its keep most. The failure is not a quiet one: a shop that has ALREADY BEEN
+   * CHARGED gets nothing back, because either we cannot ask the gateway what
+   * happened (no password) or the gateway has nowhere to return the customer
+   * (no API_PUBLIC_URL). Both are unrecoverable from the shop's side and both
+   * are trivially caught here.
+   *
+   * The two URLs must be externally reachable ORIGINS, not paths: PayStation
+   * resolves the callback from the public internet, and the app URL is where a
+   * customer's browser is sent afterwards. A localhost value in production
+   * means every payment succeeds at the bank and lands nowhere. */
+  if (env.PAYSTATION_MERCHANT_ID) {
+    const missingPaystation = ['PAYSTATION_PASSWORD', 'API_PUBLIC_URL', 'APP_PUBLIC_URL']
+      .filter((key) => !env[key] || String(env[key]).trim() === '');
+    if (missingPaystation.length > 0) {
+      throw new Error(
+        `PAYSTATION_MERCHANT_ID requires ${missingPaystation.join(', ')} — ` +
+        'a half-configured gateway takes money it cannot deliver against'
+      );
+    }
+    for (const key of ['API_PUBLIC_URL', 'APP_PUBLIC_URL']) {
+      if (!/^https?:\/\//i.test(String(env[key]).trim())) {
+        throw new Error(`${key} must be an absolute URL including the scheme (https://…)`);
+      }
+    }
+  }
 }
 
 module.exports = { validateEnv };

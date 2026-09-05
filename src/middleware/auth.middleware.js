@@ -344,7 +344,22 @@ const protect = asyncHandler(async (req, res, next) => {
         // Writes stop; reads do not. An unpaid shop can still get yesterday's
         // numbers and its due list out, which is deliberate — see
         // SUBSCRIPTION_PLAN.md §3.
-        if (req.method !== 'GET') {
+        //
+        // `allowExpiredWrite` is the one carve-out, and it is the carve-out
+        // without which self-serve renewal cannot exist: paying us is a POST,
+        // and the shops that need to make it are by definition the ones this
+        // branch is refusing. An expired shop that cannot reach the checkout is
+        // an expired shop that has to telephone someone, which is the problem
+        // the gateway was integrated to remove.
+        //
+        // Set per-route by `allowWhenExpired`, mounted BEFORE `protect` on the
+        // two billing endpoints and nowhere else — so the exception is visible
+        // at the route definition rather than living in a skip list here that
+        // nobody reads before adding to. The `access.isBlocked` branch above
+        // returns unconditionally and is deliberately not carved out: a blocked
+        // shop stays blocked, because a block is a considered decision with a
+        // reason attached and no amount of money should quietly undo one.
+        if (req.method !== 'GET' && !req.allowExpiredWrite) {
           return ApiResponse.paymentRequired(res, {
             message: 'Your subscription has expired. You can still view your data, but cannot make changes. Call 01757995016 to renew.',
             messageBn: 'আপনার সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে। আপনি ডেটা দেখতে পারবেন, কিন্তু পরিবর্তন করতে পারবেন না। রিনিউ করতে কল করুন — ০১৭৫৭৯৯৫০১৬',
@@ -602,11 +617,35 @@ const softProtect = asyncHandler(async (req, res, next) => {
   }
 });
 
+/**
+ * Let this ONE route write while the shop's subscription has expired.
+ *
+ * Mount it BEFORE `protect`, on the specific route, never on a router:
+ *
+ *     router.post('/checkout/subscription', allowWhenExpired, protect, …)
+ *
+ * It exists for exactly one class of endpoint — the ones through which a shop
+ * pays us. Expiry makes the app read-only, which means the act of renewing is
+ * itself blocked by the state it would cure. Every other write must stay
+ * refused, which is why this is a flag set at a route rather than a list of
+ * exempt paths inside `protect`: a list is something you append to without
+ * anybody reviewing it, and the first careless append re-opens the whole
+ * paywall.
+ *
+ * It does NOT bypass authentication, ownership, rate limiting, or the block
+ * switch. A blocked shop is still refused; see the comment at the guard.
+ */
+const allowWhenExpired = (req, res, next) => {
+  req.allowExpiredWrite = true;
+  next();
+};
+
 module.exports = {
   protect,
   softProtect,
   adminOnly,
   superAdminOnly,
   ownerOnly,
+  allowWhenExpired,
   hydrateBranchList // exported for tests only
 };

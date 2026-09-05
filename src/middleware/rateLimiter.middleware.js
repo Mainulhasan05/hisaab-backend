@@ -185,6 +185,60 @@ const smsLimiter = rateLimit({
 });
 
 /**
+ * Checkout Limiter — the shop opening a payment session with the gateway.
+ * 12 requests per minute, keyed on the SHOP rather than the IP.
+ *
+ * Keyed on the shop because that is what a gateway session costs us: every
+ * `initiate-payment` is an outbound call and a burnt invoice number, and a
+ * frustrated owner tapping "Renew" repeatedly on one connection is the exact
+ * traffic this bounds. An IP key would also pool every owner behind one
+ * carrier NAT into a single bucket.
+ *
+ * 12 rather than a tighter number because a real renewal legitimately costs
+ * several requests — open a session, come back, poll the verification a few
+ * times — and a limit that fires during an honest payment is worse than no
+ * limit: it strands somebody who has already been charged.
+ */
+const checkoutLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: Number(process.env.CHECKOUT_RATE_LIMIT_MAX) || 12,
+  store: new HybridStore('rl:checkout:'),
+  keyGenerator: (req) => String(req.shop?._id || req.user?.shop || req.ip),
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    return ApiResponse.tooManyRequests(res, {
+      message: 'Too many payment attempts. Please wait a moment and try again.',
+      messageBn: 'অনেকবার চেষ্টা করা হয়েছে। একটু পর আবার চেষ্টা করুন।'
+    });
+  }
+});
+
+/**
+ * The gateway's return redirect. 60 per minute per IP.
+ *
+ * Unauthenticated and guessable, so it needs a ceiling — but a generous one,
+ * because the cost of a false 429 here is a customer who has PAID being told
+ * something went wrong. The handler does no work of its own beyond one
+ * server-to-server lookup, and the reconciliation sweep covers anything this
+ * turns away, so the limit protects the gateway from us rather than us from
+ * the caller.
+ */
+const paymentReturnLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: Number(process.env.PAYMENT_RETURN_RATE_LIMIT_MAX) || 60,
+  store: new HybridStore('rl:payret:'),
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    return ApiResponse.tooManyRequests(res, {
+      message: 'Too many requests, please try again in a moment.',
+      messageBn: 'কিছুক্ষণ পর আবার চেষ্টা করুন।'
+    });
+  }
+});
+
+/**
  * Public Storefront Limiter
  * 120 requests per minute per IP.
  *
@@ -237,6 +291,37 @@ const storefrontLimiter = rateLimit({
  */
 const isPublicStorefrontPath = (req) =>
   String(req.originalUrl || '').split('?')[0].startsWith('/api/public/');
+
+/**
+ * Is this the payment gateway returning a customer's browser to us?
+ *
+ * Read the same way and for the same reason as the helper above, and used by
+ * `app.js` to let this ONE path past the CORS allowlist.
+ *
+ * ── Why CORS has to be skipped here ─────────────────────────────────────────
+ *
+ * PayStation's documentation never says whether it returns the customer with a
+ * GET redirect or a form POST. A GET navigation carries no `Origin` header and
+ * the allowlist waves it through. A cross-site form POST navigation DOES carry
+ * one — `https://api.paystation.com.bd` — which is not in `ALLOWED_ORIGINS` and
+ * must never be added to it, since that list governs which sites may make
+ * credentialed XHR calls against this API.
+ *
+ * The `cors` callback answers a disallowed origin by calling back with an Error,
+ * which the error handler turns into a 500. So on the POST branch a customer
+ * whose money had already left their wallet would be shown a server error
+ * instead of their renewed subscription — a failure that would only appear in
+ * production, only on real payments, and only if PayStation happens to use POST.
+ *
+ * Skipping CORS here gives nothing away. CORS is a browser-side policy about
+ * reading responses; it has never applied to top-level navigations, which is
+ * exactly what this request is. The handler itself reads nothing from the
+ * request and answers with a redirect, so there is no response body for a
+ * hostile origin to want.
+ */
+const isPaymentReturnPath = (req) =>
+  /^\/api\/public\/payments\/[a-z0-9_-]+\/return\//i
+    .test(String(req.originalUrl || '').split('?')[0]);
 
 /**
  * Telegram Link Token Limiter
@@ -299,6 +384,9 @@ module.exports = {
   smsLimiter,
   aiParseLimiter,
   storefrontLimiter,
+  checkoutLimiter,
+  paymentReturnLimiter,
   isPublicStorefrontPath,
+  isPaymentReturnPath,
   telegramLinkLimiter
 };

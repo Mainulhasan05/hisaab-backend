@@ -11,10 +11,22 @@ const allocationSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
+  /**
+   * The admin who granted the credits, or null when the shop bought them itself.
+   *
+   * Deliberately NOT required. It was, back when the only way to get SMS credit
+   * was for an operator to key it in — but a self-serve gateway purchase has no
+   * admin behind it, and `required: true` would have rejected every one of them
+   * at the last step, after the shop had already been charged.
+   *
+   * Null therefore means something specific and useful: "this shop paid for this
+   * itself". The `PlatformPayment` row written alongside carries the full
+   * provenance (`source`, `gateway.paymentId`, the trxId), so nothing is lost by
+   * this field being empty.
+   */
   allocatedBy: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'Admin',
-    required: true
+    ref: 'Admin'
   },
   paymentMethod: {
     type: String,

@@ -38,6 +38,7 @@ const storefrontRoutes = require('./storefront.routes');
 const orderRoutes = require('./order.routes');
 const landingRoutes = require('./landing.routes');
 const publicRoutes = require('./public.routes');
+const billingRoutes = require('./billing.routes');
 
 // Mount routes
 router.use('/auth', authRoutes);
@@ -56,6 +57,10 @@ router.use('/customers', customerRoutes);
 
 router.use('/sales', saleRoutes);
 router.use('/sms', smsRoutes);
+// The shop paying US. `/billing`, not a verb under `/admin` — this is the
+// owner's own surface, and two of its routes deliberately work while every
+// other write is refused. See the header of billing.routes.js.
+router.use('/billing', billingRoutes);
 router.use('/reports', reportRoutes);
 router.use('/audit', auditRoutes);
 router.use('/admin', adminRoutes);
@@ -128,6 +133,7 @@ router.get('/', (req, res) => {
       customers: '/api/customers',
       sales: '/api/sales',
       sms: '/api/sms',
+      billing: '/api/billing',
       reports: '/api/reports',
       audit: '/api/audit',
       admin: '/api/admin',
