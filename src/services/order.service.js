@@ -9,6 +9,7 @@ const { getBangladeshTodayStr, getBangladeshTodayRange } = require('../utils/bdT
 const { quantizeMoney } = require('../utils/quantity.util');
 const { normalizePhone, isValidPhone } = require('../utils/phone.util');
 const { branchFilter, branchMatch, isActiveBranch, wrongBranchError } = require('../utils/branchScope.util');
+const { resolveAddress, _norm: geoNorm } = require('../utils/bdGeo.util');
 const logger = require('../utils/logger.util');
 
 /**
@@ -263,20 +264,49 @@ class OrderService {
   }
 
   /**
-   * Resolve the delivery charge from the storefront's own zone table.
+   * Resolve the delivery charge from WHERE THE CUSTOMER IS.
+   *
+   * ── WHAT CHANGED, AND WHY IT HAD TO ────────────────────────────────────────
+   *
+   * This function used to take a `zoneKey` straight off the checkout body. It
+   * checked the key existed in the shop's zone table and charged it — which
+   * meant the CLIENT was choosing the delivery price. A customer in Rangpur
+   * could tick "ঢাকার ভিতরে ৳৬০" and pay ৳৬০, and nothing anywhere could tell
+   * that was wrong, because the server never learned where they were.
+   *
+   * That is the same hole I-10 closes for product prices, left open one field
+   * to the right. So the customer now names a PLACE — validated against
+   * `bdGeo` — and the zone is derived from the shop's own mapping.
+   *
+   * ── RESOLUTION ORDER: SPECIFIC BEFORE GENERAL, NAMED BEFORE DEFAULT ───────
+   *
+   *   1. area/upazila match   — "Savar" is outside Dhaka even though the
+   *                             district is Dhaka. Without this level the
+   *                             busiest district in the country cannot be
+   *                             priced correctly at all.
+   *   2. district match       — the broad brush, and all most shops need.
+   *   3. `defaultZoneKey`     — the named catch-all.
+   *   4. refuse               — never charge zero by omission.
+   *
+   * Step 4 is the one worth stating plainly: an address nobody claimed and no
+   * default to fall back on is a configuration the shop has not finished, and
+   * a 400 that says so is better than a free delivery it never notices.
    *
    * Snapshotted onto the order, never referenced: a shop that raises its Dhaka
    * charge must not change what an already-placed order said it would cost.
    *
-   * An unknown zone key is refused rather than defaulted to zero — a silent
-   * fallback to free delivery on a typo is the shop's money.
+   * @param {object} address `{ district, subdistrict }` — names, either language.
    */
-  resolveDelivery(storefront, zoneKey, { pickup = false } = {}) {
+  resolveDelivery(storefront, address, { pickup = false, requireSubdistrict = true } = {}) {
     if (pickup) {
       if (!storefront?.delivery?.pickupEnabled) {
         throw new AppError('Pickup is not offered', 'পিকআপ সুবিধা নেই', 400);
       }
-      return { zoneKey: null, zoneName: null, charge: 0, etaDaysMin: null, etaDaysMax: null, isPickup: true };
+      return {
+        zoneKey: null, zoneName: null, charge: 0,
+        etaDaysMin: null, etaDaysMax: null, isPickup: true,
+        district: null, subdistrict: null,
+      };
     }
 
     const zones = (storefront?.delivery?.zones || []).filter((z) => z.isActive !== false);
@@ -290,9 +320,30 @@ class OrderService {
       );
     }
 
-    const zone = zones.find((z) => z.key === String(zoneKey || '').trim());
+    const resolved = resolveAddress(address || {}, { requireSubdistrict });
+    if (!resolved.ok) {
+      throw new AppError('Invalid delivery address', resolved.error, 400);
+    }
+    const { district, subdistrict } = resolved;
+
+    // Compared on the canonical English name, case-insensitively: the mapping
+    // is written by a shopkeeper through a picker, but it is also written by a
+    // migration and could be edited by hand, and "dhaka" must not miss "Dhaka".
+    const has = (list, name) =>
+      Array.isArray(list) && list.some((n) => geoNorm(n) === geoNorm(name));
+
+    let zone = subdistrict ? zones.find((z) => has(z.areas, subdistrict.name)) : null;
+    if (!zone) zone = zones.find((z) => has(z.districts, district.name));
     if (!zone) {
-      throw new AppError('Choose a delivery area', 'ডেলিভারি এলাকা বেছে নিন', 400);
+      const fallbackKey = String(storefront?.delivery?.defaultZoneKey || '').trim();
+      if (fallbackKey) zone = zones.find((z) => z.key === fallbackKey);
+    }
+    if (!zone) {
+      throw new AppError(
+        'No delivery zone covers this address',
+        `"${district.bn || district.name}" এ এই দোকান এখনো ডেলিভারি দেয় না — দোকানে ফোন করুন`,
+        400
+      );
     }
 
     return {
@@ -302,6 +353,12 @@ class OrderService {
       etaDaysMin: zone.etaDaysMin ?? null,
       etaDaysMax: zone.etaDaysMax ?? null,
       isPickup: false,
+      // Snapshotted as canonical names — what the packing slip prints and what
+      // the courier is told. Never the upstream's ids; see bdGeo.util.
+      district: district.name,
+      districtBn: district.bn || null,
+      subdistrict: subdistrict?.name || null,
+      subdistrictBn: subdistrict?.bn || null,
     };
   }
 
@@ -347,6 +404,94 @@ class OrderService {
   }
 
   /**
+   * Price a basket without placing it.
+   *
+   * ── WHY THIS EXISTS RATHER THAN ARITHMETIC IN THE BROWSER ─────────────────
+   *
+   * The old checkout added the line prices and the zone charge itself, and it
+   * could, because it had exactly one line and the customer had picked the
+   * zone by hand. Neither is true now: a cart has many lines, and the zone is
+   * DERIVED from the customer's district by rules (area beats district beats
+   * default) that live in `resolveDelivery`. Re-implementing those in a
+   * component would be a second opinion on what a customer is charged.
+   *
+   * So the checkout asks. Same resolver, same prices, same free-delivery
+   * threshold, same refusals — the number on the button is the number the
+   * order will carry, because one function produced both.
+   *
+   * Writes nothing. Safe to call on every change to the form, which is why the
+   * route is outside `orderAbuseGuard` (that guard's budget is for ORDERS; a
+   * customer changing their mind twice must not spend it).
+   */
+  async quoteOrder({ shopId, storefront, items, address, pickup = false, onlineOnly = true }) {
+    const { lines, subtotal } = await this.resolveLines(shopId, { items, onlineOnly });
+
+    let delivery;
+    try {
+      delivery = this.resolveDelivery(storefront, address, { pickup });
+      delivery = this.applyFreeDelivery(storefront, delivery, subtotal);
+    } catch (err) {
+      /**
+       * An unresolvable address is not a failed quote — it is a quote for the
+       * items, with the delivery part still unknown. The customer has usually
+       * just not reached the district dropdown yet, and answering with a 400
+       * would blank the basket they are looking at.
+       *
+       * Anything that is NOT about the address still throws.
+       */
+      if (err?.statusCode !== 400) throw err;
+      return {
+        lines: lines.map(this._publicLine),
+        subtotal,
+        deliveryCharge: null,
+        total: null,
+        delivery: null,
+        deliveryError: err.messageBn || err.message,
+      };
+    }
+
+    return {
+      lines: lines.map(this._publicLine),
+      subtotal,
+      deliveryCharge: delivery.charge,
+      total: quantizeMoney(subtotal + delivery.charge),
+      delivery: {
+        zoneName: delivery.zoneName,
+        etaDaysMin: delivery.etaDaysMin,
+        etaDaysMax: delivery.etaDaysMax,
+        isPickup: delivery.isPickup,
+        district: delivery.districtBn || delivery.district || null,
+        subdistrict: delivery.subdistrictBn || delivery.subdistrict || null,
+      },
+      deliveryError: null,
+    };
+  }
+
+  /**
+   * A line as the customer may see it.
+   *
+   * `buyingPrice` is on every resolved line and must never reach a browser —
+   * it is what the shop paid, and the storefront is public. Whitelisted rather
+   * than deleted so a field added to the line shape later is invisible here by
+   * default instead of leaking until somebody notices.
+   */
+  _publicLine(line) {
+    return {
+      productId: String(line.product),
+      variantSku: line.variantSku,
+      name: line.name,
+      code: line.code,
+      variantLabel: line.variantLabel,
+      unit: line.unit,
+      image: line.image,
+      quantity: line.quantity,
+      unitPrice: line.unitPrice,
+      compareAtPrice: line.compareAtPrice,
+      lineTotal: line.lineTotal,
+    };
+  }
+
+  /**
    * Create an order. The single write both doors funnel into.
    *
    * Everything about money is computed here from the resolved lines and the
@@ -358,8 +503,14 @@ class OrderService {
     branch = null,
     customer,
     items,
-    zoneKey,
+    // `{ district, subdistrict }` — names, either language. The zone is derived
+    // from these, never sent by the client. See resolveDelivery.
+    address,
     pickup = false,
+    // Storefront customers pick from a dropdown and must name their area —
+    // Dhaka cannot be priced without it. Staff typing a phone order may not
+    // know it yet. See resolveAddress.
+    requireSubdistrict = true,
     source = 'storefront',
     sourceNote = null,
     createdBy = null,
@@ -404,7 +555,7 @@ class OrderService {
 
     const { lines, subtotal } = await this.resolveLines(shopId, { items, onlineOnly });
 
-    let delivery = this.resolveDelivery(storefront, zoneKey, { pickup });
+    let delivery = this.resolveDelivery(storefront, address, { pickup, requireSubdistrict });
     delivery = this.applyFreeDelivery(storefront, delivery, subtotal);
 
     const total = quantizeMoney(subtotal + delivery.charge);
@@ -648,7 +799,24 @@ class OrderService {
       throw new AppError('Order not found', 'অর্ডারটি পাওয়া যায়নি', 404);
     }
 
-    return this.toMerchantOrder(order);
+    /**
+     * Which customer SMS this shop has switched ON — i.e. which buttons the
+     * detail screen may offer.
+     *
+     * Sent with the ORDER rather than fetched separately by the panel so the
+     * screen cannot render a button the server would refuse. These are
+     * offer-flags, never auto-send flags; `notifyCustomer` explains why.
+     */
+    const storefront = await Storefront.findOne({ shop: req.shop._id })
+      .select('notifications').lean();
+
+    return {
+      ...this.toMerchantOrder(order),
+      smsOffered: {
+        confirmed: storefront?.notifications?.smsOnConfirm === true,
+        shipped: storefront?.notifications?.smsOnShip === true,
+      },
+    };
   }
 
   /**
@@ -706,6 +874,123 @@ class OrderService {
     }
 
     return this.toMerchantOrder(order);
+  }
+
+  /**
+   * Text the customer about their parcel — ONE order, ONE explicit tap.
+   *
+   * ── WHY THIS IS NOT AUTOMATIC ──────────────────────────────────────────────
+   *
+   * The obvious implementation is to send on every `confirm` and every `ship`
+   * whenever the shop's flag is on. `Order.model.js` argues against exactly
+   * that, and the argument is right: SMS is metered and billed per message, so
+   * a per-status automatic toggle means a shop enabling it once and then
+   * spending money on every order forever, discovering the bill at the end of
+   * the month.
+   *
+   * So `Storefront.notifications.smsOnConfirm` / `smsOnShip` decide what is
+   * OFFERED — whether the button appears — and never what is spent. This
+   * method is what the button calls.
+   *
+   * ── WHAT THIS FIXES ────────────────────────────────────────────────────────
+   *
+   * Both flags have been switches in অনলাইন → সেটিংস since P2, labelled
+   * "আপনার SMS কোটা থেকে খরচ হবে", and nothing read either one. A shopkeeper
+   * could turn them on, believe their customers were being texted and their
+   * quota spent, and both were false. A switch that promises to spend money
+   * and does nothing is worse than a missing feature, because nobody goes
+   * looking for it. See I-21.
+   *
+   * ── COST ───────────────────────────────────────────────────────────────────
+   *
+   * The body is Bangla, so it is UCS-2 and every 67 characters is a segment.
+   * These are kept to two — the order number, one fact, and the shop's name,
+   * which `sendSingle` appends and bills for.
+   */
+  async notifyCustomer(req, orderId, kind, { userId = null } = {}) {
+    if (!['confirmed', 'shipped'].includes(kind)) {
+      throw new AppError('Unknown notification', 'এই ধরনের বার্তা পাঠানো যায় না', 400);
+    }
+
+    const order = await Order.findOne(
+      branchFilter(req, { _id: orderId, shop: req.shop._id })
+    );
+    if (!order) throw new AppError('Order not found', 'অর্ডারটি পাওয়া যায়নি', 404);
+
+    const flag = kind === 'shipped' ? 'smsOnShip' : 'smsOnConfirm';
+    const storefront = await Storefront.findOne({ shop: req.shop._id })
+      .select('notifications').lean();
+    if (storefront?.notifications?.[flag] !== true) {
+      throw new AppError(
+        'This message is switched off',
+        'এই বার্তাটি সেটিংসে বন্ধ আছে — আগে চালু করুন',
+        400
+      );
+    }
+
+    // Announcing a thing that has not happened is worse than not announcing it.
+    if (kind === 'confirmed' && order.status === 'pending') {
+      throw new AppError('Order is not confirmed', 'অর্ডারটি এখনো নিশ্চিত হয়নি', 400);
+    }
+    if (kind === 'shipped' && !['shipped', 'delivered'].includes(order.status)) {
+      throw new AppError('Order has not shipped', 'অর্ডারটি এখনো পাঠানো হয়নি', 400);
+    }
+
+    // Already told, for this transition. Charging a shop twice for the same
+    // announcement is the second question the notification log exists to
+    // answer, so refuse rather than log it a second time.
+    if ((order.notifications || []).some((n) => n.channel === 'sms' && n.status === kind && n.ok)) {
+      throw new AppError('Already sent', 'এই বার্তাটি আগেই পাঠানো হয়েছে', 409);
+    }
+
+    const phone = order.customer?.phone;
+    if (!phone) throw new AppError('No phone number', 'কাস্টমারের নম্বর নেই', 400);
+
+    const text = kind === 'shipped'
+      ? `আপনার অর্ডার ${order.orderNo} পাঠানো হয়েছে। শীঘ্রই পৌঁছে যাবে।`
+      : `আপনার অর্ডার ${order.orderNo} নিশ্চিত হয়েছে। মোট ৳${order.total}।`;
+
+    const smsService = require('./sms.service');
+    let ok = true;
+    let error = null;
+    try {
+      await smsService.sendSingle(order.shop, userId, phone, text, null, req, {
+        audience: kind === 'shipped' ? 'order_shipped' : 'order_confirmed',
+      });
+    } catch (err) {
+      // An exhausted quota or a gateway outage is recorded, not thrown: the
+      // order is unaffected, and the shopkeeper needs to see WHY it did not go
+      // rather than a red toast they cannot act on later.
+      ok = false;
+      error = String(err?.messageBn || err?.message || '').slice(0, 300);
+      logger.warn(`[Order] SMS ${kind} for ${order.orderNo}: ${error}`);
+    }
+
+    order.notifications.push({
+      channel: 'sms',
+      status: kind,
+      to: phone,
+      text,
+      sentAt: new Date(),
+      sentBy: userId || null,
+      ok,
+      ...(error ? { error } : {}),
+    });
+    await order.save();
+
+    return {
+      ok,
+      error,
+      order: {
+        ...this.toMerchantOrder(order.toObject()),
+        // Preserved across the response so the button does not vanish and
+        // reappear while the screen re-renders from this payload.
+        smsOffered: {
+          confirmed: storefront?.notifications?.smsOnConfirm === true,
+          shipped: storefront?.notifications?.smsOnShip === true,
+        },
+      },
+    };
   }
 
   /**
@@ -980,6 +1265,20 @@ class OrderService {
       cancelReason: order.cancelReason || null,
       deliveredAt: order.deliveredAt || null,
       statusHistory: order.statusHistory || [],
+      /**
+       * What has already been texted, so the detail screen can grey out a
+       * button rather than let a shopkeeper pay twice for the same
+       * announcement. `text` is included because "why was I charged for four
+       * messages on one order" is answered by showing the four messages.
+       */
+      notifications: (order.notifications || []).map((n) => ({
+        channel: n.channel,
+        status: n.status || null,
+        text: n.text || null,
+        sentAt: n.sentAt || null,
+        ok: n.ok !== false,
+        error: n.error || null,
+      })),
       meta: {
         ip: order.meta?.ip || null,
         userAgent: order.meta?.userAgent || null,

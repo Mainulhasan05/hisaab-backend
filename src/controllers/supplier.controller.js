@@ -104,6 +104,22 @@ exports.voidSupplierPayment = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * সরবরাহকারী পরিশোধ — the shop-wide register of money paid OUT.
+ *
+ * `req.query` goes through whole: the page, the date range, the search term and
+ * the `types` filter are all read by the service, and validating them twice is
+ * how the two drift.
+ */
+exports.getSupplierPaymentRegister = asyncHandler(async (req, res) => {
+  const data = await supplierService.getSupplierPaymentRegister(req.shop._id, req.query, req);
+  return ApiResponse.success(res, {
+    data,
+    message: 'Supplier payment register retrieved successfully',
+    messageBn: 'পরিশোধের তালিকা লোড হয়েছে',
+  });
+});
+
 // One supplier's payment history, newest first
 exports.getSupplierPayments = asyncHandler(async (req, res) => {
   const data = await supplierService.getSupplierPayments(

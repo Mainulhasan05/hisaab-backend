@@ -668,8 +668,24 @@ const shopSchema = new mongoose.Schema({
    * full registry regardless of which units a shop may currently CHOOSE: a
    * validation list has to keep accepting anything already stored.
    *
-   * Empty (the default) = no templates granted, which is every shop that an
-   * admin has never touched.
+   * ── EMPTY MEANS "NO RESTRICTION", NOT "NOTHING" ────────────────────────────
+   * Empty (the default) = the shop may pick ANY `published` template.
+   *
+   * It used to mean the opposite, and that made the common case broken by
+   * default: an admin turned `features.storefront` on, the shop opened its
+   * panel, and the picker was empty — a website feature that could not pick a
+   * website, because being granted the FEATURE and being granted a TEMPLATE
+   * were two separate actions and the second was easy to forget.
+   *
+   * A non-empty list still means exactly what it always did: this shop may pick
+   * only these. So the field is a restriction that almost nobody needs, rather
+   * than a permission everybody needs. Read it through
+   * `utils/storefrontTemplates.util`, never directly — that module is where the
+   * empty case is interpreted, once.
+   *
+   * Note this is deliberately NOT back-filled with the full template list: a
+   * stored list would go stale the moment a new template was published, and
+   * every shop would need a migration to see it.
    */
   storefront: {
     allowedTemplates: {

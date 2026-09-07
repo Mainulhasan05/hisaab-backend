@@ -77,7 +77,7 @@ exports.placeOrder = asyncHandler(async (req, res) => {
     });
   }
 
-  const { customer = {}, items, zoneKey, pickup } = req.body;
+  const { customer = {}, items, district, subdistrict, pickup } = req.body;
 
   let order;
   try {
@@ -86,7 +86,7 @@ exports.placeOrder = asyncHandler(async (req, res) => {
       storefront,
       customer,
       items,
-      zoneKey,
+      address: { district, subdistrict },
       pickup: pickup === true,
       source: 'storefront',
       onlineOnly: true,
@@ -159,4 +159,48 @@ exports.trackOrder = asyncHandler(async (req, res) => {
     data: orderService.toPublicOrder(order),
     message: 'Order found',
   });
+});
+
+/**
+ * Price a basket without placing it.
+ *
+ * ── WHY THIS IS SAFE TO LEAVE UNGUARDED BY THE ABUSE CEILING ───────────────
+ *
+ * It writes nothing, reserves nothing and returns only what the catalogue
+ * already shows plus the shop's own published delivery charges. The one thing
+ * it reveals that a GET does not is which zone a district resolves to — which
+ * is the answer to "do you deliver to Savar, and for how much", the single
+ * most asked question a shop's page gets.
+ *
+ * `orderAbuseGuard` is deliberately absent for the same reason the landing
+ * page's quote route omits it: that guard's budget is five ORDERS a minute,
+ * and spending it on price checks would block a customer who changed their
+ * delivery area twice. The router-wide `storefrontLimiter` is what bounds it.
+ *
+ * No honeypot and no abuse strike either: a malformed quote is a stale page or
+ * a curious script, and neither is worth blocking a real basket over.
+ */
+exports.quoteOrder = asyncHandler(async (req, res) => {
+  const { shop, storefront } = await publicStorefrontService.resolveStorefront(req.params.slug);
+
+  if (!shopHasFeature(shop, 'onlineOrders')) {
+    return ApiResponse.error(res, {
+      message: 'This shop does not take online orders',
+      messageBn: 'এই দোকানটি অনলাইনে অর্ডার নেয় না — সরাসরি ফোন করুন।',
+      statusCode: 403,
+    });
+  }
+
+  const { items, district, subdistrict, pickup } = req.body;
+
+  const quote = await orderService.quoteOrder({
+    shopId: shop._id,
+    storefront,
+    items,
+    address: { district, subdistrict },
+    pickup: pickup === true,
+    onlineOnly: true,
+  });
+
+  return ApiResponse.success(res, { data: quote });
 });

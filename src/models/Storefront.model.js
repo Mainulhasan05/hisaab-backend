@@ -47,6 +47,7 @@
  */
 
 const mongoose = require('mongoose');
+const { DHAKA_CITY_AREA_NAMES } = require('../utils/bdGeo.util');
 
 const STOREFRONT_STATUS = Object.freeze(['unpublished', 'live', 'paused']);
 
@@ -158,13 +159,77 @@ const storefrontSchema = new mongoose.Schema({
         etaDaysMin: { type: Number, default: 1, min: 0 },
         etaDaysMax: { type: Number, default: 3, min: 0 },
         isActive: { type: Boolean, default: true },
+
+        /**
+         * WHICH PLACES THIS ZONE COVERS — the reason the customer can no
+         * longer pick their own delivery charge.
+         *
+         * The checkout used to post a `zoneKey`. The server checked the key
+         * existed and charged it, so a customer in Rangpur could tick
+         * "ঢাকার ভিতরে ৳৬০" and be charged ৳৬০ — the client was choosing the
+         * price, which is exactly what I-10 forbids everywhere else.
+         *
+         * Now the customer names a PLACE and the server derives the zone from
+         * these two lists (`order.service.resolveDelivery`).
+         *
+         * ── WHY TWO LISTS AND NOT ONE ─────────────────────────────────────
+         *
+         * `areas` is more specific than `districts` and wins. That is not a
+         * refinement, it is the whole reason this works for the busiest
+         * delivery area in the country: "inside Dhaka" means Dhaka CITY, but
+         * Dhaka DISTRICT also contains Savar, Dhamrai and Keraniganj, which
+         * almost every shop prices as outside. Mapping by district alone
+         * cannot express that; mapping every place individually would mean 618
+         * entries per zone.
+         *
+         * So: `districts` paints with a broad brush, `areas` corrects it.
+         *
+         * Stored as canonical ENGLISH names from `bdGeo.json`, never the
+         * upstream's numeric ids — see the header of `scripts/fetch-bd-geo.js`
+         * on why an id we do not own is not a key we can store.
+         */
+        districts: { type: [String], default: () => [] },
+        areas: { type: [String], default: () => [] },
       }],
       default: () => ([
-        { key: 'inside-dhaka', name: 'Inside Dhaka', nameBn: 'ঢাকার ভিতরে', charge: 60, etaDaysMin: 1, etaDaysMax: 2 },
-        { key: 'outside-dhaka', name: 'Outside Dhaka', nameBn: 'ঢাকার বাইরে', charge: 120, etaDaysMin: 2, etaDaysMax: 4 },
+        {
+          key: 'inside-dhaka',
+          name: 'Inside Dhaka',
+          nameBn: 'ঢাকার ভিতরে',
+          charge: 60,
+          etaDaysMin: 1,
+          etaDaysMax: 2,
+          // The city areas only. Dhaka district's rural upazilas (Savar,
+          // Dhamrai, Keraniganj…) deliberately fall through to the default
+          // zone — see DHAKA_CITY_AREA_NAMES.
+          areas: DHAKA_CITY_AREA_NAMES,
+        },
+        {
+          key: 'outside-dhaka',
+          name: 'Outside Dhaka',
+          nameBn: 'ঢাকার বাইরে',
+          charge: 120,
+          etaDaysMin: 2,
+          etaDaysMax: 4,
+        },
       ]),
     },
     pickupEnabled: { type: Boolean, default: false },
+
+    /**
+     * The catch-all zone: where an address goes when no zone claims it.
+     *
+     * Required for the mapping to be safe. Without it, the honest options for
+     * an unmapped district are "refuse the order" — which turns a shop's
+     * unfinished configuration into lost sales it never hears about — or
+     * "charge nothing", which is the shop's money. A named fallback is the
+     * third option, and it is the only one that is both safe and quiet.
+     *
+     * Seeded to the outside-Dhaka zone because that is the more expensive of
+     * the two defaults: if the fallback is ever wrong, it should be wrong in
+     * the direction the shop can refund, not the one it silently eats.
+     */
+    defaultZoneKey: { type: String, trim: true, default: 'outside-dhaka' },
   },
 
   /**

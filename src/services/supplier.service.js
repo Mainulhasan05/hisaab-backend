@@ -10,9 +10,21 @@ const supplierSettlement = require('./supplierSettlement.service');
 const { PAYMENT_TYPES } = require('../config/constants');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
-const { requireBranch } = require('../utils/branchScope.util');
+const { requireBranch, branchMatch } = require('../utils/branchScope.util');
+const { paidAtMatch, LIVE_PAYMENT } = require('../utils/paymentDate.util');
+const { endOfBangladeshDay } = require('../utils/bdTime.util');
 const { runInTransaction } = require('../utils/transaction.util');
 const { quantizeMoney } = require('../utils/quantity.util');
+
+/** Escape user input before it reaches $regex — raw input is a ReDoS vector. */
+const escapeRegex = (value) => String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * The two ways money leaves the shop for a vendor. Both, always, unless the
+ * caller narrows it — see `getSupplierPaymentRegister`'s header for why one
+ * without the other understates what the shop spent.
+ */
+const MONEY_OUT_TYPES = [PAYMENT_TYPES.PURCHASE_PAYMENT, PAYMENT_TYPES.SUPPLIER_ADVANCE];
 
 /** Money never travels as a string. Rejects NaN/Infinity/negative-zero noise. */
 const toAmount = (value) => {
@@ -691,6 +703,182 @@ class SupplierService {
    * and through the bills for everything `recordPayment` ever wrote, which
    * carries no `supplier` of its own.
    */
+  /**
+   * ─────────────────────────────────────────────────────────────────────────
+   * সরবরাহকারী পরিশোধ — every taka this shop has paid OUT to a vendor
+   * ─────────────────────────────────────────────────────────────────────────
+   *
+   * The mirror of `customer.service.getCollectionRegister`, pointed the other
+   * way, and it exists for the same reason that one does: `getSupplierPayments`
+   * below can only answer "what did I pay THIS vendor", which requires already
+   * knowing which vendor. The question an owner actually opens a screen to ask
+   * is "what went out this month, and to whom" — and there was nowhere to ask
+   * it.
+   *
+   * ── Both money-out types, never one ──────────────────────────────────────
+   *
+   * `purchase_payment` settles a bill; `supplier_advance` is money handed over
+   * before there is a bill. They are separate types precisely so reports can
+   * tell a settlement from a prepayment — but a register of what LEFT the shop
+   * needs both, or it shows an owner less money spent than their bank did. Same
+   * call `_supplierRangeEntries` makes for the statement.
+   *
+   * ── Cancelled rows stay ──────────────────────────────────────────────────
+   *
+   * Struck through and counted separately, never dropped. A payment book that
+   * quietly lost reversals shows a shop money it no longer has, and the
+   * reversal is usually the thing the owner opened this screen to check.
+   */
+  async getSupplierPaymentRegister(shopId, options = {}, req = null) {
+    const {
+      page = 1,
+      limit = 25,
+      search = '',
+      startDate,
+      endDate,
+      includeCancelled = true,
+      types,
+    } = options;
+
+    const requested = String(types || '')
+      .split(',')
+      .map((t) => t.trim())
+      .filter((t) => MONEY_OUT_TYPES.includes(t));
+    const wanted = requested.length ? requested : MONEY_OUT_TYPES;
+
+    const match = branchMatch(req || {}, {
+      shop: new mongoose.Types.ObjectId(String(shopId)),
+      type: { $in: wanted },
+    });
+    if (!includeCancelled) Object.assign(match, LIVE_PAYMENT);
+
+    // Collected rather than assigned — see the customer register's note: both
+    // the date predicate and the search are `$or`s, and assigning the second
+    // over the first drops the date range without a word.
+    const clauses = [];
+    if (startDate || endDate) {
+      const range = {};
+      if (startDate) range.$gte = new Date(startDate);
+      if (endDate) range.$lte = endOfBangladeshDay(new Date(endDate));
+      clauses.push(paidAtMatch(range));
+    }
+
+    /**
+     * Search resolves to supplier ids first, for the same reason the customer
+     * register does it: a Payment carries no vendor name to match. The bill
+     * number is matched separately — a shopkeeper holding a চালান has that and
+     * often nothing else, and the payment row itself stores only a reference to
+     * the purchase, so the invoice numbers have to be resolved to ids too.
+     */
+    const term = String(search || '').trim();
+    if (term) {
+      const rx = new RegExp(escapeRegex(term), 'i');
+      const [suppliers, bills] = await Promise.all([
+        Supplier.find(
+          { shop: shopId, $or: [{ name: rx }, { companyName: rx }, { phone: rx }] },
+          '_id'
+        ).limit(500).lean(),
+        Purchase.find({ shop: shopId, invoiceNo: rx }, '_id').limit(500).lean(),
+      ]);
+      const searchOr = [
+        ...(suppliers.length ? [{ supplier: { $in: suppliers.map((x) => x._id) } }] : []),
+        ...(bills.length ? [{ purchase: { $in: bills.map((x) => x._id) } }] : []),
+      ];
+      // An `$or: []` is a Mongo error, and a search that matched no vendor and
+      // no bill must return nothing rather than everything.
+      clauses.push({ $or: searchOr.length ? searchOr : [{ _id: null }] });
+    }
+    if (clauses.length) match.$and = clauses;
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const [faceted] = await Payment.aggregate([
+      { $match: match },
+      {
+        $facet: {
+          rows: [
+            { $sort: { paidAt: -1, createdAt: -1, _id: -1 } },
+            { $skip: skip },
+            { $limit: parseInt(limit) },
+            {
+              $lookup: {
+                from: Supplier.collection.name,
+                localField: 'supplier',
+                foreignField: '_id',
+                pipeline: [{ $project: { name: 1, phone: 1, companyName: 1 } }],
+                as: 'supplierDoc',
+              },
+            },
+            {
+              $lookup: {
+                from: Purchase.collection.name,
+                localField: 'purchase',
+                foreignField: '_id',
+                pipeline: [{ $project: { invoiceNo: 1 } }],
+                as: 'purchaseDoc',
+              },
+            },
+            {
+              $lookup: {
+                from: 'users',
+                localField: 'receivedBy',
+                foreignField: '_id',
+                pipeline: [{ $project: { name: 1 } }],
+                as: 'recordedByDoc',
+              },
+            },
+            {
+              $addFields: {
+                supplier: { $first: '$supplierDoc' },
+                invoiceNo: { $first: '$purchaseDoc.invoiceNo' },
+                recordedBy: { $first: '$recordedByDoc' },
+                voided: { $eq: ['$status', 'cancelled'] },
+                effectiveAt: { $ifNull: ['$paidAt', '$createdAt'] },
+              },
+            },
+            {
+              // A row with no bill behind it paid down the carried-in খাতা —
+              // the same vocabulary `getSupplierPayments` hands the drill-in.
+              $addFields: { againstOpeningDue: { $eq: ['$invoiceNo', null] } },
+            },
+            { $project: { supplierDoc: 0, purchaseDoc: 0, recordedByDoc: 0 } },
+          ],
+          total: [{ $count: 'n' }],
+          live: [
+            { $match: LIVE_PAYMENT },
+            { $group: { _id: '$type', amount: { $sum: '$amount' }, count: { $sum: 1 } } },
+          ],
+        },
+      },
+    ]);
+
+    const total = faceted?.total?.[0]?.n || 0;
+    const byType = {};
+    let paid = 0;
+    let liveCount = 0;
+    for (const group of faceted?.live || []) {
+      byType[group._id] = { amount: group.amount, count: group.count };
+      paid += group.amount;
+      liveCount += group.count;
+    }
+
+    return {
+      payments: faceted?.rows || [],
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / parseInt(limit)) || 0,
+      },
+      summary: {
+        paid,
+        count: liveCount,
+        cancelled: total - liveCount,
+        byType,
+      },
+    };
+  }
+
   async getSupplierPayments(shopId, supplierId, req = null, options = {}) {
     const limit = Math.min(parseInt(options.limit, 10) || 50, 200);
     const branchId = req?.branchId || null;

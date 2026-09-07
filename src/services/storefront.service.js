@@ -5,6 +5,8 @@ const { SLOT_KEYS } = require('../models/StorefrontTemplate.model');
 const Shop = require('../models/Shop.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
+const { findDistrict, findAreaAnywhere } = require('../utils/bdGeo.util');
+const { canApplyTemplate, offerableTemplateFilter } = require('../utils/storefrontTemplates.util');
 
 /** Hard ceiling on zones per shop — a zone table is not a district gazetteer. */
 const MAX_ZONES = 20;
@@ -87,8 +89,67 @@ function normalizeZones(rawZones) {
       etaDaysMin,
       etaDaysMax,
       isActive: raw?.isActive !== false,
+      districts: canonicalDistricts(raw?.districts, name),
+      areas: canonicalAreas(raw?.areas, name),
     };
   });
+}
+
+/**
+ * Turn submitted place names into canonical ones, or refuse.
+ *
+ * ── WHY AN UNKNOWN NAME IS A 400 AND NOT A SHRUG ────────────────────────────
+ *
+ * These lists decide what a customer is charged (`order.service
+ * .resolveDelivery`). A name that matches nothing simply never matches at
+ * checkout either, so keeping it would leave the shop looking at a zone that
+ * says it covers "Dhaka City" while every Dhaka order quietly falls through to
+ * the default zone — a mis-charge whose cause is invisible on the very screen
+ * that configured it.
+ *
+ * Canonicalising rather than storing what was typed is the other half: the
+ * shopkeeper's picker sends Bangla, a migration sends English, and both must
+ * end up as the one string `resolveDelivery` compares against.
+ */
+function canonicalDistricts(list, zoneName) {
+  if (list === undefined || list === null) return [];
+  if (!Array.isArray(list)) {
+    throw new AppError('districts must be an array', `"${zoneName}" এর জেলার তালিকা সঠিক নয়`, 400);
+  }
+  const out = new Set();
+  for (const raw of list.slice(0, 64)) {
+    const d = findDistrict(raw);
+    if (!d) {
+      throw new AppError('Unknown district', `"${String(raw).slice(0, 40)}" নামে কোনো জেলা নেই`, 400);
+    }
+    out.add(d.name);
+  }
+  return [...out];
+}
+
+function canonicalAreas(list, zoneName) {
+  if (list === undefined || list === null) return [];
+  if (!Array.isArray(list)) {
+    throw new AppError('areas must be an array', `"${zoneName}" এর এলাকার তালিকা সঠিক নয়`, 400);
+  }
+  const out = new Set();
+  // Bounded at the largest district's sub-list. A shop mapping every area of
+  // every district into one zone should be using `districts` instead.
+  for (const raw of list.slice(0, 700)) {
+    const name = String(raw ?? '').trim();
+    if (!name) continue;
+    // Scoped lookup needs a district, and an area list is not grouped by one —
+    // so this resolves across all districts and accepts the first canonical
+    // match. Ambiguity is not possible in practice: `fetch-bd-geo.js` dedupes
+    // repeated names within a district, and `resolveDelivery` only ever
+    // compares an area name against the district the customer already chose.
+    const match = findAreaAnywhere(name);
+    if (!match) {
+      throw new AppError('Unknown area', `"${name.slice(0, 40)}" নামে কোনো এলাকা নেই`, 400);
+    }
+    out.add(match);
+  }
+  return [...out];
 }
 
 /**
@@ -200,28 +261,34 @@ class StorefrontService {
    * gallery that does not contain the site they are looking at.
    */
   async getTemplateGallery(shop) {
-    const allowed = new Set(shop?.storefront?.allowedTemplates || []);
     const storefront = await Storefront.findOne({ shop: shop._id }).lean();
     const activeKeys = [storefront?.draft?.template, storefront?.published?.template]
       .filter(Boolean);
 
-    // One query: everything granted, plus whatever is in use. `$in` on an empty
-    // array matches nothing, which is the right answer for an ungranted shop.
-    const keys = [...new Set([...allowed, ...activeKeys])];
-    if (keys.length === 0) return [];
-
-    const templates = await StorefrontTemplate.find({ key: { $in: keys } })
+    /**
+     * One query: everything this shop may be offered, plus whatever it is
+     * running.
+     *
+     * The empty-list case used to return `[]` — a shop given the storefront
+     * feature opened its picker and found nothing, because being granted the
+     * FEATURE and being granted a TEMPLATE were two separate admin actions and
+     * the second was easy to forget. Empty now means unrestricted; see
+     * `storefrontTemplates.util`.
+     */
+    const templates = await StorefrontTemplate.find(
+      offerableTemplateFilter(shop, activeKeys)
+    )
       .sort({ sortOrder: 1, key: 1 })
       .lean();
 
     return templates.map((t) => ({
       ...t,
-      isGranted: allowed.has(t.key),
+      isGranted: canApplyTemplate(shop, t.key),
       isInUse: activeKeys.includes(t.key),
-      // Selectable = the shop may switch TO it right now. A retired or revoked
-      // template that is currently rendering is not selectable and is not
-      // removed either.
-      isSelectable: allowed.has(t.key) && t.status === 'published',
+      // Selectable = the shop may switch TO it right now. A retired template
+      // that is currently rendering, or one outside a deliberate restriction,
+      // is not selectable and is not removed either.
+      isSelectable: canApplyTemplate(shop, t.key) && t.status === 'published',
     }));
   }
 
@@ -244,8 +311,9 @@ class StorefrontService {
       throw new AppError('Template key required', 'টেমপ্লেট নির্বাচন করুন', 400);
     }
 
-    const allowed = shop?.storefront?.allowedTemplates || [];
-    if (!allowed.includes(key)) {
+    // Empty restriction = any published template. A shop with a deliberate
+    // subset is still held to it.
+    if (!canApplyTemplate(shop, key)) {
       // 403 rather than 404: the shop's own picker showed this template (it may
       // be rendering it right now), so pretending it does not exist would be
       // more confusing than saying it is not theirs to choose.
@@ -496,6 +564,19 @@ class StorefrontService {
       }
       if ('pickupEnabled' in patch.delivery) {
         storefront.delivery.pickupEnabled = patch.delivery.pickupEnabled === true;
+      }
+      if ('defaultZoneKey' in patch.delivery) {
+        // Validated against the zones as they will be AFTER this patch, not as
+        // they were: a shop renaming its fallback zone and repointing the
+        // default in one save is the normal case, and checking against the old
+        // table would refuse it.
+        const key = String(patch.delivery.defaultZoneKey || '').trim();
+        if (key && !storefront.delivery.zones.some((z) => z.key === key)) {
+          throw new AppError('Unknown default zone', 'ডিফল্ট এলাকাটি তালিকায় নেই', 400);
+        }
+        // Empty clears it, which is a real choice: a shop that would rather
+        // refuse an unmapped address than guess at its price.
+        storefront.delivery.defaultZoneKey = key || undefined;
       }
     }
     if ('notifications' in patch && patch.notifications) {

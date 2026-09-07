@@ -212,7 +212,22 @@ const checkoutBody = Joi.object({
     }).unknown(false)
   ).min(1).max(50).required(),
 
-  zoneKey: Joi.string().trim().max(40).allow(null, ''),
+  /**
+   * WHERE the customer is — and note what is NOT here any more.
+   *
+   * `zoneKey` used to be accepted on this body, and it decided the delivery
+   * charge. That made the client the author of a price, which is precisely
+   * what the block above says the `items` schema refuses. It is gone, and
+   * `unknown(false)` means a client still sending one is refused rather than
+   * quietly ignored — a request carrying a zoneKey is either a stale page or
+   * somebody testing whether we still honour it, and both should fail loudly.
+   *
+   * These are NAMES, in either language, validated against `bdGeo` inside the
+   * service. 80 characters covers the longest district and area names with
+   * room for Bangla, which costs three bytes per character.
+   */
+  district: Joi.string().trim().max(80).allow(null, ''),
+  subdistrict: Joi.string().trim().max(80).allow(null, ''),
   pickup: Joi.boolean().default(false),
 }).unknown(false);
 
@@ -233,6 +248,43 @@ const strikeOnInvalid = (schema, property) => {
     return inner(req, res, next);
   };
 };
+
+/**
+ * ── PRICE A BASKET, PLACE NOTHING ──────────────────────────────────────────
+ *
+ * A POST because it carries a body, not because it writes — exactly like the
+ * landing page's `/quote` above it in spirit. It runs the real resolver, so
+ * the total the checkout shows is produced by the same code that will charge
+ * it; the alternative was re-implementing zone resolution in the browser.
+ *
+ * No `orderAbuseGuard` and no `idempotency`: the first exists to ration
+ * ORDERS, and a customer switching delivery area twice must not spend that
+ * budget; the second collapses duplicate WRITES, and there is no write here.
+ * The router-wide `storefrontLimiter` bounds it.
+ *
+ * The body is the order body minus the person — a price does not depend on who
+ * is buying, and asking for a name before showing a total would mean the form
+ * could not price anything until it was already filled in.
+ */
+const quoteBody = Joi.object({
+  items: Joi.array().items(
+    Joi.object({
+      productId: Joi.string().trim().pattern(/^[0-9a-fA-F]{24}$/).required(),
+      variantSku: Joi.string().trim().max(60).allow(null, ''),
+      quantity: Joi.number().integer().min(1).max(999).required(),
+    }).unknown(false)
+  ).min(1).max(50).required(),
+  district: Joi.string().trim().max(80).allow(null, ''),
+  subdistrict: Joi.string().trim().max(80).allow(null, ''),
+  pickup: Joi.boolean().default(false),
+}).unknown(false);
+
+router.post(
+  '/storefront/:slug/quote',
+  validate(slugParam, 'params'),
+  validate(quoteBody, 'body'),
+  publicOrderController.quoteOrder
+);
 
 router.post(
   '/storefront/:slug/orders',

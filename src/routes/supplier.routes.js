@@ -10,6 +10,18 @@ const supplierValidation = require('../validations/supplier.validation');
 router.use(protect);
 
 router.get('/', rbac('suppliers', 'view'), supplierController.getSuppliers);
+/**
+ * The shop-wide পরিশোধ register.
+ *
+ * Mounted here, ABOVE every `/:id` route, or Express reads `payments` as a
+ * supplier id and the whole register 404s as a missing vendor.
+ *
+ * `purchases.view` and not `suppliers.view`: this is the money side of the
+ * bills, the same authority `/:id/payments` already carries. Being allowed to
+ * open the vendor list is a different, smaller trust than being allowed to read
+ * what the shop has spent.
+ */
+router.get('/payments', rbac('purchases', 'view'), supplierController.getSupplierPaymentRegister);
 // Declared before `/:id` — an Express route defined after a matching param
 // route never runs, and `opening-due` would otherwise be read as an id.
 router.get('/:id/opening-due', rbac('suppliers', 'view'), supplierController.getOpeningDueHistory);

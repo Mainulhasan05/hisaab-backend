@@ -6,7 +6,7 @@ const SalesReturn = require('../models/SalesReturn.model');
 const Payment = require('../models/Payment.model');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
-const { branchFilter, requireBranch, isBranchCustomerScope } = require('../utils/branchScope.util');
+const { branchFilter, branchMatch, requireBranch, isBranchCustomerScope } = require('../utils/branchScope.util');
 const { normalizePhone } = require('../utils/phone.util');
 const { runInTransaction } = require('../utils/transaction.util');
 const paymentAccountService = require('./paymentAccount.service');
@@ -21,6 +21,19 @@ const { quantizeMoney } = require('../utils/quantity.util');
 const { resolvePaidAt, paidAtMatch, LIVE_PAYMENT } = require('../utils/paymentDate.util');
 const { toBangladeshDateStr, endOfBangladeshDay } = require('../utils/bdTime.util');
 const mongoose = require('mongoose');
+const { PAYMENT_TYPES } = require('../config/constants');
+
+/**
+ * The three ways money reaches the shop FROM a customer, as the register
+ * names them.
+ *
+ * `sale` is not a `PAYMENT_TYPES` value and deliberately is not one: money
+ * tendered at the till lives on `Sale.paid`, not in a Payment row. The
+ * schema's `sale_payment` default is a fossil — nothing writes it — so a
+ * register built on payment types alone would silently omit every cash sale
+ * the shop has ever made.
+ */
+const MONEY_IN_KINDS = ['due_collection', 'advance', 'sale'];
 
 /** Escape user input before it reaches $regex — raw input is a ReDoS vector. */
 const escapeRegex = (value) => String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1835,69 +1848,266 @@ class CustomerService {
    * last Tuesday sorts into last Tuesday.
    */
   async getCollectionRegister(shopId, options = {}, req = null) {
-    const { page = 1, limit = 25, search = '', startDate, endDate, includeCancelled = true } = options;
+    const {
+      page = 1,
+      limit = 25,
+      search = '',
+      startDate,
+      endDate,
+      includeCancelled = true,
+      types,
+    } = options;
 
-    const scope = branchFilter(req || {}, { shop: shopId, type: 'due_collection' });
-    if (!includeCancelled) Object.assign(scope, LIVE_PAYMENT);
+    const requested = String(types || '')
+      .split(',')
+      .map((t) => t.trim())
+      .filter((t) => MONEY_IN_KINDS.includes(t));
+    const kinds = requested.length ? requested : MONEY_IN_KINDS;
 
-    if (startDate || endDate) {
-      const range = {};
-      if (startDate) range.$gte = new Date(startDate);
-      if (endDate) range.$lte = endOfBangladeshDay(new Date(endDate));
-      Object.assign(scope, paidAtMatch(range));
-    }
+    const paymentTypes = [
+      ...(kinds.includes('due_collection') ? [PAYMENT_TYPES.DUE_COLLECTION] : []),
+      ...(kinds.includes('advance') ? [PAYMENT_TYPES.ADVANCE] : []),
+    ];
+    const wantsSales = kinds.includes('sale');
+
+    const range = {};
+    if (startDate) range.$gte = new Date(startDate);
+    if (endDate) range.$lte = endOfBangladeshDay(new Date(endDate));
+    const hasRange = Boolean(startDate || endDate);
 
     /**
-     * Search runs over the receipt number here and over the CUSTOMER
-     * separately, because a Payment has no name on it to match — the customer
-     * is a reference. Resolving matching customers first and then filtering by
-     * id keeps this one indexed query instead of a `$lookup` over the whole
-     * payment collection.
+     * Search resolves to customer ids ONCE and both arms reuse them.
+     *
+     * A `Payment` carries no name to match — the customer is a reference — so
+     * the alternative is a `$lookup` across the whole collection before the
+     * filter can run. A `Sale` does carry `customerName`/`customerPhone`, but
+     * matching those directly would make one query return different rows on
+     * either side of the union whenever a customer has since been renamed. One
+     * id list keeps the two halves answering the same question.
      */
     const term = String(search || '').trim();
+    let customerIds = [];
     if (term) {
       const rx = new RegExp(escapeRegex(term), 'i');
       const matched = await Customer.find(
         { shop: shopId, $or: [{ name: rx }, { phone: rx }] },
         '_id'
-      ).limit(200).lean();
+      ).limit(500).lean();
+      customerIds = matched.map((c) => c._id);
+    }
 
-      scope.$or = [
-        { receiptNo: rx },
-        ...(matched.length > 0 ? [{ customer: { $in: matched.map((c) => c._id) } }] : []),
+    const paymentMatch = branchMatch(req || {}, {
+      shop: new mongoose.Types.ObjectId(String(shopId)),
+      type: { $in: paymentTypes },
+    });
+    /**
+     * Both narrowings go into `$and`, and they must.
+     *
+     * `paidAtMatch` expresses "on this date" as an `$or` (a row is dated by
+     * `paidAt`, or by `createdAt` when it has none). The search is an `$or`
+     * too. Assigning one and then the other — which is what this did before —
+     * silently DROPS the first: a shopkeeper who picked a month and then typed
+     * a name got every receipt that customer had ever paid, presented under the
+     * month's heading. `$and` is what makes the two filters compose.
+     */
+    const paymentClauses = [];
+    if (hasRange) paymentClauses.push(paidAtMatch(range));
+    if (term) {
+      paymentClauses.push({
+        $or: [
+          { receiptNo: new RegExp(escapeRegex(term), 'i') },
+          ...(customerIds.length ? [{ customer: { $in: customerIds } }] : []),
+        ],
+      });
+    }
+    if (paymentClauses.length) paymentMatch.$and = paymentClauses;
+    if (!includeCancelled) Object.assign(paymentMatch, LIVE_PAYMENT);
+
+    /**
+     * The sale arm, and the one thing it must NOT double-count.
+     *
+     * `Sale.paid` is money tendered for the goods on that invoice. Money the
+     * same customer handed over at the same till to clear an OLD bill is
+     * `Sale.dueSettled`, and that already exists as its own
+     * `Payment{type:'due_collection', viaSale}` row — so it arrives through the
+     * payment arm above. Adding `dueSettled` here would count it twice and the
+     * register's total would exceed what the shop actually took.
+     *
+     * There is no `type: 'sale_payment'` row to read instead: that constant is
+     * only the Payment schema's default, and no code path ever writes one.
+     */
+    const saleMatch = branchMatch(req || {}, {
+      shop: new mongoose.Types.ObjectId(String(shopId)),
+      paid: { $gt: 0 },
+    });
+    if (hasRange) saleMatch.createdAt = range;
+    if (term) {
+      saleMatch.$or = [
+        { invoiceNo: new RegExp(escapeRegex(term), 'i') },
+        ...(customerIds.length ? [{ customer: { $in: customerIds } }] : []),
       ];
+    }
+    // A cancelled sale's money went back over the counter, and a REVISED one is
+    // cancelled too (`reviseSale` cancels the original before writing the
+    // replacement). Excluded outright when the caller does not want voided
+    // rows, so `includeCancelled` means the same thing on both sides.
+    if (!includeCancelled) saleMatch.status = { $ne: 'cancelled' };
+
+    /**
+     * ONE ordering over two collections, which is why this is `$unionWith` and
+     * not two queries merged in memory the way `getCustomerLedger` does it.
+     *
+     * That ledger merges by hand because it walks ONE customer's whole history
+     * to build a running balance — the set is small and it needs every row
+     * anyway. This is the shop-wide book, paged 25 at a time: merging in memory
+     * would mean fetching every payment and every sale the shop has ever
+     * written in order to hand back page 3.
+     */
+    const pipeline = [
+      { $match: paymentMatch },
+      {
+        $project: {
+          kind: '$type',
+          amount: 1,
+          method: 1,
+          effectiveAt: { $ifNull: ['$paidAt', '$createdAt'] },
+          refNo: '$receiptNo',
+          customer: 1,
+          notes: 1,
+          voided: { $eq: ['$status', 'cancelled'] },
+          cancelledAt: 1,
+          cancelReason: 1,
+          cancelledBy: 1,
+          recordedBy: '$receivedBy',
+          branch: 1,
+          dueBefore: 1,
+          dueAfter: 1,
+          saleTotal: { $literal: null },
+        },
+      },
+    ];
+
+    if (wantsSales) {
+      pipeline.push({
+        $unionWith: {
+          coll: Sale.collection.name,
+          pipeline: [
+            { $match: saleMatch },
+            {
+              $project: {
+                kind: { $literal: 'sale' },
+                amount: '$paid',
+                method: '$paymentMethod',
+                // Backdating moves `createdAt` itself on a Sale, so this IS the
+                // effective date — the field every sales report already keys on.
+                effectiveAt: '$createdAt',
+                refNo: '$invoiceNo',
+                customer: 1,
+                notes: 1,
+                voided: { $eq: ['$status', 'cancelled'] },
+                cancelledAt: 1,
+                cancelReason: 1,
+                cancelledBy: 1,
+                recordedBy: '$createdBy',
+                branch: 1,
+                dueBefore: { $literal: null },
+                dueAfter: { $literal: null },
+                saleTotal: '$total',
+              },
+            },
+          ],
+        },
+      });
     }
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    const [rows, total, liveTotal] = await Promise.all([
-      // cancelled-inclusive: a register that hid voided collections would let
-      // one disappear between two visits with no trace, which is the failure
-      // the void was built to avoid. `status` rides on every row so the client
-      // can strike them through; `summary` below counts only the live ones.
-      Payment.find(scope)
-        .select('amount method type paidAt createdAt receiptNo notes status cancelledAt cancelReason dueBefore dueAfter branch')
-        .populate('customer', 'name phone')
-        .populate('receivedBy', 'name')
-        .populate('cancelledBy', 'name')
-        .sort({ paidAt: -1, createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit))
-        .lean(),
-      // cancelled-inclusive: this counts the rows the listing above returns, so
-      // it has to match it exactly — a count that excluded voided rows would
-      // paginate a list that includes them and lose the last page.
-      Payment.countDocuments(scope),
-      // What the shop actually took over this filter — voided rows excluded,
-      // because a total that counts money the shop gave back is not a total.
-      Payment.aggregate([
-        { $match: { ...scope, ...LIVE_PAYMENT } },
-        { $group: { _id: null, amount: { $sum: '$amount' }, count: { $sum: 1 } } },
-      ]),
+    /**
+     * `$facet` so the page, the count and the totals come off ONE scan of the
+     * union. The two `$lookup`s sit INSIDE the rows branch, after `$skip` and
+     * `$limit`, so names are resolved for the 25 rows on screen rather than for
+     * every row the filter matched.
+     */
+    const [faceted] = await Payment.aggregate([
+      ...pipeline,
+      {
+        $facet: {
+          rows: [
+            { $sort: { effectiveAt: -1, _id: -1 } },
+            { $skip: skip },
+            { $limit: parseInt(limit) },
+            {
+              $lookup: {
+                from: Customer.collection.name,
+                localField: 'customer',
+                foreignField: '_id',
+                pipeline: [{ $project: { name: 1, phone: 1 } }],
+                as: 'customerDoc',
+              },
+            },
+            {
+              $lookup: {
+                from: 'users',
+                localField: 'recordedBy',
+                foreignField: '_id',
+                pipeline: [{ $project: { name: 1 } }],
+                as: 'recordedByDoc',
+              },
+            },
+            {
+              $lookup: {
+                from: 'users',
+                localField: 'cancelledBy',
+                foreignField: '_id',
+                pipeline: [{ $project: { name: 1 } }],
+                as: 'cancelledByDoc',
+              },
+            },
+            {
+              $addFields: {
+                customer: { $first: '$customerDoc' },
+                recordedBy: { $first: '$recordedByDoc' },
+                cancelledBy: { $first: '$cancelledByDoc' },
+              },
+            },
+            { $project: { customerDoc: 0, recordedByDoc: 0, cancelledByDoc: 0 } },
+          ],
+          total: [{ $count: 'n' }],
+          // Voided rows excluded: a total that counts money the shop gave back
+          // is not a total. Split by kind as well, because "৳40,000 came in"
+          // answers a different question from "৳12,000 of it was old বাকি".
+          live: [
+            { $match: { voided: false } },
+            { $group: { _id: '$kind', amount: { $sum: '$amount' }, count: { $sum: 1 } } },
+          ],
+        },
+      },
     ]);
 
+    const total = faceted?.total?.[0]?.n || 0;
+    const byKind = {};
+    let collected = 0;
+    let liveCount = 0;
+    for (const group of faceted?.live || []) {
+      byKind[group._id] = { amount: group.amount, count: group.count };
+      collected += group.amount;
+      liveCount += group.count;
+    }
+
     return {
-      collections: rows,
+      collections: (faceted?.rows || []).map((row) => ({
+        ...row,
+        // `status` is what the রসিদ খাতা already renders on. Kept beside the
+        // boolean so the sale arm — which has four statuses, not two — reaches
+        // the client saying the one thing this register cares about.
+        status: row.voided ? 'cancelled' : 'completed',
+        receiptNo: row.refNo,
+        // The রসিদ printer and the existing register rows both key on `paidAt`.
+        // The union normalises the date to `effectiveAt` — a sale has no
+        // `paidAt` at all — so it is mirrored back under the old name rather
+        // than making every reader learn the new one.
+        paidAt: row.effectiveAt,
+      })),
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -1905,9 +2115,10 @@ class CustomerService {
         pages: Math.ceil(total / parseInt(limit)) || 0,
       },
       summary: {
-        collected: liveTotal[0]?.amount || 0,
-        count: liveTotal[0]?.count || 0,
-        cancelled: total - (liveTotal[0]?.count || 0),
+        collected,
+        count: liveCount,
+        cancelled: total - liveCount,
+        byKind,
       },
     };
   }

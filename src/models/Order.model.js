@@ -280,6 +280,30 @@ const orderSchema = new mongoose.Schema({
     etaDaysMin: { type: Number, default: null },
     etaDaysMax: { type: Number, default: null },
     isPickup: { type: Boolean, default: false },
+
+    /**
+     * WHERE the parcel goes, as structured place names.
+     *
+     * `customer.address` is still the house-number-and-road free text, because
+     * no dropdown will ever hold "৩য় তলা, বাসা ১২, রোড ৫". These four fields
+     * are the part a courier's API needs as data rather than prose, and they
+     * are what the zone was derived from — so an order can always be audited:
+     * this district, therefore that zone, therefore that charge.
+     *
+     * SNAPSHOTTED NAMES, NOT IDS. `bdGeo.json`'s numeric ids belong to an
+     * upstream dataset that a refresh could renumber; a district's name is a
+     * real place. Both languages are stored because the packing slip prints
+     * Bangla and a courier API wants English, and re-deriving one from the
+     * other later would mean this order depending on a dataset it was not
+     * placed against.
+     *
+     * Empty on a pickup order and on every order placed before this existed —
+     * read them as "not recorded", never as "Dhaka".
+     */
+    district: { type: String, trim: true },
+    districtBn: { type: String, trim: true },
+    subdistrict: { type: String, trim: true },
+    subdistrictBn: { type: String, trim: true },
   },
 
   // ── Money ────────────────────────────────────────────────────────────────

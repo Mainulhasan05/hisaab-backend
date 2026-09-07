@@ -829,6 +829,21 @@ class PublicStorefrontService {
         etaDaysMax: Number(z.etaDaysMax) || 0,
       }));
 
+    /**
+     * The zone → district/area mapping is deliberately NOT sent here.
+     *
+     * It was, briefly. Sending it would let the checkout price a district
+     * without a round trip — but it would also mean the resolution rule
+     * (area beats district beats default) existed twice: once in
+     * `order.service.resolveDelivery` and once in a browser. Two
+     * implementations of one money rule is the exact failure
+     * `AGENT_WORKFLOW.md` §15.2 describes, and the disagreement would be
+     * discovered by a customer.
+     *
+     * The checkout asks `POST /public/storefront/:slug/quote` instead, which
+     * runs the real resolver. The zone list above stays because a shop's home
+     * page still says "ঢাকায় ৳৬০, সারাদেশে ৳১২০", and that needs no mapping.
+     */
     return {
       zones,
       pickupEnabled: storefront.delivery?.pickupEnabled === true,

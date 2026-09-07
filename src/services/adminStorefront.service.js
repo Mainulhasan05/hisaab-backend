@@ -8,6 +8,7 @@ const cacheService = require('./cache.service');
 const platformMediaService = require('./platformMedia.service');
 const logger = require('../utils/logger.util');
 const { AppError } = require('../middleware/error.middleware');
+const { hasTemplateRestriction, canApplyTemplate } = require('../utils/storefrontTemplates.util');
 const { invalidateShopAuthCache } = require('../utils/authCache.util');
 const { FEATURE_KEYS } = require("../utils/features.util");
 
@@ -349,7 +350,6 @@ class AdminStorefrontService {
       .select('status draft.template published.template published.version stats')
       .lean();
 
-    const allowed = new Set(shop.storefront?.allowedTemplates || []);
     const draftKey = storefront?.draft?.template || null;
     const liveKey = storefront?.published?.template || null;
 
@@ -363,6 +363,16 @@ class AdminStorefrontService {
     return {
       shop: { _id: String(shop._id), name: shop.name, slug: shop.slug },
       storefrontEnabled: shop.features?.storefront === true,
+      /**
+       * False = the shop may pick any published template, which is the default
+       * and the case for almost every shop.
+       *
+       * Sent explicitly because the checklist below cannot express it on its
+       * own: with no restriction every box reads as ticked, and an admin
+       * looking at that has no way to tell "I granted all five" from "there is
+       * no restriction and there are five". The screen needs to say which.
+       */
+      restricted: hasTemplateRestriction(shop),
       storefront: storefront
         ? {
           status: storefront.status,
@@ -379,13 +389,14 @@ class AdminStorefrontService {
         vertical: t.vertical,
         thumbnail: t.thumbnail,
         status: t.status,
-        granted: allowed.has(t.key),
+        // With no restriction in force, everything published is granted.
+        granted: canApplyTemplate(shop, t.key),
         isDraft: t.key === draftKey,
         isLive: t.key === liveKey,
         // Revoking a grant for the template a shop is LIVE on does not take the
         // site down (Shop.model.js invariant) — but the admin should be told
         // that is what they are about to do.
-        revokeWarning: allowed.has(t.key) && (t.key === liveKey || t.key === draftKey)
+        revokeWarning: canApplyTemplate(shop, t.key) && (t.key === liveKey || t.key === draftKey)
           ? 'এই দোকানটি বর্তমানে এই টেমপ্লেটটি ব্যবহার করছে। সরিয়ে দিলে সাইট বন্ধ হবে না, তবে তারা আর এটি নতুন করে বেছে নিতে পারবে না।'
           : null,
       })),
@@ -452,7 +463,12 @@ class AdminStorefrontService {
       shop: shopId,
       admin: adminId,
       action: 'storefront_templates_granted',
-      description: `Storefront templates for "${shop.name}": +[${added.join(', ') || '—'}] -[${removed.join(', ') || '—'}]`,
+      // An emptied list is not "revoked everything" any more — it is "no
+      // restriction". The audit trail has to say which, or a later reader will
+      // misread the most consequential of the two as the other.
+      description: wanted.length
+        ? `Storefront templates for "${shop.name}": +[${added.join(', ') || '—'}] -[${removed.join(', ') || '—'}]`
+        : `Storefront templates for "${shop.name}": restriction removed — all published templates available`,
       descriptionBn: `"${shop.name}" দোকানের টেমপ্লেট হালনাগাদ করা হয়েছে`,
       entity: { type: 'shop', id: shop._id, name: shop.name },
       changes: { before: { allowedTemplates: previous }, after: { allowedTemplates: wanted } },
