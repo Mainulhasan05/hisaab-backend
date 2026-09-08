@@ -20,6 +20,25 @@ const shopSchema = new mongoose.Schema({
     lowercase: true,
     trim: true
   },
+  /**
+   * Every address this shop has ever answered to, oldest first.
+   *
+   * A storefront URL is not ours to invalidate. By the time an operator renames
+   * one it is in a Facebook post, a printed sticker and a customer's browser
+   * history, and none of those get a migration. `resolveStorefront` treats an
+   * entry here as an alias for `slug`, so the old link keeps working and the
+   * canonical tag consolidates the two — see publicStorefront.service.js.
+   *
+   * Not unique on its own, but held to the SAME namespace as `slug`: the admin
+   * rename checks a candidate against both fields across all shops before
+   * writing. Otherwise shop A could take the address shop B just vacated, and
+   * B's old links would silently start serving A's catalogue — the one failure
+   * mode of aliasing that actually hurts someone.
+   */
+  previousSlugs: {
+    type: [String],
+    default: () => [],
+  },
   type: {
     type: String,
     trim: true,
@@ -633,6 +652,18 @@ const shopSchema = new mongoose.Schema({
       type: Boolean,
       default: false
     },
+    // Lets the shop have the AI write its storefront's search title and
+    // description, and a customer-facing description for one product at a time.
+    // Spends the SAME per-branch daily allowance as `aiExpense` — one number
+    // the shopkeeper has to understand, one number an admin has to raise.
+    //
+    // Requires `storefront`: a shop with no website has no search result to
+    // write. Off = no "এআই দিয়ে লিখুন" buttons and the routes 404; text already
+    // generated is ordinary text and is kept, so the switch is reversible.
+    aiSeo: {
+      type: Boolean,
+      default: false
+    },
     // Named places money sits — bank accounts, bKash numbers, the cash box —
     // each carrying its own balance, plus transfers between them. Off = the
     // shop sees exactly what it always has: a payment METHOD on each row and a
@@ -809,20 +840,45 @@ shopSchema.index({ 'subscription.expiresAt': 1 });
 // shop they cannot unblock (invariant §8.3). Sparse: most shops are not blocked.
 shopSchema.index({ 'access.blockedAt': 1 }, { sparse: true });
 
-// Generate slug before saving
-shopSchema.pre('save', function(next) {
-  if (this.isModified('name') || !this.slug) {
-    // Create slug from name
-    let slug = this.name
-      .toLowerCase()
-      .replace(/[^\w\s-]/g, '')
-      .replace(/\s+/g, '-')
-      .replace(/-+/g, '-')
-      .trim();
+/**
+ * Old addresses, so a renamed shop's existing links resolve in one indexed hit
+ * rather than a collection scan on every 404-shaped request to a public URL.
+ *
+ * Sparse is safe here and genuinely earns its place: this is a SINGLE-field
+ * multikey index, so an empty array simply is not indexed, and almost every
+ * shop has an empty array. (The trap logged in `compound sparse index` notes is
+ * a different shape — sparse skips nothing when a always-present field like
+ * `shop` leads the key.)
+ */
+shopSchema.index({ previousSlugs: 1 }, { sparse: true });
 
-    // Add random suffix for uniqueness
+/**
+ * Mint a slug the first time, and NEVER again.
+ *
+ * This used to also fire on `isModified('name')`, which meant renaming a shop
+ * silently moved its public website to a new URL and 404'd every link anyone
+ * had shared. That was survivable only because no code path updates `name`
+ * after registration — a latent trap, not a working design — and it became
+ * unsurvivable the moment an operator could choose a slug by hand, since the
+ * next rename would throw their choice away without telling anyone.
+ *
+ * So the address is now set once at creation and moved only deliberately, via
+ * the admin rename (adminStorefront.service.js `setShopSlug`), which records
+ * the old one in `previousSlugs` so nothing breaks.
+ *
+ * The random suffix stays. Two shops called "Student Hub" is the normal case,
+ * not the edge case, and a mint that can collide would fail registration on the
+ * unique index — turning someone else's shop name into a reason a new owner
+ * cannot sign up. The suffix is what the rename exists to remove.
+ */
+shopSchema.pre('save', function(next) {
+  if (!this.slug) {
+    const { normalizeSlug } = require('../utils/shopSlug.util');
+    // Bangla names normalise to '' — the suffix alone is then the whole slug,
+    // which is ugly but addressable, and the operator can rename it.
+    const base = normalizeSlug(this.name);
     const randomSuffix = Math.random().toString(36).substring(2, 8);
-    this.slug = `${slug}-${randomSuffix}`;
+    this.slug = base ? `${base}-${randomSuffix}` : `shop-${randomSuffix}`;
   }
   next();
 });

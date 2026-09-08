@@ -243,6 +243,37 @@ const FEATURES = Object.freeze({
      */
     requires: [],
   },
+  aiSeo: {
+    bn: 'এআই দিয়ে এসইও লেখা',
+    en: 'AI SEO writing',
+    description:
+      'Lets the shop press "এআই দিয়ে লিখুন" and get a search title and meta ' +
+      'description for its storefront, and a customer-facing description for ' +
+      'one product at a time. The AI never publishes: every suggestion lands ' +
+      'in an editable box, and the shop-level one lands in the DRAFT and still ' +
+      'needs a publish. Spends the same per-BRANCH daily message allowance as ' +
+      'AI expense entry (`ai.dailyMessageLimit`, default 5) — one allowance, ' +
+      'not two, so a shop that has used its messages on expenses has none left ' +
+      'for SEO and the panel says so. Off = the buttons disappear and the ' +
+      'routes 404; text already written this way is kept.',
+    /**
+     * REQUIRES `storefront`, unlike its sibling `aiExpense`, which requires
+     * nothing.
+     *
+     * That is not symmetry for its own sake — it is the difference between the
+     * two features. Expenses exist for every shop from the day it registers, so
+     * there is nothing to switch on first. A search title, by contrast, is a
+     * property of a website: without `storefront` there is no public page, no
+     * `<meta>` tag rendering this text and no draft to save it into. Granting
+     * it alone would put a button on a screen the shop cannot open.
+     *
+     * Not `requiresStorage` — it writes no bytes. The OG IMAGE does, but that
+     * is an ordinary upload through the image pipeline, gated by
+     * `productImages` like every other upload, and it is not part of this
+     * capability.
+     */
+    requires: ['storefront'],
+  },
   fundAccounts: {
     bn: 'অ্যাকাউন্ট ও ফান্ড',
     en: 'Fund accounts',

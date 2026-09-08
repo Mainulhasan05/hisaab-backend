@@ -6,6 +6,7 @@ const StorefrontTemplate = require('../models/StorefrontTemplate.model');
 const { AppError } = require('../middleware/error.middleware');
 const { resolveSubscription } = require('../utils/subscriptionState.util');
 const { shopHasFeature } = require('../utils/features.util');
+const { resolveSeo } = require('../utils/storefrontSeo.util');
 const logger = require('../utils/logger.util');
 
 /**
@@ -102,6 +103,85 @@ const VARIANT_INTERNAL_FIELDS = ['stock', 'isActive'];
 const SERVABLE_STATES = Object.freeze(['active', 'trial', 'grace', 'expiring']);
 
 class PublicStorefrontService {
+
+  /**
+   * Every storefront a search engine should be told about.
+   *
+   * ─────────────────────────────────────────────────────────────────────────
+   * THIS IS THE ENDPOINT THAT MAKES THE SEO WORK EXIST
+   * ─────────────────────────────────────────────────────────────────────────
+   *
+   * Each shop already had a perfectly good `/s/<slug>/sitemap.xml`, and nothing
+   * anywhere pointed at it. The platform's own `/sitemap.xml` lists the
+   * marketing site — home, blog, pricing — and stops. So a shop could write a
+   * title, publish, and be indexed only if a customer happened to link to them
+   * from somewhere Google already crawled.
+   *
+   * A crawler finds pages by following references. Give it none and the rest of
+   * the SEO work is decoration: no meta description ranks a page that was never
+   * fetched. This is the reference.
+   *
+   * ── THE SERVABILITY TEST IS THE SAME ONE `resolveStorefront` APPLIES ──────
+   *
+   * Listing a shop whose subscription has lapsed, whose feature was withdrawn
+   * or whose site an admin paused would submit URLs that answer 404 — which is
+   * a crawl-budget cost to us and, repeated, a quality signal against the whole
+   * domain. So the filter is derived from the same rules, in the same order,
+   * and the two must not drift: if a storefront would go dark for a visitor, it
+   * does not belong in a sitemap.
+   *
+   * `previousSlugs` are deliberately NOT listed. They resolve, so a shared link
+   * still works, but submitting them would ask Google to index a second copy of
+   * a catalogue we are trying to consolidate onto one address.
+   */
+  async listIndexableStorefronts() {
+    // Live and un-paused first — this is the narrow end of the funnel and it is
+    // indexed, so it does the work of eliminating nearly everything.
+    const storefronts = await Storefront.find({
+      status: 'live',
+      // `null`, not `false`. This field holds the ADMIN who pulled the switch,
+      // not a boolean — `resolveStorefront` only ever truth-tests it, so the
+      // type is easy to misread from the call sites. A `$in: [null, false]`
+      // here throws a CastError on every request rather than filtering
+      // anything, which is a sitemap that is always empty.
+      pausedByAdmin: null,
+      'published.template': { $ne: null },
+    })
+      .select('shop published.publishedAt updatedAt')
+      .lean();
+
+    if (!storefronts.length) return [];
+
+    const shops = await Shop.find({
+      _id: { $in: storefronts.map((s) => s.shop) },
+    })
+      .select('slug features subscription access isActive')
+      .lean();
+
+    const byId = new Map(shops.map((s) => [String(s._id), s]));
+
+    return storefronts
+      .map((sf) => {
+        const shop = byId.get(String(sf.shop));
+        if (!shop || !shop.slug) return null;
+        if (!shopHasFeature(shop, 'storefront')) return null;
+        if (!SERVABLE_STATES.includes(resolveSubscription(shop).state)) return null;
+
+        return {
+          slug: shop.slug,
+          // What the shop last PUBLISHED, not when the document was last
+          // written. `updatedAt` moves every time a draft is autosaved, and a
+          // lastmod that changes without the public page changing teaches a
+          // crawler to stop believing the field.
+          updatedAt: sf.published?.publishedAt || sf.updatedAt || null,
+        };
+      })
+      .filter(Boolean)
+      // Stable order so the XML is byte-identical between requests that have
+      // nothing new in them, which is what makes it cacheable at the edge.
+      .sort((a, b) => a.slug.localeCompare(b.slug));
+  }
+
   /**
    * Resolve a slug to a servable { shop, storefront, template }, or 404.
    *
@@ -122,10 +202,19 @@ class PublicStorefrontService {
     const clean = String(slug || '').trim().toLowerCase();
     if (!clean) throw this._dark('empty slug');
 
-    // Not `Shop.findBySlug` — that static filters on `isActive` alone, and the
-    // block/expiry decision below needs the document either way so that the
-    // reason can be logged.
-    const shop = await Shop.findOne({ slug: clean })
+    /**
+     * Not `Shop.findBySlug` — that static filters on `isActive` alone, and the
+     * block/expiry decision below needs the document either way so that the
+     * reason can be logged.
+     *
+     * The `previousSlugs` arm is what makes an admin rename non-destructive: a
+     * link printed on a sticker before the rename still lands here. The
+     * returned `shop.slug` is always the CURRENT one regardless of which arm
+     * matched, so every URL the page then builds — and the canonical tag —
+     * points at the new address and search engines consolidate onto it instead
+     * of indexing the same catalogue twice.
+     */
+    const shop = await Shop.findOne({ $or: [{ slug: clean }, { previousSlugs: clean }] })
       .select('_id name slug logo phone address features storefront subscription access isActive')
       .lean();
     if (!shop) throw this._dark(`no shop for slug "${clean}"`);
@@ -562,7 +651,16 @@ class PublicStorefrontService {
       theme: { ...(template.themeDefaults || {}), ...(published.theme || {}) },
       blocks: published.blocks || {},
       nav: published.nav || [],
-      seo: published.seo || {},
+      /**
+       * RESOLVED, not raw.
+       *
+       * The page used to do `seo.title || shop.name` itself, and so would the
+       * product page, the category page and the sitemap — four copies of one
+       * fallback rule, drifting. Worse: the shop's SEO editor renders a preview
+       * of its own, and a preview that computes the fallback separately is a
+       * preview of a page that does not exist. One resolver, one answer.
+       */
+      seo: resolveSeo(shop, published.seo),
       delivery: this._publicDelivery(storefront, shop),
       categories,
       featured,

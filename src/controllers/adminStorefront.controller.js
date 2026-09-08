@@ -86,3 +86,25 @@ exports.setStorefrontPause = asyncHandler(async (req, res) => {
     message: req.body.paused === true ? 'Storefront paused' : 'Storefront resumed',
   });
 });
+
+// ── Public address ──────────────────────────────────────────────────────────
+
+exports.getShopSlug = asyncHandler(async (req, res) => {
+  const data = await adminStorefrontService.getShopSlug(req.params.id);
+  return ApiResponse.success(res, { data, message: 'Storefront address retrieved' });
+});
+
+exports.setShopSlug = asyncHandler(async (req, res) => {
+  const data = await adminStorefrontService.setShopSlug(
+    req.params.id,
+    req.admin._id,
+    req.body.slug
+  );
+  return ApiResponse.success(res, {
+    data,
+    message: data.changed ? 'Storefront address updated' : 'Storefront address unchanged',
+    messageBn: data.changed
+      ? `নতুন ঠিকানা: /s/${data.slug}`
+      : 'ঠিকানাটি আগে থেকেই এটাই ছিল',
+  });
+});

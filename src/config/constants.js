@@ -434,7 +434,8 @@ module.exports = {
     STOREFRONT_ROLLBACK: { en: 'storefront_rollback', bn: 'ওয়েবসাইট পুনরুদ্ধার' },
     STOREFRONT_PAUSED_BY_ADMIN: { en: 'storefront_paused_by_admin', bn: 'অনলাইন দোকান বন্ধ' },
     STOREFRONT_RESUMED_BY_ADMIN: { en: 'storefront_resumed_by_admin', bn: 'অনলাইন দোকান চালু' },
-    ONLINE_CATALOG_BULK_UPDATE: { en: 'online_catalog_bulk_update', bn: 'অনলাইন পণ্য একসাথে হালনাগাদ' }
+    ONLINE_CATALOG_BULK_UPDATE: { en: 'online_catalog_bulk_update', bn: 'অনলাইন পণ্য একসাথে হালনাগাদ' },
+    SHOP_SLUG_CHANGED: { en: 'shop_slug_changed', bn: 'অনলাইন ঠিকানা পরিবর্তন' }
   },
 
   // Sales Return Refund Methods

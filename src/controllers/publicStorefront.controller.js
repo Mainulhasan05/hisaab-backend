@@ -104,3 +104,26 @@ exports.getSitemap = asyncHandler(async (req, res) => {
     messageBn: 'সাইটম্যাপ লোড হয়েছে',
   });
 });
+
+/**
+ * Every live storefront, for the platform-wide sitemap index.
+ *
+ * The one endpoint on this router that is not about a single shop, and the one
+ * that decides whether any of this SEO work reaches a crawler at all — see
+ * `listIndexableStorefronts` for why. No slug param, so no `_dark` treatment
+ * applies: a shop being absent from this list is the only signal it gives, and
+ * that is the same signal its public URL already gives by 404ing.
+ *
+ * Cached for a day like the per-shop sitemap. A storefront that went live an
+ * hour ago being crawled tomorrow instead of today costs nothing; hammering a
+ * full-collection read on every crawler request would.
+ */
+exports.getSitemapIndex = asyncHandler(async (req, res) => {
+  const storefronts = await publicStorefrontService.listIndexableStorefronts();
+  cache(res, 3600, 86400);
+  return ApiResponse.success(res, {
+    data: { storefronts, count: storefronts.length },
+    message: 'Storefront index loaded',
+    messageBn: 'দোকানের তালিকা লোড হয়েছে',
+  });
+});

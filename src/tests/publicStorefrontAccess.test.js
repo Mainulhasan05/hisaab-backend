@@ -108,7 +108,11 @@ describe('serves a healthy shop', () => {
   it('accepts a slug in any case and trims it', async () => {
     wire();
     await expect(publicService.resolveStorefront('  RAHIM-STORE  ')).resolves.toBeTruthy();
-    expect(Shop.findOne).toHaveBeenCalledWith({ slug: 'rahim-store' });
+    // Both arms, because an old address must resolve too — see
+    // shopSlugRename.test.js for what that alias is protecting.
+    expect(Shop.findOne).toHaveBeenCalledWith({
+      $or: [{ slug: 'rahim-store' }, { previousSlugs: 'rahim-store' }],
+    });
   });
 
   // Grace is a period the operator deliberately granted. Going dark inside it

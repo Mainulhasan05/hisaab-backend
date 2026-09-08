@@ -10,6 +10,7 @@ const logger = require('../utils/logger.util');
 const { AppError } = require('../middleware/error.middleware');
 const { hasTemplateRestriction, canApplyTemplate } = require('../utils/storefrontTemplates.util');
 const { invalidateShopAuthCache } = require('../utils/authCache.util');
+const { validateSlug, MIN_LENGTH, MAX_LENGTH } = require('../utils/shopSlug.util');
 const { FEATURE_KEYS } = require("../utils/features.util");
 
 /** This service's name in the media library's consumer registry. */
@@ -570,6 +571,152 @@ class AdminStorefrontService {
     await cacheService.bumpShopCacheVersion(shopId, 0);
 
     return storefront.toObject();
+  }
+
+  // ══ PUBLIC ADDRESS ═══════════════════════════════════════════════════════
+
+  /**
+   * What a shop's storefront address is now, and what it used to be.
+   *
+   * Returned as a shape rather than a bare string because the screen has to
+   * show the operator the two things that make a rename safe to reason about:
+   * the addresses already spent (which cannot be handed to another shop), and
+   * whether this storefront is actually live (a rename of a dark site costs
+   * nothing; a rename of a live one is a URL customers are holding).
+   */
+  async getShopSlug(shopId) {
+    const shop = await Shop.findById(shopId).select('name slug previousSlugs').lean();
+    if (!shop) {
+      throw new AppError('Shop not found', 'দোকান পাওয়া যায়নি', 404);
+    }
+
+    const storefront = await Storefront.findOne({ shop: shopId })
+      .select('status pausedByAdmin published.template')
+      .lean();
+
+    return {
+      shop: String(shop._id),
+      name: shop.name,
+      slug: shop.slug,
+      previousSlugs: shop.previousSlugs || [],
+      publicPath: `/s/${shop.slug}`,
+      // Whether anyone is actually reading this address today.
+      isLive: Boolean(
+        storefront &&
+        storefront.status === 'live' &&
+        !storefront.pausedByAdmin &&
+        storefront.published?.template
+      ),
+      minLength: MIN_LENGTH,
+      maxLength: MAX_LENGTH,
+    };
+  }
+
+  /**
+   * Move a shop's storefront to a new public address.
+   *
+   * ── WHY THE OLD ADDRESS IS KEPT AND NOT JUST OVERWRITTEN ────────────────
+   *
+   * The reason this endpoint exists at all is that registration mints
+   * `student-hub-3di3eo` and the owner wants `student-hub`. The reason it is
+   * not a one-line `$set` is that by the time they ask, the ugly URL is in a
+   * Facebook post and a customer's bookmarks. Pushing the old slug onto
+   * `previousSlugs` makes `resolveStorefront` treat it as an alias, so the
+   * rename costs nobody a 404 — see the field's comment on Shop.model.js.
+   *
+   * ── THE UNIQUENESS CHECK SPANS BOTH FIELDS, ON PURPOSE ──────────────────
+   *
+   * A candidate is rejected if ANY shop holds it as a current slug OR as a
+   * previous one. Checking only `slug` would let shop B claim the address shop
+   * A just vacated, and A's old links — the ones this whole design exists to
+   * keep working — would then start serving B's catalogue. That is the single
+   * way aliasing can hurt a real customer, so the namespace is treated as
+   * append-only: an address, once used, is spent.
+   *
+   * The unique index on `slug` is still the backstop. This check exists to turn
+   * a duplicate-key error into a sentence an operator can act on, not to
+   * replace it — two admins renaming at once is exactly the race the index is
+   * there for.
+   */
+  async setShopSlug(shopId, adminId, rawSlug) {
+    const shop = await Shop.findById(shopId);
+    if (!shop) {
+      throw new AppError('Shop not found', 'দোকান পাওয়া যায়নি', 404);
+    }
+
+    const check = validateSlug(rawSlug);
+    if (!check.valid) {
+      throw new AppError(check.reason, check.reasonBn, 400);
+    }
+    const slug = check.slug;
+
+    const previous = shop.slug;
+    if (slug === previous) {
+      return {
+        shop: String(shop._id),
+        slug,
+        previousSlugs: shop.previousSlugs || [],
+        publicPath: `/s/${slug}`,
+        changed: false,
+      };
+    }
+
+    // Reclaiming an address this SAME shop used before is allowed and is the
+    // undo button for a rename someone regrets — it is only another shop's
+    // history that is off limits.
+    const clash = await Shop.findOne({
+      _id: { $ne: shop._id },
+      $or: [{ slug }, { previousSlugs: slug }],
+    }).select('_id name slug').lean();
+
+    if (clash) {
+      throw new AppError(
+        `"${slug}" is already in use`,
+        `"${slug}" ঠিকানাটি অন্য একটি দোকান ব্যবহার করছে`,
+        409
+      );
+    }
+
+    const history = (shop.previousSlugs || []).filter((s) => s && s !== slug);
+    if (previous && !history.includes(previous)) history.push(previous);
+
+    shop.slug = slug;
+    shop.previousSlugs = history;
+    await shop.save();
+
+    await AuditLog.create({
+      shop: shopId,
+      admin: adminId,
+      action: 'shop_slug_changed',
+      description: `Storefront address for "${shop.name}": /s/${previous} → /s/${slug}`,
+      descriptionBn: `"${shop.name}" দোকানের অনলাইন ঠিকানা /s/${previous} থেকে /s/${slug} করা হয়েছে`,
+      entity: { type: 'shop', id: shop._id, name: shop.name },
+      changes: { before: { slug: previous }, after: { slug } },
+    });
+
+    /**
+     * Two caches, two reasons.
+     *
+     * The auth cache holds a populated Shop document per session, and the shop's
+     * own /online panel reads `req.shop.slug` to print "your site is at …". Left
+     * alone it would show the old address until the session expired.
+     *
+     * The public page cache is keyed per shop and is what a customer hits; the
+     * new URL is cold anyway, but the generation bump is what stops the old
+     * address serving a page whose internal links still say the old slug.
+     */
+    await invalidateShopAuthCache(shopId);
+    await cacheService.bumpShopCacheVersion(shopId, 0);
+
+    logger.info(`[storefront] slug changed for shop ${shopId}: ${previous} -> ${slug}`);
+
+    return {
+      shop: String(shop._id),
+      slug,
+      previousSlugs: history,
+      publicPath: `/s/${slug}`,
+      changed: true,
+    };
   }
 }
 

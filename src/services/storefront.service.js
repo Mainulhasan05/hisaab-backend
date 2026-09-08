@@ -7,6 +7,7 @@ const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
 const { findDistrict, findAreaAnywhere } = require('../utils/bdGeo.util');
 const { canApplyTemplate, offerableTemplateFilter } = require('../utils/storefrontTemplates.util');
+const { normalizeSeo } = require('../utils/storefrontSeo.util');
 
 /** Hard ceiling on zones per shop — a zone table is not a district gazetteer. */
 const MAX_ZONES = 20;
@@ -244,12 +245,34 @@ class StorefrontService {
     };
   }
 
-  _seedSeo(shop) {
-    return {
-      title: shop.name,
-      description: `${shop.name} — অনলাইনে অর্ডার করুন।`,
-      ogImage: shop.logo || null,
-    };
+  /**
+   * SEO starts EMPTY, and that is a correction rather than an omission.
+   *
+   * This used to seed `{ title: shop.name, description: "<name> — অনলাইনে
+   * অর্ডার করুন।", ogImage: logo }`. The values were right; storing them was
+   * not, and the damage only became visible once there was a screen to see it
+   * on:
+   *
+   *   · A stored value is indistinguishable from an authored one. The SEO
+   *     editor reports which fields the shop actually wrote (`resolveSeo`'s
+   *     `isDefault`) so a placeholder does not read as finished work — and a
+   *     seeded default defeats that entirely. Every shop is shown its own
+   *     generic description labelled as its own writing, and nobody edits it.
+   *   · A copy goes stale. Seeded at creation, the title kept the shop's name
+   *     from the day they registered; renaming the shop left the old name in
+   *     the meta tag forever, silently.
+   *   · Google discards a description that says nothing, in favour of a snippet
+   *     it picks itself. So the seeded value was never even the value in use —
+   *     it was just the reason nobody wrote a better one.
+   *
+   * The identical text is still what the page renders, from `resolveSeo`, which
+   * derives it live from the current shop. Same output, no stale copy, and the
+   * field is honestly empty until a person fills it in.
+   *
+   * `scripts/clear-seeded-storefront-seo.js` clears the values already stored.
+   */
+  _seedSeo() {
+    return {};
   }
 
   /**
@@ -386,7 +409,22 @@ class StorefrontService {
       storefront.draft.nav = patch.nav;
     }
     if ('seo' in patch) {
-      storefront.draft.seo = this._plainObject(patch.seo, 'seo');
+      /**
+       * Merged per field, and validated — not stored as whatever arrived.
+       *
+       * Two changes from the blob it used to be, both of which the SEO editor
+       * depends on. MERGED, because that screen saves the description on its
+       * own and must not blank the title the shop wrote last week — the same
+       * rule `blocks` follows one branch down. VALIDATED, because these three
+       * strings are the only content in the system that goes into a `<meta>`
+       * tag: a newline pasted from WhatsApp silently truncates the snippet, and
+       * a relative `ogImage` is dropped by Facebook with nothing on screen to
+       * say why. See `utils/storefrontSeo.util.js`.
+       */
+      storefront.draft.seo = {
+        ...(storefront.draft.seo || {}),
+        ...normalizeSeo(this._plainObject(patch.seo, 'seo')),
+      };
     }
     if ('blocks' in patch) {
       const blocks = this._plainObject(patch.blocks, 'blocks');
@@ -618,6 +656,87 @@ class StorefrontService {
 
     await storefront.save();
     return storefront;
+  }
+
+  // ══ SEO ══════════════════════════════════════════════════════════════════
+
+  /**
+   * What this shop actually sells, for the AI writer's prompt.
+   *
+   * ── WHY THE ONLINE FILTER MATTERS HERE ──────────────────────────────────
+   *
+   * `isAvailableOnline` and `isActive`, the same gate the public pages apply.
+   * A shop's internal catalogue is routinely much wider than its website —
+   * wholesale-only lines, discontinued stock, the supplier's whole price list
+   * imported once and never pruned. Describing the business from THAT is how a
+   * stationery shop's meta description ends up mentioning the mobile phones it
+   * stopped selling in 2024.
+   *
+   * Categories come from the products rather than the Category collection for
+   * the same reason `getCategories` does it that way in the public service: a
+   * category with nothing online in it is not something this shop sells online.
+   *
+   * Names only. No prices, no stock, no ids — none of it changes what the model
+   * needs to know, and all of it is tokens on every request.
+   */
+  async getSeoContext(shopId) {
+    const Product = require('../models/Product.model');
+
+    const rows = await Product.find({
+      shop: shopId,
+      isActive: true,
+      isAvailableOnline: true,
+    })
+      .select('name category')
+      .populate('category', 'name')
+      // Featured first so the shop's own idea of what it is known for leads the
+      // list, then newest — a shop's recent stock describes it better than
+      // whatever happened to be imported first.
+      .sort({ isFeaturedOnline: -1, createdAt: -1 })
+      .limit(60)
+      .lean();
+
+    const categories = [];
+    const seen = new Set();
+    for (const row of rows) {
+      const name = row.category?.name;
+      if (name && !seen.has(name)) {
+        seen.add(name);
+        categories.push(name);
+      }
+    }
+
+    return {
+      categories,
+      products: rows.map((r) => r.name).filter(Boolean),
+      onlineProductCount: rows.length,
+    };
+  }
+
+  /**
+   * One product of THIS shop, for the description writer.
+   *
+   * The `shop` clause is the authorisation check, not a filter: without it a
+   * product id copied from another shop would come back and be described in
+   * this shop's voice. Same 404-not-403 posture the rest of this router takes.
+   */
+  async getProductForSeo(shopId, productId) {
+    const Product = require('../models/Product.model');
+    const mongoose = require('mongoose');
+
+    if (!mongoose.Types.ObjectId.isValid(String(productId || ''))) {
+      throw new AppError('Product not found', 'পণ্যটি পাওয়া যায়নি', 404);
+    }
+
+    const product = await Product.findOne({ _id: productId, shop: shopId })
+      .select('name brand unit sellingPrice onlinePrice category')
+      .populate('category', 'name')
+      .lean();
+
+    if (!product) {
+      throw new AppError('Product not found', 'পণ্যটি পাওয়া যায়নি', 404);
+    }
+    return product;
   }
 }
 

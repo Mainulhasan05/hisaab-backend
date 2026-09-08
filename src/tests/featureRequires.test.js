@@ -93,16 +93,18 @@ describe('missingDepsFor — what blocks enabling', () => {
 
 describe('dependentsOf — what disabling takes with it', () => {
   it('is transitive', () => {
-    // onlineOrders names `storefront`, not `onlineSelling`. It still has to go.
-    expect(dependentsOf('onlineSelling').sort()).toEqual(['onlineOrders', 'storefront']);
+    // onlineOrders names `storefront`, not `onlineSelling`. It still has to go,
+    // and so does `aiSeo` — an AI writer for a website the shop no longer has.
+    expect(dependentsOf('onlineSelling').sort()).toEqual(['aiSeo', 'onlineOrders', 'storefront']);
   });
 
   it('covers the direct case', () => {
-    expect(dependentsOf('storefront')).toEqual(['onlineOrders']);
+    expect(dependentsOf('storefront').sort()).toEqual(['aiSeo', 'onlineOrders']);
   });
 
   it('is empty for a leaf capability', () => {
     expect(dependentsOf('onlineOrders')).toEqual([]);
+    expect(dependentsOf('aiSeo')).toEqual([]);
     expect(dependentsOf('packaging')).toEqual([]);
   });
 });

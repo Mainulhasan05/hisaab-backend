@@ -154,6 +154,16 @@ router.get(
 );
 
 /**
+ * The list of every live storefront, for the platform's sitemap index.
+ *
+ * ABOVE nothing and BELOW `/storefront/:slug` deliberately — `storefronts` is a
+ * distinct path segment from `storefront`, so no ordering hazard exists here;
+ * the plural is what keeps it out of the `:slug` namespace entirely. Naming it
+ * `/storefront/index` would have made "index" an unusable shop slug forever.
+ */
+router.get('/storefronts/sitemap-index', publicStorefrontController.getSitemapIndex);
+
+/**
  * ── CHECKOUT — THE ONE WRITE ON THIS ROUTER ─────────────────────────────────
  *
  * The header above says every verb here is a GET, and that when checkout

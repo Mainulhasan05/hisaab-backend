@@ -78,6 +78,11 @@ router.put('/shops/:id/storefront/templates', adminStorefrontController.setShopT
 // The platform kill switch. Takes ONE storefront dark without touching the
 // shop's POS — they keep trading at the counter. See adminStorefront.service.
 router.patch('/shops/:id/storefront/pause', adminStorefrontController.setStorefrontPause);
+// The shop's public address. Separate from the pause switch above because it is
+// a different question with a different blast radius: pausing is reversible in
+// one click, renaming spends an address permanently (Shop.previousSlugs).
+router.get('/shops/:id/storefront/slug', adminStorefrontController.getShopSlug);
+router.patch('/shops/:id/storefront/slug', adminStorefrontController.setShopSlug);
 router.get('/shops/:id/branches', adminController.getShopBranches);
 router.post('/shops/:id/branches', adminController.addShopBranch);
 router.patch('/shops/:id/branches/:branchId', adminController.updateShopBranch);
