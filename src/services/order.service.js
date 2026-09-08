@@ -5,11 +5,17 @@ const Product = require('../models/Product.model');
 const Storefront = require('../models/Storefront.model');
 const publicStorefrontService = require('./publicStorefront.service');
 const { AppError } = require('../middleware/error.middleware');
-const { getBangladeshTodayStr, getBangladeshTodayRange } = require('../utils/bdTime.util');
+const {
+  getBangladeshTodayStr,
+  getBangladeshTodayRange,
+  getBangladeshDayRange,
+} = require('../utils/bdTime.util');
 const { quantizeMoney } = require('../utils/quantity.util');
 const { normalizePhone, isValidPhone } = require('../utils/phone.util');
 const { branchFilter, branchMatch, isActiveBranch, wrongBranchError } = require('../utils/branchScope.util');
 const { resolveAddress, _norm: geoNorm } = require('../utils/bdGeo.util');
+const { buildOrderStatusSms, ORDER_SMS_KINDS } = require('../utils/smsTemplates.util');
+const { channelForOrder } = require('../utils/channel.util');
 const logger = require('../utils/logger.util');
 
 /**
@@ -39,6 +45,37 @@ const FORWARD_TRANSITIONS = Object.freeze({
   shipped: ['confirmed', 'packed'],
   delivered: ['confirmed', 'packed', 'shipped'],
 });
+
+/**
+ * How long an order may sit in one state before it counts as STUCK.
+ *
+ * ── WHY THE WORKLIST NEEDED A NOTION OF "LATE" AT ALL ───────────────────────
+ *
+ * Status tabs answer "what state is this in". They do not answer the question
+ * the shop actually loses money on, which is "what have I forgotten". An
+ * unconfirmed order is a customer who has not been called; two days later it is
+ * a customer who has bought elsewhere. The tab said `নতুন ৫` whether those five
+ * arrived nine minutes ago or nine days ago.
+ *
+ * Measured against `updatedAt` — TIME SINCE LAST MOVEMENT, one meaning for
+ * every state. For a pending order nothing has touched it, so `updatedAt` is
+ * `createdAt` and this reads as age since placement; for the rest it reads as
+ * time in the current state, which is the right question once someone has
+ * started work on it. Using `createdAt` throughout would flag a shipped parcel
+ * for being old rather than for being late.
+ *
+ * `delivered` and `cancelled` are absent because they are terminal: an order
+ * that is finished cannot be late.
+ */
+const STUCK_AFTER_HOURS = Object.freeze({
+  pending: 24,
+  confirmed: 48,
+  packed: 48,
+  shipped: 168, // a week on the road is a parcel to chase the courier about
+});
+
+/** Ceiling on an export, so one click cannot ask for a shop's entire history. */
+const EXPORT_MAX_ROWS = 5000;
 
 /**
  * Orders — the shared core.
@@ -423,12 +460,20 @@ class OrderService {
    * route is outside `orderAbuseGuard` (that guard's budget is for ORDERS; a
    * customer changing their mind twice must not spend it).
    */
-  async quoteOrder({ shopId, storefront, items, address, pickup = false, onlineOnly = true }) {
+  async quoteOrder({
+    shopId,
+    storefront,
+    items,
+    address,
+    pickup = false,
+    onlineOnly = true,
+    requireSubdistrict = true,
+  }) {
     const { lines, subtotal } = await this.resolveLines(shopId, { items, onlineOnly });
 
     let delivery;
     try {
-      delivery = this.resolveDelivery(storefront, address, { pickup });
+      delivery = this.resolveDelivery(storefront, address, { pickup, requireSubdistrict });
       delivery = this.applyFreeDelivery(storefront, delivery, subtotal);
     } catch (err) {
       /**
@@ -558,6 +603,17 @@ class OrderService {
     let delivery = this.resolveDelivery(storefront, address, { pickup, requireSubdistrict });
     delivery = this.applyFreeDelivery(storefront, delivery, subtotal);
 
+    /**
+     * The locality, attached AFTER the zone is settled — never before.
+     *
+     * Placing it here rather than passing it into `resolveDelivery` is the
+     * whole guarantee: an unvalidated string cannot have influenced the charge,
+     * because the charge was already decided when it arrived. See
+     * `Order.delivery.area`.
+     */
+    const area = String(address?.area || '').trim().slice(0, 80);
+    if (area && !delivery.isPickup) delivery = { ...delivery, area };
+
     const total = quantizeMoney(subtotal + delivery.charge);
     const orderNo = await this.nextOrderNo(shopId, storefront?.orderPrefix);
 
@@ -670,31 +726,127 @@ class OrderService {
    * waited longest is the one to deal with next. Everything else newest-first,
    * because "what just happened" is the question the other tabs answer.
    */
-  async listOrders(req, { status, q, page = 1, limit = 20 } = {}) {
+  /**
+   * Turn the worklist's query parameters into one Mongo filter.
+   *
+   * ── EVERY READER OF THIS SCREEN BUILDS ITS FILTER HERE ─────────────────────
+   *
+   * The list, the tab badges, the totals line and the CSV export are four
+   * queries over one question, and the screen is only honest if all four ask it
+   * the same way. When the badges were built from an unfiltered
+   * `countsByStatus` the tab said `নতুন ১২` above a list of three, because the
+   * count ignored the date range the list obeyed — the exact "cards agreeing
+   * with the list" failure AGENT_WORKFLOW §7.3 tells us to check for.
+   *
+   * `omitStatus` is what the badges pass: a tab's own count must reflect every
+   * OTHER filter and not itself, or every tab but the active one reads zero.
+   *
+   * ── WHY `$and` AND NOT TWO `$or` KEYS ──────────────────────────────────────
+   *
+   * Both the search term and the stuck-order rule are disjunctions. Written as
+   * `filter.$or = …` twice, the second silently overwrites the first — the
+   * search quietly stops applying and the shopkeeper is handed somebody else's
+   * order. They are pushed onto `$and` instead, which composes.
+   */
+  _worklistFilter(req, { status, q, from, to, source, zone, late, omitStatus = false } = {}) {
     const filter = branchFilter(req, { shop: req.shop._id });
+    const and = [];
 
-    if (status && Order.ORDER_STATUSES.includes(status)) {
+    if (!omitStatus && status && Order.ORDER_STATUSES.includes(status)) {
       filter.status = status;
     }
+
+    if (source === 'storefront' || source === 'manual') {
+      filter.source = source;
+    }
+
+    /**
+     * The delivery arrangement. One control, two shapes of answer: `pickup` is
+     * not a zone and cannot be matched as one — an order the customer collects
+     * has `zoneKey: null`, so a naive zone filter would match all of them or
+     * none of them depending on how it happened to be written.
+     */
+    if (zone === 'pickup') {
+      filter['delivery.isPickup'] = true;
+    } else if (zone) {
+      filter['delivery.zoneKey'] = zone;
+      filter['delivery.isPickup'] = { $ne: true };
+    }
+
+    /**
+     * Calendar days in Bangladesh, converted here and nowhere else.
+     *
+     * `getBangladeshDayRange` gives the UTC instants that bound a BD day, so
+     * "today" means midnight-to-midnight in Dhaka rather than on the server —
+     * which on a UTC host is six hours out and files every order rung before
+     * 6am under the previous day.
+     *
+     * A malformed date is IGNORED rather than allowed to become epoch zero. The
+     * route already refuses anything that is not `YYYY-MM-DD`, so reaching here
+     * with one means a caller that bypassed it, and silently widening their
+     * range to "everything since 1970" is a worse answer than no filter.
+     */
+    const range = {};
+    if (from) {
+      const { startOfDay } = getBangladeshDayRange(String(from));
+      if (startOfDay instanceof Date && !Number.isNaN(startOfDay.getTime())) {
+        range.$gte = startOfDay;
+      }
+    }
+    if (to) {
+      const { endOfDay } = getBangladeshDayRange(String(to));
+      if (endOfDay instanceof Date && !Number.isNaN(endOfDay.getTime())) {
+        range.$lte = endOfDay;
+      }
+    }
+    if (range.$gte || range.$lte) filter.createdAt = range;
+
     if (q && String(q).trim()) {
       const term = String(q).trim();
       const phone = normalizePhone(term);
       // An order number or a phone — the two things a shopkeeper actually has
       // in hand when a customer calls. Never a free regex over names on an
       // unindexed field.
-      filter.$or = [
-        { orderNo: term.toUpperCase() },
-        ...(phone ? [{ 'customer.phone': phone }] : []),
-      ];
+      and.push({
+        $or: [
+          { orderNo: term.toUpperCase() },
+          ...(phone ? [{ 'customer.phone': phone }] : []),
+        ],
+      });
     }
+
+    if (late === true || late === 'true') {
+      const now = Date.now();
+      and.push({
+        $or: Object.entries(STUCK_AFTER_HOURS).map(([state, hours]) => ({
+          status: state,
+          updatedAt: { $lt: new Date(now - hours * 60 * 60 * 1000) },
+        })),
+      });
+    }
+
+    if (and.length) filter.$and = and;
+    return filter;
+  }
+
+  /**
+   * The worklist. `{shop, status, createdAt:-1}` is the index this rides.
+   *
+   * Oldest-first for pending — the plan's own §7.2 rule: the order that has
+   * waited longest is the one to deal with next. Everything else newest-first,
+   * because "what just happened" is the question the other tabs answer. An
+   * explicit `sort` overrides both, because a shopkeeper reconciling a day's
+   * takings wants the big ones first and does not care when they arrived.
+   */
+  async listOrders(req, { page = 1, limit = 20, sort: sortBy, ...criteria } = {}) {
+    const filter = this._worklistFilter(req, criteria);
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const perPage = Math.min(50, Math.max(1, parseInt(limit, 10) || 20));
-    const sort = filter.status === 'pending' ? { createdAt: 1 } : { createdAt: -1 };
 
     const [orders, total] = await Promise.all([
       Order.find(filter)
-        .sort(sort)
+        .sort(this._sortFor(sortBy, criteria.status))
         .skip((pageNum - 1) * perPage)
         .limit(perPage)
         .lean(),
@@ -712,14 +864,77 @@ class OrderService {
     };
   }
 
+  /** The sort clause, given an explicit choice and the active status tab. */
+  _sortFor(sortBy, status) {
+    if (sortBy === 'oldest') return { createdAt: 1 };
+    if (sortBy === 'newest') return { createdAt: -1 };
+    if (sortBy === 'amount') return { total: -1, createdAt: -1 };
+    // The default still depends on the tab — see `listOrders`.
+    return status === 'pending' ? { createdAt: 1 } : { createdAt: -1 };
+  }
+
+  /**
+   * How many orders the current filter matches, and what they are worth.
+   *
+   * The worth is the part that needs saying out loud: this is the sum of
+   * `total` over whatever is being looked at, which on a `delivered` tab is
+   * money earned and on a `pending` tab is money merely HOPED for. The screen
+   * labels it per tab; a service that returned one number called "revenue"
+   * would be inviting the two to be added together, which is the habit
+   * `summary` already refuses to teach.
+   */
+  async worklistTotals(req, criteria = {}) {
+    const rows = await Order.aggregate([
+      { $match: branchMatch(req, this._worklistFilter(req, criteria)) },
+      { $group: { _id: null, count: { $sum: 1 }, amount: { $sum: '$total' } } },
+    ]);
+    return {
+      count: rows[0]?.count || 0,
+      amount: quantizeMoney(rows[0]?.amount || 0),
+    };
+  }
+
+  /**
+   * The rows behind the current view, for a spreadsheet.
+   *
+   * One line per ORDER, not per item: what a shop reconciles is the parcel and
+   * the money on it. `EXPORT_MAX_ROWS` caps it so a shop with a year of history
+   * and no filters cannot ask for all of it at once — and the caller is told
+   * when it was truncated rather than being handed a file that quietly stops.
+   */
+  async exportRows(req, criteria = {}) {
+    const orders = await Order.find(this._worklistFilter(req, criteria))
+      .sort(this._sortFor(criteria.sort, criteria.status))
+      .limit(EXPORT_MAX_ROWS + 1)
+      .lean();
+
+    return {
+      orders: orders.slice(0, EXPORT_MAX_ROWS).map((o) => this.toMerchantOrder(o)),
+      truncated: orders.length > EXPORT_MAX_ROWS,
+      limit: EXPORT_MAX_ROWS,
+    };
+  }
+
   /**
    * Order counts per status — the tab badges and the dashboard's pending tile.
-   * `branchMatch`, not `branchFilter`: this is an aggregation and $match does
+   *
+   * ── THE BADGES OBEY EVERY FILTER EXCEPT THE TABS THEMSELVES ────────────────
+   *
+   * `omitStatus: true` is the whole subtlety. A tab's badge must be counted
+   * under the date range, source, zone and search the user has set — otherwise
+   * "নতুন ১২" sits above a list of three and the shopkeeper cannot tell which
+   * number is the lie. But it must NOT be counted under the active status, or
+   * every tab except the open one reads zero.
+   *
+   * Passing no criteria at all gives the whole-shop counts, which is what the
+   * overview's pending tile wants.
+   *
+   * `branchMatch`, not `branchFilter`: this is an aggregation and `$match` does
    * not cast (I-3).
    */
-  async countsByStatus(req) {
+  async countsByStatus(req, criteria = {}) {
     const rows = await Order.aggregate([
-      { $match: branchMatch(req, { shop: req.shop._id }) },
+      { $match: branchMatch(req, this._worklistFilter(req, { ...criteria, omitStatus: true })) },
       { $group: { _id: '$status', count: { $sum: 1 } } },
     ]);
 
@@ -729,6 +944,94 @@ class OrderService {
     }
     counts.all = rows.reduce((sum, r) => sum + r.count, 0);
     return counts;
+  }
+
+  /**
+   * COMMITTED STOCK — units promised to pending orders that have NOT left the
+   * shelf yet.
+   *
+   * ── Why this is a number and not a reservation ──────────────────────────────
+   *
+   * Placing an order deducts nothing (I-9, and `_assertStock`'s note explains
+   * why reserving would let a stranger with a script empty a shop's shelves on
+   * paper). That decision is right and this does not change it.
+   *
+   * What it left behind was a silence. With three shirts on the shelf and three
+   * pending orders for shirts, `Product.stock` says 3, the storefront says "in
+   * stock", the reorder alert stays quiet, and the counter will happily sell all
+   * three — and the shopkeeper finds out when the parcel desk presses confirm
+   * and gets "পর্যাপ্ত স্টক নেই" on an order they already promised someone. The
+   * shop was never told what it had committed.
+   *
+   * So: the units stay available, and the commitment becomes VISIBLE. The
+   * shopkeeper decides what to do about it, which is the same division of labour
+   * as everywhere else here — the system does not silently reserve, and it does
+   * not silently hide either.
+   *
+   * ── Pending only ────────────────────────────────────────────────────────────
+   *
+   * `confirmed` and everything after it has ALREADY come off `Product.stock`;
+   * counting those here would double-count the same units, showing a shop twice
+   * the exposure it has. `cancelled` and `returned` never take any.
+   *
+   * @param {object} req
+   * @param {string[]|null} productIds Restrict to these products, for a screen
+   *   showing a page of them. Null = every product with pending demand.
+   * @returns {Promise<Map<string, number>>} product id (string) → units promised
+   */
+  async committedStock(req, productIds = null) {
+    const match = branchMatch(req, { shop: req.shop._id, status: 'pending' });
+    const pipeline = [
+      { $match: match },
+      { $unwind: '$items' },
+    ];
+    if (Array.isArray(productIds) && productIds.length) {
+      pipeline.push({
+        $match: {
+          'items.product': {
+            $in: productIds.map((id) => new mongoose.Types.ObjectId(String(id))),
+          },
+        },
+      });
+    }
+    pipeline.push({
+      $group: { _id: '$items.product', units: { $sum: '$items.quantity' } },
+    });
+
+    const rows = await Order.aggregate(pipeline);
+    return new Map(rows.map((r) => [String(r._id), r.units || 0]));
+  }
+
+  /**
+   * How many orders are STUCK, by state — the overview's "কাজ বাকি" queue.
+   *
+   * Not derivable from `countsByStatus`: that answers "how many are pending",
+   * and the question a shop loses money on is "how many have been pending too
+   * long". See `STUCK_AFTER_HOURS`.
+   *
+   * Every id in the `$match` comes from `branchMatch`, which casts (I-3).
+   */
+  async stuckCounts(req) {
+    const now = Date.now();
+    const rows = await Order.aggregate([
+      {
+        $match: branchMatch(req, {
+          shop: req.shop._id,
+          $or: Object.entries(STUCK_AFTER_HOURS).map(([state, hours]) => ({
+            status: state,
+            updatedAt: { $lt: new Date(now - hours * 60 * 60 * 1000) },
+          })),
+        }),
+      },
+      { $group: { _id: '$status', count: { $sum: 1 } } },
+    ]);
+
+    const stuck = Object.fromEntries(Object.keys(STUCK_AFTER_HOURS).map((s) => [s, 0]));
+    for (const row of rows) {
+      if (row._id in stuck) stuck[row._id] = row.count;
+    }
+    stuck.total = rows.reduce((sum, r) => sum + r.count, 0);
+    return stuck;
   }
 
   /**
@@ -744,38 +1047,140 @@ class OrderService {
     const { startOfDay, endOfDay } = getBangladeshTodayRange();
     const todayRange = { $gte: startOfDay, $lte: endOfDay };
 
-    const [counts, todayRows, recent] = await Promise.all([
+    /**
+     * Yesterday, bounded the same way.
+     *
+     * A count on its own is not information — "৭টি অর্ডার" is good or bad only
+     * against something. Derived by subtracting a day from today's BD-aligned
+     * start rather than by formatting a date string, so the two windows cannot
+     * disagree about where a day begins.
+     */
+    const dayMs = 24 * 60 * 60 * 1000;
+    const yesterdayRange = {
+      $gte: new Date(startOfDay.getTime() - dayMs),
+      $lte: new Date(endOfDay.getTime() - dayMs),
+    };
+
+    const dayShape = {
+      _id: null,
+      placed: { $sum: 1 },
+      confirmedRevenue: {
+        $sum: {
+          $cond: [
+            { $in: ['$status', ['confirmed', 'packed', 'shipped', 'delivered']] },
+            '$total',
+            0,
+          ],
+        },
+      },
+    };
+
+    const [counts, stuck, todayRows, yesterdayRows, recent, committed] = await Promise.all([
       this.countsByStatus(req),
+      this.stuckCounts(req),
       Order.aggregate([
         { $match: branchMatch(req, { shop: req.shop._id, createdAt: todayRange }) },
-        {
-          $group: {
-            _id: null,
-            placed: { $sum: 1 },
-            confirmedRevenue: {
-              $sum: {
-                $cond: [
-                  { $in: ['$status', ['confirmed', 'packed', 'shipped', 'delivered']] },
-                  '$total',
-                  0,
-                ],
-              },
-            },
-          },
-        },
+        { $group: dayShape },
+      ]),
+      Order.aggregate([
+        { $match: branchMatch(req, { shop: req.shop._id, createdAt: yesterdayRange }) },
+        { $group: dayShape },
       ]),
       Order.find(branchFilter(req, { shop: req.shop._id }))
         .sort({ createdAt: -1 })
         .limit(5)
         .lean(),
+      this.committedStock(req),
     ]);
+
+    const day = (rows) => ({
+      placed: rows[0]?.placed || 0,
+      confirmedRevenue: quantizeMoney(rows[0]?.confirmedRevenue || 0),
+    });
+
+    /**
+     * What pending orders have PROMISED, and which of those promises the shelf
+     * cannot currently keep.
+     *
+     * `short` is the part worth acting on: products where pending demand already
+     * exceeds what is in stock. Every one of those is an order that will be
+     * refused at confirm with "পর্যাপ্ত স্টক নেই" unless the shop restocks — and
+     * before this, the first anyone heard of it was that refusal.
+     *
+     * Compared at PRODUCT level even for variant products, whose `stock` is the
+     * rollup of their variants. That is coarse: three orders for size M and ten
+     * L's on the shelf reads as covered. It is still the right first cut —
+     * it is never a false alarm (if the total is short, something certainly is),
+     * and the per-variant version needs the same comparison keyed on
+     * `items.variantSku`, which is a bigger read for a warning nobody has asked
+     * to be more precise yet.
+     */
+    let committedUnits = 0;
+    let shortProducts = [];
+    if (committed.size) {
+      for (const units of committed.values()) committedUnits += units;
+      const ids = [...committed.keys()];
+      const products = await Product.find({
+        _id: { $in: ids },
+        shop: req.shop._id,
+        isDeleted: { $ne: true },
+      })
+        .select('name code stock')
+        .lean();
+      shortProducts = products
+        .map((p) => ({
+          _id: p._id,
+          name: p.name,
+          code: p.code || null,
+          stock: Number(p.stock) || 0,
+          committed: committed.get(String(p._id)) || 0,
+        }))
+        .filter((p) => p.committed > p.stock)
+        .sort((a, b) => (b.committed - b.stock) - (a.committed - a.stock))
+        .slice(0, 10);
+    }
 
     return {
       counts,
-      today: {
-        placed: todayRows[0]?.placed || 0,
-        confirmedRevenue: quantizeMoney(todayRows[0]?.confirmedRevenue || 0),
+      /**
+       * Stock promised but not yet taken — the visible half of I-9.
+       *
+       * `units` is what pending orders have asked for and the shelf has NOT
+       * given up: placing an order moves no stock, and this is the shop being
+       * told so in a number rather than finding out at confirm time. `short` is
+       * the subset already over-promised.
+       */
+      committedStock: {
+        units: committedUnits,
+        products: committed.size,
+        short: shortProducts,
       },
+      /**
+       * The action queue: what is waiting on a human right now.
+       *
+       * ── ONE TILE, ONE STATUS, DELIBERATELY ────────────────────────────────
+       *
+       * The obvious shape was a single "পাঠাতে হবে" spanning confirmed AND
+       * packed — two states of one job, and it reads better. It is also a lie
+       * the moment it is tapped: the overview links each row into the worklist,
+       * the worklist filters by ONE status, and a tile saying five that opens a
+       * list of three is precisely the card-disagrees-with-the-list failure
+       * AGENT_WORKFLOW §7.3 names. Better wording is not worth a number the
+       * shopkeeper learns to distrust.
+       *
+       * `stuck` is the exception and is allowed to span statuses, because the
+       * worklist has a filter that means exactly it (`late=true`).
+       */
+      queue: {
+        pending: counts.pending || 0,
+        confirmed: counts.confirmed || 0,
+        packed: counts.packed || 0,
+        inTransit: counts.shipped || 0,
+        stuck: stuck.total || 0,
+      },
+      stuck,
+      today: day(todayRows),
+      yesterday: day(yesterdayRows),
       recent: recent.map((o) => this.toMerchantOrder(o)),
     };
   }
@@ -799,24 +1204,7 @@ class OrderService {
       throw new AppError('Order not found', 'অর্ডারটি পাওয়া যায়নি', 404);
     }
 
-    /**
-     * Which customer SMS this shop has switched ON — i.e. which buttons the
-     * detail screen may offer.
-     *
-     * Sent with the ORDER rather than fetched separately by the panel so the
-     * screen cannot render a button the server would refuse. These are
-     * offer-flags, never auto-send flags; `notifyCustomer` explains why.
-     */
-    const storefront = await Storefront.findOne({ shop: req.shop._id })
-      .select('notifications').lean();
-
-    return {
-      ...this.toMerchantOrder(order),
-      smsOffered: {
-        confirmed: storefront?.notifications?.smsOnConfirm === true,
-        shipped: storefront?.notifications?.smsOnShip === true,
-      },
-    };
+    return this.toMerchantOrder(order);
   }
 
   /**
@@ -908,7 +1296,7 @@ class OrderService {
    * which `sendSingle` appends and bills for.
    */
   async notifyCustomer(req, orderId, kind, { userId = null } = {}) {
-    if (!['confirmed', 'shipped'].includes(kind)) {
+    if (!ORDER_SMS_KINDS.includes(kind)) {
       throw new AppError('Unknown notification', 'এই ধরনের বার্তা পাঠানো যায় না', 400);
     }
 
@@ -917,23 +1305,32 @@ class OrderService {
     );
     if (!order) throw new AppError('Order not found', 'অর্ডারটি পাওয়া যায়নি', 404);
 
-    const flag = kind === 'shipped' ? 'smsOnShip' : 'smsOnConfirm';
-    const storefront = await Storefront.findOne({ shop: req.shop._id })
-      .select('notifications').lean();
-    if (storefront?.notifications?.[flag] !== true) {
-      throw new AppError(
-        'This message is switched off',
-        'এই বার্তাটি সেটিংসে বন্ধ আছে — আগে চালু করুন',
-        400
-      );
-    }
+    /**
+     * The message must describe the order's ACTUAL state.
+     *
+     * The shopkeeper presses this from the order screen, which may have been
+     * open since before someone else moved the order on — so a "confirmed"
+     * message could otherwise go out for an order that has since been
+     * cancelled. Announcing a state the order is not in is worse than not
+     * announcing at all, because the customer acts on it.
+     *
+     * `cancelled` and `delivered` are exact. The rest allow any LATER state
+     * too: a shop that packed and shipped in one go may still want to send the
+     * confirmation it never got round to.
+     */
+    const ORDER = ['pending', 'confirmed', 'packed', 'shipped', 'delivered'];
+    const reached = ORDER.indexOf(order.status);
+    const needed = ORDER.indexOf(kind);
+    const stateOk = kind === 'cancelled'
+      ? order.status === 'cancelled'
+      : order.status !== 'cancelled' && reached >= needed && needed > 0;
 
-    // Announcing a thing that has not happened is worse than not announcing it.
-    if (kind === 'confirmed' && order.status === 'pending') {
-      throw new AppError('Order is not confirmed', 'অর্ডারটি এখনো নিশ্চিত হয়নি', 400);
-    }
-    if (kind === 'shipped' && !['shipped', 'delivered'].includes(order.status)) {
-      throw new AppError('Order has not shipped', 'অর্ডারটি এখনো পাঠানো হয়নি', 400);
+    if (!stateOk) {
+      throw new AppError(
+        `Order is ${order.status}`,
+        'অর্ডারের বর্তমান অবস্থার সাথে এই বার্তাটি মেলে না — পাতাটি রিফ্রেশ করুন',
+        409
+      );
     }
 
     // Already told, for this transition. Charging a shop twice for the same
@@ -946,16 +1343,31 @@ class OrderService {
     const phone = order.customer?.phone;
     if (!phone) throw new AppError('No phone number', 'কাস্টমারের নম্বর নেই', 400);
 
-    const text = kind === 'shipped'
-      ? `আপনার অর্ডার ${order.orderNo} পাঠানো হয়েছে। শীঘ্রই পৌঁছে যাবে।`
-      : `আপনার অর্ডার ${order.orderNo} নিশ্চিত হয়েছে। মোট ৳${order.total}।`;
+    /**
+     * Built by the SHARED template, never inline here.
+     *
+     * `lib/sms/templates.js` mirrors that builder character for character and
+     * is what the order screen previews. Composing a body here instead would
+     * mean the preview the shopkeeper approved and the message the customer
+     * receives came from two different pieces of code — which is the one thing
+     * a preview exists to rule out.
+     */
+    const text = buildOrderStatusSms({
+      kind,
+      orderNo: order.orderNo,
+      total: order.total,
+      isPickup: order.delivery?.isPickup === true,
+    });
+    if (!text) {
+      throw new AppError('No message for this status', 'এই অবস্থার জন্য কোনো বার্তা নেই', 400);
+    }
 
     const smsService = require('./sms.service');
     let ok = true;
     let error = null;
     try {
       await smsService.sendSingle(order.shop, userId, phone, text, null, req, {
-        audience: kind === 'shipped' ? 'order_shipped' : 'order_confirmed',
+        audience: `order_${kind}`,
       });
     } catch (err) {
       // An exhausted quota or a gateway outage is recorded, not thrown: the
@@ -978,19 +1390,7 @@ class OrderService {
     });
     await order.save();
 
-    return {
-      ok,
-      error,
-      order: {
-        ...this.toMerchantOrder(order.toObject()),
-        // Preserved across the response so the button does not vanish and
-        // reappear while the screen re-renders from this payload.
-        smsOffered: {
-          confirmed: storefront?.notifications?.smsOnConfirm === true,
-          shipped: storefront?.notifications?.smsOnShip === true,
-        },
-      },
-    };
+    return { ok, error, order: this.toMerchantOrder(order.toObject()) };
   }
 
   /**
@@ -1058,6 +1458,7 @@ class OrderService {
 
     const saleItems = [];
     const unitPriceOverrides = new Map();
+    const buyingPriceOverrides = new Map();
     for (const line of existing.items) {
       const productId = String(line.product);
       let variantId = null;
@@ -1071,11 +1472,22 @@ class OrderService {
           );
         }
       }
+      const key = variantId ? `${productId}:${variantId}` : productId;
       saleItems.push({ productId, variantId, quantity: line.quantity });
-      unitPriceOverrides.set(
-        variantId ? `${productId}:${variantId}` : productId,
-        line.unitPrice
-      );
+      unitPriceOverrides.set(key, line.unitPrice);
+      /**
+       * The COST as it stood when the order was placed.
+       *
+       * Only set when the line actually carries one. Orders placed before
+       * `buyingPrice` was populated have it as `undefined`, and passing that
+       * through would be read as "cost 0" by the override — turning the whole
+       * line into pure profit. Absent here means `createSale` falls back to the
+       * product's current cost, which is exactly what it did before this map
+       * existed, so old orders confirm as they always have.
+       */
+      if (Number.isFinite(line.buyingPrice)) {
+        buyingPriceOverrides.set(key, line.buyingPrice);
+      }
     }
 
     // 1. Claim.
@@ -1106,7 +1518,16 @@ class OrderService {
           customerPhone: existing.customer.phone,
           paid: 0,
           isOnline: true,
-          channel: existing.source === 'storefront' ? 'website' : 'other',
+          /**
+           * Derived from the shop's own `sourceNote`, not hardcoded.
+           *
+           * This used to be `source === 'storefront' ? 'website' : 'other'`,
+           * which collapsed EVERY manual order into `other` — and manual is how
+           * most shops here actually sell, so the one field a channel report
+           * could group by was accurate only for the storefront. See
+           * utils/channel.util.js for why the note itself cannot be the key.
+           */
+          channel: channelForOrder(existing),
           deliveryCharge: existing.deliveryCharge || 0,
           shippingAddress: existing.delivery?.isPickup
             ? 'পিকআপ'
@@ -1116,7 +1537,7 @@ class OrderService {
             .join(' · '),
         },
         req,
-        { unitPriceOverrides }
+        { unitPriceOverrides, buyingPriceOverrides, order: orderId }
       );
     } catch (err) {
       // Roll the claim back — the order returns to the worklist untouched.
@@ -1168,10 +1589,29 @@ class OrderService {
     if (existing.status === 'cancelled') {
       throw new AppError('Already cancelled', 'অর্ডারটি আগেই বাতিল হয়েছে', 409);
     }
+    if (existing.status === 'returned') {
+      throw new AppError(
+        'This parcel was already returned',
+        'এই পার্সেলটি আগেই ফেরত এসেছে',
+        409
+      );
+    }
     if (existing.status === 'delivered') {
       throw new AppError(
         'A delivered order is returned, not cancelled',
         'ডেলিভারি হয়ে যাওয়া অর্ডার বাতিল নয় — রিটার্ন করুন',
+        400
+      );
+    }
+    // A shipped parcel is an RTO, not a cancellation, and the two are counted
+    // separately on purpose — see `returnOrder` and the lifecycle note on
+    // `Order.model.js`. Sending them here would also dead-end: `cancelSale`
+    // refuses while a courier holds the money, and this path has no way to
+    // release it.
+    if (existing.status === 'shipped') {
+      throw new AppError(
+        'A shipped parcel is returned, not cancelled',
+        'পাঠানো পার্সেল বাতিল নয় — "পার্সেল ফেরত এসেছে" ব্যবহার করুন',
         400
       );
     }
@@ -1201,6 +1641,148 @@ class OrderService {
         },
         $push: {
           statusHistory: { status: 'cancelled', at: new Date(), by: userId || null },
+        },
+      },
+      { new: true }
+    ).lean();
+
+    if (!order) {
+      throw new AppError(
+        'Order state changed — refresh and retry',
+        'অর্ডারটির অবস্থা বদলে গেছে — রিফ্রেশ করে আবার চেষ্টা করুন',
+        409
+      );
+    }
+
+    return this.toMerchantOrder(order);
+  }
+
+  /**
+   * RTO — the parcel shipped, the customer refused it, and it is back.
+   *
+   * ── WHY THIS IS NOT JUST `cancelOrder` ──────────────────────────────────────
+   *
+   * Two reasons, one for the shopkeeper and one for the code.
+   *
+   * For the shopkeeper: a refused parcel and a cancelled order cost completely
+   * different amounts, and only one of them is a number worth watching. See the
+   * lifecycle note on `Order.model.js`.
+   *
+   * For the code: a shipped parcel's money is usually sitting on a courier's
+   * balance, and `cancelSale` REFUSES to void an invoice in that state — "this
+   * parcel is still with a courier, record its return first". That refusal is
+   * correct and must stay. But before this method existed, the only way to
+   * obey it was to leave the online orders screen, find the invoice in the
+   * sales list, press "পার্সেল ফেরত এসেছে" there, then come back and cancel:
+   * three screens, in an order nothing tells you, for the single most common
+   * outcome in a COD business. The 409 was accurate and useless.
+   *
+   * So this does the whole unwind in the order it has to happen:
+   *
+   *   1. release the courier's money back onto the customer's খাতা, if a
+   *      courier is holding it (`undispatchFromCourier`);
+   *   2. void the invoice — stock back on the shelf, due reversed
+   *      (`cancelSale`, which now has nothing to object to);
+   *   3. mark the order `returned`.
+   *
+   * ── FAILURE ORDERING ────────────────────────────────────────────────────────
+   *
+   * Books first, status last, exactly as `cancelOrder` does it. If step 1 or 2
+   * throws, the order stays `shipped` and the shopkeeper sees why — an order
+   * marked returned with a live invoice behind it would be a lie in the one
+   * place they check. The reverse ordering has no such recovery.
+   *
+   * A crash between 2 and 3 leaves a cancelled Sale under a `shipped` order.
+   * That is visible (the detail screen shows the sale as cancelled) and is
+   * fixed by pressing the button again — step 1 no-ops with no courier, and
+   * step 2 is refused as already-cancelled, which this treats as success for
+   * that reason.
+   */
+  async returnOrder(req, orderId, userId, reason = '') {
+    const existing = await Order.findOne(
+      branchFilter(req, { _id: orderId, shop: req.shop._id })
+    ).lean();
+    if (!existing) {
+      throw new AppError('Order not found', 'অর্ডারটি পাওয়া যায়নি', 404);
+    }
+    if (existing.status === 'returned') {
+      throw new AppError('Already returned', 'এই পার্সেলটি আগেই ফেরত এসেছে', 409);
+    }
+    /**
+     * Only a parcel that actually went out can come back.
+     *
+     * `delivered` is excluded deliberately: the customer HAD the goods, so what
+     * follows is a `SalesReturn` against the invoice — which refunds, restocks
+     * and books the loss on the day it arrived — not an unwind of the sale as
+     * though it never happened.
+     */
+    if (existing.status !== 'shipped') {
+      throw new AppError(
+        `Only a shipped parcel can be returned (this one is ${existing.status})`,
+        existing.status === 'delivered'
+          ? 'ডেলিভারি হয়ে যাওয়া পার্সেলের জন্য "মাল ফেরত" ব্যবহার করুন'
+          : 'শুধু পাঠানো পার্সেলই ফেরত আসতে পারে — এটি এখনো পাঠানো হয়নি',
+        400
+      );
+    }
+
+    const trimmedReason = String(reason || '').slice(0, 500);
+
+    if (existing.sale) {
+      const saleService = require('./sale.service');
+
+      // 1. Take the money back off the courier, if they are holding it. Skipped
+      //    for an own-rider delivery and for any shop without fund accounts,
+      //    where there was never a courier leg to reverse.
+      const sale = await mongoose.model('Sale')
+        .findOne({ _id: existing.sale, shop: req.shop._id })
+        .select('courier status')
+        .lean();
+
+      if (sale?.courier) {
+        await saleService.undispatchFromCourier(
+          req.shop._id,
+          userId,
+          {
+            saleId: existing.sale,
+            reason: trimmedReason || `অনলাইন অর্ডার ${existing.orderNo} ফেরত এসেছে`,
+          },
+          req
+        );
+      }
+
+      // 2. Void the invoice. Already-cancelled is not an error here: it means a
+      //    previous attempt got this far and died before stamping the status,
+      //    and refusing would strand the order in `shipped` forever.
+      if (sale?.status !== 'cancelled') {
+        await saleService.cancelSale(
+          req.shop._id,
+          userId,
+          existing.sale,
+          trimmedReason || `অনলাইন অর্ডার ${existing.orderNo} ফেরত এসেছে (RTO)`,
+          req.branchId || null
+        );
+      }
+    }
+
+    // 3. Stamp it. The status filter is what makes two staff pressing the
+    //    button at once resolve to one winner.
+    const order = await Order.findOneAndUpdate(
+      { _id: orderId, shop: req.shop._id, status: 'shipped' },
+      {
+        $set: {
+          status: 'returned',
+          returnedAt: new Date(),
+          returnedBy: userId || null,
+          returnReason: trimmedReason,
+        },
+        $push: {
+          statusHistory: {
+            status: 'returned',
+            at: new Date(),
+            by: userId || null,
+            ...(trimmedReason ? { note: trimmedReason.slice(0, 300) } : {}),
+          },
         },
       },
       { new: true }
@@ -1264,6 +1846,8 @@ class OrderService {
       cancelledAt: order.cancelledAt || null,
       cancelReason: order.cancelReason || null,
       deliveredAt: order.deliveredAt || null,
+      returnedAt: order.returnedAt || null,
+      returnReason: order.returnReason || null,
       statusHistory: order.statusHistory || [],
       /**
        * What has already been texted, so the detail screen can grey out a

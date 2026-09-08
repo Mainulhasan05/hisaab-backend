@@ -39,11 +39,51 @@
  */
 
 const geo = require('../data/bdGeo.json');
+const curated = require('../data/bdCityAreas.json');
 
 const DIVISIONS = Object.freeze(geo.divisions);
 const DISTRICTS = Object.freeze(geo.districts);
 const UPAZILAS = Object.freeze(geo.upazilas);
 const DHAKA_AREAS = Object.freeze(geo.dhakaAreas);
+
+/**
+ * ── THE UPAZILA TABLE CANNOT DESCRIBE A CITY ────────────────────────────────
+ *
+ * A city corporation REPLACES the sadar upazila rather than sitting inside it,
+ * so for the districts whose whole town is a city corporation the upstream
+ * upazila list contains only the rural upazilas — and the city itself, where
+ * most of the orders are, has no row at all. Verifiably true for exactly four
+ * districts:
+ *
+ *   Dhaka       — Dhamrai, Dohar, Keraniganj, Nawabganj, Savar. No Dhaka city.
+ *   Chattogram  — 14 rural upazilas. No Chattogram city.
+ *   Khulna      — 9 rural upazilas. No Khulna city.
+ *   Rajshahi    — 9 rural upazilas. No Rajshahi city.
+ *
+ * Dhaka was already fixed upstream (`dhakaAreas`, 126 rows). The other three
+ * were not, and the symptom was reported from Rajshahi: pick the district,
+ * and the only things offered are Bagha, Bagmara, Charghat … none of which is
+ * the city the customer lives in. There is nothing to select, so the order
+ * either cannot be placed or is filed under the wrong upazila.
+ *
+ * `bdCityAreas.json` is that missing level. It is hand-curated — no upstream
+ * publishes it in a joinable form — and therefore deliberately NARROW: only
+ * metropolitan thanas, only where the district genuinely offers no
+ * alternative. Read the `_rule` field in that file before adding a row.
+ *
+ * ── WHAT DOES *NOT* GO IN IT ────────────────────────────────────────────────
+ *
+ * Anything below thana level. "Mollapara" is a mahalla inside Boalia; so are
+ * several thousand other para, mahalla and bazar names, none of them in any
+ * administrative dataset and none of them stable. Chasing them here would be a
+ * list that is always wrong somewhere. They are recorded instead as
+ * `Order.delivery.area` — free text, snapshotted, printed on the packing slip,
+ * and never consulted when deriving the delivery zone.
+ *
+ * That split is the whole design: the VALIDATED level decides what the
+ * customer pays, the FREE level tells the rider which gate to knock on.
+ */
+const CITY_AREAS = Object.freeze(curated.cityAreas || []);
 
 /**
  * Normalise a name for comparison only.
@@ -87,9 +127,14 @@ for (const u of UPAZILAS) {
   if (!SUBS_BY_DISTRICT.has(u.districtId)) SUBS_BY_DISTRICT.set(u.districtId, []);
   SUBS_BY_DISTRICT.get(u.districtId).push({ ...u, kind: 'upazila' });
 }
-for (const a of DHAKA_AREAS) {
+for (const a of [...DHAKA_AREAS, ...CITY_AREAS]) {
   if (!SUBS_BY_DISTRICT.has(a.districtId)) SUBS_BY_DISTRICT.set(a.districtId, []);
-  SUBS_BY_DISTRICT.get(a.districtId).push({
+  const list = SUBS_BY_DISTRICT.get(a.districtId);
+  // A curated row must never shadow an upstream upazila of the same name —
+  // two identical entries in one dropdown is a coin flip for the customer and
+  // an ambiguous `findSubdistrict` for us. The upstream wins.
+  if (list.some((row) => norm(row.name) === norm(a.name))) continue;
+  list.push({
     id: null,
     districtId: a.districtId,
     name: a.name,
@@ -207,13 +252,22 @@ function divisionOf(district) {
  * it sets a long max-age rather than making every checkout pay for it.
  */
 function fullTree() {
+  const area = (a) => ({
+    districtId: a.districtId, name: a.name, bn: a.bn, cityCorporation: a.cityCorporation,
+  });
   return {
     divisions: DIVISIONS.map((d) => ({ id: d.id, name: d.name, bn: d.bn })),
     districts: DISTRICTS.map((d) => ({ id: d.id, divisionId: d.divisionId, name: d.name, bn: d.bn })),
     upazilas: UPAZILAS.map((u) => ({ districtId: u.districtId, name: u.name, bn: u.bn })),
-    dhakaAreas: DHAKA_AREAS.map((a) => ({
-      districtId: a.districtId, name: a.name, bn: a.bn, cityCorporation: a.cityCorporation,
-    })),
+    /**
+     * `dhakaAreas` is kept, unchanged, because a browser holding a cached copy
+     * of the previous file and a browser fetching this one must both render a
+     * working picker. `cityAreas` is the superset every new caller should read:
+     * Dhaka's 126 areas plus the metropolitan thanas of the cities the upazila
+     * table cannot describe. Readers do `geo.cityAreas || geo.dhakaAreas`.
+     */
+    dhakaAreas: DHAKA_AREAS.map(area),
+    cityAreas: [...DHAKA_AREAS, ...CITY_AREAS].map(area),
   };
 }
 

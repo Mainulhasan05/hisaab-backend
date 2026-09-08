@@ -1,0 +1,46 @@
+{
+  "_note": "Metropolitan city areas (thanas) that the upstream upazila table cannot contain. See src/utils/bdGeo.util.js and scripts/fetch-bd-geo.js for why this file is hand-curated and deliberately narrow.",
+  "_source": "Bangladesh Police metropolitan unit thana lists (CMP, KMP, RMP) + Narayanganj Metropolitan Police. Public administrative record.",
+  "_curatedBy": "hisaab",
+  "_rule": "ONLY add a row here when a real place has NO selectable entry in bdGeo.json's upazila table for its district. Localities below thana level (mahallas, para, bazar names) do NOT belong here — they are free text on the order, see Order.delivery.area.",
+  "cityAreas": [
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "Kotwali", "bn": "কোতোয়ালী" },
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "Sadarghat", "bn": "সদরঘাট" },
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "Bakalia", "bn": "বাকলিয়া" },
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "Chawkbazar", "bn": "চকবাজার" },
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "Panchlaish", "bn": "পাঁচলাইশ" },
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "Khulshi", "bn": "খুলশী" },
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "Bayazid Bostami", "bn": "বায়েজিদ বোস্তামী" },
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "Chandgaon", "bn": "চান্দগাঁও" },
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "Double Mooring", "bn": "ডবলমুরিং" },
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "Halishahar", "bn": "হালিশহর" },
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "Pahartali", "bn": "পাহাড়তলী" },
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "Akbar Shah", "bn": "আকবর শাহ" },
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "Patenga", "bn": "পতেঙ্গা" },
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "EPZ", "bn": "ইপিজেড" },
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "Bandar", "bn": "বন্দর" },
+    { "districtId": 43, "cityCorporation": "Chattogram", "name": "Karnaphuli", "bn": "কর্ণফুলী" },
+
+    { "districtId": 59, "cityCorporation": "Khulna", "name": "Kotwali", "bn": "কোতোয়ালী" },
+    { "districtId": 59, "cityCorporation": "Khulna", "name": "Sonadanga", "bn": "সোনাডাঙ্গা" },
+    { "districtId": 59, "cityCorporation": "Khulna", "name": "Khalishpur", "bn": "খালিশপুর" },
+    { "districtId": 59, "cityCorporation": "Khulna", "name": "Daulatpur", "bn": "দৌলতপুর" },
+    { "districtId": 59, "cityCorporation": "Khulna", "name": "Khan Jahan Ali", "bn": "খানজাহান আলী" },
+    { "districtId": 59, "cityCorporation": "Khulna", "name": "Aranghata", "bn": "আড়ংঘাটা" },
+    { "districtId": 59, "cityCorporation": "Khulna", "name": "Harintana", "bn": "হরিণটানা" },
+    { "districtId": 59, "cityCorporation": "Khulna", "name": "Labanchara", "bn": "লবণচরা" },
+
+    { "districtId": 24, "cityCorporation": "Rajshahi", "name": "Boalia", "bn": "বোয়ালিয়া" },
+    { "districtId": 24, "cityCorporation": "Rajshahi", "name": "Rajpara", "bn": "রাজপাড়া" },
+    { "districtId": 24, "cityCorporation": "Rajshahi", "name": "Motihar", "bn": "মতিহার" },
+    { "districtId": 24, "cityCorporation": "Rajshahi", "name": "Shah Makhdum", "bn": "শাহ মখদুম" },
+    { "districtId": 24, "cityCorporation": "Rajshahi", "name": "Chandrima", "bn": "চন্দ্রিমা" },
+    { "districtId": 24, "cityCorporation": "Rajshahi", "name": "Kashiadanga", "bn": "কাশিয়াডাঙ্গা" },
+    { "districtId": 24, "cityCorporation": "Rajshahi", "name": "Katakhali", "bn": "কাটাখালী" },
+    { "districtId": 24, "cityCorporation": "Rajshahi", "name": "Belpukur", "bn": "বেলপুকুর" },
+    { "districtId": 24, "cityCorporation": "Rajshahi", "name": "Damkura", "bn": "দামকুড়া" },
+    { "districtId": 24, "cityCorporation": "Rajshahi", "name": "Karnahar", "bn": "কর্ণহার" },
+
+    { "districtId": 11, "cityCorporation": "Narayanganj", "name": "Fatullah", "bn": "ফতুল্লা" }
+  ]
+}

@@ -64,10 +64,6 @@ const SOURCES = {
 /** Where the two outputs land. Both written by this script so they cannot drift. */
 const OUT_GEO = path.join(__dirname, '..', 'src', 'data', 'bdGeo.json');
 const OUT_POSTCODES = path.join(__dirname, '..', 'src', 'data', 'bdPostcodes.json');
-/** The frontend copy — same bytes, fetched lazily by the checkout form. */
-const OUT_GEO_FRONTEND = path.join(
-  __dirname, '..', '..', 'hisaab-frontend', 'public', 'data', 'bd-geo.json'
-);
 
 const apply = process.argv.includes('--apply');
 
@@ -341,20 +337,40 @@ async function main() {
     console.log('Dry run — nothing written. Re-run with --apply to write:');
     console.log(`  ${OUT_GEO}`);
     console.log(`  ${OUT_POSTCODES}`);
-    console.log(`  ${OUT_GEO_FRONTEND}`);
+    console.log('  …then scripts/sync-bd-geo-frontend.js --apply renders the browser copies');
     return;
   }
 
   for (const [file, data] of [
     [OUT_GEO, geo],
     [OUT_POSTCODES, pc],
-    [OUT_GEO_FRONTEND, geo],
   ]) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify(data), 'utf8');
     const kb = (fs.statSync(file).size / 1024).toFixed(1);
     console.log(`wrote ${file}  (${kb} KB)`);
   }
+
+  /**
+   * The browser's copies are NOT written from `geo` above.
+   *
+   * They used to be, and that was a way to lose data silently: the frontend
+   * file is upstream PLUS `src/data/bdCityAreas.json` (the metropolitan thanas
+   * the upazila table cannot contain — Rajshahi, Chattogram and Khulna city
+   * have no other selectable entry). Copying the raw upstream over the top
+   * would have deleted them from the checkout on the next refresh, and the
+   * symptom would have been a customer in Rajshahi city with nothing to pick —
+   * exactly the bug those rows were added to fix.
+   *
+   * So the merge has one implementation, in `bdGeo.util`, and both browser
+   * files are rendered from it by the no-network sync script.
+   */
+  console.log('');
+  require('child_process').execFileSync(
+    process.execPath,
+    [path.join(__dirname, 'sync-bd-geo-frontend.js'), '--apply'],
+    { stdio: 'inherit' }
+  );
 }
 
 main().catch((err) => {

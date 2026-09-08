@@ -2027,6 +2027,15 @@ class CustomerService {
      * union. The two `$lookup`s sit INSIDE the rows branch, after `$skip` and
      * `$limit`, so names are resolved for the 25 rows on screen rather than for
      * every row the filter matched.
+     *
+     * cancelled-inclusive: BY REQUEST ONLY, and the filter is already applied.
+     * `paymentMatch` above takes `LIVE_PAYMENT` — and the sale branch takes
+     * `status: { $ne: 'cancelled' }` — unless the CALLER asked for
+     * `includeCancelled`, which is a deliberate control on the register screen
+     * for reading back what was voided. The predicate is ~100 lines up, outside
+     * the guard's comment window, so this note is what tells the next reader
+     * (and paymentCancellation.test.js) that the read is guarded rather than
+     * forgotten. If you move that `Object.assign`, move this note with it.
      */
     const [faceted] = await Payment.aggregate([
       ...pipeline,

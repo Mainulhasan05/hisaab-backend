@@ -534,6 +534,44 @@ const saleSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  /**
+   * The `Order` this invoice settles, when there is one.
+   *
+   * `Order.sale` is the forward link and has existed since P2; this is the
+   * reverse, and it exists because `isOnline` alone mixes two populations that
+   * are not comparable:
+   *
+   *   · a parcel with an `Order` behind it — a worklist row, a fulfilment
+   *     lifecycle, a delivery address, a courier;
+   *   · a sale a cashier ticked "অনলাইন অর্ডার" on at the till, which has none
+   *     of that and never will.
+   *
+   * Both read `isOnline: true`, so every question of the form "how are my
+   * online orders doing" was being answered over a set that silently included
+   * the second kind. Answering it needed a second query into `Order` keyed on
+   * `sale`, which no report did.
+   *
+   * Null on every POS sale and on every sale made before this field existed —
+   * absent means "no order behind this", which for all of them is the truth, so
+   * there is nothing to migrate.
+   *
+   * Written ONCE, by `orderService.confirmOrder`, inside the same transaction
+   * that creates the invoice. Never rewritten: an invoice that changed which
+   * order it settles would make both documents lie.
+   */
+  order: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Order',
+    default: null
+  },
+  /**
+   * WHICH channel this sale came through.
+   *
+   * For an order this is derived from the shop's own `sourceNote` by
+   * `utils/channel.util.js` rather than typed twice — see that file for why the
+   * free-text note cannot itself be the reporting key. For a till sale it is
+   * `pos`, which is the default and therefore what every historical row says.
+   */
   channel: {
     type: String,
     enum: ['pos', 'facebook', 'instagram', 'whatsapp', 'website', 'other'],
@@ -612,6 +650,17 @@ saleSchema.index({ shop: 1, customer: 1, createdAt: -1 }); // Customer purchase 
 saleSchema.index({ shop: 1, branch: 1, createdAt: -1 }); // Main listing with branch filter
 saleSchema.index({ shop: 1, branch: 1, status: 1, createdAt: -1 }); // Due/pending sales with branch
 saleSchema.index({ shop: 1, isOnline: 1, createdAt: -1 }); // Online sales filter index
+// The reverse of `Order.sale`, for "which invoice settles this order" and for
+// separating true parcel sales from till-typed online sales.
+//
+// `partialFilterExpression`, NOT `sparse`. A sparse index skips a document only
+// when EVERY key in it is absent, and `shop` leads this key and is always
+// present — so a sparse index here would index every sale in the collection and
+// the word "sparse" would be decoration. Same trap `Payment.receiptNo` hit.
+saleSchema.index(
+  { shop: 1, order: 1 },
+  { partialFilterExpression: { order: { $type: 'objectId' } } }
+);
 saleSchema.index({ shop: 1, createdAt: -1 }); // Single-branch listing, recent sales, invoice-number day count
 saleSchema.index({ shop: 1, due: 1 }); // Dues listing/sort
 saleSchema.index({ shop: 1, total: -1 }); // Sort by amount (whitelisted sort field)

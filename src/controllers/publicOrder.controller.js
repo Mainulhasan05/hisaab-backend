@@ -77,7 +77,7 @@ exports.placeOrder = asyncHandler(async (req, res) => {
     });
   }
 
-  const { customer = {}, items, district, subdistrict, pickup } = req.body;
+  const { customer = {}, items, district, subdistrict, area, pickup } = req.body;
 
   let order;
   try {
@@ -86,7 +86,7 @@ exports.placeOrder = asyncHandler(async (req, res) => {
       storefront,
       customer,
       items,
-      address: { district, subdistrict },
+      address: { district, subdistrict, area },
       pickup: pickup === true,
       source: 'storefront',
       onlineOnly: true,
@@ -191,13 +191,17 @@ exports.quoteOrder = asyncHandler(async (req, res) => {
     });
   }
 
-  const { items, district, subdistrict, pickup } = req.body;
+  const { items, district, subdistrict, area, pickup } = req.body;
 
   const quote = await orderService.quoteOrder({
     shopId: shop._id,
     storefront,
     items,
-    address: { district, subdistrict },
+    // `area` reaches the resolver and is ignored by it — see
+    // `Order.delivery.area`. Passed anyway so quote and order take an
+    // identical address object; a quote built from a different shape than the
+    // order is a total that can disagree with what gets charged.
+    address: { district, subdistrict, area },
     pickup: pickup === true,
     onlineOnly: true,
   });

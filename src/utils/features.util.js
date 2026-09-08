@@ -127,11 +127,14 @@ const FEATURES = Object.freeze({
      * customer due (invariant I-9, see Order.model.js). Orders arriving is
      * therefore safe on its own.
      *
-     * What is NOT here yet is the shop-side worklist that confirms them, so
-     * until it lands a shop with this on should expect to read its orders and
-     * ring the customer rather than press a button. That is a smaller gap than
-     * it sounds — it is how these shops already work — but it is the reason to
-     * switch this on deliberately, per shop, rather than for everyone.
+     * The shop-side worklist DOES exist now — confirm, pack, ship, deliver,
+     * cancel and RTO, plus manual order entry for what arrives in an inbox.
+     * This paragraph used to say it did not.
+     *
+     * One consequence worth knowing before switching it on: the till's
+     * "অনলাইন অর্ডার" toggle DISAPPEARS for this shop, because the worklist
+     * becomes the one sanctioned door into an online sale and two doors let the
+     * same parcel be booked twice. See `sale.service.createSale`'s guard.
      */
   },
   landingPages: {
@@ -143,7 +146,11 @@ const FEATURES = Object.freeze({
       'them; it works the orders they bring in, from a separate panel. Those ' +
       'orders never enter the customer book or the sales ledger — see ' +
       'LANDING_PAGE_PLAN.md I-17. Off = no panel and no nav entry; the pages ' +
-      'and their orders are kept, not deleted, so the switch is reversible.',
+      'and their orders are kept, not deleted, so the switch is reversible. ' +
+      'NOTE: landing orders also move NO STOCK. A shop selling the same goods ' +
+      'through both a campaign page and the storefront will oversell, because ' +
+      'only the storefront side decrements — check with the shop before ' +
+      'enabling this alongside `storefront`.',
     /**
      * NO PREREQUISITES, and that is deliberate.
      *

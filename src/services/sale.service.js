@@ -57,6 +57,25 @@ const { deductBatches, restoreBatches, batchWriteOp } = require('../utils/batch.
 const { hasFeature } = require('../utils/features.util');
 const { isCombo, findComponentVariant, isChooseSlot } = require('../utils/combo.util');
 
+/**
+ * Is this payload asking for an ONLINE sale?
+ *
+ * Both fields are consulted because the two disagree in the wild: an older
+ * client posts `channel: 'facebook'` with no `isOnline`, and the POS posts
+ * `isOnline: true` with `channel` left at its default. Either one is the shop
+ * saying "this was not a walk-in", and the guard that reads this must catch
+ * both or it catches neither.
+ *
+ * `'false'` and `''` arrive from query-ish clients and must read as false —
+ * `Boolean('false')` is true, which would turn every such sale online.
+ */
+function isOnlineRequested(saleData) {
+  const flag = saleData?.isOnline;
+  const online = flag === true || flag === 'true';
+  const channel = saleData?.channel;
+  return online || (typeof channel === 'string' && channel !== '' && channel !== 'pos');
+}
+
 // "Today" in Bangladesh, from the shared definition in `bdTime.util`. This was
 // a fourth private copy of the same offset arithmetic; the copies are what let
 // the cash register drift onto a different day from the sales it counts.
@@ -383,6 +402,23 @@ class SaleService {
    *     what the online order QUOTED (the storefront's `onlinePrice ??
    *     sellingPrice`), not what the POS would charge today.
    *
+   *   `buyingPriceOverrides` — the same map shape for COST, and the mirror of
+   *     the above for the same reason. `Order.items[].buyingPrice` snapshots
+   *     what the shop had paid at the moment the order was placed; without this
+   *     the snapshot was written and never read, and profit was computed from
+   *     whatever the product's cost happened to be at CONFIRM time. A restock
+   *     at a higher price between Tuesday's order and Thursday's confirm then
+   *     retroactively made Tuesday's order look less profitable — exactly what
+   *     the field's own documentation says it exists to prevent, and the same
+   *     rule every other snapshot on an invoice already follows.
+   *
+   *     Combo lines ignore it: their cost is summed from live component costs
+   *     inside this method, and a single override for the bundle has nothing to
+   *     apply to.
+   *
+   *   `order` — the `Order` this invoice settles, written to `Sale.order`. Set
+   *     only by `confirmOrder`, and only inside its transaction.
+   *
    *   The rest are `reviseSale`'s, and each exists because a revision must be
    *   the SAME invoice, on the SAME day, inside the SAME transaction:
    *
@@ -404,6 +440,9 @@ class SaleService {
     const unitPriceOverrides = internalOptions.unitPriceOverrides instanceof Map
       ? internalOptions.unitPriceOverrides
       : null;
+    const buyingPriceOverrides = internalOptions.buyingPriceOverrides instanceof Map
+      ? internalOptions.buyingPriceOverrides
+      : null;
     const {
       forceInvoiceNo = null,
       forceCreatedAt = null,
@@ -411,6 +450,7 @@ class SaleService {
       revision = 0,
       carryDueSnapshot = null,
       forceTaxRate = null,
+      order: linkedOrder = null,
     } = internalOptions;
     // The quoted price wins over every pricing rule, including wholesale —
     // an online order is billed at what the customer was shown.
@@ -420,6 +460,56 @@ class SaleService {
       const value = unitPriceOverrides.get(key);
       return Number.isFinite(value) && value >= 0 ? value : null;
     };
+    // The COST the order snapshotted, same key shape. Kept separate from
+    // `overrideFor` rather than returning a pair, because a line may legitimately
+    // have one and not the other: an order placed before this field was
+    // populated carries a price but no cost, and must keep falling back to the
+    // product's own figure exactly as it did before.
+    const costOverrideFor = (productId, variantId = null) => {
+      if (!buyingPriceOverrides) return null;
+      const key = variantId ? `${productId}:${variantId}` : String(productId);
+      const value = buyingPriceOverrides.get(key);
+      return Number.isFinite(value) && value >= 0 ? value : null;
+    };
+
+    /**
+     * ── ONE DOOR INTO ONLINE SALES (I-24) ────────────────────────────────────
+     *
+     * A shop running the order worklist may not ALSO book online sales straight
+     * from the till.
+     *
+     * The till's "অনলাইন অর্ডার" toggle predates the worklist and was the only
+     * way to record a Facebook sale before `Order` existed. Once a shop has
+     * `onlineOrders`, it becomes a second, parallel door into the same
+     * business — and the two doors do not know about each other:
+     *
+     *   · the same parcel can be entered twice, once confirmed from the
+     *     worklist and once rung up at the till, and NOTHING detects it. Stock
+     *     comes off twice, the customer is billed twice on their খাতা;
+     *   · a till sale has no `Order`, so it has no fulfilment lifecycle, no
+     *     delivery address, no courier and no `Sale.order` — yet it reads
+     *     `isOnline: true` and lands in the middle of every online figure;
+     *   · the till offers `channel: 'website'`, which is a claim only the
+     *     storefront can truthfully make.
+     *
+     * The manual order form (`POST /online-orders`) is the replacement and is
+     * strictly better: same speed, server-derived prices, and the order gets a
+     * worklist row, a status trail and a channel. So this is a redirection, not
+     * a removal — and it is silent for the shops that matter, since a shop
+     * without `onlineOrders` has no worklist to redirect to and keeps the
+     * toggle exactly as before (I-1: flag off ⇒ behaviour byte-identical).
+     *
+     * `linkedOrder` is what distinguishes the sanctioned caller: only
+     * `confirmOrder` passes it, and it passes it from inside its own claim.
+     */
+    if (isOnlineRequested(saleData) && !linkedOrder && hasFeature(req, 'onlineOrders')) {
+      throw new AppError(
+        'Online sales are recorded through the order worklist for this shop',
+        'এই দোকানে অনলাইন বিক্রি অর্ডার তালিকা থেকে করতে হয় — "অনলাইন অর্ডার" পাতায় গিয়ে নতুন অর্ডার নিন',
+        400
+      );
+    }
+
     return await runInTransaction(async (session) => {
       const sessionOpt = session ? { session } : {};
       const {
@@ -1097,7 +1187,16 @@ class SaleService {
             lineWholesale = false;
           }
         }
-        buyingPrice = variant.buyingPrice || product.buyingPrice || 0;
+        // The order's cost snapshot wins, for the same reason its price does:
+        // both were true when the customer was quoted. `?? ` and not `||` —
+        // a genuinely free sample costs 0 and must not fall through to today's
+        // figure.
+        {
+          const quotedCost = costOverrideFor(product._id, variant._id);
+          buyingPrice = quotedCost !== null
+            ? quotedCost
+            : (variant.buyingPrice || product.buyingPrice || 0);
+        }
         variantInfo = {
           variantId: variant._id,
           variantSku: variant.sku,
@@ -1172,7 +1271,12 @@ class SaleService {
             lineWholesale = false;
           }
         }
-        buyingPrice = product.buyingPrice || 0;
+        // See the variant branch above: the order's snapshot is the cost that
+        // was true when the customer was quoted.
+        {
+          const quotedCost = costOverrideFor(product._id);
+          buyingPrice = quotedCost !== null ? quotedCost : (product.buyingPrice || 0);
+        }
 
         const previousStock = product.stock;
         // Track stock change in memory for validation of subsequent items of the
@@ -1718,6 +1822,14 @@ class SaleService {
           notes,
           isOnline: Boolean(isOnline),
           channel: channel || 'pos',
+          // The `Order` behind this invoice, or null for a till sale. Written
+          // here rather than stamped afterwards so it lands in the same
+          // transaction as the stock movements and the ledger — a crash between
+          // a committed Sale and a separate link write is precisely the
+          // orphaned-invoice case `confirmOrder`'s step 3 already has to
+          // tolerate for `Order.sale`, and there is no reason to add a second
+          // window for the reverse direction.
+          order: linkedOrder || null,
           deliveryCharge: numDeliveryCharge,
           advancePaid: numAdvancePaid,
           courierName,

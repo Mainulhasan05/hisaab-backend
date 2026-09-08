@@ -14,10 +14,31 @@ exports.getStorefront = asyncHandler(async (req, res) => {
   const storefront = await storefrontService.getStorefront(req.shop._id);
   const templates = await storefrontService.getTemplateGallery(req.shop);
 
+  /**
+   * Is Telegram ACTUALLY connected?
+   *
+   * `Storefront.notifications.telegram` is a preference and defaults ON, so
+   * the settings screen showed a ticked switch to shops that had never linked
+   * Telegram — or, worse, to one that linked it and later disconnected. New
+   * orders then arrived in silence with a switch on screen insisting they
+   * would not, which is exactly the failure I-21 names: a control that
+   * promises something no code path performs.
+   *
+   * Reported here rather than fetched from `GET /telegram/status` because that
+   * route is `ownerOnly` and this panel is open to managers too — a manager
+   * would get a 403 and the screen would have to guess.
+   */
+  const TelegramLink = require('../models/TelegramLink.model');
+  const telegramConnected = await TelegramLink.exists({
+    shop: req.shop._id,
+    isActive: true,
+  });
+
   return ApiResponse.success(res, {
     data: {
       storefront,
       templates,
+      telegramConnected: Boolean(telegramConnected),
       hasUnpublishedChanges: storefront.hasUnpublishedChanges(),
       // The public address. Built here rather than in the client so the client
       // never has to know how storefront URLs are shaped — that changes when

@@ -917,6 +917,31 @@ class ReportService {
             },
             totalItems: { $sum: { $size: '$items' } },
             count: { $sum: 1 },
+            /**
+             * ── The day's online half ────────────────────────────────────────
+             *
+             * Conditional sums inside the EXISTING group rather than a second
+             * aggregation: it costs no extra query, and — more importantly — it
+             * cannot disagree with the totals beside it, because it is the same
+             * pass over the same matched documents. The offline half is derived
+             * by subtraction below for exactly that reason; two independently
+             * summed halves are two things that can drift.
+             *
+             * Zero for every shop that sells only at the counter, which is what
+             * every one of these figures said before this existed.
+             */
+            onlineRevenue: {
+              $sum: { $cond: [{ $eq: ['$isOnline', true] }, grossSaleAmountExpr(), 0] },
+            },
+            onlineProfit: {
+              $sum: { $cond: [{ $eq: ['$isOnline', true] }, grossProfitExpr(), 0] },
+            },
+            onlineDue: {
+              $sum: { $cond: [{ $eq: ['$isOnline', true] }, { $ifNull: ['$due', 0] }, 0] },
+            },
+            onlineCount: {
+              $sum: { $cond: [{ $eq: ['$isOnline', true] }, 1, 0] },
+            },
           },
         },
       ]),
@@ -1129,7 +1154,11 @@ class ReportService {
       ]),
     ]);
 
-    const sales = salesAgg[0] || { totalRevenue: 0, totalProfit: 0, totalPaid: 0, totalDue: 0, totalDiscount: 0, totalItems: 0, count: 0 };
+    const sales = salesAgg[0] || {
+      totalRevenue: 0, totalProfit: 0, totalPaid: 0, totalDue: 0, totalDiscount: 0,
+      totalItems: 0, count: 0,
+      onlineRevenue: 0, onlineProfit: 0, onlineDue: 0, onlineCount: 0,
+    };
     const expenses = expenseAgg[0] || { totalExpenses: 0, count: 0 };
     const purchases = purchaseAgg[0] || { totalPurchases: 0, totalPaid: 0, totalDue: 0, count: 0 };
     const returns = returnsAgg[0] || { totalReturns: 0, totalProfitLoss: 0, cashRefund: 0, count: 0 };
@@ -1192,6 +1221,28 @@ class ReportService {
         items: sales.totalItems,
         count: sales.count,
         byMethod: salesByMethod,
+        /**
+         * Where the day's selling happened.
+         *
+         * The offline half is `total − online`, never its own sum, so the two
+         * always add back to `revenue` above no matter what a row's `channel`
+         * says. A shop that has never sold online sees zeros on one side and
+         * its familiar figures on the other.
+         */
+        byPlace: {
+          online: {
+            revenue: quantizeMoney(sales.onlineRevenue || 0),
+            profit: quantizeMoney(sales.onlineProfit || 0),
+            due: quantizeMoney(sales.onlineDue || 0),
+            count: sales.onlineCount || 0,
+          },
+          offline: {
+            revenue: quantizeMoney((sales.totalRevenue || 0) - (sales.onlineRevenue || 0)),
+            profit: quantizeMoney((sales.totalProfit || 0) - (sales.onlineProfit || 0)),
+            due: quantizeMoney((sales.totalDue || 0) - (sales.onlineDue || 0)),
+            count: (sales.count || 0) - (sales.onlineCount || 0),
+          },
+        },
       },
 
       // Expenses
@@ -1436,6 +1487,7 @@ class ReportService {
       dailyExpenses,
       transferCharges,
       shrinkageAgg,
+      channelAgg,
     ] = await Promise.all([
       // 1. Sales: revenue, COGS, profit, count
       Sale.aggregate([
@@ -1688,6 +1740,73 @@ class ReportService {
         },
         { $sort: { total: -1 } },
       ]),
+
+      /**
+       * 10. WHERE THE MONEY CAME FROM — the online/offline split.
+       *
+       * The shop app could already FILTER a sales list by online/offline, but
+       * no report anywhere grouped by it, so "কত অনলাইন থেকে, কত অফলাইন থেকে"
+       * had no answer — for a product sold as running both counters at once,
+       * that is the headline question.
+       *
+       * ── Why the key is computed rather than just `$channel` ────────────────
+       *
+       * `channel` defaults to `'pos'` and `isOnline` defaults to false, but they
+       * are independent fields and the pair disagrees on real rows: an early
+       * client could post `channel: 'facebook'` without setting `isOnline`.
+       * Grouping on `channel` alone would then count that sale as a shop sale;
+       * grouping on `isOnline` alone would throw away which channel it was.
+       * Trusting `isOnline` for the split and `channel` for the label is what
+       * makes the two sub-totals add up to the headline revenue, which is the
+       * only property that makes this table believable.
+       *
+       * ── `fromOrders` ───────────────────────────────────────────────────────
+       *
+       * How many of these have a real `Order` behind them. It exists because
+       * `isOnline` covers two different things — a parcel with a worklist row,
+       * and a sale a cashier ticked "online" on at the till — and a shop
+       * reconciling its worklist against its books needs to see the gap rather
+       * than have it averaged away. Once `sale.service`'s one-door guard has
+       * been in place for a while this should equal `count` for every online
+       * row; while it does not, the difference is exactly the till-typed
+       * backlog.
+       */
+      Sale.aggregate([
+        {
+          $match: {
+            ...this._baseMatch(shopId, branchId),
+            ...invoicedOnDayMatch(),
+            ...dateMatch,
+          },
+        },
+        {
+          $group: {
+            _id: {
+              isOnline: { $eq: ['$isOnline', true] },
+              // An online sale keeps its own channel; everything else is the
+              // counter, whatever the row happens to say.
+              channel: {
+                $cond: [
+                  { $eq: ['$isOnline', true] },
+                  { $ifNull: ['$channel', 'other'] },
+                  'pos',
+                ],
+              },
+            },
+            revenue: { $sum: grossSaleAmountExpr() },
+            grossProfit: { $sum: grossProfitExpr() },
+            tax: { $sum: { $ifNull: ['$tax', 0] } },
+            delivery: { $sum: { $ifNull: ['$deliveryCharge', 0] } },
+            discount: { $sum: { $ifNull: ['$discountAmount', '$discount'] } },
+            due: { $sum: { $ifNull: ['$due', 0] } },
+            count: { $sum: 1 },
+            fromOrders: {
+              $sum: { $cond: [{ $ifNull: ['$order', false] }, 1, 0] },
+            },
+          },
+        },
+        { $sort: { revenue: -1 } },
+      ]),
     ]);
 
     const sales = salesAgg[0] || {
@@ -1818,6 +1937,71 @@ class ReportService {
     // while looking tidier.
     const netRevenue = quantizeMoney(sales.totalRevenue - returns.totalReturns);
 
+    /**
+     * The channel table, shaped so it can be read beside the headline figures
+     * without the reader doing arithmetic in their head.
+     *
+     * COGS per row is derived the SAME way as the headline — merchandise
+     * revenue (gross, less tax and delivery) minus gross profit — so
+     * `Σ row.merchandiseRevenue − Σ row.cogs === grossProfit` holds for exactly
+     * the reason the top-level identity does. Deriving it any other way here
+     * would produce a table that does not add up to the statement above it,
+     * which is worse than no table.
+     *
+     * Returns are deliberately NOT split out per channel. `SalesReturn` carries
+     * no channel of its own and reaching through to the original sale would
+     * make a return move between rows depending on when it was raised — the
+     * day-stability problem this file already solved once. So the rows are
+     * gross-as-invoiced, and the label says so.
+     */
+    const byChannel = (channelAgg || []).map((row) => {
+      const revenue = quantizeMoney(row.revenue || 0);
+      const rowTax = quantizeMoney(row.tax || 0);
+      const rowDelivery = quantizeMoney(row.delivery || 0);
+      const rowMerchandise = quantizeMoney(Math.max(0, revenue - rowTax - rowDelivery));
+      const rowGrossProfit = quantizeMoney(row.grossProfit || 0);
+      return {
+        channel: row._id?.channel || 'other',
+        isOnline: row._id?.isOnline === true,
+        revenue,
+        merchandiseRevenue: rowMerchandise,
+        cogs: quantizeMoney(Math.max(0, rowMerchandise - rowGrossProfit)),
+        grossProfit: rowGrossProfit,
+        tax: rowTax,
+        deliveryCharge: rowDelivery,
+        discount: quantizeMoney(row.discount || 0),
+        due: quantizeMoney(row.due || 0),
+        count: row.count || 0,
+        // Only meaningful for online rows; always 0 for `pos`, where there is
+        // no order to have come from.
+        fromOrders: row.fromOrders || 0,
+      };
+    });
+
+    /** Roll the table up into the two numbers the question is actually about. */
+    const rollup = (rows) => rows.reduce(
+      (acc, r) => ({
+        revenue: quantizeMoney(acc.revenue + r.revenue),
+        merchandiseRevenue: quantizeMoney(acc.merchandiseRevenue + r.merchandiseRevenue),
+        cogs: quantizeMoney(acc.cogs + r.cogs),
+        grossProfit: quantizeMoney(acc.grossProfit + r.grossProfit),
+        deliveryCharge: quantizeMoney(acc.deliveryCharge + r.deliveryCharge),
+        due: quantizeMoney(acc.due + r.due),
+        count: acc.count + r.count,
+        fromOrders: acc.fromOrders + r.fromOrders,
+      }),
+      {
+        revenue: 0, merchandiseRevenue: 0, cogs: 0, grossProfit: 0,
+        deliveryCharge: 0, due: 0, count: 0, fromOrders: 0,
+      }
+    );
+
+    const channelSplit = {
+      online: rollup(byChannel.filter((r) => r.isOnline)),
+      offline: rollup(byChannel.filter((r) => !r.isOnline)),
+      byChannel,
+    };
+
     const result = {
       // Summary
       revenue: sales.totalRevenue,
@@ -1842,6 +2026,16 @@ class ReportService {
       // owner can do something about, and they call for different actions.
       shrinkage,
       netProfit,
+
+      /**
+       * Online vs offline, and the per-channel breakdown behind it.
+       *
+       * `channelSplit.online.revenue + channelSplit.offline.revenue === revenue`
+       * by construction — both come from one pass over the same matched set as
+       * the headline figures — so the table can be trusted to reconcile with
+       * the statement it sits under. Enforced by test, not by hope.
+       */
+      channelSplit,
 
       // Details
       sales: {

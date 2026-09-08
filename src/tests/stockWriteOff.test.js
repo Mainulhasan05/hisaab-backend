@@ -187,7 +187,7 @@ describe('B · the row carries the cost, signed like every other movement', () =
 // ── C/D. The P&L term ───────────────────────────────────────────────────────
 
 /**
- * Stub the nine aggregations `getProfitLoss` runs, in the order `Promise.all`
+ * Stub the ten aggregations `getProfitLoss` runs, in the order `Promise.all`
  * evaluates them. `mockResolvedValueOnce` chains rather than a single value
  * because `Sale` and `Expense` are each queried more than once and the calls
  * mean different things.
@@ -204,6 +204,10 @@ const stubProfitLoss = ({ shrinkage = [] } = {}) => {
       totalDiscount: 0, totalLineDiscount: 0, totalTax: 0, totalDelivery: 0, count: 5,
     }])
     // 6. daily chart
+    .mockResolvedValueOnce([])
+    // 10. the online/offline channel split. Empty is right for these tests:
+    //     they are about shrinkage, and a shop with no channel rows reports
+    //     zeros on both sides without touching any figure asserted below.
     .mockResolvedValueOnce([]);
 
   jest.spyOn(Expense, 'aggregate')

@@ -107,6 +107,15 @@ const orderItemSchema = new mongoose.Schema({
    * first, and the disagreement would surface as a shopkeeper's daily summary
    * not matching their order list.
    *
+   * `confirmOrder` carries it across as `buyingPriceOverrides`, the cost mirror
+   * of the price overrides beside it. For a long time it did NOT — this field
+   * was written here and read by nothing, and `createSale` used whatever the
+   * product's cost happened to be at confirm time, which is the exact
+   * retroactive restatement the paragraph below says it exists to prevent. If
+   * you are removing the override, remove this field in the same change; a
+   * snapshot nobody reads is worse than no snapshot, because it reads as a
+   * guarantee.
+   *
    * Snapshotted at placement for the same reason the selling price is: a
    * restock at a higher cost next week must not retroactively make last week's
    * orders look less profitable.
@@ -133,6 +142,28 @@ const orderItemSchema = new mongoose.Schema({
  * `cancelled` is reachable from anywhere before `delivered`. Cancelling a
  * CONFIRMED order has to unwind the sale, which is why §18.1 wants
  * `cancelSale` transactional before this feature carries real volume.
+ *
+ * ── `returned` — THE PARCEL WENT OUT AND CAME BACK (RTO) ────────────────────
+ *
+ * The books do the same thing here as for `cancelled`: the sale is unwound,
+ * stock goes back, the customer's due reverses. It is a SEPARATE status anyway,
+ * and the reason is measurement rather than accounting.
+ *
+ * In a Bangladeshi COD operation somewhere between a fifth and two fifths of
+ * dispatched parcels come back refused. That number is the single most
+ * important thing about such a business — it decides whether taking an order is
+ * profitable at all, because the shop pays the courier for the outward leg and
+ * usually the return leg too, on a parcel that earned nothing. Folding RTO into
+ * `cancelled` puts it in the same bucket as "customer changed their mind before
+ * we packed it", which costs nothing, and the resulting number cannot be used
+ * for anything.
+ *
+ * So: `cancelled` = called off before it shipped. `returned` = shipped, refused,
+ * back on the shelf. Both unwind the sale; only one of them cost money to find
+ * out about.
+ *
+ * A DELIVERED order that comes back later is still not this — that is a
+ * `SalesReturn` against the invoice, because the customer had it.
  */
 const ORDER_STATUSES = Object.freeze([
   'pending',
@@ -141,9 +172,16 @@ const ORDER_STATUSES = Object.freeze([
   'shipped',
   'delivered',
   'cancelled',
+  'returned',
 ]);
 
-/** Statuses in which no `Sale` exists yet, so nothing has touched the books. */
+/**
+ * Statuses in which no `Sale` exists yet, so nothing has touched the books.
+ *
+ * `returned` is deliberately NOT here. An order only reaches it by having been
+ * confirmed, shipped and unwound, so a Sale certainly existed — it is simply
+ * cancelled now, exactly as a cancelled-after-confirm order's is.
+ */
 const PRE_CONFIRM_STATUSES = Object.freeze(['pending', 'cancelled']);
 
 const orderSchema = new mongoose.Schema({
@@ -304,6 +342,28 @@ const orderSchema = new mongoose.Schema({
     districtBn: { type: String, trim: true },
     subdistrict: { type: String, trim: true },
     subdistrictBn: { type: String, trim: true },
+
+    /**
+     * The locality below thana level — "Mollapara", "Uposhohor", "Board Bazar".
+     *
+     * FREE TEXT, AND DELIBERATELY SO. Bangladesh has no published, joinable
+     * dataset of mahallas, para and bazar names, and the ones that exist are
+     * neither complete nor stable. A dropdown here would be a list that is
+     * always missing the customer's own neighbourhood — which is exactly the
+     * complaint that produced this field: a Rajshahi customer could name their
+     * district and their thana and still had nowhere to put the word their
+     * address is actually known by.
+     *
+     * ── IT MUST NEVER REACH `resolveDelivery` ──────────────────────────────
+     *
+     * The moment an unvalidated string can influence the zone, the customer is
+     * choosing their own delivery charge again — the precise hole
+     * `bdGeo.util.js` was written to close. The zone comes from `district` and
+     * `subdistrict`, both checked against the real geography, and this field is
+     * carried alongside for the human who has to find the gate. Descriptive,
+     * never decisive.
+     */
+    area: { type: String, trim: true, maxlength: 80 },
   },
 
   // ── Money ────────────────────────────────────────────────────────────────
@@ -348,6 +408,17 @@ const orderSchema = new mongoose.Schema({
   cancelledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   cancelReason: { type: String, trim: true, maxlength: 500 },
   deliveredAt: { type: Date, default: null },
+  /**
+   * RTO. Kept as its own trio rather than reusing `cancelled*`, so a shop can
+   * ask "how many parcels came back, and why" without that question also
+   * sweeping in every order called off before it shipped. The reason is free
+   * text on purpose — "ফোন বন্ধ", "ঠিকানা ভুল", "নিল না" are what shops
+   * actually write, and an enum guessed in advance would be wrong within a
+   * month. Null on every order that never shipped.
+   */
+  returnedAt: { type: Date, default: null },
+  returnedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  returnReason: { type: String, trim: true, maxlength: 500 },
 
   /**
    * Every transition, in order. The shopkeeper's answer to "what happened to

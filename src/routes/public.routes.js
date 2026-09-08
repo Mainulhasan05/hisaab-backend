@@ -228,6 +228,20 @@ const checkoutBody = Joi.object({
    */
   district: Joi.string().trim().max(80).allow(null, ''),
   subdistrict: Joi.string().trim().max(80).allow(null, ''),
+  /**
+   * The locality below thana level — "Mollapara", "Uposhohor", "Board Bazar".
+   *
+   * FREE TEXT, and note where it lands: `Order.delivery.area`, attached AFTER
+   * the zone has been resolved and never passed to the resolver. It cannot
+   * change a price, which is the only reason an unvalidated place name is
+   * allowed on this body at all.
+   *
+   * It exists because no administrative dataset holds mahallas and none ever
+   * will, so a customer whose address is known by a name below thana level had
+   * nowhere to put it — and every gap in the dropdown was an order the shop
+   * could not take.
+   */
+  area: Joi.string().trim().max(80).allow(null, ''),
   pickup: Joi.boolean().default(false),
 }).unknown(false);
 
@@ -276,6 +290,11 @@ const quoteBody = Joi.object({
   ).min(1).max(50).required(),
   district: Joi.string().trim().max(80).allow(null, ''),
   subdistrict: Joi.string().trim().max(80).allow(null, ''),
+  // Accepted and ignored for pricing — see `checkoutBody`. Present so the
+  // quote and the order take the SAME body: a checkout that had to strip one
+  // field before quoting and add it back before ordering is a checkout with two
+  // slightly different ideas of what it is submitting.
+  area: Joi.string().trim().max(80).allow(null, ''),
   pickup: Joi.boolean().default(false),
 }).unknown(false);
 

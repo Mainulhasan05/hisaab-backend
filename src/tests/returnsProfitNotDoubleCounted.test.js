@@ -97,7 +97,11 @@ function stubPeriod({ returnAmount = RETURN_AMOUNT, returnProfitLoss = RETURN_PR
         count: 1,
       },
     ])
-    .mockResolvedValueOnce([]); // dailySales — the chart, not under test
+    .mockResolvedValueOnce([]) // dailySales — the chart, not under test
+    // The online/offline channel split. Empty is right here: this file is about
+    // returns not being double-counted, and a shop with no channel rows reports
+    // zeros on both sides without moving any figure asserted below.
+    .mockResolvedValueOnce([]);
 
   jest
     .spyOn(Expense, 'aggregate')
@@ -203,7 +207,12 @@ describe('a closed period does not restate itself', () => {
     jest.spyOn(cacheService, 'get').mockResolvedValue(null);
     jest.spyOn(cacheService, 'set').mockResolvedValue(undefined);
     jest.spyOn(cacheService, 'getShopCacheVersion').mockResolvedValue(1);
-    jest.spyOn(Sale, 'aggregate').mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    // Three calls: summary, daily chart, channel split. All empty — this case is
+    // a period with no sales of its own, only a return reaching into it.
+    jest.spyOn(Sale, 'aggregate')
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
     jest.spyOn(Expense, 'aggregate')
       .mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
     jest.spyOn(SalesReturn, 'aggregate').mockResolvedValue([

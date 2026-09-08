@@ -16,18 +16,119 @@ const asyncHandler = require('../utils/asyncHandler.util');
  * fulfilment metadata.
  */
 
+/**
+ * Everything on the query string that describes WHICH orders, as one object.
+ *
+ * Read once, here, and handed unchanged to all three service calls below. When
+ * the list read `req.query` and the counts read nothing, the tab badges and the
+ * rows under them were answers to two different questions — see
+ * `order.service._worklistFilter`.
+ */
+const criteriaOf = (query) => ({
+  status: query.status,
+  q: query.q,
+  from: query.from,
+  to: query.to,
+  source: query.source,
+  zone: query.zone,
+  late: query.late,
+  sort: query.sort,
+});
+
 exports.list = asyncHandler(async (req, res) => {
-  const { status, q, page, limit } = req.query;
-  const { orders, pagination } = await orderService.listOrders(req, { status, q, page, limit });
-  const counts = await orderService.countsByStatus(req);
+  const criteria = criteriaOf(req.query);
+  const { page, limit } = req.query;
+
+  /**
+   * Three reads, one filter, in parallel.
+   *
+   * `totals` is a separate aggregation rather than a sum of the page, because
+   * the page is twenty rows and the number the shopkeeper wants is over the
+   * whole filtered set — "আজ কত টাকার অর্ডার এসেছে" is not answerable from
+   * whichever twenty happen to be on screen.
+   */
+  const [{ orders, pagination }, counts, totals] = await Promise.all([
+    orderService.listOrders(req, { ...criteria, page, limit }),
+    orderService.countsByStatus(req, criteria),
+    orderService.worklistTotals(req, criteria),
+  ]);
 
   return ApiResponse.success(res, {
-    data: { orders, counts },
+    data: { orders, counts, totals },
     pagination,
     message: 'Orders retrieved',
     messageBn: 'অর্ডার তালিকা লোড হয়েছে',
   });
 });
+
+/**
+ * The current view as a CSV file.
+ *
+ * ── THE BOM IS LOAD-BEARING ────────────────────────────────────────────────
+ *
+ * Excel on Windows opens a UTF-8 CSV as the system ANSI codepage unless the
+ * file starts with a byte-order mark, so every Bengali name, every Bangla zone
+ * label and the ৳ sign arrive as mojibake. The shopkeeper's conclusion is that
+ * the export is broken, and they are right. Three bytes fix it.
+ *
+ * ── AND THE LEADING APOSTROPHE ON PHONE NUMBERS ────────────────────────────
+ *
+ * `01712345678` is read by Excel as the number 1712345678 — the leading zero
+ * is dropped and the customer becomes uncallable. Prefixing a tab character
+ * forces the cell to text. This is the sort of detail that decides whether an
+ * export is used twice.
+ */
+exports.exportCsv = asyncHandler(async (req, res) => {
+  const criteria = criteriaOf(req.query);
+  const { orders, truncated, limit } = await orderService.exportRows(req, criteria);
+
+  const header = [
+    'অর্ডার নং', 'তারিখ', 'অবস্থা', 'উৎস', 'কাস্টমার', 'মোবাইল',
+    'জেলা', 'থানা/উপজেলা', 'এলাকা', 'ঠিকানা', 'ডেলিভারি এলাকা',
+    'পণ্য সংখ্যা', 'পণ্যের দাম', 'ডেলিভারি চার্জ', 'মোট', 'ইনভয়েস',
+  ];
+
+  const STATUS_BN = {
+    pending: 'নতুন', confirmed: 'নিশ্চিত', packed: 'প্যাক',
+    shipped: 'পাঠানো', delivered: 'ডেলিভারি', cancelled: 'বাতিল',
+  };
+
+  const rows = orders.map((o) => [
+    o.orderNo,
+    new Date(o.createdAt).toISOString(),
+    STATUS_BN[o.status] || o.status,
+    o.source === 'manual' ? (o.sourceNote || 'ম্যানুয়াল') : 'ওয়েবসাইট',
+    o.customer?.name || '',
+    `\t${o.customer?.phone || ''}`,
+    o.delivery?.district || '',
+    o.delivery?.subdistrict || '',
+    o.delivery?.area || '',
+    o.customer?.address || '',
+    o.delivery?.isPickup ? 'পিকআপ' : (o.delivery?.zoneName || ''),
+    o.items?.length || 0,
+    o.subtotal,
+    o.deliveryCharge,
+    o.total,
+    o.sale ? String(o.sale) : '',
+  ]);
+
+  const csv = [header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n');
+
+  const stamp = new Date().toISOString().slice(0, 10);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="orders-${stamp}.csv"`);
+  // Says so in a header rather than as a row in the file: a warning row would
+  // be parsed as data by whatever the shopkeeper opens it in.
+  if (truncated) res.setHeader('X-Export-Truncated', String(limit));
+
+  return res.send(`﻿${csv}`);
+});
+
+/** One CSV cell: quoted, with embedded quotes doubled, per RFC 4180. */
+function csvCell(value) {
+  const text = value === null || value === undefined ? '' : String(value);
+  return `"${text.replace(/"/g, '""')}"`;
+}
 
 exports.summary = asyncHandler(async (req, res) => {
   const summary = await orderService.summary(req);
@@ -80,6 +181,22 @@ exports.cancel = asyncHandler(async (req, res) => {
     data: order,
     message: 'Order cancelled',
     messageBn: 'অর্ডারটি বাতিল করা হয়েছে',
+  });
+});
+
+/**
+ * The parcel came back (RTO).
+ *
+ * One call that releases the courier's money, voids the invoice and marks the
+ * order `returned` — see `orderService.returnOrder` for why it has to be one
+ * call and not three screens.
+ */
+exports.markReturned = asyncHandler(async (req, res) => {
+  const order = await orderService.returnOrder(req, req.params.id, req.user._id, req.body.reason);
+  return ApiResponse.success(res, {
+    data: order,
+    message: 'Parcel returned',
+    messageBn: 'পার্সেল ফেরত রেকর্ড হয়েছে — স্টক ফিরেছে, ইনভয়েস বাতিল হয়েছে',
   });
 });
 
@@ -139,7 +256,7 @@ exports.notify = asyncHandler(async (req, res) => {
 exports.create = asyncHandler(async (req, res) => {
   const storefront = await storefrontService.getStorefront(req.shop._id);
 
-  const { customer = {}, items, district, subdistrict, pickup, sourceNote } = req.body;
+  const { customer = {}, items, district, subdistrict, area, pickup, sourceNote } = req.body;
 
   const order = await orderService.placeOrder({
     shop: req.shop,
@@ -147,7 +264,7 @@ exports.create = asyncHandler(async (req, res) => {
     branch: requireBranch(req),
     customer,
     items,
-    address: { district, subdistrict },
+    address: { district, subdistrict, area },
     pickup: pickup === true,
     requireSubdistrict: false,
     source: 'manual',
@@ -161,5 +278,52 @@ exports.create = asyncHandler(async (req, res) => {
     message: 'Order created',
     messageBn: 'অর্ডার তৈরি হয়েছে',
     statusCode: 201,
+  });
+});
+
+/**
+ * Price a manual order before creating it.
+ *
+ * ── WHY THE FORM NEEDED THIS ────────────────────────────────────────────────
+ *
+ * `/online/orders/new` used to show a subtotal it computed in the browser from
+ * the product-search results, labelled "আনুমানিক", with the delivery charge
+ * simply absent until after the order was created. A shop assistant on the
+ * phone to a customer asking "সব মিলিয়ে কত?" had nothing to read out — the one
+ * number the conversation is about was the one number the screen did not have.
+ *
+ * The alternative was to resolve the zone client-side from the shop's zone
+ * table, which is a second implementation of `resolveDelivery` and therefore a
+ * second opinion about what a customer is charged. The public checkout already
+ * refused that trade and got `POST /quote` instead; this is the same answer for
+ * the same reason, on the authenticated door.
+ *
+ * WRITES NOTHING. Safe to call on every change to the form.
+ *
+ * `create` rather than `view` permission: it prices a basket that only someone
+ * allowed to place an order has any business assembling, and it is the same
+ * resolver `create` will run.
+ */
+exports.quote = asyncHandler(async (req, res) => {
+  const storefront = await storefrontService.getStorefront(req.shop._id);
+  const { items, district, subdistrict, area, pickup } = req.body;
+
+  const quote = await orderService.quoteOrder({
+    shopId: req.shop._id,
+    storefront,
+    items,
+    address: { district, subdistrict, area },
+    pickup: pickup === true,
+    // Both match `create` exactly. A quote produced under different rules from
+    // the order it precedes is worse than no quote: it is a number the shop
+    // reads out to a customer and then cannot honour.
+    onlineOnly: false,
+    requireSubdistrict: false,
+  });
+
+  return ApiResponse.success(res, {
+    data: quote,
+    message: 'Quote calculated',
+    messageBn: 'হিসাব করা হয়েছে',
   });
 });

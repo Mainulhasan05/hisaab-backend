@@ -1013,6 +1013,85 @@ const buildInvoiceSms = ({
   });
 };
 
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * ONLINE ORDER STATUS — the shop telling a customer their parcel moved
+ *
+ * ── WHY THESE ARE ENGLISH WHEN THE REST OF THE APP IS BANGLA ────────────────
+ *
+ * Every other customer-facing body here is Bangla because it is read by a
+ * Bangladeshi customer. These are English for a reason that is about money
+ * rather than language: a single Bangla character flips the whole message to
+ * UCS-2, which cuts the budget from 160 characters per segment to 70 (67 in a
+ * multipart). An online shop sends up to five of these per order — one per
+ * status change — where a till sends one receipt per sale. English keeps each
+ * one inside a SINGLE GSM-7 segment; Bangla would make most of them two, and
+ * the shop pays that difference on every parcel it ships.
+ *
+ * The shop's own name is the part we cannot control (`gsmSafeShopName` passes
+ * it through), so a Bangla-named shop still lands in UCS-2. That is exactly why
+ * these bodies are kept short: even at 67 characters a segment, every one of
+ * them below fits in two.
+ *
+ * ── NOTHING HERE ANNOUNCES SOMETHING THAT HAS NOT HAPPENED ──────────────────
+ *
+ * There is no `pending` body. An order that has only been placed has not been
+ * looked at by anybody, nothing is reserved for it (§6.3), and the confirmation
+ * page already told the customer it arrived. Texting them at that point spends
+ * the shop's money to repeat what they are looking at.
+ *
+ * ── PICKUP IS A DIFFERENT SENTENCE, NOT A DIFFERENT FEATURE ─────────────────
+ *
+ * "On the way" is wrong for an order the customer is collecting, and "keep the
+ * money ready" is wrong at their front door. Two states change wording; the
+ * rest read identically either way.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Which transitions can be announced. `pending` is absent on purpose. */
+const ORDER_SMS_KINDS = Object.freeze([
+  'confirmed',
+  'packed',
+  'shipped',
+  'delivered',
+  'cancelled',
+]);
+
+/**
+ * One status message. Returns null for a kind with no body, so a caller cannot
+ * accidentally send an empty SMS for a state this does not cover.
+ *
+ * The shop signature is NOT appended here — `sms.service.sendSingle` does that
+ * immediately before counting segments, and doing it twice would either
+ * double the sign-off or make the preview's segment count disagree with the
+ * bill. Preview callers run `appendShopSignature` themselves for the same
+ * reason.
+ */
+const buildOrderStatusSms = ({ kind, orderNo, total = 0, isPickup = false }) => {
+  const no = String(orderNo || '').trim();
+  if (!no || !ORDER_SMS_KINDS.includes(kind)) return null;
+
+  const amount = `Tk${formatSmsAmount(total)}`;
+
+  switch (kind) {
+    case 'confirmed':
+      return isPickup
+        ? `Order ${no} confirmed. Total ${amount}, pay when you collect it.`
+        : `Order ${no} confirmed. Total ${amount}, cash on delivery.`;
+    case 'packed':
+      return `Order ${no} is packed and will be sent soon.`;
+    case 'shipped':
+      return isPickup
+        ? `Order ${no} is ready. Please collect it from our shop.`
+        : `Order ${no} is on the way. Please keep ${amount} ready.`;
+    case 'delivered':
+      return `Order ${no} is complete. Thank you for shopping with us.`;
+    case 'cancelled':
+      return `Order ${no} has been cancelled. Please call us for details.`;
+    default:
+      return null;
+  }
+};
+
 module.exports = {
   formatSmsAmount,
   gsmSafeShopName,
@@ -1043,4 +1122,7 @@ module.exports = {
   renderInvoiceTemplate,
   validateInvoiceTemplate,
   buildInvoiceSms,
+  // Online order status announcements. English on purpose — see the section.
+  ORDER_SMS_KINDS,
+  buildOrderStatusSms,
 };
