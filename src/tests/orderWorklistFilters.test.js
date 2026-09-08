@@ -254,17 +254,31 @@ describe('sorting', () => {
   };
 
   /**
-   * §7.2's rule, and it is a product decision rather than a default: on the
-   * নতুন tab the order that has waited longest is the one to deal with next.
-   * Everywhere else the question is "what just happened".
+   * A product decision, and one that has been made both ways.
+   *
+   * §7.2 originally put the নতুন tab in oldest-first: the order that has waited
+   * longest is the one to deal with next. It was reversed because it buried the
+   * order the shopkeeper had just been pinged about — they open this screen
+   * because something arrived, and it was at the bottom behind everything they
+   * had already chosen not to handle.
+   *
+   * Staleness is not lost, it moved to where it works better: `STUCK_AFTER_HOURS`
+   * labels a rotting order, counts it on the overview and links straight to it.
+   * A label beats a position.
+   *
+   * This test is written to fail loudly if pending goes back to `createdAt: 1`
+   * without that argument being had again.
    */
-  it('defaults pending to oldest-first and everything else to newest-first', async () => {
-    expect(await sortFor({ status: 'pending' })).toEqual({ createdAt: 1 });
+  it('defaults every tab to newest-first, pending included', async () => {
+    expect(await sortFor({ status: 'pending' })).toEqual({ createdAt: -1 });
     expect(await sortFor({ status: 'delivered' })).toEqual({ createdAt: -1 });
     expect(await sortFor({})).toEqual({ createdAt: -1 });
   });
 
-  it('lets an explicit choice override the tab default', async () => {
+  it('lets an explicit choice override the default', async () => {
+    // `oldest` is what a shopkeeper who WANTS the old queue discipline picks,
+    // so the capability is still one tap away rather than gone.
+    expect(await sortFor({ status: 'pending', sort: 'oldest' })).toEqual({ createdAt: 1 });
     expect(await sortFor({ status: 'pending', sort: 'newest' })).toEqual({ createdAt: -1 });
     expect(await sortFor({ status: 'pending', sort: 'amount' }))
       .toEqual({ total: -1, createdAt: -1 });

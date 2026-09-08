@@ -832,11 +832,26 @@ class OrderService {
   /**
    * The worklist. `{shop, status, createdAt:-1}` is the index this rides.
    *
-   * Oldest-first for pending — the plan's own §7.2 rule: the order that has
-   * waited longest is the one to deal with next. Everything else newest-first,
-   * because "what just happened" is the question the other tabs answer. An
-   * explicit `sort` overrides both, because a shopkeeper reconciling a day's
-   * takings wants the big ones first and does not care when they arrived.
+   * NEWEST-FIRST everywhere, including the pending tab.
+   *
+   * ── WHY THIS CHANGED ────────────────────────────────────────────────────────
+   *
+   * Pending used to be oldest-first, on §7.2's rule that the order which has
+   * waited longest is the one to deal with next. That is sound queue theory and
+   * it was the wrong screen for it: a shopkeeper who has just been pinged about
+   * a new order opens this list to find THAT order, and it was at the bottom,
+   * behind every older one they had already decided not to deal with yet. The
+   * most recent event is the reason the screen was opened.
+   *
+   * The anti-rot property oldest-first was protecting is not lost, because it
+   * is not this sort's job any more — `STUCK_AFTER_HOURS` and the `late` filter
+   * do it directly and better. An order that has sat too long is named as stuck,
+   * counted on the overview and reachable in one tap from there, rather than
+   * being merely near the top of a list and hoping to be noticed. Position was
+   * always a weak signal for "this is rotting"; a label is a strong one.
+   *
+   * An explicit `sort` still overrides, because a shopkeeper reconciling a
+   * day's takings wants the big ones first and does not care when they arrived.
    */
   async listOrders(req, { page = 1, limit = 20, sort: sortBy, ...criteria } = {}) {
     const filter = this._worklistFilter(req, criteria);
@@ -864,13 +879,24 @@ class OrderService {
     };
   }
 
-  /** The sort clause, given an explicit choice and the active status tab. */
+  /**
+   * The sort clause, given an explicit choice.
+   *
+   * `status` is still taken so the signature does not have to change at three
+   * call sites, and because "the default depends on the tab" is a decision that
+   * has already been made once and reversed once — the next person to want it
+   * has the parameter waiting rather than having to thread it through again.
+   * See `listOrders` for why the answer is currently the same for every tab.
+   */
+  // eslint-disable-next-line no-unused-vars
   _sortFor(sortBy, status) {
     if (sortBy === 'oldest') return { createdAt: 1 };
     if (sortBy === 'newest') return { createdAt: -1 };
     if (sortBy === 'amount') return { total: -1, createdAt: -1 };
-    // The default still depends on the tab — see `listOrders`.
-    return status === 'pending' ? { createdAt: 1 } : { createdAt: -1 };
+    // Newest-first on every tab, pending included. The oldest-first default the
+    // pending tab used to carry buried the order the shopkeeper opened the
+    // screen to find; staleness is surfaced by `late`/`stuck`, not by position.
+    return { createdAt: -1 };
   }
 
   /**
