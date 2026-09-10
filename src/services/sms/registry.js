@@ -86,6 +86,15 @@ function listConfiguredProviders() {
 }
 
 /**
+ * The gateway that sends when nothing says otherwise.
+ *
+ * Automas since 2026-09-10. Named here as well as in env so that an environment
+ * which forgot the variable still gets the intended gateway rather than the one
+ * that merely happens to sort first.
+ */
+const PLATFORM_DEFAULT = 'automas';
+
+/**
  * The platform default, from env.
  *
  * This is the floor beneath the admin-panel setting: it answers before the
@@ -95,7 +104,7 @@ function listConfiguredProviders() {
 function getDefaultProviderName() {
   const configured = normalizeName(process.env.SMS_DEFAULT_PROVIDER);
   if (configured && FACTORIES[configured]) return configured;
-  return 'mimsms';
+  return PLATFORM_DEFAULT;
 }
 
 /**

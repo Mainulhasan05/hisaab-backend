@@ -307,6 +307,9 @@ describe('the customer is told what the shop is holding', () => {
     const body = buildSaleReceipt({
       invoiceNo: 'INV-1', total: 300, paid: 300, due: 0,
       advanceHeld: 700, totalDue: 0, shopName: 'হিসাব',
+      // Named, because the platform default is English since 2026-09-10 and
+      // this test is about the Bangla wording of the line.
+      language: 'bn',
     });
     // Without this line the receipt reads `বিল ৳300` and nothing else, and the
     // only reasonable conclusion is that the ৳700 was pocketed.

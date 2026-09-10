@@ -1230,7 +1230,56 @@ class OrderService {
       throw new AppError('Order not found', 'অর্ডারটি পাওয়া যায়নি', 404);
     }
 
-    return this.toMerchantOrder(order);
+    return {
+      ...this.toMerchantOrder(order),
+      tracking: await this._trackingPath(req, order),
+    };
+  }
+
+  /**
+   * The customer's own tracking page, for the shopkeeper.
+   *
+   * ── WHY THE SERVER BUILDS IT ────────────────────────────────────────────────
+   *
+   * The panel does not know the shop's slug — nothing in the auth payload
+   * carries it — so a browser-side URL would need a second request to the
+   * storefront endpoint from a screen that has no other reason to make one.
+   * Here it is two fields we already hold.
+   *
+   * ── AND WHY IT CAN BE NULL ──────────────────────────────────────────────────
+   *
+   * Only when the storefront is actually reachable. A shop whose site is a
+   * draft, or one an admin has paused, has a `/s/<slug>/…` address that answers
+   * 404 — and a button that opens a "this shop does not exist" page is worse
+   * than no button, because the shopkeeper reads it as their own order being
+   * gone. `null` means the screen renders nothing, which is honest.
+   *
+   * Manual orders get one too. The page is addressed by order number and phone
+   * and neither cares how the order was taken, so a shop that took an order
+   * over the phone can still send that customer a link to follow it.
+   *
+   * The PATH only. The public origin is the frontend's business
+   * (`NEXT_PUBLIC_SITE_URL`), and a second copy of it here is a second thing to
+   * get wrong on the day it changes.
+   */
+  async _trackingPath(req, order) {
+    const slug = req.shop?.slug;
+    const phone = order?.customer?.phone;
+    if (!slug || !phone || !order?.orderNo) return null;
+
+    const sf = await Storefront.findOne({ shop: req.shop._id })
+      .select('status pausedByAdmin')
+      .lean();
+    // The same two conditions the storefront resolver applies. `pausedByAdmin`
+    // is the kill switch a shop cannot clear itself, so it is checked here for
+    // the same reason it is checked there.
+    if (!sf || sf.status !== 'live' || sf.pausedByAdmin) return null;
+
+    return {
+      path:
+        `/s/${encodeURIComponent(slug)}/order/${encodeURIComponent(order.orderNo)}` +
+        `?phone=${encodeURIComponent(phone)}`,
+    };
   }
 
   /**

@@ -164,6 +164,74 @@ const shopSchema = new mongoose.Schema({
       default: 1,
       min: 1
     },
+    /**
+     * The day of the month this shop is billed on. 1–31, or null.
+     *
+     * ── An ANCHOR, never an AUTHORITY ────────────────────────────────────────
+     *
+     * `subscription.expiresAt` remains the only input to the access decision.
+     * This field changes WHERE a month-mode extension lands and nothing else.
+     * It appears in no middleware, in no branch of `resolveSubscription` that
+     * picks a state, and in no query that decides whether a request is allowed.
+     * A shop with a nonsense billing day has a slightly wrong renewal date; it
+     * is never a shop that cannot log in. SHOP_BILLING_DATE_PLAN.md §9.1.
+     *
+     * ── Why it exists ────────────────────────────────────────────────────────
+     *
+     * Without it the billing date drifts two ways, and each individual step is
+     * correct, which is why nothing noticed:
+     *
+     *   clamping     31 Jan +1mo = 28 Feb (right), but 28 Feb then becomes the
+     *                anchor, so March lands on the 28th and the 31st is gone
+     *                for good — about three days lost per year.
+     *   late payment expiry past means the anchor is today, so a shop billed on
+     *                the 5th that pays on the 20th is billed on the 20th from
+     *                then on, and the operator's call list stops being a
+     *                calendar.
+     *
+     * Reading this fresh on every renewal fixes both: the day is re-clamped per
+     * month rather than rewritten, so 31 → 28 Feb → 31 Mar.
+     *
+     * `null` means no anchor and month-mode behaves exactly as it did before
+     * this field existed. Every shop starts there, which is what makes shipping
+     * this a no-op until an anchor is set. `31` is legal and means "the last day
+     * this month has".
+     *
+     * Set three ways: stamped automatically on a shop's first paid month-mode
+     * extension, typed by an admin, or backfilled by script. A trial never
+     * stamps one — a trial ends on a day count, and treating that as a billing
+     * anniversary would anchor the shop to a date that meant nothing to it.
+     */
+    billingDay: {
+      type: Number,
+      min: 1,
+      max: 31,
+      default: null
+    },
+    /**
+     * Whether month-mode extensions snap to `billingDay`.
+     *
+     * 'billing_day' (default) aligns; 'from_anchor' reproduces the pre-existing
+     * behaviour of a plain calendar month from the anchor. The escape hatch is
+     * per shop AND overridable per extension, because aligning a shop that is
+     * not yet on its billing day can hand it a short first period — see the
+     * transition note on `billing.service.alignToBillingDay`. That is a decision
+     * for the operator to make in front of a preview, not one to bury here.
+     *
+     * Inert while `billingDay` is null.
+     */
+    cycleAlignment: {
+      type: String,
+      enum: ['billing_day', 'from_anchor'],
+      default: 'billing_day'
+    },
+    // When the billing day was last established, for the timeline. Stamped by
+    // the automatic path as well as by an admin edit, so "why is this shop on
+    // the 12th?" stays answerable.
+    billingDaySetAt: {
+      type: Date,
+      default: null
+    },
     // Negotiated ৳ per SMS. Prefills allocation; the price actually charged is
     // frozen onto each allocation, so history stays truthful when this changes.
     smsUnitPrice: {
@@ -388,19 +456,27 @@ const shopSchema = new mongoose.Schema({
       /**
        * The language of the receipt the CUSTOMER receives.
        *
-       * Bangla by default — it is what a customer in Bangladesh reads, and for
-       * the half of the platform whose shop name is already Bangla it is free:
-       * the message was UCS-2 either way.
+       * ENGLISH by default since 2026-09-10. It was Bangla, on the reasoning
+       * that Bangla is what a customer in Bangladesh reads and that it is free
+       * for the half of the platform whose shop name is already Bangla — the
+       * message was UCS-2 either way.
        *
-       * `en` exists for the other half. A receipt from a shop named in ASCII is
-       * one GSM-7 segment today and becomes two the moment a Bangla character
-       * enters it, so this is a real per-message cost and the shop's to choose,
-       * not ours to impose. See smsTemplates.util.js.
+       * What that reasoning left out is the other half, and they are the ones
+       * who pay for it. A receipt from a shop named in ASCII is ONE GSM-7
+       * segment at 160 characters; a single Bangla character flips the whole
+       * message to UCS-2 and cuts the budget to 70. So the old default silently
+       * doubled the per-receipt cost for every ASCII-named shop, on every sale,
+       * and none of them had ever been asked.
+       *
+       * A shop that wants Bangla sets `bn` here and is never overridden again —
+       * see the migration note in `scripts/sms-receipt-language-en.js` for why a
+       * STORED value has to be treated as a choice from now on, even though the
+       * ten shops that had one on the day of the change had never made one.
        */
       language: {
         type: String,
         enum: ['bn', 'en'],
-        default: 'bn'
+        default: 'en'
       },
       /**
        * This shop's own wording for the sale receipt.

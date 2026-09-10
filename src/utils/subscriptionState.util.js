@@ -34,6 +34,21 @@ const { toBengaliNumber } = require('./bengali.util');
 const WARNING_DAYS = 3;
 
 /**
+ * A billing day, or null for anything that is not one.
+ *
+ * A local copy of `billing.service.normalizeBillingDay` rather than an import:
+ * this module is pure, I/O-free and runs on every authenticated request, and
+ * importing the billing service — which pulls in five models and a logger —
+ * to read one integer would trade that for nothing. The duplication is four
+ * lines and the two cannot drift in a way that matters, because a disagreement
+ * only ever changes whether a label renders.
+ */
+function normalizeDay(raw) {
+  const day = Math.round(Number(raw));
+  return Number.isFinite(day) && day >= 1 && day <= 31 ? day : null;
+}
+
+/**
  * States, worst first. `blocked` and `expired` deny writes; everything else
  * allows them.
  *
@@ -89,7 +104,7 @@ function isBlocked(shop) {
  *   daysRemaining: number|null, graceDays: number, graceEndsAt: Date|null,
  *   canRead: boolean, canWrite: boolean, isBlocked: boolean,
  *   severity: 'none'|'info'|'warning'|'critical', reason: string|null,
- *   supportPhone: string,
+ *   supportPhone: string, billingDay: number|null,
  * }}
  */
 function resolveSubscription(shop, now = new Date(), opts = {}) {
@@ -107,6 +122,22 @@ function resolveSubscription(shop, now = new Date(), opts = {}) {
     isBlocked: false,
     reason: null,
     supportPhone: SUPPORT_PHONE,
+    /**
+     * The day of the month this shop is billed on, or null.
+     *
+     * CARRIED, NOT CONSULTED. Every branch below reaches its state from
+     * `expiresAt` and `access` exactly as it did before this field existed, and
+     * a grep for `billingDay` in this file finds it only here. It rides along
+     * so the owner's billing card can say "প্রতি মাসের ৫ তারিখ" off the payload
+     * it already receives, rather than costing a second request.
+     *
+     * Deliberately NOT accompanied by a `nextBillingOn` date. For an aligned
+     * shop that date is `expiresOn` and would be a second name for one value;
+     * for a shop not yet aligned it would be a date derived here and nowhere
+     * else, free to disagree with what the renewal actually does. The day is
+     * the durable fact; the date is already on the payload.
+     */
+    billingDay: normalizeDay(shop?.billing?.billingDay),
   };
 
   // No shop on the request at all (platform admin, unauthenticated route).

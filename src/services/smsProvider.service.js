@@ -37,6 +37,11 @@ class SmsProviderService {
         isFailover: info.name === config.failoverProvider,
         balance: balance?.success ? balance.balance : null,
         balanceError: balance?.success === false ? balance.error : null,
+        /* A gateway with no balance API at all is not a gateway in trouble.
+         * Automas has none, so without this the screen would show a red error
+         * beside a perfectly healthy primary gateway on every single load —
+         * and a permanent red is a red nobody reads. */
+        balanceSupported: balance?.supported !== false,
         // `null` means the rate has never been entered, and the screen must say
         // so rather than print ৳0.00 next to real spending.
         unitCost: rates.providerCost?.[info.name] ?? rates.fallbackCost ?? null,

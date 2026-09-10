@@ -33,11 +33,12 @@
  *    only a sanity check applied afterwards. This is the single easiest way to
  *    give away a year of subscription for nothing.
  *
- * 3. `trx_status` casing is inconsistent in PayStation's own documentation
- *    ("Success" in the v1 example, "success" in v2), so it is always lowercased
- *    before comparison, and anything unrecognised resolves to `processing` —
- *    never to `success`. An unknown verdict must mean "ask again later", never
- *    "hand over the goods".
+ * 3. `trx_status` IS NOT THE WORD THE DOCS SAY. The v1 example says "Success",
+ *    v2 says "success", and the live merchant account says "successful" — and
+ *    "cancelled", which is documented nowhere. So the word is normalised and
+ *    looked up in `TRX_STATUS_WORDS` rather than compared, and anything
+ *    unrecognised resolves to `processing` — never to `success`. An unknown
+ *    verdict must mean "ask again later", never "hand over the goods".
  *
  * ── Why v1 /transaction-status and not v2 ───────────────────────────────────
  *
@@ -77,6 +78,66 @@ const TRX_STATUS = Object.freeze({
   PROCESSING: 'processing',
   FAILED: 'failed',
   REFUND: 'refund',
+});
+
+/**
+ * The words PayStation actually puts in `trx_status`, mapped onto the four
+ * states above.
+ *
+ * ── Why this is a table and not four `===` comparisons ──────────────────────
+ *
+ * Three sources, three different spellings of the same outcome:
+ *
+ *   PayStation's own v1 docs   "Success"
+ *   PayStation's own v2 docs   "success"
+ *   OUR LIVE MERCHANT ACCOUNT  "successful"
+ *
+ * The live account is the one that matters, and it also returns "cancelled",
+ * which appears in no documentation at all. An exact match against `'success'`
+ * therefore read a completed ৳800 bKash payment as `processing` and left the
+ * shop unfulfilled while the sweep asked the same question 52 times — the bug
+ * this table exists to end. Do not narrow it back to the documented words.
+ *
+ * Matching is exact against the normalised key (lowercased, whitespace and
+ * hyphens folded to `_`), never a substring: `unsuccessful` contains `success`,
+ * and a substring match would hand over a subscription for a failed payment.
+ */
+const TRX_STATUS_WORDS = Object.freeze({
+  success: TRX_STATUS.SUCCESS,
+  successful: TRX_STATUS.SUCCESS,
+  succeeded: TRX_STATUS.SUCCESS,
+  completed: TRX_STATUS.SUCCESS,
+  complete: TRX_STATUS.SUCCESS,
+  paid: TRX_STATUS.SUCCESS,
+
+  failed: TRX_STATUS.FAILED,
+  fail: TRX_STATUS.FAILED,
+  failure: TRX_STATUS.FAILED,
+  unsuccessful: TRX_STATUS.FAILED,
+  declined: TRX_STATUS.FAILED,
+  rejected: TRX_STATUS.FAILED,
+  invalid: TRX_STATUS.FAILED,
+  error: TRX_STATUS.FAILED,
+  // Terminal, and confirmed live. Left unmapped it counted as `processing`, so
+  // the sweep re-asked about a customer who had pressed Cancel 291 times over
+  // the following day before the 24-hour abandon rule finally caught it.
+  cancel: TRX_STATUS.FAILED,
+  cancelled: TRX_STATUS.FAILED,
+  canceled: TRX_STATUS.FAILED,
+  expired: TRX_STATUS.FAILED,
+  timeout: TRX_STATUS.FAILED,
+
+  refund: TRX_STATUS.REFUND,
+  refunded: TRX_STATUS.REFUND,
+  reversed: TRX_STATUS.REFUND,
+  chargeback: TRX_STATUS.REFUND,
+
+  processing: TRX_STATUS.PROCESSING,
+  pending: TRX_STATUS.PROCESSING,
+  initiated: TRX_STATUS.PROCESSING,
+  incomplete: TRX_STATUS.PROCESSING,
+  unpaid: TRX_STATUS.PROCESSING,
+  in_progress: TRX_STATUS.PROCESSING,
 });
 
 /**
@@ -391,13 +452,17 @@ class PayStationAdapter {
    * understand.
    */
   readTrxStatus(raw) {
-    const value = String(raw ?? '').trim().toLowerCase();
-    if (value === TRX_STATUS.SUCCESS) return TRX_STATUS.SUCCESS;
-    if (value === TRX_STATUS.FAILED) return TRX_STATUS.FAILED;
-    if (value === TRX_STATUS.REFUND) return TRX_STATUS.REFUND;
-    if (value === TRX_STATUS.PROCESSING) return TRX_STATUS.PROCESSING;
+    const value = String(raw ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+    const mapped = TRX_STATUS_WORDS[value];
+    if (mapped) return mapped;
     if (value) {
-      logger.warn(`[paystation] unrecognised trx_status '${raw}' — treating as processing`);
+      // Loud, because this is the exact shape of the bug that stranded a paid
+      // ৳800 renewal for a day: a word we do not know resolves to `processing`,
+      // which is safe for the money but invisible until someone reads the log.
+      logger.error(
+        `[paystation] UNKNOWN trx_status '${raw}' — treated as processing. `
+        + 'If the gateway shows this transaction as paid, add the word to TRX_STATUS_WORDS.'
+      );
     }
     return TRX_STATUS.PROCESSING;
   }
@@ -419,6 +484,7 @@ function resetAdapter() {
 
 module.exports = {
   PayStationAdapter,
+  TRX_STATUS_WORDS,
   getAdapter,
   resetAdapter,
   TRX_STATUS,

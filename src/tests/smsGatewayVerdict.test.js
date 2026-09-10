@@ -30,6 +30,16 @@
  * values change, this is where it should be noticed, not in a silent campaign.
  */
 
+/**
+ * Every send below names MimSMS explicitly.
+ *
+ * The platform default is Automas as of 2026-09-10, and these assertions are
+ * about MimSMS's endpoints and TransactionType values. Leaving the gateway to
+ * the default would silently move this file onto a gateway it says nothing
+ * about — a test that passes for the wrong reason, or fails for one.
+ */
+const MIMSMS_ONLY = { primaryProvider: 'mimsms', failoverProvider: null, failoverEnabled: false };
+
 const smsService = require('../services/sms.service');
 const { readGatewayVerdict, TRANSACTION_TYPE } = smsService;
 
@@ -149,6 +159,7 @@ describe('sendBatch honours the body, not the HTTP status', () => {
       sharedBody: 'Hello',
       personalized: false,
       transactionType: 'T',
+      routingConfig: MIMSMS_ONLY,
     });
 
     expect(result.ok).toBe(false);
@@ -169,6 +180,7 @@ describe('sendBatch honours the body, not the HTTP status', () => {
       sharedBody: 'Hello',
       personalized: false,
       transactionType: 'T',
+      routingConfig: MIMSMS_ONLY,
     });
 
     expect(result.ok).toBe(true);
@@ -183,6 +195,7 @@ describe('sendBatch honours the body, not the HTTP status', () => {
       sharedBody: '',
       personalized: true,
       transactionType: 'T',
+      routingConfig: MIMSMS_ONLY,
     });
 
     expect(sent().url).toContain('/DSMS');
@@ -198,6 +211,7 @@ describe('sendBatch honours the body, not the HTTP status', () => {
       sharedBody: 'Sale on now',
       personalized: false,
       transactionType: 'P',
+      routingConfig: MIMSMS_ONLY,
     });
 
     expect(sent().url).toContain('/OneToMany');
@@ -226,6 +240,7 @@ describe('sendBatch honours the body, not the HTTP status', () => {
       sharedBody: 'x',
       personalized: false,
       transactionType: 'T',
+      routingConfig: MIMSMS_ONLY,
     });
 
     expect(calls).toBe(1);

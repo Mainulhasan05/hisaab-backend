@@ -93,6 +93,7 @@ const RECEIPT_TEXT = {
     // invites reading the second as a restatement of the first. It is also the
     // word the till puts on the same figure.
     total: 'বিল',
+    discount: 'ছাড়',
     paid: 'জমা',
     due: 'বাকি',
     oldDuePaid: 'আগের বাকি জমা',
@@ -107,6 +108,7 @@ const RECEIPT_TEXT = {
     currency: 'Tk',
     invoice: 'Inv',
     total: 'Total',
+    discount: 'Discount',
     paid: 'Paid',
     due: 'Due',
     oldDuePaid: 'Old due paid',
@@ -132,6 +134,37 @@ const RECEIPT_TEXT = {
  * template picker and always prints, so the picker shows the whole shape of the
  * message.
  */
+/**
+ * The discount on this invoice, as a percentage of what the goods came to.
+ *
+ * Derived from the MONEY rather than read off `discountType`, and that is the
+ * point: a shop that types "50" as a flat taka discount and a shop that types
+ * "5" as a percentage have given the same customer the same 5% off a ৳1,000
+ * bill, and the customer should read the same thing. `discountAmount` is the
+ * one field that means the same on both kinds of invoice — `discount` alone
+ * holds "10" on a percentage sale and ৳10 on a fixed one, which is the exact
+ * ambiguity `Sale.discountAmount` was added to end.
+ *
+ * Returns `null` when there is nothing honest to print:
+ *
+ *   - no discount, so there is no line to add to a message billed by the
+ *     character;
+ *   - no subtotal to take a percentage OF, which would be a division by zero;
+ *   - a discount so small it rounds to `0%`, where the line costs a customer a
+ *     read and tells them nothing. A ৳0.40 courtesy off ৳1,000 is not a
+ *     discount worth a line.
+ *
+ * One decimal place, and a whole number prints bare: `10%`, not `10.0%`.
+ */
+const receiptDiscountPercent = (subtotal, discountAmount) => {
+  const base = Number(subtotal) || 0;
+  const off = Number(discountAmount) || 0;
+  if (base <= 0 || off <= 0) return null;
+
+  const pct = Math.round((off / base) * 1000) / 10;
+  return pct > 0 ? String(pct) : null;
+};
+
 const showsTotalDue = (totalDue, due) => {
   if (totalDue === null || totalDue === undefined || totalDue === '') return false;
   if (typeof totalDue === 'string' && Number.isNaN(Number(totalDue))) return true;
@@ -172,17 +205,30 @@ const buildSaleReceipt = ({
   total,
   paid,
   due,
+  subtotal = 0,
+  discountAmount = 0,
   dueSettled = 0,
   advanceHeld = 0,
   totalDue = null,
   shopName,
-  language = 'bn',
+  language = 'en',
 }) => {
-  const t = RECEIPT_TEXT[language] || RECEIPT_TEXT.bn;
+  const t = RECEIPT_TEXT[language] || RECEIPT_TEXT.en;
   const money = (label, amount) => `${label}${t.sep}${t.currency}${formatSmsAmount(amount)}`;
 
   const settled = Number(dueSettled) || 0;
   const lines = [`${t.invoice}${t.sep}${invoiceNo}`, money(t.total, total)];
+
+  /* Sits directly under the total, because that is the number it explains.
+   * `total` on this receipt is already NET of the discount, so a customer
+   * reading `Total:Tk801` alone has no way to see they were given anything —
+   * the concession the shop made is invisible on the only document they keep.
+   *
+   * Only the percentage, not the taka: it is the figure a customer repeats to
+   * the next person, it is the same number whichever way the cashier typed the
+   * discount, and it costs three characters in a message billed by segment. */
+  const discountPct = receiptDiscountPercent(subtotal, discountAmount);
+  if (discountPct) lines.push(`${t.discount}${t.sep}${discountPct}%`);
 
   if (formatSmsAmount(paid) !== '0') lines.push(money(t.paid, paid));
   if (formatSmsAmount(due) !== '0') lines.push(money(t.due, due));
@@ -968,12 +1014,14 @@ const buildInvoiceSms = ({
   total,
   paid,
   due,
+  subtotal = 0,
+  discountAmount = 0,
   previousDue = 0,
   dueSettled = 0,
   advanceHeld = 0,
   totalDue = null,
   shopName,
-  language = 'bn',
+  language = 'en',
 }) => {
   const body = String(template ?? '').trim();
 
@@ -1005,6 +1053,8 @@ const buildInvoiceSms = ({
     total,
     paid,
     due,
+    subtotal,
+    discountAmount,
     dueSettled,
     advanceHeld,
     totalDue,

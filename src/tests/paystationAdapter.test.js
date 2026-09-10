@@ -37,6 +37,7 @@ jest.mock('axios', () => ({
 const {
   PayStationAdapter, TRX_STATUS, PAYMENT_ERROR_CATEGORY, CODE,
 } = require('../services/payment/paystation.adapter');
+const logger = require('../utils/logger.util');
 
 const OLD_ENV = process.env;
 
@@ -86,6 +87,62 @@ beforeEach(() => {
 });
 
 afterAll(() => { process.env = OLD_ENV; });
+
+describe('trx_status is not the word the documentation says', () => {
+  /* ── The live incident this block exists for ──────────────────────────────
+   *
+   * A real ৳800 bKash renewal settled at 13:56 on 2026-09-10. PayStation
+   * answered every `transaction-status` lookup with:
+   *
+   *     { trx_status: "successful", trx_id: "DIA0CQQFQU",
+   *       payment_method: "bKash", payer_mobile_no: "01791284331" }
+   *
+   * `readTrxStatus` compared that against the literal `'success'`, did not
+   * match, and fell through to `processing`. The order sat at `initiated`
+   * through 52 lookups while the shop had no subscription and PayStation's own
+   * dashboard showed the payment as taken.
+   *
+   * Three sources spell this outcome three different ways — the v1 docs say
+   * "Success", the v2 docs say "success", the live merchant account says
+   * "successful" — so these are asserted as a vocabulary, not a constant.
+   */
+  test('the LIVE gateway word "successful" is a success', () => {
+    expect(adapter().readTrxStatus('successful')).toBe(TRX_STATUS.SUCCESS);
+  });
+
+  test('the two DOCUMENTED spellings are a success too', () => {
+    expect(adapter().readTrxStatus('Success')).toBe(TRX_STATUS.SUCCESS);
+    expect(adapter().readTrxStatus('success')).toBe(TRX_STATUS.SUCCESS);
+  });
+
+  test('"cancelled" is terminal, not something to keep asking about', () => {
+    // Also live, also undocumented. Read as `processing` it kept one order in
+    // the sweep for 291 lookups over the 24 hours before the abandon rule
+    // caught it.
+    expect(adapter().readTrxStatus('cancelled')).toBe(TRX_STATUS.FAILED);
+    expect(adapter().readTrxStatus('canceled')).toBe(TRX_STATUS.FAILED);
+    expect(adapter().readTrxStatus('Cancelled')).toBe(TRX_STATUS.FAILED);
+  });
+
+  test('"unsuccessful" is a FAILURE — the match is never a substring', () => {
+    // The whole reason this is a table lookup and not `value.includes('success')`.
+    // A substring match hands a subscription to a payment that did not happen.
+    expect(adapter().readTrxStatus('unsuccessful')).toBe(TRX_STATUS.FAILED);
+  });
+
+  test('spacing and hyphens do not change the verdict', () => {
+    expect(adapter().readTrxStatus('  Successful  ')).toBe(TRX_STATUS.SUCCESS);
+    expect(adapter().readTrxStatus('in-progress')).toBe(TRX_STATUS.PROCESSING);
+  });
+
+  test('a word we have never seen is processing, and says so loudly', () => {
+    // Never `success`: an unknown verdict costs another lookup, and the sweep's
+    // trx-id guard stops it being written off. Guessing costs a year of
+    // subscription.
+    expect(adapter().readTrxStatus('settled_t2')).toBe(TRX_STATUS.PROCESSING);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('UNKNOWN trx_status'));
+  });
+});
 
 describe('status_code is a string, not a number', () => {
   test('"200" + success is accepted', () => {

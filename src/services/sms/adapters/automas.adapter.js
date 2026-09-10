@@ -1,48 +1,61 @@
 /**
- * Automas — the failover gateway.
+ * Automas — the primary gateway.
  *
- * Three things about this gateway differ from MimSMS in ways that bite if you
- * assume they match. All three are handled here so nothing above this file has
- * to know about them.
+ * Everything below was verified against the live account on 2026-09-10, because
+ * the published docs describe an API this account does not serve. Where the two
+ * disagree, the wire won. The differences are not cosmetic — three of them fail
+ * SILENTLY, returning HTTP 200 with a success-shaped body while delivering
+ * nothing.
  *
- * ── 1. Success is 0, not 200 ─────────────────────────────────────────────────
+ * ── 1. The body must be form-encoded. JSON is accepted and ignored ───────────
  *
- * Every result carries a numeric `status` where 0 means accepted and anything
- * else is a documented failure code. A truthiness check on that field is exactly
- * backwards — `if (status)` treats every success as a failure and every failure
- * as a success.
+ * A JSON POST returns HTTP 200 and `{"response":[{"status":105,"id":95413,
+ * "msisdn":"NA"}]}`. `msisdn: "NA"` is the tell: the gateway never parsed our
+ * body, so it saw no recipient, and 105 ("Invalid MSISDN") is it saying so. It
+ * still allocates an id, so the call looks like it did something.
  *
- * ── 2. The auth parameter is named differently per operation ─────────────────
+ * The same parameters sent as `application/x-www-form-urlencoded` return
+ * `{"status":0,"id":6591452,"msisdn":"8801757995016"}` and the message arrives.
+ * This is why `form()` exists and why nothing here posts an object.
  *
- * This is the gateway's own inconsistency, not a typo here:
+ * ── 2. There is ONE endpoint, and it takes many recipients ───────────────────
  *
- *   single   → apikey  + sender
- *   dynamic  → apikey  + sender
- *   bulk     → api_key + senderid
- *   balance  → api_key
+ * The docs describe separate single / bulk / dynamic endpoints with different
+ * parameter names per operation. On this account those paths 404. Only
+ * `/smsapiv3` answers, and `msisdn` accepts a comma-separated list, returning
+ * one result row per recipient:
  *
- * `credentials()` below takes the style as an argument for that reason. Sending
- * `apikey` to the bulk endpoint authenticates as nobody and returns 103.
+ *   msisdn=8801757995016,8801700000000
+ *   -> response: [ {status:0, id:6591460, msisdn:"8801757995016"},
+ *                  {status:0, id:6591461, msisdn:"8801700000000"} ]
  *
- * ── 3. `smstext` is documented "HTTP encoded" ────────────────────────────────
+ * So `sendBulk` is that call, and `sendDynamic` — which the gateway has no
+ * endpoint for at all — is emulated by grouping recipients who share a body.
+ * The docs' `api_key`/`senderid`/`contacts`/`msg` shape returns 105 here; it is
+ * not used.
  *
- * Which means the gateway URL-decodes the message body server-side. A literal
- * `%`, `&`, `+` or `#` in a shop's message is then either corrupted or accepted
- * with a success status and an id, and dies silently downstream — never
- * delivered, never charged, invisible in the gateway's panel. `httpEncodeBody`
- * on the base class is applied to every message field going to this gateway.
+ * ── 3. The body is NOT URL-decoded server-side ───────────────────────────────
  *
- * Because that is a claim about the gateway's behaviour rather than something we
- * can prove from here, `AUTOMAS_HTTP_ENCODE=false` turns it off without a
- * deploy. Verify it once against a real send with a `&` in the body: if the
- * recipient reads a literal `%26`, this is over-encoding and should be off.
+ * The docs call `smstext` "HTTP encoded", which would mean percent-encoding
+ * collision characters on the way out. Verified by sending `A&B 50% #1 +2` raw:
+ * it arrived on the handset exactly as written. Form encoding already escapes
+ * the body in transit, so encoding it a second time would deliver a literal
+ * `%26` to customers.
  *
- * ── Endpoint paths ───────────────────────────────────────────────────────────
+ * `AUTOMAS_HTTP_ENCODE=true` restores the old behaviour if an account is ever
+ * seen to behave the way the docs describe. It defaults OFF on that test.
  *
- * The published docs use ONE url for every operation, distinguished only by the
- * body shape, and never state the balance path explicitly. Each path is
- * therefore env-overridable, so an account whose docs differ is a config change
- * rather than a patch.
+ * ── 4. There is no working balance endpoint ──────────────────────────────────
+ *
+ * `/smsapiv3/balance` and every other documented spelling 404s. `/getbalance`
+ * answers `{"response":"104"}` — but it answers exactly that with a bogus key,
+ * and with no parameters at all, and the figure does not move after a send. 104
+ * is a status code ("Invalid User"), not taka.
+ *
+ * Balance therefore reports UNSUPPORTED rather than guessing. That matters more
+ * than it sounds: the previous code posted the balance request to the send URL,
+ * so every load of the admin providers screen fired a send-shaped request at the
+ * gateway. Set `AUTOMAS_BALANCE_URL` if Automas ever provides a real one.
  */
 
 const axios = require('axios');
@@ -51,13 +64,6 @@ const { formatPhone } = require('../../../utils/phone.util');
 const logger = require('../../../utils/logger.util');
 
 const BASE_URL = process.env.AUTOMAS_BASE_URL || 'https://api.automas.com.bd/smsapiv3';
-
-const PATHS = {
-  SINGLE: process.env.AUTOMAS_PATH_SINGLE || '',
-  BULK: process.env.AUTOMAS_PATH_BULK || '',
-  DYNAMIC: process.env.AUTOMAS_PATH_DYNAMIC || '',
-  BALANCE: process.env.AUTOMAS_PATH_BALANCE || '',
-};
 
 /**
  * The gateway's documented status codes.
@@ -92,13 +98,27 @@ const STATUS_CODES = {
 /** Unicode messages must be flagged; ASCII may omit the field entirely. */
 const UNICODE_TYPE = '8';
 
+const FORM_HEADERS = { 'Content-Type': 'application/x-www-form-urlencoded' };
+
 class AutomasAdapter extends BaseSmsAdapter {
   constructor() {
     super('automas');
     this.baseUrl = BASE_URL;
     this.apiKey = process.env.AUTOMAS_API_KEY || null;
     this.senderId = process.env.AUTOMAS_SENDER_ID || null;
-    this.httpEncode = process.env.AUTOMAS_HTTP_ENCODE !== 'false';
+    // Off by default — see note 3 in the header. This is the opposite of what
+    // the docs say and the same as what the handset showed.
+    this.httpEncode = process.env.AUTOMAS_HTTP_ENCODE === 'true';
+    this.balanceUrl = process.env.AUTOMAS_BALANCE_URL || null;
+
+    /* How many recipients ride in one call. The gateway does not document a
+     * ceiling and did not refuse the sizes tested; the cap exists so that a
+     * 5,000-recipient campaign is not one request whose failure loses every
+     * result — a chunk that fails costs us only that chunk. */
+    this.maxRecipients = Number(process.env.AUTOMAS_MAX_RECIPIENTS) || 500;
+
+    /* Parallel calls when a send fans out over several chunks or bodies. */
+    this.concurrency = Number(process.env.AUTOMAS_CONCURRENCY) || 4;
 
     this.http = axios.create({
       timeout: Number(process.env.SMS_HTTP_TIMEOUT_MS) || 10000,
@@ -109,19 +129,28 @@ class AutomasAdapter extends BaseSmsAdapter {
     return Boolean(this.apiKey && this.senderId);
   }
 
-  url(path) {
-    return BASE_URL + (path || '');
+  /** One endpoint serves every send operation on this account. */
+  sendUrl() {
+    return BASE_URL + (process.env.AUTOMAS_SEND_PATH || '');
   }
 
-  /** See the header: the parameter names differ per operation, by the gateway's design. */
-  credentials(style, senderId = null) {
-    const sender = senderId || this.senderId;
-    return style === 'snake'
-      ? { api_key: this.apiKey, senderid: sender }
-      : { apikey: this.apiKey, sender };
+  /**
+   * POST as a form, never as JSON.
+   *
+   * The single most consequential line in this file: a JSON body here is
+   * accepted with HTTP 200 and delivers nothing. See note 1 in the header.
+   */
+  async form(url, params) {
+    const body = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null) continue;
+      body.append(key, String(value));
+    }
+    const { data } = await this.http.post(url, body.toString(), { headers: FORM_HEADERS });
+    return data;
   }
 
-  /** Apply the gateway's expected body encoding, unless switched off. */
+  /** Apply the gateway's expected body encoding. Off unless explicitly enabled. */
   encodeBody(message) {
     const clean = this.sanitizeMessage(message);
     return this.httpEncode ? this.httpEncodeBody(clean) : clean;
@@ -203,6 +232,99 @@ class AutomasAdapter extends BaseSmsAdapter {
       : null;
   }
 
+  /** Bounded-concurrency map. Keeps a large campaign from opening 500 sockets. */
+  async mapLimit(items, worker) {
+    const out = new Array(items.length);
+    let cursor = 0;
+    const width = Math.min(this.concurrency, items.length) || 0;
+    const runners = Array.from({ length: width }, async () => {
+      for (;;) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= items.length) return;
+        out[index] = await worker(items[index], index);
+      }
+    });
+    await Promise.all(runners);
+    return out;
+  }
+
+  /**
+   * Send one body to a list of already-normalised numbers, in chunks.
+   *
+   * Results come back in the order given. A chunk that throws marks only ITS
+   * recipients failed — the rest of the campaign still went out, and re-sending
+   * everyone would double-charge the people who did receive it. If every chunk
+   * throws, the caller turns that into a batch-level throw so the dispatcher can
+   * fail the whole thing over.
+   */
+  async fanOut(numbers, text, sender, unicode) {
+    const chunks = [];
+    for (let i = 0; i < numbers.length; i += this.maxRecipients) {
+      chunks.push(numbers.slice(i, i + this.maxRecipients));
+    }
+
+    const byChunk = await this.mapLimit(chunks, async (chunk) => {
+      const params = {
+        apikey: this.apiKey,
+        sender,
+        msisdn: chunk.join(','),
+        smstext: text,
+      };
+      // The flag is only meaningful for UCS-2; sending it for ASCII text would
+      // charge Unicode segment rates on a message that does not need them.
+      if (unicode) params.type = UNICODE_TYPE;
+
+      try {
+        return { data: await this.form(this.sendUrl(), params), error: null };
+      } catch (err) {
+        logger.warn(`[sms] automas chunk of ${chunk.length} failed: ${err.message}`);
+        return { data: null, error: err };
+      }
+    });
+
+    /* Duplicates are why this is a queue per number rather than a map to one
+     * entry. The same number can legitimately appear twice in a campaign list,
+     * and both copies must get their own result — mapping to a single entry
+     * would report one gateway id twice and hide a failure behind a success. */
+    const queues = new Map();
+    const responses = [];
+    let readable = 0;
+    let transportFailures = 0;
+
+    for (const { data, error } of byChunk) {
+      if (error) { transportFailures += 1; continue; }
+      responses.push(data);
+      for (const entry of this.responseArray(data)) {
+        const key = this.matchKey(entry?.msisdn);
+        if (!queues.has(key)) queues.set(key, []);
+        queues.get(key).push(entry);
+        readable += 1;
+      }
+    }
+
+    const results = numbers.map((phone) => {
+      const queue = queues.get(this.matchKey(phone));
+      const entry = queue && queue.length ? queue.shift() : null;
+      const verdict = this.readEntry(entry);
+      return {
+        phone,
+        success: verdict.success,
+        statusCode: verdict.statusCode,
+        messageId: entry?.id ?? null,
+        error: verdict.success ? null : verdict.message,
+      };
+    });
+
+    return {
+      results,
+      responses,
+      readable,
+      allChunksFailed: byChunk.length > 0 && transportFailures === byChunk.length,
+      firstError: byChunk.find((c) => c.error)?.error || null,
+    };
+  }
+
   async sendSingle(phone, message, senderId = null) {
     const to = this.normalizePhone(phone);
     const text = this.encodeBody(message);
@@ -217,25 +339,20 @@ class AutomasAdapter extends BaseSmsAdapter {
       };
     }
 
-    const payload = {
-      ...this.credentials('camel', sender),
-      msisdn: to,
-      smstext: text,
-    };
-    // The flag is only meaningful for UCS-2; sending it for ASCII text would
-    // charge Unicode segment rates on a message that does not need them.
-    if (this.isUnicode(message)) payload.type = UNICODE_TYPE;
+    const params = { apikey: this.apiKey, sender, msisdn: to, smstext: text };
+    if (this.isUnicode(message)) params.type = UNICODE_TYPE;
 
-    const { data } = await this.http.post(this.url(PATHS.SINGLE), payload);
+    const data = await this.form(this.sendUrl(), params);
 
-    const entry = this.readEntry(this.responseArray(data)[0]);
+    const first = this.responseArray(data)[0];
+    const entry = this.readEntry(first);
     if (!entry.success) {
       throw this.failure(`Gateway refused: ${entry.message}`, { code: entry.statusCode, data });
     }
 
     return {
       success: true,
-      messageId: this.responseArray(data)[0]?.id ?? null,
+      messageId: first?.id ?? null,
       statusCode: entry.statusCode,
       provider: this.name,
       senderIdUsed: sender,
@@ -245,14 +362,13 @@ class AutomasAdapter extends BaseSmsAdapter {
   }
 
   /**
-   * One message to many, one call.
+   * One message to many, in as few calls as the recipient cap allows.
    *
-   * Unlike MimSMS this gateway returns REAL per-recipient results, so they are
-   * mapped back by msisdn rather than by position — position is not promised and
-   * a reordered response would otherwise attribute one recipient's failure to
-   * another. Anyone the response does not mention stays `success: false` with an
-   * explicit reason, so the caller retries only them and charges only for the
-   * confirmed.
+   * Results are mapped back by msisdn rather than by position — position is not
+   * promised, and a reordered response would otherwise attribute one recipient's
+   * failure to another. Anyone the response does not mention stays
+   * `success: false` with an explicit reason, so the caller retries only them
+   * and charges only for the confirmed.
    */
   async sendBulk(phones, message, senderId = null) {
     const list = phones.map((p) => this.normalizePhone(typeof p === 'string' ? p : p.phone));
@@ -268,63 +384,40 @@ class AutomasAdapter extends BaseSmsAdapter {
       };
     }
 
-    const payload = {
-      ...this.credentials('snake', sender),
-      type: this.isUnicode(message) ? 'unicode' : 'text',
-      scheduledDateTime: '',
-      msg: text,
-      contacts: list.join(','),
-    };
+    const fan = await this.fanOut(list, text, sender, this.isUnicode(message));
 
-    const { data } = await this.http.post(this.url(PATHS.BULK), payload);
-    const entries = this.responseArray(data);
-
-    // A batch that produced no readable results at all is a batch-level refusal.
-    // Surfacing it as a throw lets the dispatcher fail the whole chunk over to
-    // the other gateway, rather than silently reporting every recipient failed.
-    if (entries.length === 0) {
-      throw this.failure('Gateway returned no results for bulk send', { data });
+    /* A batch that produced no readable results at all is a batch-level refusal.
+     * Surfacing it as a throw lets the dispatcher fail the whole chunk over to
+     * the other gateway, rather than silently reporting every recipient failed. */
+    if (fan.allChunksFailed) throw fan.firstError;
+    if (fan.readable === 0) {
+      throw this.failure('Gateway returned no results for bulk send', { data: fan.responses[0] ?? null });
     }
-
-    const byPhone = new Map();
-    for (const entry of entries) {
-      byPhone.set(this.matchKey(entry?.msisdn), entry);
-    }
-
-    const results = list.map((phone) => {
-      const entry = byPhone.get(this.matchKey(phone));
-      const verdict = this.readEntry(entry);
-      return {
-        phone,
-        success: verdict.success,
-        statusCode: verdict.statusCode,
-        messageId: entry?.id ?? null,
-        error: verdict.success ? null : verdict.message,
-      };
-    });
 
     return {
-      success: results.some((r) => r.success),
+      success: fan.results.some((r) => r.success),
       provider: this.name,
       method: 'one-to-many',
       messageId: null,
       senderIdUsed: sender,
-      data,
-      results,
+      data: fan.responses.length === 1 ? fan.responses[0] : fan.responses,
+      results: fan.results,
     };
   }
 
   /**
    * Personalised text per recipient.
    *
-   * The gateway echoes our own `id` back as `cid`, which is a stronger join key
-   * than the phone number — two recipients can legitimately share a number in a
-   * badly-deduped list, and `cid` still tells them apart. Falls back to the
-   * msisdn when `cid` is absent.
+   * The gateway has no dynamic endpoint (see note 2), so this groups recipients
+   * who share an identical body and sends one call per distinct body. For the
+   * common campaign — one template, thousands of recipients — that collapses to
+   * the same single call `sendBulk` would make. For a genuinely per-recipient
+   * body it is one call each, which is the true cost of the missing endpoint and
+   * not something a different grouping can avoid.
    */
   async sendDynamic(messages, senderId = null) {
     const prepared = messages.map((m, i) => ({
-      cid: i + 1,
+      index: i,
       phone: this.normalizePhone(m.phone),
       message: this.encodeBody(m.message),
       unicode: this.isUnicode(m.message),
@@ -340,40 +433,42 @@ class AutomasAdapter extends BaseSmsAdapter {
       };
     }
 
-    const payload = {
-      ...this.credentials('camel', sender),
-      messages: prepared.map((r) => {
-        const row = { id: r.cid, msisdn: r.phone, smstext: r.message };
-        if (r.unicode) row.type = UNICODE_TYPE;
-        return row;
-      }),
-    };
-
-    const { data } = await this.http.post(this.url(PATHS.DYNAMIC), payload);
-    const entries = this.responseArray(data);
-
-    if (entries.length === 0) {
-      throw this.failure('Gateway returned no results for dynamic send', { data });
+    // Group by the exact body that will go on the wire. The unicode flag is part
+    // of the key because it changes the request, not just the text.
+    const groups = new Map();
+    for (const row of prepared) {
+      const key = `${row.unicode ? 'u' : 'a'}:${row.message}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
     }
 
-    const byCid = new Map();
-    const byPhone = new Map();
-    for (const entry of entries) {
-      if (entry?.cid !== undefined && entry?.cid !== null) byCid.set(Number(entry.cid), entry);
-      byPhone.set(this.matchKey(entry?.msisdn), entry);
-    }
+    const grouped = [...groups.values()];
+    const fans = await this.mapLimit(grouped, (rows) => this.fanOut(
+      rows.map((r) => r.phone),
+      rows[0].message,
+      sender,
+      rows[0].unicode,
+    ));
 
-    const results = prepared.map((r) => {
-      const entry = byCid.get(r.cid) ?? byPhone.get(this.matchKey(r.phone));
-      const verdict = this.readEntry(entry);
-      return {
-        phone: r.phone,
-        success: verdict.success,
-        statusCode: verdict.statusCode,
-        messageId: entry?.sid ?? entry?.id ?? null,
-        error: verdict.success ? null : verdict.message,
-      };
+    const results = new Array(prepared.length);
+    const responses = [];
+    let readable = 0;
+    let failedGroups = 0;
+
+    grouped.forEach((rows, g) => {
+      const fan = fans[g];
+      readable += fan.readable;
+      if (fan.allChunksFailed) failedGroups += 1;
+      responses.push(...fan.responses);
+      rows.forEach((row, i) => { results[row.index] = fan.results[i]; });
     });
+
+    if (fans.length > 0 && failedGroups === fans.length) {
+      throw fans[0].firstError;
+    }
+    if (readable === 0) {
+      throw this.failure('Gateway returned no results for dynamic send', { data: responses[0] ?? null });
+    }
 
     return {
       success: results.some((r) => r.success),
@@ -381,24 +476,55 @@ class AutomasAdapter extends BaseSmsAdapter {
       method: 'dynamic',
       messageId: null,
       senderIdUsed: sender,
-      data,
+      data: responses.length === 1 ? responses[0] : responses,
       results,
     };
   }
 
-  /** Answers `{ response: "1234.56" }` — a bare string, not an object. */
+  /**
+   * Balance — unsupported unless a real endpoint is configured.
+   *
+   * See note 4. Reporting "unsupported" is not a gap being papered over; it is
+   * the only honest answer, and it is strictly better than the alternative,
+   * which was posting a balance request to the SEND url on every admin page
+   * load.
+   */
   async checkBalance() {
     if (!this.isConfigured()) {
       return { success: false, balance: null, provider: this.name, error: 'Not configured' };
     }
+    if (!this.balanceUrl) {
+      return {
+        success: false,
+        balance: null,
+        provider: this.name,
+        supported: false,
+        error: 'Automas does not expose a balance endpoint on this account',
+      };
+    }
     try {
-      const { data } = await this.http.post(this.url(PATHS.BALANCE), { api_key: this.apiKey });
+      const data = await this.form(this.balanceUrl, { api_key: this.apiKey });
       const raw = data?.response ?? data?.balance ?? data;
       const balance = Number(String(raw).replace(/[^0-9.]/g, ''));
+
+      /* A bare status code is not a balance. `/getbalance` answers "104" — the
+       * code for Invalid User — to any request including an empty one, and a
+       * naive parse turns that into 104 taka of credit that does not exist. */
+      if (balance !== 0 && STATUS_CODES[balance]) {
+        return {
+          success: false,
+          balance: null,
+          provider: this.name,
+          error: `Balance endpoint returned status ${balance} (${STATUS_CODES[balance].message})`,
+          data,
+        };
+      }
+
       return {
-        success: true,
+        success: Number.isFinite(balance),
         balance: Number.isFinite(balance) ? balance : null,
         provider: this.name,
+        error: Number.isFinite(balance) ? undefined : 'Unreadable balance response',
         data,
       };
     } catch (err) {

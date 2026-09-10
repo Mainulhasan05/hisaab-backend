@@ -29,6 +29,7 @@ const PlatformPayment = require('../models/PlatformPayment.model');
 const Shop = require('../models/Shop.model');
 const SMSQuota = require('../models/SMSQuota.model');
 const billingService = require('../services/billing.service');
+const smsService = require('../services/sms.service');
 const paystation = require('../services/payment/paystation.adapter');
 const { TRX_STATUS } = paystation;
 
@@ -307,6 +308,176 @@ describe('fulfilment', () => {
 /* ═══════════════════════════════════════════════════════════════════════════
  * PRICING — derived here, never accepted
  * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * THE SWEEP MUST NEVER WRITE OFF MONEY IT HAS BEEN TOLD ABOUT
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+describe('reconcile never abandons an order the gateway has named', () => {
+  /**
+   * `gateway.trxId` only ever comes from PayStation, and PayStation only issues
+   * one once an instrument actually ran. So an order still `initiated` WITH a
+   * trx id is not an abandoned checkout, it is unrecognised money — and once it
+   * is marked `abandoned` nothing ever looks at it again.
+   *
+   * This is the containment for the class of bug behind the incident: a gateway
+   * word we do not know keeps an order at `initiated`, and 24 hours later the
+   * sweep writes ৳800 off as "Never completed".
+   */
+  function sweepEnv() {
+    jest.spyOn(billingService, 'getSettings').mockResolvedValue(SETTINGS);
+    jest.spyOn(PlatformOrder, 'find').mockImplementation((query) => {
+      const chain = { sort: () => chain, limit: async () => [] };
+      // The stranded-paid pass and the in-window pass return nothing here; only
+      // the aged-with-trxId pass is under test.
+      if (query.status === PLATFORM_ORDER_STATUS.INITIATED && query['gateway.trxId']) {
+        chain.limit = async () => [{
+          _id: 'order9', invoiceNumber: 'HSBLIVE1', gateway: { trxId: 'DIA0CQQFQU' },
+        }];
+      }
+      return chain;
+    });
+  }
+
+  test('the abandon query excludes anything carrying a trx id', async () => {
+    sweepEnv();
+    jest.spyOn(checkoutService, 'verifyOrder').mockResolvedValue({ ok: true, pending: true });
+    const updateMany = jest.spyOn(PlatformOrder, 'updateMany').mockResolvedValue({ modifiedCount: 0 });
+
+    await checkoutService.reconcile();
+
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ 'gateway.trxId': { $in: [null, ''] } }),
+      expect.anything()
+    );
+  });
+
+  test('an aged order with a trx id is re-checked instead of written off', async () => {
+    sweepEnv();
+    const verify = jest.spyOn(checkoutService, 'verifyOrder')
+      .mockResolvedValue({ ok: true, fulfilled: true });
+    jest.spyOn(PlatformOrder, 'updateMany').mockResolvedValue({ modifiedCount: 0 });
+
+    const summary = await checkoutService.reconcile();
+
+    expect(verify).toHaveBeenCalledWith('order9', { reason: 'sweep' });
+    expect(summary.fulfilled).toBe(1);
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * THE CONFIRMATION SMS
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+describe('payment confirmation SMS', () => {
+  function shopQuery(shop) {
+    jest.spyOn(Shop, 'findById').mockReturnValue({
+      select: () => ({ lean: async () => shop }),
+    });
+  }
+
+  const paidOrder = (overrides = {}) => ({
+    _id: 'order1', shop: 'shop1', kind: 'subscription', months: 1, amount: 800,
+    gateway: { trxId: 'DIA0CQQFQU', payerMobile: '01791284331' },
+    ...overrides,
+  });
+
+  test('goes to the number the money actually came from', async () => {
+    // Not the shop's registered phone: a manager who renews on the owner's
+    // behalf is the one whose wallet was debited, and is who "the payment
+    // maker" means.
+    shopQuery({
+      _id: 'shop1', name: 'হিসাব টেস্ট', phone: '01726315133',
+      subscription: { expiresAt: new Date('2026-10-10T17:59:59.000Z') },
+    });
+    const send = jest.spyOn(smsService, 'sendSystemSingle').mockResolvedValue({ success: true });
+
+    await checkoutService.sendPaymentConfirmationSms(paidOrder());
+
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ phone: '01791284331' }));
+  });
+
+  test('falls back to the shop when the gateway reports no payer number', async () => {
+    // Card payments carry no `payer_mobile_no` at all.
+    shopQuery({
+      _id: 'shop1', name: 'হিসাব টেস্ট', phone: '01726315133',
+      billing: { billingContact: { phone: '01712345678' } },
+      subscription: { expiresAt: new Date('2026-10-10T17:59:59.000Z') },
+    });
+    const send = jest.spyOn(smsService, 'sendSystemSingle').mockResolvedValue({ success: true });
+
+    await checkoutService.sendPaymentConfirmationSms(
+      paidOrder({ gateway: { trxId: 'CARD1', payerMobile: null } })
+    );
+
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ phone: '01712345678' }));
+  });
+
+  test('the subscription message carries the amount, the new expiry and the trx id', async () => {
+    shopQuery({
+      _id: 'shop1', name: 'হিসাব টেস্ট', phone: '01726315133',
+      subscription: { expiresAt: new Date('2026-10-10T17:59:59.000Z') },
+    });
+    const send = jest.spyOn(smsService, 'sendSystemSingle').mockResolvedValue({ success: true });
+
+    await checkoutService.sendPaymentConfirmationSms(paidOrder());
+
+    const { message } = send.mock.calls[0][0];
+    expect(message).toContain('৳৮০০');
+    // Bangladesh date, from an expiry stored as the last instant of a BD day.
+    // Read with the server's local calendar this reads a different day either
+    // side of UTC, which is a shopkeeper told the wrong date their access ends.
+    expect(message).toContain('১০ অক্টোবর ২০২৬');
+    expect(message).toContain('DIA0CQQFQU');
+  });
+
+  test('an SMS top-up is told how many messages it bought, not an expiry', async () => {
+    shopQuery({ _id: 'shop1', name: 'হিসাব টেস্ট', phone: '01726315133' });
+    const send = jest.spyOn(smsService, 'sendSystemSingle').mockResolvedValue({ success: true });
+
+    await checkoutService.sendPaymentConfirmationSms(
+      paidOrder({ kind: 'sms', amount: 500, smsQuantity: 1250, months: undefined })
+    );
+
+    const { message } = send.mock.calls[0][0];
+    expect(message).toContain('১২৫০');
+    expect(message).toContain('এসএমএস');
+    expect(message).not.toContain('মেয়াদ');
+  });
+
+  test('is a PLATFORM send — it never spends the quota it just sold', async () => {
+    // Routing this through `sendSingle` would make a shop pay, out of the
+    // credits it just bought, for the receipt saying the credits arrived.
+    shopQuery({ _id: 'shop1', name: 'হিসাব টেস্ট', phone: '01726315133' });
+    const system = jest.spyOn(smsService, 'sendSystemSingle').mockResolvedValue({ success: true });
+    const shopSend = jest.spyOn(smsService, 'sendSingle').mockResolvedValue({});
+
+    await checkoutService.sendPaymentConfirmationSms(paidOrder());
+
+    expect(system).toHaveBeenCalled();
+    expect(shopSend).not.toHaveBeenCalled();
+  });
+
+  test('an SMS gateway failure never becomes a payment failure', async () => {
+    // The money is banked and the shop is extended before this runs. A throw
+    // escaping here would strand a fulfilled order.
+    shopQuery({ _id: 'shop1', name: 'হিসাব টেস্ট', phone: '01726315133' });
+    jest.spyOn(smsService, 'sendSystemSingle').mockRejectedValue(new Error('gateway down'));
+
+    await expect(checkoutService.sendPaymentConfirmationSms(paidOrder())).resolves.toBeNull();
+  });
+
+  test('an unusable phone number is skipped rather than sent to', async () => {
+    shopQuery({ _id: 'shop1', name: 'হিসাব টেস্ট', phone: 'n/a' });
+    const send = jest.spyOn(smsService, 'sendSystemSingle').mockResolvedValue({ success: true });
+
+    await checkoutService.sendPaymentConfirmationSms(
+      paidOrder({ gateway: { trxId: 'X', payerMobile: '' } })
+    );
+
+    expect(send).not.toHaveBeenCalled();
+  });
+});
 
 describe('quote', () => {
   test('a list-price shop is quoted the ladder exactly', async () => {

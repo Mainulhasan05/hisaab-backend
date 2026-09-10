@@ -103,6 +103,28 @@ const LIST_EXCLUDE = '-description -batches -serials -images -catalogImages';
  */
 const LIST_EXCLUDE_WITH_IMAGES = '-description -batches -serials -images';
 
+/**
+ * "This product has no photo, in either pipeline."
+ *
+ * `catalogImages` is the R2 path and `images` the older ImgBB one; a photo is a
+ * photo whoever hosts it, so a product counts as unphotographed only when BOTH
+ * are empty or absent.
+ *
+ * Declared once because two call sites have to agree about it and they are two
+ * hundred lines apart: `getProducts`' `hasPhoto` filter, which decides what the
+ * online catalogue screen shows under "ছবি নেই", and `bulkSetOnlineStatus`'s
+ * `$nor`, which decides what a bulk publish silently skips. A shopkeeper who
+ * filters to the photo-less rows, fixes every one of them and then publishes
+ * must find nothing skipped — that only holds while the filter and the refusal
+ * are literally the same predicate.
+ */
+const NO_PHOTO_MATCH = Object.freeze({
+  $and: [
+    { $or: [{ catalogImages: { $size: 0 } }, { catalogImages: { $exists: false } }] },
+    { $or: [{ images: { $size: 0 } }, { images: { $exists: false } }] },
+  ],
+});
+
 // ── Why this is a Symbol and not the string 'fields' ────────────────────────
 //
 // `getProducts` is called as `productService.getProducts(shopId, req.query, req)`
@@ -260,6 +282,25 @@ class ProductService {
       query.$or = searchOr;
     } else if (lowStockOr) {
       query.$or = lowStockOr;
+    }
+
+    /**
+     * `hasPhoto=false` — the online catalogue's "ছবি নেই" filter.
+     *
+     * Without it the screen can only count the photo-less rows on the page the
+     * shopkeeper happens to be looking at, which is how a shop with four
+     * hundred unphotographed products is told about twenty-three of them and
+     * has no way to reach the rest except by paging.
+     *
+     * Appended to `$and` rather than merged into `$or`: the block above may
+     * have just claimed `$or` for search or low-stock, and a second `$or` key
+     * on the same object silently discards the first. Top-level `$and` and
+     * `$or` are ANDed by Mongo, so this composes with either.
+     */
+    if (options.hasPhoto === 'false' || options.hasPhoto === false) {
+      query.$and = [...(query.$and || []), NO_PHOTO_MATCH];
+    } else if (options.hasPhoto === 'true' || options.hasPhoto === true) {
+      query.$and = [...(query.$and || []), { $nor: [NO_PHOTO_MATCH] }];
     }
 
     const skip = (pageNum - 1) * limitNum;
@@ -3129,24 +3170,19 @@ class ProductService {
     // whoever is hosting it.
     let skippedNoPhoto = 0;
     if (update.isAvailableOnline === true) {
+      // NO_PHOTO_MATCH, not a second copy of the same clause — see its
+      // declaration for why the catalogue filter and this skip have to be the
+      // same predicate rather than two that merely look alike.
       const withoutPhoto = await Product.countDocuments({
         ...filter,
-        $and: [
-          { $or: [{ catalogImages: { $size: 0 } }, { catalogImages: { $exists: false } }] },
-          { $or: [{ images: { $size: 0 } }, { images: { $exists: false } }] },
-        ],
+        ...NO_PHOTO_MATCH,
       });
       skippedNoPhoto = withoutPhoto;
 
       // `$nor` rather than mutating `filter.$or`, which the category branch
       // above may already be using — two `$or` keys on one object silently
       // discard the first.
-      filter.$nor = [{
-        $and: [
-          { $or: [{ catalogImages: { $size: 0 } }, { catalogImages: { $exists: false } }] },
-          { $or: [{ images: { $size: 0 } }, { images: { $exists: false } }] },
-        ],
-      }];
+      filter.$nor = [NO_PHOTO_MATCH];
     }
 
     const result = await Product.updateMany(filter, { $set: update });

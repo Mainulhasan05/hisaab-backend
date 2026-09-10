@@ -64,6 +64,122 @@ function addBangladeshMonths(from, months) {
   return endOfBangladeshDay(iso);
 }
 
+/**
+ * Add whole months and land on the shop's billing day.
+ *
+ * The difference from `addBangladeshMonths` is which day survives. That
+ * function carries the ANCHOR's day forward, so a clamp is permanent:
+ *
+ *     31 Jan +1mo -> 28 Feb   (correct for February)
+ *     28 Feb +1mo -> 28 Mar   (wrong — the 31st is now gone for good)
+ *
+ * This one carries the shop's STORED day forward and re-clamps it fresh each
+ * time, so the day comes back the moment the month is long enough again:
+ *
+ *     billingDay 31
+ *     31 Jan +1mo -> 28 Feb
+ *     28 Feb +1mo -> 31 Mar   (the anchor is 31, not 28)
+ *
+ * `billingDay` is never rewritten by this — a 31 stays a 31 through every
+ * February. That is the entire mechanism; everything else about the feature is
+ * plumbing to get the right day in here.
+ *
+ * ── The transition case, stated rather than hidden ──────────────────────────
+ *
+ * Aligning a shop whose expiry is NOT yet on its billing day can hand it fewer
+ * days than a plain calendar month. A shop paid through 20 March with a billing
+ * day of 5 buying one month lands on 5 April: sixteen days for a month's money.
+ *
+ * This is a one-time transition — once the expiry sits on the billing day every
+ * later renewal is a clean month — but it is real, so it is never applied
+ * silently. `computeExpiry` returns `naiveExpiresAt` and `shortened` beside the
+ * result, the admin sheet previews both before anything is saved, and
+ * `cycleAlignment: 'from_anchor'` turns alignment off for a shop or for one
+ * extension. `_applyExtension` additionally refuses any alignment that would
+ * not advance past the current expiry, so paid time can never be taken back.
+ *
+ * @param {Date|string} from        the anchor to count months from
+ * @param {number} months
+ * @param {number} billingDay       1–31
+ * @returns {Date|null} end of the resulting Bangladesh day
+ */
+function alignToBillingDay(from, months, billingDay) {
+  // `new Date(null)` is the epoch, not an invalid date, so `toBangladeshDateStr`
+  // answers "1970-01-01" for a missing anchor rather than null. Without this
+  // line a null anchor would quietly produce a 1970 expiry — a lockout wearing
+  // an arithmetic bug's clothes. Checked here rather than relying on the
+  // falsy-string guard below, which never fires for that input.
+  if (from === null || from === undefined || from === '') return null;
+
+  const dateStr = toBangladeshDateStr(from);
+  if (!dateStr) return null;
+
+  const day = Math.round(Number(billingDay));
+  if (!Number.isFinite(day) || day < 1 || day > 31) return null;
+
+  const [y, m] = dateStr.split('-').map(Number);
+  const targetMonthIndex = m - 1 + months;
+  const targetYear = y + Math.floor(targetMonthIndex / 12);
+  const targetMonth = ((targetMonthIndex % 12) + 12) % 12;
+  // Day 0 of the following month is the last day of this one. Clamped for THIS
+  // month only; the stored `billingDay` is untouched.
+  const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+  const landedDay = Math.min(day, lastDay);
+  const iso = `${targetYear}-${String(targetMonth + 1).padStart(2, '0')}-${String(landedDay).padStart(2, '0')}`;
+  return endOfBangladeshDay(iso);
+}
+
+/**
+ * A billing day, or null.
+ *
+ * Null-safe and range-checked in ONE place so no caller has to decide what a
+ * `0`, a `"5"` or a `99` means. Anything outside 1–31 is treated as "no
+ * anchor", which degrades to the pre-existing plain-calendar-month behaviour
+ * rather than to an exception — the failure mode for a bad anchor must be a
+ * slightly different renewal date, never a request that throws.
+ */
+function normalizeBillingDay(raw) {
+  if (raw === null || raw === undefined || raw === '') return null;
+  const day = Math.round(Number(raw));
+  if (!Number.isFinite(day) || day < 1 || day > 31) return null;
+  return day;
+}
+
+/** The billing day this shop is anchored to, or null. */
+function billingDayOf(shop) {
+  return normalizeBillingDay(shop?.billing?.billingDay);
+}
+
+/**
+ * Where "now" moves to for a backdated payment, or null for no backdating.
+ *
+ * Only a `receivedAt` that is actually in the PAST is honoured. A future one
+ * would push the period start forward and hand out days nobody has paid for
+ * yet, which is a typo in a date field turning into free access.
+ *
+ * Shared by the payment funnel and the preview so the date the operator is
+ * shown is computed by the same rule as the date that gets written. A preview
+ * that anchored differently from the write would be worse than no preview.
+ */
+function resolveAnchorAt({ backdate, receivedAt, now }) {
+  if (!backdate) return null;
+  const paidOn = receivedAt ? new Date(receivedAt) : now;
+  if (Number.isNaN(paidOn.getTime())) return null;
+  return paidOn < now ? paidOn : null;
+}
+
+/**
+ * Does this shop want month-mode extensions snapped to its billing day?
+ *
+ * Defaults to yes on an absent value, matching the schema default, so a shop
+ * document written before this field existed aligns once it has a billing day.
+ * That is safe because a shop written before this field existed also has no
+ * billing day, and alignment is inert without one.
+ */
+function alignmentOf(shop) {
+  return shop?.billing?.cycleAlignment === 'from_anchor' ? 'from_anchor' : 'billing_day';
+}
+
 class BillingService {
   /** Platform defaults. Never allowed to be the thing that fails a request. */
   async getSettings() {
@@ -100,9 +216,34 @@ class BillingService {
    * Everything lands on the END of a Bangladesh day, so the date the operator
    * typed is the last date the shop can trade.
    *
-   * @returns {{ expiresAt: Date, anchor: Date, days: number|null }}
+   * ── The billing day ─────────────────────────────────────────────────────
+   *
+   * `billingDay` only ever affects MONTH mode, and only when `alignment` is
+   * 'billing_day'. Days-mode and until-mode ignore it entirely: an explicitly
+   * typed date or day count is the operator saying exactly what they want, and
+   * an anchor that quietly moved it somewhere else would be the bug this whole
+   * feature exists to prevent, pointed the other way.
+   *
+   * `naiveExpiresAt` is what the un-aligned arithmetic would have produced, and
+   * `shortened` says whether alignment cost the shop days against it. Both are
+   * returned rather than logged so the admin sheet can show the operator the
+   * trade before they commit to it.
+   *
+   * @returns {{
+   *   expiresAt: Date, anchor: Date, days: number|null,
+   *   naiveExpiresAt: Date, aligned: boolean, shortened: boolean,
+   *   billingDay: number|null,
+   * }}
    */
-  computeExpiry({ currentExpiresAt, mode, value, now = new Date(), anchorAt = null }) {
+  computeExpiry({
+    currentExpiresAt,
+    mode,
+    value,
+    now = new Date(),
+    anchorAt = null,
+    billingDay = null,
+    alignment = 'billing_day',
+  }) {
     if (mode === 'until') {
       const expiresAt = endOfBangladeshDay(value);
       if (!expiresAt || Number.isNaN(expiresAt.getTime())) {
@@ -112,6 +253,10 @@ class BillingService {
         expiresAt,
         anchor: currentExpiresAt || now,
         days: bangladeshDaysBetween(currentExpiresAt || now, expiresAt),
+        naiveExpiresAt: expiresAt,
+        aligned: false,
+        shortened: false,
+        billingDay: null,
       };
     }
 
@@ -146,7 +291,15 @@ class BillingService {
         );
       }
       const expiresAt = addBangladeshDays(anchor, amount);
-      return { expiresAt, anchor, days: bangladeshDaysBetween(currentExpiresAt, expiresAt) };
+      return {
+        expiresAt,
+        anchor,
+        days: bangladeshDaysBetween(currentExpiresAt, expiresAt),
+        naiveExpiresAt: expiresAt,
+        aligned: false,
+        shortened: false,
+        billingDay: null,
+      };
     }
 
     if (mode === 'months') {
@@ -157,8 +310,33 @@ class BillingService {
           400
         );
       }
-      const expiresAt = addBangladeshMonths(anchor, amount);
-      return { expiresAt, anchor, days: bangladeshDaysBetween(currentExpiresAt, expiresAt) };
+
+      // What the arithmetic did before this feature existed. Still computed
+      // even when aligning, because it is the baseline the operator is shown
+      // and the only way `shortened` can mean anything.
+      const naiveExpiresAt = addBangladeshMonths(anchor, amount);
+
+      const day = alignment === 'from_anchor' ? null : normalizeBillingDay(billingDay);
+      // Whole months only. A fractional "1.5 months" has no billing day to land
+      // on, so it falls through to the plain arithmetic rather than silently
+      // rounding someone's period.
+      const alignable = day !== null && Number.isInteger(amount);
+      const alignedExpiresAt = alignable ? alignToBillingDay(anchor, amount, day) : null;
+
+      // A null back from the aligner means it could not produce a date. Fall
+      // back to the plain month rather than throwing: a bad anchor must cost a
+      // shop the alignment, never the renewal.
+      const expiresAt = alignedExpiresAt || naiveExpiresAt;
+
+      return {
+        expiresAt,
+        anchor,
+        days: bangladeshDaysBetween(currentExpiresAt, expiresAt),
+        naiveExpiresAt,
+        aligned: !!alignedExpiresAt,
+        shortened: !!alignedExpiresAt && alignedExpiresAt < naiveExpiresAt,
+        billingDay: alignedExpiresAt ? day : null,
+      };
     }
 
     throw new AppError(
@@ -228,21 +406,67 @@ class BillingService {
    * Deliberately does NOT touch `shop.access` or `shop.isActive`. Renewing a
    * blocked shop leaves it blocked; the caller surfaces that instead of
    * silently undoing an operator's decision.
+   *
+   * `alignment` overrides the shop's stored preference for THIS extension only.
+   * It is never written back — a one-off "don't snap this one" must not quietly
+   * change what the shop's next renewal does.
    */
-  async _applyExtension(shop, { mode, value, now = new Date(), anchorAt = null, becomesPaid }) {
+  async _applyExtension(shop, {
+    mode, value, now = new Date(), anchorAt = null, becomesPaid, alignment = null,
+  }) {
     const before = {
       expiresAt: shop.subscription?.expiresAt || null,
       plan: shop.subscription?.plan,
       state: resolveSubscription(shop, now).state,
+      billingDay: billingDayOf(shop),
     };
 
-    const { expiresAt, days } = this.computeExpiry({
-      currentExpiresAt: shop.subscription?.expiresAt || null,
+    const currentExpiresAt = shop.subscription?.expiresAt || null;
+
+    const computed = this.computeExpiry({
+      currentExpiresAt,
       mode,
       value,
       now,
       anchorAt,
+      billingDay: before.billingDay,
+      alignment: alignment || alignmentOf(shop),
     });
+
+    let { expiresAt, days } = computed;
+
+    /**
+     * Alignment may never take back paid time. A BACKSTOP, not a live branch.
+     *
+     * As the arithmetic currently stands this cannot fire, and the reason is
+     * worth writing down because it is the thing that makes the feature safe:
+     * the anchor is `max(currentExpiresAt, from)`, months are whole and at
+     * least one, and day 1 of any month is later than every day of the month
+     * before it. So an aligned date always lands in a strictly later month than
+     * the anchor, and is therefore always past the current expiry. The
+     * invariant holds structurally, not because of this check.
+     *
+     * It stays because the anchor rule is the kind of thing that gets revised —
+     * a proration feature, a half-month package, a different backdating rule —
+     * and the failure it would introduce is silent: a renewal that quietly
+     * shortens a subscription looks exactly like a renewal. If that day comes,
+     * the shop gets its plain calendar month and the log says why, rather than
+     * losing days nobody meant to take. `billingDay.test.js` asserts the
+     * property directly, so a change that breaks it fails there first.
+     *
+     * Deliberately here and not in `computeExpiry`, which is pure and is also
+     * what the preview calls: the preview must be able to SHOW an alignment
+     * that would shorten against a plain month, which is a real and common
+     * case (see `alignToBillingDay`) and a different thing from this one.
+     */
+    if (computed.aligned && currentExpiresAt && expiresAt <= currentExpiresAt) {
+      logger.warn(
+        `[billing] billing-day alignment for shop ${shop._id} would not advance past ` +
+        `${toBangladeshDateStr(currentExpiresAt)}; falling back to a plain month.`
+      );
+      expiresAt = computed.naiveExpiresAt;
+      days = bangladeshDaysBetween(currentExpiresAt, expiresAt);
+    }
 
     shop.subscription.expiresAt = expiresAt;
     // `status` is a denormalised label the resolver ignores, kept current so
@@ -253,6 +477,32 @@ class BillingService {
       if (before.plan === 'trial') shop.subscription.trialEndedAt = now;
     }
 
+    /**
+     * The feature installs itself on the first PAID month-mode renewal.
+     *
+     * No migration guesses a billing day on anyone's behalf, and no operator
+     * has to set one before the system starts holding a date steady — the day
+     * the shop actually renewed on becomes the day it is billed on.
+     *
+     * Three conditions, each load-bearing:
+     *   · `becomesPaid` — a trial ends on a day count, and treating that as a
+     *     billing anniversary anchors the shop to a date that meant nothing to
+     *     it. Free extensions are excluded for the same reason.
+     *   · month mode — a days-mode or until-mode extension is the operator
+     *     naming a date, not establishing a cycle.
+     *   · no day already — this stamps once and never overwrites. A stored day
+     *     is either an operator's decision or the shop's own history, and a
+     *     renewal is not the place to revise either.
+     */
+    if (becomesPaid && mode === 'months' && before.billingDay === null) {
+      const stamped = normalizeBillingDay(Number(toBangladeshDateStr(expiresAt)?.split('-')[2]));
+      if (stamped !== null) {
+        shop.billing = shop.billing || {};
+        shop.billing.billingDay = stamped;
+        shop.billing.billingDaySetAt = now;
+      }
+    }
+
     await shop.save();
     await invalidateShopAuthCache(shop._id);
 
@@ -260,6 +510,7 @@ class BillingService {
       expiresAt,
       plan: shop.subscription.plan,
       state: resolveSubscription(shop, now).state,
+      billingDay: billingDayOf(shop),
     };
 
     return { before, after, days, expiresAt };
@@ -361,6 +612,66 @@ class BillingService {
   // ── extension ───────────────────────────────────────────────────────────
 
   /**
+   * Where an extension WOULD land. Reads only; writes nothing.
+   *
+   * This exists so the billing day can never surprise anyone. Alignment can
+   * hand a not-yet-aligned shop a short first period (see
+   * `alignToBillingDay`), and the difference between that being a decision and
+   * being a discovery is entirely whether the operator saw the date before
+   * they saved. The admin extend sheet calls this as the form is filled in.
+   *
+   * It is a thin wrapper over `computeExpiry` on purpose: a preview that
+   * computed the date a second way would eventually disagree with the thing it
+   * is previewing, which is the failure this whole subsystem is written to
+   * avoid.
+   *
+   * `shortened` here reports what the arithmetic did. `_applyExtension` will
+   * additionally decline an alignment that fails to advance past the current
+   * expiry, so a preview can legitimately show an alignment that the write
+   * then falls back from — `willAlign` is the honest answer and is computed
+   * with the same rule the writer uses.
+   */
+  async previewExtension(shopId, {
+    mode, value, alignment = null, backdate = false, receivedAt = null,
+  } = {}) {
+    const shop = await this._loadShop(shopId);
+    const now = new Date();
+    const currentExpiresAt = shop.subscription?.expiresAt || null;
+    const anchorAt = resolveAnchorAt({ backdate, receivedAt, now });
+
+    const computed = this.computeExpiry({
+      currentExpiresAt,
+      mode,
+      value,
+      now,
+      anchorAt,
+      billingDay: billingDayOf(shop),
+      alignment: alignment || alignmentOf(shop),
+    });
+
+    const willAlign =
+      computed.aligned && (!currentExpiresAt || computed.expiresAt > currentExpiresAt);
+    const expiresAt = willAlign ? computed.expiresAt : computed.naiveExpiresAt;
+
+    return {
+      expiresAt,
+      expiresOn: toBangladeshDateStr(expiresAt),
+      naiveExpiresAt: computed.naiveExpiresAt,
+      naiveExpiresOn: toBangladeshDateStr(computed.naiveExpiresAt),
+      days: bangladeshDaysBetween(currentExpiresAt || now, expiresAt),
+      currentExpiresAt,
+      currentExpiresOn: currentExpiresAt ? toBangladeshDateStr(currentExpiresAt) : null,
+      billingDay: billingDayOf(shop),
+      alignment: alignment || alignmentOf(shop),
+      backdatedTo: anchorAt,
+      aligned: willAlign,
+      // True only when alignment is actually being applied AND costs days
+      // against the plain month. A fallback is not a shortening.
+      shortened: willAlign && computed.shortened,
+    };
+  }
+
+  /**
    * Extend (or correct) a shop's subscription, with or without payment.
    *
    * `payment: null` is a free extension and demands a reason. That is not
@@ -375,18 +686,24 @@ class BillingService {
    * @param {number|string} opts.value  days | months | ISO date
    * @param {Object|null} opts.payment  {amount, method, transactionId, receivedAt, notes}
    * @param {string} [opts.reason]      required when payment is null, or when moving expiry backwards
+   * @param {'billing_day'|'from_anchor'} [opts.alignment] override the shop's billing-day
+   *        preference for this extension only
    */
-  async extendSubscription(actor, shopId, { mode, value, payment = null, reason, note } = {}) {
+  async extendSubscription(actor, shopId, { mode, value, payment = null, reason, note, alignment = null } = {}) {
     const shop = await this._loadShop(shopId);
     const now = new Date();
 
     // Preview the landing point before writing anything, so both guards below
-    // can refuse without having half-applied the change.
+    // can refuse without having half-applied the change. Reads the same billing
+    // day and alignment `_applyExtension` will, or the guards would be judging
+    // a date that is not the one about to be written.
     const preview = this.computeExpiry({
       currentExpiresAt: shop.subscription?.expiresAt || null,
       mode,
       value,
       now,
+      billingDay: billingDayOf(shop),
+      alignment: alignment || alignmentOf(shop),
     });
 
     if (!payment && !reason) {
@@ -417,6 +734,7 @@ class BillingService {
         mode,
         value,
         note,
+        alignment,
         source: 'manual',
         ...payment,
       });
@@ -426,6 +744,7 @@ class BillingService {
       mode,
       value,
       now,
+      alignment,
       becomesPaid: false, // free days never convert a trial into a paid plan
     });
 
@@ -481,6 +800,10 @@ class BillingService {
     source = 'manual',
     actor,
     gateway,
+    // One-off override of the shop's billing-day preference. The gateway path
+    // never sends it — a self-serve renewal always follows the shop's standing
+    // setting, because there is no operator on that path to judge the trade.
+    alignment = null,
   } = {}) {
     const paid = Number(amount);
     if (!Number.isFinite(paid) || paid < 0) {
@@ -502,10 +825,7 @@ class BillingService {
     const shop = await this._loadShop(shopId);
     const now = new Date();
     const paidOn = receivedAt ? new Date(receivedAt) : now;
-    // Only honour a backdate that is actually in the past. A future
-    // `receivedAt` would otherwise push the period start forward and hand out
-    // days nobody has paid for yet.
-    const anchorAt = backdate && paidOn < now ? paidOn : null;
+    const anchorAt = resolveAnchorAt({ backdate, receivedAt, now });
     const from = anchorAt || now;
     const periodStart = shop.subscription?.expiresAt > from ? shop.subscription.expiresAt : from;
 
@@ -519,6 +839,7 @@ class BillingService {
       value,
       now,
       anchorAt,
+      alignment,
       becomesPaid: true,
     });
 
@@ -889,6 +1210,8 @@ class BillingService {
       smsUnitPrice: shop.billing?.smsUnitPrice,
       cycleMonths: shop.billing?.cycleMonths,
       graceDays: shop.subscription?.graceDays,
+      billingDay: billingDayOf(shop),
+      cycleAlignment: alignmentOf(shop),
     };
 
     const numeric = (v) => (v === undefined || v === null || v === '' ? undefined : Number(v));
@@ -913,6 +1236,42 @@ class BillingService {
     if (cycleMonths !== undefined) shop.billing.cycleMonths = Math.max(1, Math.round(cycleMonths));
     if (patch.notes !== undefined) shop.billing.notes = patch.notes;
     if (patch.billingContact) shop.billing.billingContact = patch.billingContact;
+
+    /**
+     * The billing day. `null` is a meaningful value here and clearing it must
+     * be possible — it puts the shop back on plain calendar months — so an
+     * explicit `null` or `''` clears, and only an ABSENT key leaves it alone.
+     * That is why this cannot go through `numeric()` above, which folds those
+     * three cases together.
+     */
+    if (patch.billingDay !== undefined) {
+      const wanted = patch.billingDay === null || patch.billingDay === ''
+        ? null
+        : normalizeBillingDay(patch.billingDay);
+      if (patch.billingDay !== null && patch.billingDay !== '' && wanted === null) {
+        throw new AppError(
+          'Billing day must be a day of the month between 1 and 31',
+          'বিলিং তারিখ ১ থেকে ৩১ এর মধ্যে হতে হবে',
+          400
+        );
+      }
+      if (wanted !== before.billingDay) {
+        shop.billing.billingDay = wanted;
+        shop.billing.billingDaySetAt = wanted === null ? null : new Date();
+      }
+    }
+
+    if (patch.cycleAlignment !== undefined) {
+      if (!['billing_day', 'from_anchor'].includes(patch.cycleAlignment)) {
+        throw new AppError(
+          'Cycle alignment must be billing_day or from_anchor',
+          'বিলিং সাইকেলের ধরন সঠিক নয়',
+          400
+        );
+      }
+      shop.billing.cycleAlignment = patch.cycleAlignment;
+    }
+
     // Grace lives on `subscription` because it modifies expiry behaviour, but
     // it is negotiated alongside price, so it is set from the same form.
     if (graceDays !== undefined) shop.subscription.graceDays = Math.round(graceDays);
@@ -925,12 +1284,35 @@ class BillingService {
       smsUnitPrice: shop.billing.smsUnitPrice,
       cycleMonths: shop.billing.cycleMonths,
       graceDays: shop.subscription.graceDays,
+      billingDay: billingDayOf(shop),
+      cycleAlignment: alignmentOf(shop),
     };
 
     const graceChanged = before.graceDays !== after.graceDays;
+    const priceChanged = before.monthlyPrice !== after.monthlyPrice
+      || before.smsUnitPrice !== after.smsUnitPrice;
+    const billingDayChanged = before.billingDay !== after.billingDay
+      || before.cycleAlignment !== after.cycleAlignment;
+
+    /**
+     * One event type, chosen most-specific-first.
+     *
+     * `billing_day_changed` only wins when the price did NOT move, so a form
+     * that changes both still files under `price_changed` — the money is what
+     * an operator scans the timeline for, and burying a price change under a
+     * date change is how "why is this shop on ৳800?" stops being answerable.
+     */
+    let eventType = 'price_changed';
+    if (!priceChanged && billingDayChanged) eventType = 'billing_day_changed';
+    else if (!priceChanged && graceChanged) eventType = 'grace_changed';
+
+    const dayCopy = after.billingDay === null
+      ? 'no fixed billing day'
+      : `billed on day ${after.billingDay} (${after.cycleAlignment})`;
+
     await this._recordEvent({
       shop,
-      type: graceChanged && before.monthlyPrice === after.monthlyPrice ? 'grace_changed' : 'price_changed',
+      type: eventType,
       actor,
       before,
       after,
@@ -940,7 +1322,7 @@ class BillingService {
         actionBn: 'বিলিং তথ্য পরিবর্তন',
         description:
           `Updated billing for ${shop.name}: ৳${after.monthlyPrice}/month, ` +
-          `৳${after.smsUnitPrice}/SMS, ${after.graceDays} grace day(s).` +
+          `৳${after.smsUnitPrice}/SMS, ${after.graceDays} grace day(s), ${dayCopy}.` +
           `${patch.reason ? ` Reason: ${patch.reason}` : ''}`,
         descriptionBn: `${shop.name} এর বিলিং তথ্য পরিবর্তন করা হয়েছে`,
       },
@@ -1269,7 +1651,11 @@ class BillingService {
         severity: resolved.severity,
         expiresAt: resolved.expiresAt,
         daysRemaining: resolved.daysRemaining,
-        monthlyPrice: shop.billing?.monthlyPrice ?? shop.subscription?.monthlyPrice ?? 0,
+        monthlyPrice: shop.billing?.monthlyPrice ?? 0,
+        // The operator's call list is organised by date, so the day this shop
+        // is billed on belongs in the list itself rather than one click away.
+        billingDay: billingDayOf(shop),
+        cycleAlignment: alignmentOf(shop),
         smsRemaining: quotaMap.get(String(shop._id)) || 0,
         lastPaymentAt: pay?.lastAt || null,
         lifetimeValue: pay?.lifetime || 0,
@@ -1332,7 +1718,7 @@ class BillingService {
           { 'subscription.expiresAt': { $exists: false } },
         ],
       })
-        .select('billing.monthlyPrice subscription.plan subscription.monthlyPrice')
+        .select('billing.monthlyPrice subscription.plan')
         .lean(),
       PlatformPayment.aggregate([
         { $match: { receivedAt: { $gte: monthStart } } },
@@ -1357,10 +1743,12 @@ class BillingService {
     ]);
 
     const paidShops = activeShops.filter((s) => s.subscription?.plan !== 'trial');
-    const mrr = paidShops.reduce(
-      (sum, s) => sum + (s.billing?.monthlyPrice ?? s.subscription?.monthlyPrice ?? 0),
-      0
-    );
+    // `billing.monthlyPrice` only. `subscription.monthlyPrice` is a deprecated
+    // twin that also defaults to 800, and reading it as a fallback meant two
+    // fields could disagree about one shop's price with nothing to say which
+    // won — the defect SUBSCRIPTION_PLAN.md §2.5 recorded. The overdue
+    // aggregation above already reads the live field alone; this now matches it.
+    const mrr = paidShops.reduce((sum, s) => sum + (s.billing?.monthlyPrice ?? 0), 0);
 
     const byType = Object.fromEntries(collected.map((c) => [c._id, { total: c.total, count: c.count }]));
 
@@ -1381,5 +1769,10 @@ class BillingService {
 const billingService = new BillingService();
 
 module.exports = billingService;
-// Exported for the month-arithmetic tests; not part of the service contract.
+// Exported for the month-arithmetic tests and the backfill script; not part of
+// the service contract.
 module.exports.addBangladeshMonths = addBangladeshMonths;
+module.exports.alignToBillingDay = alignToBillingDay;
+module.exports.normalizeBillingDay = normalizeBillingDay;
+module.exports.billingDayOf = billingDayOf;
+module.exports.alignmentOf = alignmentOf;

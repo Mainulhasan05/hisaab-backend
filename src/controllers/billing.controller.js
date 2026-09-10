@@ -58,6 +58,26 @@ exports.startTrial = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * Where an extension would land, without applying it.
+ *
+ * Read-only despite being a POST: the request carries a mode, a value and an
+ * optional date, which do not belong in a query string, and it must not be
+ * cached by anything between here and the panel. Nothing is written.
+ *
+ * The extend sheet calls this as the operator fills the form, so that a
+ * billing-day alignment that costs the shop days is seen before it is saved
+ * rather than discovered afterwards.
+ */
+exports.previewExtension = asyncHandler(async (req, res) => {
+  const data = await billingService.previewExtension(req.params.id, withLegacyPaymentFields(req.body));
+  return ApiResponse.success(res, {
+    data,
+    message: 'Extension preview',
+    messageBn: 'মেয়াদের হিসাব',
+  });
+});
+
 exports.extendSubscription = asyncHandler(async (req, res) => {
   const data = await billingService.extendSubscription(actorOf(req), req.params.id, req.body);
   return ApiResponse.success(res, {

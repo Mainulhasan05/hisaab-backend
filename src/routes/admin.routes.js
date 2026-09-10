@@ -242,6 +242,10 @@ router.patch('/billing/payments/:paymentId', billingController.amendPayment);
 router.post('/billing/payments/:paymentId/reverse', billingController.reversePayment);
 router.get('/shops/:id/billing', billingController.getShopBilling);
 router.post('/shops/:id/trial', billingController.startTrial);
+// Read-only despite the verb — it writes nothing and exists so the extend
+// sheet can show where a renewal lands before it is committed. POST because
+// the mode/value/date it takes do not belong in a query string.
+router.post('/shops/:id/subscription/preview', billingController.previewExtension);
 router.post('/shops/:id/subscription/extend', billingController.extendSubscription);
 router.post('/shops/:id/access', billingController.setAccess);
 router.patch('/shops/:id/billing', billingController.updateBillingProfile);

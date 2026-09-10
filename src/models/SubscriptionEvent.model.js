@@ -29,6 +29,11 @@ const EVENT_TYPES = [
   'plan_changed',
   'price_changed',
   'grace_changed',
+  // The shop's fixed billing day, or its alignment mode, moved. A separate
+  // type from `price_changed` because it answers a different question — not
+  // "what does this shop pay?" but "why did its renewal date jump?" — and the
+  // second question is the one asked during a collection call.
+  'billing_day_changed',
 ];
 
 const subscriptionEventSchema = new mongoose.Schema({
@@ -53,15 +58,21 @@ const subscriptionEventSchema = new mongoose.Schema({
     id: { type: mongoose.Schema.Types.ObjectId },
     name: { type: String },
   },
+  // `billingDay` rides along on both sides so the timeline can show a date
+  // moving without the reader having to infer it from two expiry stamps a
+  // month apart. Absent on every event written before the field existed, which
+  // the UI renders as "unchanged" rather than as "cleared".
   before: {
     expiresAt: { type: Date },
     plan: { type: String },
     state: { type: String },
+    billingDay: { type: Number },
   },
   after: {
     expiresAt: { type: Date },
     plan: { type: String },
     state: { type: String },
+    billingDay: { type: Number },
   },
   // false = days granted without money changing hands. Requires `reason`.
   paid: {

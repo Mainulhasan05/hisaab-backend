@@ -2075,8 +2075,22 @@ class SMSService {
           // case the receipt used to be silent about, and the only figure the
           // customer needs that the bill itself cannot give them.
           totalDue: totalDueAfter,
+          /**
+           * What the goods came to before the invoice discount, and what came
+           * off. The receipt prints the PERCENTAGE derived from the two, and
+           * only when there was one — see `receiptDiscountPercent`.
+           *
+           * Read off the saved document rather than the request: `discountAmount`
+           * is resolved by `Sale.pre('save')` from `discount` + `discountType`
+           * and bounded to the subtotal, so it is the only figure that means
+           * taka on both a fixed and a percentage invoice. The request's own
+           * `discount` holds "10" on a percentage sale, and a receipt built from
+           * that would tell a customer they saved ৳10 on a ৳8,900 bill.
+           */
+          subtotal: saleDoc?.subtotal ?? saleData.subtotal ?? 0,
+          discountAmount: saleDoc?.discountAmount ?? 0,
           shopName: shop.name,
-          language: shop.settings?.smsSettings?.language || 'bn',
+          language: shop.settings?.smsSettings?.language || 'en',
         });
 
         // Send SMS with invoice metadata. The shop name rides along because it
@@ -2210,7 +2224,7 @@ class SMSService {
     let shopName = 'Your Shop';
     // The picker has to be shown in the language the shop's receipts actually
     // go out in, or it is advertising a body nobody will receive.
-    let language = 'bn';
+    let language = 'en';
     // The shop's own receipt wording, when an operator has set one. Same
     // reason: the picker's job is to show what this shop sends, and for a shop
     // with a custom template the platform body is not it.
@@ -2222,7 +2236,7 @@ class SMSService {
         if (shop?.name) {
           shopName = getGsmSafeShopName(shop.name);
         }
-        language = shop?.settings?.smsSettings?.language || 'bn';
+        language = shop?.settings?.smsSettings?.language || 'en';
         invoiceTemplate = shop?.settings?.smsSettings?.invoiceTemplate || '';
       } catch (err) {
         logger.error(`SMS: Failed to fetch shop name for templates: ${err.message}`);

@@ -55,6 +55,13 @@ const getAdapter = () => paystation.getAdapter();
 const { AppError } = require('../middleware/error.middleware');
 const { PLATFORM_PAYMENT_METHODS, PLATFORM_PAYMENT_TYPES, SUBSCRIPTION_PRICE } = require('../config/constants');
 const { resolveSubscription } = require('../utils/subscriptionState.util');
+/* Required as a module for the same reason as the gateway adapter above: the
+ * SMS service pulls in the whole dispatcher/quota stack, and a destructured
+ * reference could not be stubbed by the checkout tests. */
+const smsService = require('./sms.service');
+const { isValidPhone } = require('../utils/phone.util');
+const { toBengaliNumber, formatCurrencyBn, BENGALI_MONTHS } = require('../utils/bengali.util');
+const { toBangladeshDateStr } = require('../utils/bdTime.util');
 const logger = require('../utils/logger.util');
 
 /**
@@ -115,6 +122,21 @@ function mapPaymentMethod(raw) {
 }
 
 const round2 = (n) => Number((Number(n) || 0).toFixed(2));
+
+/**
+ * A Bangladesh calendar date, in Bangla, safe on a UTC server.
+ *
+ * Built from `toBangladeshDateStr` rather than handed to `formatDateBn`, which
+ * reads the SERVER's local date. An expiry is stored as the last instant of a
+ * Bangladesh day (17:59:59Z), so on a server west of UTC `formatDateBn` would
+ * tell a shopkeeper their subscription ends a day earlier than it does.
+ */
+function bengaliDate(date) {
+  const iso = toBangladeshDateStr(date);
+  if (!iso) return '';
+  const [y, m, d] = iso.split('-').map(Number);
+  return `${toBengaliNumber(d)} ${BENGALI_MONTHS[m - 1]} ${toBengaliNumber(y)}`;
+}
 
 class PlatformCheckoutService {
   /**
@@ -601,7 +623,79 @@ class PlatformCheckoutService {
     logger.info(
       `[checkout] order ${claimed._id} fulfilled for shop ${shop._id} (${claimed.kind})`
     );
+
+    // Deliberately not awaited. The subscription is already extended and the
+    // ledger row written; an SMS gateway having a bad minute must not turn a
+    // completed fulfilment into a thrown error that strands the order at `paid`.
+    this.sendPaymentConfirmationSms(claimed).catch(() => {});
+
     return claimed;
+  }
+
+  /**
+   * Tell the person who paid that the money arrived. Never throws.
+   *
+   * ── Who gets it ────────────────────────────────────────────────────────────
+   *
+   * `gateway.payerMobile` — the bKash/Nagad number the payment was actually made
+   * from, which PayStation returns on a settled transaction. That is "the payment
+   * maker" literally: a manager who renews on the owner's behalf gets the
+   * confirmation for the money that left THEIR wallet. The shop's billing contact
+   * is the fallback for card payments, where there is no payer number at all.
+   *
+   * ── Why this is a platform send and not a shop send ────────────────────────
+   *
+   * `sendSystemSingle` bills the segments to us and charges the shop's SMS quota
+   * nothing. Routing this through `sendSingle` would make a shop pay, out of the
+   * credits it just bought, for the receipt telling it the credits arrived.
+   *
+   * Written in Bangla and kept under two UCS-2 segments, because the platform
+   * pays per segment on every renewal on the platform. See the SMS receipt note:
+   * Bangla is 67 characters a segment, not 160.
+   */
+  async sendPaymentConfirmationSms(order) {
+    try {
+      // Re-read rather than trusting the copy fulfilment started with: the new
+      // expiry is the whole point of the message, and `applySubscriptionPayment`
+      // wrote it to its OWN instance of the shop document.
+      const shop = await Shop.findById(order.shop)
+        .select('name phone billing.billingContact subscription.expiresAt')
+        .lean();
+      if (!shop) return null;
+
+      const payer = order.gateway?.payerMobile;
+      const phone = [payer, shop.billing?.billingContact?.phone, shop.phone]
+        .map((p) => (p ? String(p).trim() : ''))
+        .find((p) => p && isValidPhone(p));
+
+      if (!phone) {
+        logger.warn(`[checkout] order ${order._id} fulfilled but no valid phone to confirm to`);
+        return null;
+      }
+
+      const amount = formatCurrencyBn(order.amount);
+      // The trx id is what a shopkeeper reads back to us on the phone when they
+      // think a payment went missing, so it is worth the characters it costs.
+      const trx = order.gateway?.trxId ? ` TrxID: ${order.gateway.trxId}` : '';
+
+      const message = order.kind === PLATFORM_ORDER_KIND.SUBSCRIPTION
+        ? `পেমেন্ট সফল হয়েছে। ${amount} পেয়েছি। আপনার মেয়াদ ${bengaliDate(shop.subscription?.expiresAt)} পর্যন্ত বাড়ানো হয়েছে।${trx}`
+        : `পেমেন্ট সফল হয়েছে। ${amount} পেয়েছি। ${toBengaliNumber(order.smsQuantity)}টি এসএমএস যোগ হয়েছে।${trx}`;
+
+      await smsService.sendSystemSingle({
+        phone,
+        message,
+        audience: 'platform_payment_receipt',
+      });
+
+      logger.info(`[checkout] payment confirmation sent to ${phone} for order ${order._id}`);
+      return true;
+    } catch (err) {
+      // The money is banked and the shop is extended. A failed receipt is worth
+      // a log line and nothing more — it must never look like a failed payment.
+      logger.error(`[checkout] could not send payment confirmation for ${order._id}: ${err.message}`);
+      return null;
+    }
   }
 
   /**
@@ -688,10 +782,50 @@ class PlatformCheckoutService {
       else if (result.pending) summary.pending += 1;
     }
 
+    /* ── Orders the gateway has already named ──────────────────────────────
+     *
+     * A `gateway.trxId` only ever comes from PayStation, and PayStation only
+     * issues one when a payment instrument actually ran. So an order still
+     * sitting at `initiated` WITH a trx id is not an abandoned checkout — it is
+     * money we have failed to recognise, and the abandon rule below must never
+     * touch it.
+     *
+     * This is the escape hatch for the failure that produced it: the gateway
+     * answered `successful`, a word this code did not know, so the order stayed
+     * `initiated` and would have been written off 24 hours later with ৳800 of a
+     * shop's money against it. The word list is fixed; this makes the NEXT
+     * unknown word cost a log line instead of a payment.
+     */
+    const named = await PlatformOrder.find({
+      status: PLATFORM_ORDER_STATUS.INITIATED,
+      createdAt: { $lte: cutoffOld },
+      'gateway.trxId': { $nin: [null, ''] },
+    }).limit(25);
+
+    for (const order of named) {
+      logger.error(
+        `[checkout] order ${order._id} (${order.invoiceNumber}) is past the abandon window but `
+        + `carries gateway trx ${order.gateway.trxId} — re-checking instead of abandoning`
+      );
+      summary.checked += 1;
+      const result = await this.verifyOrder(order._id, { reason: 'sweep' }).catch(() => null);
+      if (result?.fulfilled) summary.fulfilled += 1;
+      else if (result?.failed) summary.failed += 1;
+      else if (result?.pending) summary.pending += 1;
+    }
+
     // Old and still unresolved. Marked rather than deleted — "this shop tried to
     // pay us and walked away" is a fact worth keeping.
+    //
+    // The trx-id exclusion is load-bearing, not defensive: abandoning an order
+    // the gateway has named is how a real payment becomes unrecoverable, since
+    // nothing ever looks at an `abandoned` order again.
     const aged = await PlatformOrder.updateMany(
-      { status: PLATFORM_ORDER_STATUS.INITIATED, createdAt: { $lte: cutoffOld } },
+      {
+        status: PLATFORM_ORDER_STATUS.INITIATED,
+        createdAt: { $lte: cutoffOld },
+        'gateway.trxId': { $in: [null, ''] },
+      },
       { $set: { status: PLATFORM_ORDER_STATUS.ABANDONED, failureReason: 'Never completed' } }
     );
     summary.abandoned = aged.modifiedCount || 0;

@@ -67,6 +67,23 @@ describe('SMS templates (mirrored in hisaab-frontend/lib/sms/templates.js)', () 
   });
 
   describe('buildSaleReceipt', () => {
+    /**
+     * English is the platform default since 2026-09-10, so every test below
+     * that asserts Bangla NAMES Bangla. That reads as noise until you see what
+     * it prevents: without it these tests assert only "whatever the default is"
+     * and quietly stop covering the vocabulary they were written for the day
+     * the default moves again.
+     */
+    it('defaults to English when the shop has not chosen a language', () => {
+      expect(
+        buildSaleReceipt({
+          invoiceNo: 'INV-1', total: 2500, paid: 1500, due: 1000, shopName: 'Rahim Store',
+        })
+      ).toBe(
+        'Inv:INV-1\nTotal:Tk2500\nPaid:Tk1500\nDue:Tk1000\nThanks for visiting\n- Rahim Store'
+      );
+    });
+
     it('renders the exact Bangla receipt body', () => {
       expect(
         buildSaleReceipt({
@@ -75,6 +92,7 @@ describe('SMS templates (mirrored in hisaab-frontend/lib/sms/templates.js)', () 
           paid: 1500,
           due: 1000,
           shopName: 'Rahim Store',
+          language: 'bn',
         })
       ).toBe(
         'চালান INV-20260814-0042\nবিল ৳2500\nজমা ৳1500\nবাকি ৳1000\nধন্যবাদ\n- Rahim Store'
@@ -94,6 +112,85 @@ describe('SMS templates (mirrored in hisaab-frontend/lib/sms/templates.js)', () 
       ).toBe(
         'Inv:INV-20260814-0042\nTotal:Tk2500\nPaid:Tk1500\nDue:Tk1000\nThanks for visiting\n- Rahim Store'
       );
+    });
+
+    /* ── The discount line ───────────────────────────────────────────────────
+     *
+     * `total` on a receipt is already NET of the discount, so without this line
+     * the concession the shop made is invisible on the only document the
+     * customer keeps. It prints the PERCENTAGE, and only when there is one — a
+     * line that says nothing still costs a character in a message billed by
+     * segment. */
+    describe('the discount line', () => {
+      const sale = {
+        invoiceNo: 'INV-1', total: 900, paid: 900, due: 0, shopName: 'Rahim Store',
+      };
+
+      it('is absent when the sale gave no discount', () => {
+        expect(buildSaleReceipt({ ...sale, subtotal: 900, discountAmount: 0 }))
+          .not.toContain('Discount');
+      });
+
+      it('is absent when the caller supplies no discount figures at all', () => {
+        // Every caller that predates this field, and the re-send of any sale
+        // written before `Sale.discountAmount` existed.
+        expect(buildSaleReceipt(sale)).not.toContain('Discount');
+      });
+
+      it('prints the percentage when there is a discount', () => {
+        expect(buildSaleReceipt({ ...sale, subtotal: 1000, discountAmount: 100 }))
+          .toContain('Discount:10%');
+      });
+
+      /**
+       * The reason the percentage is derived from the MONEY rather than read
+       * off `discountType`. A shop that types a flat ৳50 and a shop that types
+       * 5% have given the same customer the same thing on a ৳1,000 bill, and
+       * the receipt must not depend on which box the cashier used.
+       */
+      it('reads the same for a fixed discount and the percentage that equals it', () => {
+        const fixed = buildSaleReceipt({ ...sale, subtotal: 1000, discountAmount: 50 });
+        const pct = buildSaleReceipt({ ...sale, subtotal: 1000, discountAmount: 1000 * 0.05 });
+        expect(fixed).toBe(pct);
+        expect(fixed).toContain('Discount:5%');
+      });
+
+      it('keeps one decimal place and drops a trailing zero', () => {
+        expect(buildSaleReceipt({ ...sale, subtotal: 1000, discountAmount: 33 }))
+          .toContain('Discount:3.3%');
+        expect(buildSaleReceipt({ ...sale, subtotal: 1000, discountAmount: 200 }))
+          .toContain('Discount:20%');
+      });
+
+      /* A ৳0.40 courtesy off ৳1,000 is not a discount worth a line, and
+       * `Discount:0%` is a line the customer reads and learns nothing from. */
+      it('prints nothing when the discount rounds away to zero percent', () => {
+        expect(buildSaleReceipt({ ...sale, subtotal: 1000, discountAmount: 0.4 }))
+          .not.toContain('Discount');
+      });
+
+      it('prints nothing rather than dividing by a zero subtotal', () => {
+        const message = buildSaleReceipt({ ...sale, subtotal: 0, discountAmount: 100 });
+        expect(message).not.toContain('Discount');
+        expect(message).not.toContain('NaN');
+        expect(message).not.toContain('Infinity');
+      });
+
+      it('uses the shop’s own word for it in Bangla', () => {
+        expect(buildSaleReceipt({
+          ...sale, subtotal: 1000, discountAmount: 100, language: 'bn',
+        })).toContain('ছাড় 10%');
+      });
+
+      /* It sits under the total because that is the figure it explains. */
+      it('sits between the total and the paid line', () => {
+        const lines = buildSaleReceipt({
+          ...sale, total: 900, paid: 500, due: 400, subtotal: 1000, discountAmount: 100,
+        }).split('\n');
+        expect(lines[1]).toBe('Total:Tk900');
+        expect(lines[2]).toBe('Discount:10%');
+        expect(lines[3]).toBe('Paid:Tk500');
+      });
     });
 
     it('names the shop once, at the sign-off only', () => {
@@ -120,6 +217,7 @@ describe('SMS templates (mirrored in hisaab-frontend/lib/sms/templates.js)', () 
         due: 390,
         totalDue: 2990,
         shopName: 'Rahim Store',
+        language: 'bn',
       });
       expect(message).toContain('বাকি ৳390');
       expect(message).toContain('মোট বাকি ৳2990');
@@ -152,13 +250,13 @@ describe('SMS templates (mirrored in hisaab-frontend/lib/sms/templates.js)', () 
 
     it('drops the zero lines a cash sale and a credit sale do not need', () => {
       const cash = buildSaleReceipt({
-        invoiceNo: 'INV-1', total: 100, paid: 100, due: 0, shopName: 'Rahim Store',
+        invoiceNo: 'INV-1', total: 100, paid: 100, due: 0, shopName: 'Rahim Store', language: 'bn',
       });
       expect(cash).not.toContain('বাকি');
       expect(cash).toContain('জমা ৳100');
 
       const credit = buildSaleReceipt({
-        invoiceNo: 'INV-1', total: 100, paid: 0, due: 100, shopName: 'Rahim Store',
+        invoiceNo: 'INV-1', total: 100, paid: 0, due: 100, shopName: 'Rahim Store', language: 'bn',
       });
       expect(credit).not.toContain('জমা');
       expect(credit).toContain('বাকি ৳100');
@@ -173,6 +271,7 @@ describe('SMS templates (mirrored in hisaab-frontend/lib/sms/templates.js)', () 
         dueSettled: 2200,
         totalDue: 400,
         shopName: 'Rahim Store',
+        language: 'bn',
       });
       expect(message).toContain('আগের বাকি জমা ৳2200');
       expect(message).toContain('মোট বাকি ৳400');
@@ -194,6 +293,7 @@ describe('SMS templates (mirrored in hisaab-frontend/lib/sms/templates.js)', () 
           dueSettled: 9500,
           totalDue: 4300,
           shopName: 'হিসাব ফ্যাশন গ্যালারী',
+          language: 'bn',
         })
       );
       expect(info.encoding).toBe('Unicode');
@@ -524,8 +624,11 @@ describe('per-shop invoice SMS templates', () => {
     it('sends the platform receipt, byte for byte, when the shop has no template', () => {
       // The regression that matters most: every shop on the platform has an
       // empty template, and none of their receipts may change.
-      expect(buildInvoiceSms(facts)).toBe(
+      expect(buildInvoiceSms({ ...facts, language: 'bn' })).toBe(
         'চালান INV-20260814-0042\nবিল ৳2500\nজমা ৳1500\nবাকি ৳1000\nধন্যবাদ\n- Rahim Store'
+      );
+      expect(buildInvoiceSms(facts)).toBe(
+        'Inv:INV-20260814-0042\nTotal:Tk2500\nPaid:Tk1500\nDue:Tk1000\nThanks for visiting\n- Rahim Store'
       );
       expect(buildInvoiceSms({ ...facts, template: '' })).toBe(buildInvoiceSms(facts));
       expect(buildInvoiceSms({ ...facts, template: '   ' })).toBe(buildInvoiceSms(facts));
