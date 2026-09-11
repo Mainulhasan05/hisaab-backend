@@ -95,7 +95,27 @@ beforeEach(() => {
   // writes, and the allocation onto bills has its own file
   // (`supplierAdvanceReallocation.test.js`).
   jest.spyOn(Payment, 'aggregate').mockResolvedValue([]);
-  jest.spyOn(Payment, 'create').mockImplementation(async (rows) => {
+  /**
+   * Mongoose's own rule, enforced by the mock.
+   *
+   * `Model.create()` refuses more than one document inside a session unless
+   * `ordered: true` is set — it cannot issue an unordered parallel insert in a
+   * transaction — and it throws a bare `MongooseError`, which carries no status
+   * and no `isOperational`, so the API answered with its generic crash message.
+   *
+   * Every straddling-payment test below passed anyway, because this mock took
+   * the rows and ignored the options. A vendor carrying an opening balance
+   * therefore could not be paid AT ALL in production while the suite that
+   * exists to cover exactly that case stayed green. Asserting the contract the
+   * real driver enforces is the only thing that closes that gap.
+   */
+  jest.spyOn(Payment, 'create').mockImplementation(async (rows, options = {}) => {
+    if (Array.isArray(rows) && rows.length > 1 && options.session && !options.ordered) {
+      throw Object.assign(
+        new Error('Cannot call `create()` with a session and multiple documents unless `ordered: true` is set'),
+        { name: 'MongooseError' }
+      );
+    }
     created.push(...rows);
     return rows;
   });
@@ -105,6 +125,13 @@ beforeEach(() => {
 });
 
 afterEach(() => jest.restoreAllMocks());
+
+/**
+ * Stands in for a Mongoose session. Nothing reads it beyond being truthy — its
+ * whole job is to make `sessionOpt` non-empty, which is what puts `Payment.create`
+ * under the driver's ordered-insert rule.
+ */
+const FAKE_SESSION = { id: 'test-session' };
 
 const pay = (amount, over = {}) => settlement.settleSupplierDue({
   shopId: SHOP, userId: USER, supplierId: SUPPLIER, amount, method: 'cash', ...over,
@@ -215,6 +242,30 @@ describe('a straddling payment is written as two rows, never one', () => {
 
     expect(created).toHaveLength(1);
     expect(created[0].purchase).toBeDefined();
+  });
+
+  it('writes both rows inside a transaction, which needs an ordered insert', async () => {
+    // The production shape. Every other test here calls the settlement with no
+    // session, so the driver rule the mock enforces — more than one document
+    // under a session must be an ORDERED insert — was never once exercised, and
+    // a straddling payment that passed every assertion above threw
+    // `MongooseError` the moment a real request ran it inside `runInTransaction`.
+    //
+    // The shopkeeper saw the generic crash message, so it read as a flaky
+    // server rather than as "this vendor can never be paid".
+    stub({
+      openingDue: 20000, totalAmount: 10000,
+      bills: [bill({ invoiceNo: 'PUR-1', totalAmount: 10000, paid: 0, date: new Date() })],
+    });
+
+    await settlement.settleSupplierDue(
+      { shopId: SHOP, userId: USER, supplierId: SUPPLIER, amount: 25000, method: 'cash' },
+      FAKE_SESSION
+    );
+
+    expect(created).toHaveLength(2);
+    expect(created.find((r) => !r.purchase).amount).toBe(20000);
+    expect(created.find((r) => r.purchase).amount).toBe(5000);
   });
 
   it('writes ONE bill-less row for a pure খাতা settlement', async () => {

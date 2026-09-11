@@ -42,6 +42,7 @@ const BRANCH_B = new mongoose.Types.ObjectId(); // destination
 let store;          // Map<idString, productDoc>
 let roundTrips;     // Mongo operations issued
 let createdTxns;    // flattened StockTransaction rows
+let bulkOps;        // every Product.bulkWrite op the service emitted
 
 function makeProduct({ id, code, branch, stock = 100, variants = null }) {
   const doc = {
@@ -62,7 +63,14 @@ function makeProduct({ id, code, branch, stock = 100, variants = null }) {
 
 const matches = (doc, filter) => {
   for (const [k, v] of Object.entries(filter)) {
-    if (k === '_id') {
+    if (k === '$or') {
+      // `findCounterpartsBatch` fetches all three matching rules in one query.
+      if (!v.some((branchFilter) => matches(doc, branchFilter))) return false;
+    } else if (k === 'code' && v && v.$in) {
+      if (!v.$in.some((x) => String(x) === String(doc.code))) return false;
+    } else if (k === 'clonedFrom' && v && v.$in) {
+      if (!v.$in.some((x) => String(x) === String(doc.clonedFrom))) return false;
+    } else if (k === '_id') {
       if (v && v.$in) { if (!v.$in.some((x) => String(x) === String(doc._id))) return false; }
       else if (String(v) !== String(doc._id)) return false;
     } else if (k === 'isDeleted') {
@@ -109,6 +117,12 @@ function installProductMocks() {
   // save() did: the service quantizes in JS and writes the computed value.
   jest.spyOn(Product, 'bulkWrite').mockImplementation((ops) => {
     roundTrips++;
+    // Kept so a test can assert WHICH document and variant a write targets.
+    // The variant write is a pipeline update that this fake does not execute —
+    // the stock values these tests read come from the service mutating the
+    // shared in-memory doc — so without the recorded ops nothing would notice a
+    // write aimed at the wrong subdocument.
+    bulkOps.push(...ops);
     for (const op of ops) {
       const { filter, update } = op.updateOne;
       const doc = all().find((d) => matches(d, filter));
@@ -132,16 +146,40 @@ beforeEach(() => {
   store = new Map();
   roundTrips = 0;
   createdTxns = [];
+  bulkOps = [];
 
   installProductMocks();
 
+  /**
+   * The ledger mocks VALIDATE, they do not merely collect.
+   *
+   * This suite used to swallow whatever the service handed it, so the rows were
+   * never once measured against `StockTransaction`'s schema. The service was
+   * writing `performedBy` (the model requires `createdBy`), `note` (the model
+   * calls it `notes`), a bare ObjectId in `reference` (the model wants
+   * `{ type, id, invoiceNo }`) and a `referenceModel` key the model does not
+   * declare. Every approve, receive and reject therefore died on insert in the
+   * real app while all of these tests passed — after `Product.bulkWrite` had
+   * already moved the stock.
+   *
+   * `validateSync` is the cheapest possible fix: no database, no async, and it
+   * fails on exactly the mismatch that shipped.
+   */
+  const assertValidTxn = (doc) => {
+    const err = new StockTransaction(doc).validateSync();
+    if (err) throw err;
+  };
+
   jest.spyOn(StockTransaction, 'create').mockImplementation((docs) => {
     roundTrips++;
-    createdTxns.push(...(Array.isArray(docs) ? docs : [docs]));
-    return Promise.resolve(Array.isArray(docs) ? docs : [docs]);
+    const rows = Array.isArray(docs) ? docs : [docs];
+    rows.forEach(assertValidTxn);
+    createdTxns.push(...rows);
+    return Promise.resolve(rows);
   });
   jest.spyOn(StockTransaction, 'insertMany').mockImplementation((docs) => {
     roundTrips++;
+    docs.forEach(assertValidTxn);
     createdTxns.push(...docs);
     return Promise.resolve(docs);
   });
@@ -375,5 +413,173 @@ describe('rejectTransfer — reverses an in-transit deduction', () => {
 
     expect(roundTrips).toBeLessThanOrEqual(8);
     expect(createdTxns).toHaveLength(20);
+  });
+});
+
+// ── The variant path, both ends ─────────────────────────────────────────────
+//
+// A branch move of a variant product is the case that was broken end to end:
+// the line could be created without naming a variant (which moved the roll-up
+// and quietly undid itself), and a line that DID name one could not be received
+// unless the destination happened to share the source's subdocument ids.
+
+/** A product whose variants carry the given ids, with SKUs shared across branches. */
+function makeVariantProduct({ id, code, branch, specs }) {
+  const variants = specs.map((v) => ({
+    _id: v.id,
+    sku: v.sku,
+    attributes: { size: v.size },
+    buyingPrice: 10,
+    sellingPrice: 20,
+    stock: v.stock,
+  }));
+  const doc = makeProduct({
+    id, code, branch,
+    stock: variants.reduce((n, v) => n + v.stock, 0),
+    variants,
+  });
+  return doc;
+}
+
+function variantTransferDoc({ productId, variantId, sku, size, quantity = 4, status = 'pending' }) {
+  return {
+    _id: new mongoose.Types.ObjectId(),
+    shop: SHOP, fromBranch: BRANCH_A, toBranch: BRANCH_B,
+    transferNo: 'TR-V1', status,
+    items: [{
+      _id: new mongoose.Types.ObjectId(),
+      product: productId,
+      productName: 'Shirt',
+      productCode: 'SH1',
+      variantId,
+      variantSku: sku,
+      variantAttributes: { size },
+      quantity,
+      batches: [],
+    }],
+    save: jest.fn(function () { roundTrips++; return Promise.resolve(this); }),
+  };
+}
+
+describe('variant transfers', () => {
+  const SRC_XL = new mongoose.Types.ObjectId();
+  const SRC_S = new mongoose.Types.ObjectId();
+  const DEST_XL = new mongoose.Types.ObjectId();  // deliberately a DIFFERENT id
+  const DEST_S = new mongoose.Types.ObjectId();
+  let srcId;
+  let destId;
+
+  beforeEach(() => {
+    srcId = new mongoose.Types.ObjectId();
+    destId = new mongoose.Types.ObjectId();
+    store.set(String(srcId), makeVariantProduct({
+      id: srcId, code: 'SH1', branch: BRANCH_A,
+      specs: [
+        { id: SRC_XL, sku: 'SH1-XL', size: 'XL', stock: 30 },
+        { id: SRC_S, sku: 'SH1-S', size: 'S', stock: 20 },
+      ],
+    }));
+    store.set(String(destId), makeVariantProduct({
+      id: destId, code: 'SH1', branch: BRANCH_B,
+      specs: [
+        { id: DEST_XL, sku: 'SH1-XL', size: 'XL', stock: 5 },
+        { id: DEST_S, sku: 'SH1-S', size: 'S', stock: 1 },
+      ],
+    }));
+  });
+
+  it('refuses a line on a variant product that names no variant', async () => {
+    jest.spyOn(StockTransfer, 'create').mockImplementation((d) => Promise.resolve(d));
+
+    await expect(transferService.createTransfer({
+      shop: SHOP, fromBranch: BRANCH_A, toBranch: BRANCH_B,
+      items: [{ product: srcId, productName: 'Shirt', quantity: 4, variantId: null }],
+    }, USER)).rejects.toThrow(/ভ্যারিয়েন্ট নির্বাচন করুন/);
+  });
+
+  it('deducts the named variant and rolls the product total up with it', async () => {
+    const doc = variantTransferDoc({ productId: srcId, variantId: SRC_XL, sku: 'SH1-XL', size: 'XL' });
+    stubTransfer(doc);
+
+    await transferService.approveTransfer(doc._id, SHOP, USER);
+
+    const src = store.get(String(srcId));
+    expect(src.variants.find((v) => String(v._id) === String(SRC_XL)).stock).toBe(26);
+    expect(src.variants.find((v) => String(v._id) === String(SRC_S)).stock).toBe(20);
+    expect(createdTxns).toHaveLength(1);
+    expect(createdTxns[0].type).toBe('transfer_out');
+    expect(String(createdTxns[0].variantId)).toBe(String(SRC_XL));
+  });
+
+  it('credits the destination variant matched by SKU, not by subdocument id', async () => {
+    const doc = variantTransferDoc({
+      productId: srcId, variantId: SRC_XL, sku: 'SH1-XL', size: 'XL', status: 'in_transit',
+    });
+    stubTransfer(doc);
+
+    await transferService.receiveTransfer(doc._id, SHOP, USER, null);
+
+    const dest = store.get(String(destId));
+    expect(dest.variants.find((v) => String(v._id) === String(DEST_XL)).stock).toBe(9);
+    expect(dest.variants.find((v) => String(v._id) === String(DEST_S)).stock).toBe(1);
+    expect(doc.status).toBe('received');
+
+    // The ledger row must be reachable from the DESTINATION product's history,
+    // so it names that document's own variant id.
+    expect(createdTxns).toHaveLength(1);
+    expect(createdTxns[0].type).toBe('transfer_in');
+    expect(String(createdTxns[0].product)).toBe(String(destId));
+    expect(String(createdTxns[0].variantId)).toBe(String(DEST_XL));
+    expect(createdTxns[0].reference.type).toBe('transfer');
+    expect(createdTxns[0].reference.invoiceNo).toBe('TR-V1');
+
+    // And the stock write itself is aimed at the destination document, with the
+    // destination's own variant id embedded in its pipeline.
+    const write = bulkOps.find((op) => String(op.updateOne.filter._id) === String(destId));
+    expect(write).toBeDefined();
+    expect(JSON.stringify(write.updateOne.update)).toContain(String(DEST_XL));
+    expect(JSON.stringify(write.updateOne.update)).not.toContain(String(SRC_XL));
+  });
+
+  it('names the variant when the destination branch does not stock it', async () => {
+    const dest = store.get(String(destId));
+    dest.variants = dest.variants.filter((v) => v.sku !== 'SH1-XL');
+    dest.variants.id = (vid) => dest.variants.find((v) => String(v._id) === String(vid)) || null;
+
+    const doc = variantTransferDoc({
+      productId: srcId, variantId: SRC_XL, sku: 'SH1-XL', size: 'XL', status: 'in_transit',
+    });
+    stubTransfer(doc);
+
+    await expect(transferService.receiveTransfer(doc._id, SHOP, USER, null))
+      .rejects.toThrow(/XL/);
+  });
+
+  it('refuses to receive more than was dispatched', async () => {
+    const doc = variantTransferDoc({
+      productId: srcId, variantId: SRC_XL, sku: 'SH1-XL', size: 'XL', status: 'in_transit',
+    });
+    stubTransfer(doc);
+
+    await expect(transferService.receiveTransfer(doc._id, SHOP, USER, [
+      { itemId: doc.items[0]._id, received: 400 },
+    ])).rejects.toThrow(/বেশি গ্রহণ করা যাবে না/);
+
+    expect(store.get(String(destId)).variants.find((v) => String(v._id) === String(DEST_XL)).stock).toBe(5);
+  });
+
+  it('accepts a short receipt and records only what arrived', async () => {
+    const doc = variantTransferDoc({
+      productId: srcId, variantId: SRC_XL, sku: 'SH1-XL', size: 'XL', status: 'in_transit',
+    });
+    stubTransfer(doc);
+
+    await transferService.receiveTransfer(doc._id, SHOP, USER, [
+      { itemId: doc.items[0]._id, received: 1 },
+    ]);
+
+    expect(store.get(String(destId)).variants.find((v) => String(v._id) === String(DEST_XL)).stock).toBe(6);
+    expect(doc.items[0].received).toBe(1);
+    expect(createdTxns[0].quantity).toBe(1);
   });
 });

@@ -88,7 +88,13 @@ const stockTransactionSchema = new mongoose.Schema({
       // number, and pointing the row at the purchase would make two different
       // movements — the delivery in and the part of it that went back —
       // indistinguishable in the stock history.
-      enum: ['sale', 'purchase', 'manual', 'return', 'damage', 'purchase_return']
+      // `transfer` points at a `StockTransfer`. Both ends of a branch move —
+      // the `transfer_out` row on the source and the `transfer_in` row on the
+      // destination — carry the same id, which is what lets a stock history
+      // screen show where the goods went and where they came from. Its absence
+      // was one of the reasons the transfer service could not write a ledger
+      // row at all.
+      enum: ['sale', 'purchase', 'manual', 'return', 'damage', 'purchase_return', 'transfer']
     },
     id: mongoose.Schema.Types.ObjectId,
     invoiceNo: String

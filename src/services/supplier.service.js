@@ -818,6 +818,29 @@ class SupplierService {
                 as: 'purchaseDoc',
               },
             },
+            /**
+             * ── EVERY bill the payment landed on, not just the first ────────
+             *
+             * `purchase` holds one id, and `settleSupplierDue` sets it to
+             * `allocations[0]` purely so the row has something to point at. One
+             * ৳50,000 payment can clear four চালান, and this register named one
+             * of them and silently dropped the rest — a reader reconciling a
+             * vendor statement saw ৳50,000 against a ৳12,000 bill and had no
+             * way to find where the other ৳38,000 went.
+             *
+             * Resolved here rather than on the client because the row stores
+             * ids and the reader needs numbers. Bounded by the page size, and
+             * the ids are already indexed as `_id`.
+             */
+            {
+              $lookup: {
+                from: Purchase.collection.name,
+                localField: 'allocations.purchase',
+                foreignField: '_id',
+                pipeline: [{ $project: { invoiceNo: 1 } }],
+                as: 'allocationDocs',
+              },
+            },
             {
               $lookup: {
                 from: 'users',
@@ -834,6 +857,35 @@ class SupplierService {
                 recordedBy: { $first: '$recordedByDoc' },
                 voided: { $eq: ['$status', 'cancelled'] },
                 effectiveAt: { $ifNull: ['$paidAt', '$createdAt'] },
+                // `{ purchase, invoiceNo, amount }` per bill, in the order the
+                // settlement walked them — oldest debt first. `$lookup` does
+                // not preserve order, so the invoice number is matched back to
+                // its slice rather than zipped by position.
+                allocationDetails: {
+                  $map: {
+                    input: { $ifNull: ['$allocations', []] },
+                    as: 'a',
+                    in: {
+                      purchase: '$$a.purchase',
+                      amount: '$$a.amount',
+                      invoiceNo: {
+                        $first: {
+                          $map: {
+                            input: {
+                              $filter: {
+                                input: '$allocationDocs',
+                                as: 'd',
+                                cond: { $eq: ['$$d._id', '$$a.purchase'] },
+                              },
+                            },
+                            as: 'd',
+                            in: '$$d.invoiceNo',
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
               },
             },
             {
@@ -841,7 +893,7 @@ class SupplierService {
               // the same vocabulary `getSupplierPayments` hands the drill-in.
               $addFields: { againstOpeningDue: { $eq: ['$invoiceNo', null] } },
             },
-            { $project: { supplierDoc: 0, purchaseDoc: 0, recordedByDoc: 0 } },
+            { $project: { supplierDoc: 0, purchaseDoc: 0, recordedByDoc: 0, allocationDocs: 0 } },
           ],
           total: [{ $count: 'n' }],
           live: [

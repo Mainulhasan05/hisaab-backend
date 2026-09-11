@@ -322,7 +322,27 @@ async function settleSupplierDue(
     });
   }
 
-  const payments = await Payment.create(rows, sessionOpt);
+  /**
+   * `ordered: true` is REQUIRED, not a preference.
+   *
+   * Mongoose refuses `create()` with a session and more than one document
+   * unless it is set — it cannot run an unordered parallel insert inside a
+   * transaction — and throws a bare `MongooseError` when it is not. That error
+   * carries no `statusCode` and no `isOperational`, so the global handler
+   * classified it as a crash and answered the shopkeeper with
+   * "কিছু একটা সমস্যা হয়েছে। আবার চেষ্টা করুন।"
+   *
+   * `rows` has more than one entry exactly when a single পরিশোধ settles more
+   * than one kind of debt — carried-in খাতা AND bills, or debt AND অগ্রিম. So a
+   * vendor with an opening balance could not be paid at all, while a vendor
+   * with only bills paid fine, which is why this survived: the failure looked
+   * like an intermittent server fault rather than a rule.
+   *
+   * Ordered is also the honest semantic here. These rows are halves of one
+   * event and the reconciler counts each exactly once; inserting some of them
+   * and not the rest is not a state this function has any meaning in.
+   */
+  const payments = await Payment.create(rows, { ...sessionOpt, ordered: true });
 
   // ── 4. The money, once, for the whole event ────────────────────────────────
   await paymentAccountService.applyAccountDelta({

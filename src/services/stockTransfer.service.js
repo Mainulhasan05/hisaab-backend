@@ -10,13 +10,49 @@ const { storageUnit, quantize } = require('../utils/quantity.util');
 const { takeBatches, addBatches, batchWriteOp } = require('../utils/batch.util');
 const { assertNotCombo } = require('../utils/combo.util');
 
-// Helper to create errors with statusCode (no AppError class in this project)
+/**
+ * A refusal this service authored, in Bengali, with a status code.
+ *
+ * `isOperational` is the important line and it was missing. The global error
+ * handler sends `messageBn` through to the client ONLY for operational errors;
+ * everything else is treated as a crash and answered with the generic
+ * "কিছু একটা সমস্যা হয়েছে। আবার চেষ্টা করুন।" So in production every carefully
+ * worded refusal in this file — insufficient stock, wrong branch, product not
+ * stocked at the destination — arrived as that one useless sentence, and the
+ * status code was ignored too. Development was unaffected, which is why it went
+ * unnoticed: `sendErrorDev` sends the Bengali regardless.
+ */
 const createError = (message, statusCode = 400) => {
   const err = new Error(message);
   err.statusCode = statusCode;
   err.messageBn = message;
+  err.isOperational = true;
   return err;
 };
+
+/**
+ * The `reference` block every transfer ledger row carries.
+ *
+ * `StockTransaction.reference` is an OBJECT — `{ type, id, invoiceNo }` — and
+ * this file used to write `reference: transfer._id` beside a `referenceModel`
+ * key the schema does not declare, `performedBy` instead of the required
+ * `createdBy`, and `note` instead of `notes`. Three of those are silently
+ * dropped; the fourth is required, so EVERY approve, receive and reject died on
+ * `insertMany` with a validation error — after `Product.bulkWrite` had already
+ * moved the stock. The batching tests never caught it because they stub
+ * `StockTransaction.insertMany`, so no schema ever ran.
+ *
+ * The transfer number goes in `invoiceNo` for the same reason a purchase puts
+ * its invoice there: it is the human-readable handle a stock history row is
+ * looked up by.
+ */
+const transferLedgerRef = (transfer) => ({
+  reference: {
+    type: 'transfer',
+    id: transfer._id,
+    invoiceNo: transfer.transferNo,
+  },
+});
 
 /**
  * Stock transfer is the one place cross-branch access is intentional, so it
@@ -128,6 +164,100 @@ const findCounterpartsBatch = async (sourceProducts, shopId, branchId, session =
     if (match) resolved.set(String(src._id), match);
   }
   return resolved;
+};
+
+/** Does this product actually carry variants, whatever the flag says? */
+const hasRealVariants = (product) =>
+  Array.isArray(product?.variants) && product.variants.length > 0;
+
+/** One variant subdocument by id, on a hydrated doc or a plain object. */
+const variantById = (product, variantId) => {
+  if (!variantId) return null;
+  return (typeof product?.variants?.id === 'function'
+    ? product.variants.id(variantId)
+    : product?.variants?.find((x) => String(x._id) === String(variantId))) || null;
+};
+
+/**
+ * A short human label — "XL / লাল" — for error messages.
+ *
+ * Takes either a variant subdocument (`attributes`, `sku`) or a transfer line
+ * (`variantAttributes`, `variantSku`), because both sides of a receipt need to
+ * name the same thing and only one of them holds a variant document.
+ */
+const variantLabel = (src) => {
+  const a = src?.attributes || src?.variantAttributes || {};
+  const parts = [a.size, a.color, a.weight, a.material, a.style].filter(Boolean);
+  return parts.join(' / ') || src?.sku || src?.variantSku || '';
+};
+
+/**
+ * A transfer line on a variant product MUST name its variant.
+ *
+ * Without this the line moved `product.stock`, which on a variant product is
+ * the ROLL-UP of `variants[].stock`. The source was written with a total one
+ * unit lower than its own variants sum to, the destination one unit higher, and
+ * the next thing to recompute either rollup silently undid the whole transfer.
+ * Nothing errored; the stock simply came back. (See the rollup-drift repair
+ * this repo already carries a script for.)
+ *
+ * Checked on the product DATA rather than `hasVariants`, for the reason the
+ * Product model spells out: the flag is set by a human and the array is the
+ * truth.
+ */
+const assertVariantChosen = (product, item) => {
+  if (!hasRealVariants(product)) return;
+  if (!item.variantId) {
+    throw createError(
+      `"${item.productName || product.name}" এর ভ্যারিয়েন্ট নির্বাচন করুন`,
+      400
+    );
+  }
+  if (!variantById(product, item.variantId)) {
+    throw createError(
+      `"${item.productName || product.name}" এর নির্বাচিত ভ্যারিয়েন্ট উৎস শাখায় নেই`,
+      400
+    );
+  }
+};
+
+/**
+ * The DESTINATION branch's variant for a transfer line.
+ *
+ * Variant `_id`s are subdocument ids, so they belong to the product document
+ * that holds them. They happen to match across branches for a catalogue seeded
+ * by the admin clone (it copies each variant object wholesale, `_id` included)
+ * and do NOT match for a branch whose products were entered by hand. The old
+ * code assumed the first case always held, so every hand-built branch rejected
+ * an arriving variant line with "ভ্যারিয়েন্ট গন্তব্য শাখায় নেই" and the goods
+ * could never be received.
+ *
+ * SKU is the real cross-branch key — the clone preserves it and a shopkeeper
+ * typing the catalogue in twice uses the same one — with the attribute triple
+ * as the last resort for a SKU that was later edited on one side.
+ */
+const resolveDestinationVariant = (target, item) => {
+  const byId = variantById(target, item.variantId);
+  if (byId) return byId;
+
+  const list = Array.isArray(target?.variants) ? target.variants : [];
+  if (item.variantSku) {
+    const bySku = list.find(
+      (v) => v.sku && String(v.sku).toLowerCase() === String(item.variantSku).toLowerCase()
+    );
+    if (bySku) return bySku;
+  }
+
+  const want = item.variantAttributes || {};
+  const keys = ['size', 'color', 'weight', 'material', 'style'].filter((k) => want[k]);
+  if (keys.length) {
+    const byAttrs = list.find((v) =>
+      keys.every((k) => String(v.attributes?.[k] || '') === String(want[k]))
+    );
+    if (byAttrs) return byAttrs;
+  }
+
+  return null;
 };
 
 /** Read a product's stock for a variant (or the product itself). */
@@ -294,6 +424,7 @@ exports.createTransfer = async (data, userId, req = null) => {
     }
     // A combo has no stock to move between branches — transfer its components.
     assertNotCombo(product, 'শাখা স্থানান্তর');
+    assertVariantChosen(product, item);
     const available = readStock(product, item.variantId || null);
     if (available < item.quantity) {
       throw createError(`${item.productName || 'পণ্য'} এর স্টক অপর্যাপ্ত (আছে: ${available}, চাহিদা: ${item.quantity})`, 400);
@@ -342,6 +473,12 @@ exports.approveTransfer = async (transferId, shopId, userId, req = null) => {
         throw createError(`${item.productName || 'পণ্য'} উৎস শাখায় পাওয়া যায়নি`, 404);
       }
 
+      // Re-checked here, not only at create time: a line saved before this
+      // guard existed (or before the product grew variants) would otherwise
+      // move the roll-up and quietly undo itself. Such a transfer can still be
+      // cancelled — it just cannot be approved as it stands.
+      assertVariantChosen(product, item);
+
       const previousStock = readStock(product, item.variantId || null);
       if (previousStock < item.quantity) {
         throw createError(`${item.productName || 'পণ্য'} এর স্টক অপর্যাপ্ত`, 400);
@@ -380,10 +517,9 @@ exports.approveTransfer = async (transferId, shopId, userId, req = null) => {
         quantity: -item.quantity,
         previousStock,
         newStock,
-        reference: transfer._id,
-        referenceModel: 'StockTransfer',
-        performedBy: userId,
-        note: `ট্রান্সফার #${transfer.transferNo} — শাখা থেকে পাঠানো`,
+        ...transferLedgerRef(transfer),
+        createdBy: userId,
+        notes: `ট্রান্সফার #${transfer.transferNo} — শাখা থেকে পাঠানো`,
       });
     }
 
@@ -424,10 +560,27 @@ exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req 
     const txns = [];
 
     for (const item of transfer.items) {
-      // Find matching received quantity (default to full quantity)
-      const receivedQty = receivedItems
+      // Find matching received quantity (default to full quantity).
+      //
+      // Bounded, because the number comes from the destination branch's own
+      // form. An unbounded figure let a branch receive more than was ever
+      // dispatched — the source deducted 10, the destination credited 100, and
+      // the shop-wide total grew by 90 units nobody bought. Negative is refused
+      // for the mirror reason.
+      const rawQty = receivedItems
         ? (receivedItems.find(r => String(r.itemId) === String(item._id))?.received ?? item.quantity)
         : item.quantity;
+      const parsedQty = Number(rawQty);
+      if (!Number.isFinite(parsedQty) || parsedQty < 0) {
+        throw createError(`"${item.productName || 'পণ্য'}" এর গৃহীত পরিমাণ সঠিক নয়`, 400);
+      }
+      if (parsedQty > item.quantity) {
+        throw createError(
+          `"${item.productName || 'পণ্য'}" পাঠানো হয়েছে ${item.quantity}, তার বেশি গ্রহণ করা যাবে না`,
+          400
+        );
+      }
+      const receivedQty = parsedQty;
 
       item.received = receivedQty;
 
@@ -446,15 +599,32 @@ exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req 
         );
       }
 
-      const previousStock = readStock(target, item.variantId || null);
-      const newStock = applyStock(target, item.variantId || null, receivedQty);
+      // The destination's OWN variant id, which is not necessarily the one the
+      // line carries — see `resolveDestinationVariant`. Everything below uses
+      // this id, so the stock write lands on the element that exists in the
+      // document being written.
+      let destVariantId = null;
+      if (item.variantId) {
+        const destVariant = resolveDestinationVariant(target, item);
+        if (!destVariant) {
+          const label = variantLabel(item) || item.variantSku || '';
+          throw createError(
+            `"${item.productName || sourceProduct.name}"${label ? ` (${label})` : ''} এর ভ্যারিয়েন্ট গন্তব্য শাখায় নেই। আগে ওই শাখায় যোগ করুন।`,
+            400
+          );
+        }
+        destVariantId = destVariant._id;
+      }
+
+      const previousStock = readStock(target, destVariantId);
+      const newStock = applyStock(target, destVariantId, receivedQty);
       if (newStock === null) {
         throw createError(
           `"${item.productName || sourceProduct.name}" এর ভ্যারিয়েন্ট গন্তব্য শাখায় নেই`,
           400
         );
       }
-      stockOps.push(stockWriteOp(target, item.variantId || null, newStock));
+      stockOps.push(stockWriteOp(target, destVariantId, newStock));
 
       // ── Replay the dispatched batches at the destination ────────────────
       //
@@ -480,7 +650,7 @@ exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req 
           if (take > 0) arriving.push({ ...(b.toObject ? b.toObject() : b), quantity: take });
           left -= take;
         }
-        if (addBatches(target, item.variantId || null, arriving)) {
+        if (addBatches(target, destVariantId, arriving)) {
           stockOps.push(batchWriteOp(target));
         }
       }
@@ -491,17 +661,19 @@ exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req 
         product: target._id,
         productName: item.productName,
         productCode: item.productCode,
-        variantId: item.variantId,
+        // The DESTINATION's variant id, matching `product: target._id` above.
+        // A row that named the source's subdocument id was unreachable from
+        // the destination product's own stock history.
+        variantId: destVariantId || undefined,
         variantSku: item.variantSku,
         variantAttributes: item.variantAttributes,
         type: STOCK_TRANSACTION_TYPES.TRANSFER_IN,
         quantity: receivedQty,
         previousStock,
         newStock,
-        reference: transfer._id,
-        referenceModel: 'StockTransfer',
-        performedBy: userId,
-        note: `ট্রান্সফার #${transfer.transferNo} — শাখায় গৃহীত`,
+        ...transferLedgerRef(transfer),
+        createdBy: userId,
+        notes: `ট্রান্সফার #${transfer.transferNo} — শাখায় গৃহীত`,
       });
     }
 
@@ -572,10 +744,9 @@ exports.rejectTransfer = async (transferId, shopId, userId, reason, req = null) 
           quantity: item.quantity,
           previousStock,
           newStock,
-          reference: transfer._id,
-          referenceModel: 'StockTransfer',
-          performedBy: userId,
-          note: `ট্রান্সফার #${transfer.transferNo} বাতিল — স্টক ফেরত`,
+          ...transferLedgerRef(transfer),
+          createdBy: userId,
+          notes: `ট্রান্সফার #${transfer.transferNo} বাতিল — স্টক ফেরত`,
         });
       }
 

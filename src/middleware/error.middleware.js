@@ -61,6 +61,35 @@ const handleValidationErrorDB = (err) => {
 };
 
 /**
+ * The database is unreachable, or the query outlived its timeout.
+ *
+ * Worth naming rather than folding into the generic crash message: it is the
+ * one "server error" a shopkeeper can actually act on — wait a moment and try
+ * again — and it is the one that does NOT mean their data is wrong. Being told
+ * "something went wrong" for a ten-second network blip sends people hunting
+ * through their books for a mistake that never happened.
+ */
+const handleDbUnavailable = () => {
+  return new AppError(
+    'Database unavailable — please retry shortly',
+    'সার্ভারে সাময়িক সমস্যা হচ্ছে। একটু পরে আবার চেষ্টা করুন।',
+    503
+  );
+};
+
+const DB_UNAVAILABLE_NAMES = new Set([
+  'MongoNetworkError',
+  'MongoNetworkTimeoutError',
+  'MongoServerSelectionError',
+  'MongooseServerSelectionError',
+  'MongoTimeoutError',
+]);
+
+const isDbUnavailable = (err) =>
+  DB_UNAVAILABLE_NAMES.has(err?.name) ||
+  (typeof err?.message === 'string' && err.message.includes('buffering timed out'));
+
+/**
  * Handle JWT Error
  */
 const handleJWTError = () => {
@@ -142,6 +171,11 @@ const passthroughFields = (err) => {
   // cannot take an order yet", and the author had to guess which four.
   if (err.issues) out.issues = err.issues;
 
+  // The request id a crash was logged under. Set by `errorHandler` on every
+  // error, so an operational refusal that a shopkeeper reports as confusing can
+  // still be traced back to the request that produced it.
+  if (err.errorRef) out.errorRef = err.errorRef;
+
   return out;
 };
 
@@ -174,17 +208,29 @@ const sendErrorProd = (err, res) => {
     return res.status(err.statusCode).json(response);
   }
 
-  // Programming or other unknown error: log it and return actual message for debugging
-  logger.error('ERROR 💥:', err);
+  // Programming or other unknown error. Logged WITH the reference the client is
+  // about to be shown, so a shopkeeper reading a code down the phone leads
+  // straight to this stack instead of to a guess.
+  logger.error(`ERROR 💥 [ref ${err.errorRef || 'none'}] ${err.name}: ${err.message}`);
+  logger.error(err.stack || '(no stack)');
 
   return res.status(err.statusCode || 500).json({
     success: false,
     statusCode: err.statusCode || 500,
     message: err.message || 'Something went wrong!',
     // A non-operational error has no authored Bengali copy — it is a crash, not
-    // a message we wrote. A generic sentence still beats showing a shopkeeper
-    // an English stack fragment with no idea what to do next.
-    messageBn: 'কিছু একটা সমস্যা হয়েছে। আবার চেষ্টা করুন।',
+    // a message we wrote, and its English text ("Cannot call create() with a
+    // session…") would tell a shopkeeper nothing and alarm them for no reason.
+    //
+    // What the generic sentence must NOT be is untraceable. Quoting the request
+    // id turns "it said something went wrong" — a report nobody can act on —
+    // into one line that finds the exact stack above. Every message this app
+    // sends should name the real problem; when it genuinely cannot, it should
+    // at least name where the real problem is written down.
+    messageBn: err.errorRef
+      ? `কিছু একটা সমস্যা হয়েছে। আবার চেষ্টা করুন। (কোড: ${err.errorRef})`
+      : 'কিছু একটা সমস্যা হয়েছে। আবার চেষ্টা করুন।',
+    errorRef: err.errorRef || undefined,
     errors: null,
     timestamp: new Date().toISOString()
   });
@@ -215,6 +261,14 @@ const errorHandler = (err, req, res, next) => {
   if (err.name === 'ValidationError') error = handleValidationErrorDB(err);
   if (err.name === 'JsonWebTokenError') error = handleJWTError();
   if (err.name === 'TokenExpiredError') error = handleJWTExpiredError();
+  if (isDbUnavailable(err)) error = handleDbUnavailable();
+
+  // Whatever survives the list above is a fault in OUR code, and the client is
+  // about to be told so in one generic sentence. Carry the request's own id
+  // across so that sentence can quote something findable: without it a report
+  // of "it said something went wrong" is unmatchable against a log file
+  // holding every other request of the day. See `sendErrorProd`.
+  error.errorRef = req?.context?.requestId || null;
 
   if (process.env.NODE_ENV === 'development') {
     return sendErrorDev(error, res);
