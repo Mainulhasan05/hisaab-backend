@@ -123,15 +123,36 @@ async function rebuildShop(db, shop, defaultBranchId) {
     },
   ]).toArray();
 
-  // Due collections are not tied to a sale, so they carry only the branch that
-  // took the cash. Invoice payments are already inside sale.paid above.
+  /**
+   * Due collections are not tied to a sale, so they carry only the branch that
+   * took the cash. Invoice payments are already inside sale.paid above.
+   *
+   * ── Voided rows are not money ──────────────────────────────────────────────
+   *
+   * Both reads below predate `cancelDueCollection` (2026-08-25) and so counted
+   * cancelled rows as collected. That made this script report a FALSE mismatch
+   * against every customer who has ever had a বাকি আদায় voided: the stored
+   * rollup — correctly — drops the reversed amount, the rebuild keeps it, and
+   * the difference is reported as drift in the stored figures. The exit code
+   * then tells the reader to go and fix a write path that was never wrong.
+   *
+   * This is the `LIVE_PAYMENT` rule from `utils/paymentDate.util.js`, which
+   * `src/tests/paymentCancellation.test.js` enforces across `src/services` —
+   * `scripts/` is outside that scan, which is why these two survived.
+   *
+   * `$ne: 'cancelled'` and never `'active'`: rows written before the field
+   * existed carry no `status` at all, and an equality test would rebuild every
+   * shop's history as zero collected.
+   */
+  const LIVE = { status: { $ne: 'cancelled' } };
+
   const collections = await db.collection('payments').aggregate([
-    { $match: { shop: shopId, customer: { $ne: null }, type: 'due_collection' } },
+    { $match: { shop: shopId, customer: { $ne: null }, type: 'due_collection', ...LIVE } },
     { $group: { _id: { customer: '$customer', branch: '$branch' }, paid: { $sum: '$amount' } } },
   ]).toArray();
 
   const refunds = await db.collection('payments').aggregate([
-    { $match: { shop: shopId, customer: { $ne: null }, type: 'refund' } },
+    { $match: { shop: shopId, customer: { $ne: null }, type: 'refund', ...LIVE } },
     { $group: { _id: { customer: '$customer', branch: '$branch' }, refunded: { $sum: '$amount' } } },
   ]).toArray();
 

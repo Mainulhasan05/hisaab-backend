@@ -18,6 +18,10 @@ const KEYS = {
   DASHBOARD_STATS: (shopId) => `shop:${shopId}:dashboard`,
   DAILY_SUMMARY: (shopId, date) => `shop:${shopId}:daily:${date}`,
   PROFIT_LOSS: (shopId, start, end) => `shop:${shopId}:pnl:${start || 'all'}:${end || 'all'}`,
+  // Month-wise business summary. The window is part of the key because it is
+  // chosen by the reader (12 months, 24, a named range) rather than fixed —
+  // two owners looking at overlapping windows must not share a cache entry.
+  MONTH_WISE: (shopId, from, to) => `shop:${shopId}:monthwise:${from}:${to}`,
   SALES_REPORT: (shopId, start, end, groupBy) => `shop:${shopId}:sales:${start || 'all'}:${end || 'all'}:${groupBy || 'day'}`,
   PRODUCT_REPORT: (shopId, start, end) => `shop:${shopId}:products:${start || 'all'}:${end || 'all'}`,
   CUSTOMER_REPORT: (shopId, start, end) => `shop:${shopId}:customers:${start || 'all'}:${end || 'all'}`,
@@ -43,6 +47,10 @@ const getTTL = {
   dashboardStats: TTL.MEDIUM,       // 5 min - refreshes frequently
   dailySummary: TTL.MEDIUM,         // 5 min - date-specific
   profitLoss: TTL.MEDIUM,           // 5 min
+  // 5 min like the P&L it is built from. Closed months never change, but the
+  // window always includes the current one, so the entry has to age like any
+  // other live figure.
+  monthWise: TTL.MEDIUM,            // 5 min
   salesReport: TTL.MEDIUM,          // 5 min
   productReport: TTL.MEDIUM,        // 5 min
   customerReport: TTL.MEDIUM,       // 5 min

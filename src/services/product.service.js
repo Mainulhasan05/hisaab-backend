@@ -168,9 +168,13 @@ class ProductService {
       brandNameSearch,
     } = options;
 
-    // Ensure valid integers with proper defaults (handles 'null', undefined, NaN)
-    const pageNum = parseInt(page) || 1;
-    const limitNum = parseInt(limit) || 20;
+    // Ensure valid integers with proper defaults (handles 'null', undefined, NaN).
+    // The page size is also CAPPED: it used to pass straight through, so one
+    // `?limit=100000` pulled the whole catalogue into a worker's heap. 1000 is
+    // above every size the app asks for, so no screen changes; see the same
+    // clamp in getSales / getCustomers.
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.min(1000, Math.max(1, parseInt(limit) || 20));
 
     // Soft-deleted products are hidden from every listing ($ne covers older
     // documents created before the isDeleted field existed)

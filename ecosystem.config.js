@@ -50,6 +50,13 @@ module.exports = {
         MONGO_MIN_POOL_SIZE: process.env.MONGO_MIN_POOL_SIZE || '2',
       },
 
+      // A single worker that leaks — or that answers one oversized request —
+      // is recycled before it takes the host's memory with it. The list
+      // endpoints now cap their page size (sale/product/customer.service), so
+      // this is the backstop, not the fix. PM2 restarts just that worker and
+      // the SIGTERM drain in src/index.js handles the in-flight requests.
+      max_memory_restart: '600M',
+
       // A worker that dies is replaced; a worker that thrashes is not, so the
       // restart is bounded rather than an infinite crash loop.
       max_restarts: 10,

@@ -108,6 +108,17 @@ describe('B. a sale with returns against it cannot be cancelled', () => {
     });
   };
 
+  /**
+   * The live `viaSale` settlement rows this checkout wrote, for the guard that
+   * runs last. Empty is the ordinary case — most checkouts settle no খাতা — and
+   * every test that reaches past the register guard needs this, or `Payment.find`
+   * returns a real query that never resolves without a database.
+   */
+  const mockSettlements = (rows = []) => {
+    const Payment = require('../models/Payment.model');
+    return jest.spyOn(Payment, 'find').mockResolvedValue(rows);
+  };
+
   it('refuses a partly-returned invoice', async () => {
     jest.spyOn(Sale, 'findOne').mockResolvedValue(saleDoc({ returnedAmount: 300 }));
 
@@ -154,6 +165,7 @@ describe('B. a sale with returns against it cannot be cancelled', () => {
     const find = jest.spyOn(Product, 'find').mockResolvedValue([]);
     jest.spyOn(require('../models/AuditLog.model'), 'create').mockResolvedValue({});
     mockRegister(null); // no register row for that day at all
+    mockSettlements();  // nothing was collected against the খাতা here
     const shopUpdate = jest.spyOn(Shop, 'updateOne').mockResolvedValue({ modifiedCount: 1 });
 
     const sale = saleDoc();
@@ -174,5 +186,145 @@ describe('B. a sale with returns against it cannot be cancelled', () => {
       { $inc: { 'stats.totalSales': -1 } },
       expect.anything()
     );
+  });
+});
+
+/* ════════════════════════════════════════════════════════════════════════
+ * C. A খাতা SETTLEMENT TAKEN AT THIS CHECKOUT IS ITS OWN DECISION
+ * ════════════════════════════════════════════════════════════════════════
+ *
+ * A cashier can clear part of the customer's older খাতা while ringing up a
+ * bill. That money is a separate `Payment{viaSale}` row, deliberately outside
+ * `sale.paid`, and `cancelSale` used to leave it standing without saying so.
+ *
+ * Right when the cash was really taken. Wrong when the whole checkout was a
+ * mis-punch, because then the collection has nothing behind it — and the
+ * orphaned receipt was invisible from every screen in the app. One live case
+ * was found in production (৳3,450, voided 48s after checkout).
+ *
+ * So the service now refuses to guess. These tests pin the refusal, both
+ * answers, and the two row types — not the reversal arithmetic, which belongs
+ * to `dueSettlement.cancelDueCollection` and is tested beside it.
+ */
+describe('C. cancelling will not silently decide a khata settlement', () => {
+  const Payment = require('../models/Payment.model');
+  const dueSettlement = require('../services/dueSettlement.service');
+
+  const settlementRow = (over = {}) => ({
+    _id: new mongoose.Types.ObjectId(),
+    type: 'due_collection',
+    amount: 3450,
+    receiptNo: 'RCP-260912-DDA535',
+    ...over,
+  });
+
+  /** A cancellable sale whose checkout also took money off the খাতা. */
+  const readyToCancel = (rows) => {
+    const Product = require('../models/Product.model');
+    const Shop = require('../models/Shop.model');
+    const sale = {
+      _id: new mongoose.Types.ObjectId(),
+      shop: SHOP,
+      invoiceNo: 'INV-1',
+      status: 'completed',
+      returnedAmount: 0,
+      total: 15000,
+      paid: 15000,
+      due: 0,
+      branch: null,
+      createdAt: new Date(),
+      items: [],
+    };
+    sale.save = jest.fn().mockResolvedValue(sale);
+    jest.spyOn(Sale, 'findOne').mockResolvedValue(sale);
+    jest.spyOn(Product, 'find').mockResolvedValue([]);
+    jest.spyOn(Shop, 'updateOne').mockResolvedValue({ modifiedCount: 1 });
+    jest.spyOn(require('../models/AuditLog.model'), 'create').mockResolvedValue({});
+    jest.spyOn(require('../models/CashRegister.model'), 'findOne').mockReturnValue({
+      lean: jest.fn().mockResolvedValue(null),
+    });
+    jest.spyOn(Payment, 'find').mockResolvedValue(rows);
+    return sale;
+  };
+
+  it('refuses when a settlement rode in and nobody was asked about it', async () => {
+    readyToCancel([settlementRow()]);
+    const voidSpy = jest.spyOn(dueSettlement, 'cancelDueCollection').mockResolvedValue({});
+
+    await expect(
+      saleService.cancelSale(SHOP, new mongoose.Types.ObjectId(), 'id', 'ভুল')
+    ).rejects.toMatchObject({ statusCode: 409 });
+
+    // Refused BEFORE any write — the guard is worthless if it throws halfway.
+    expect(voidSpy).not.toHaveBeenCalled();
+  });
+
+  it('proceeds untouched when told the collection stands', async () => {
+    const sale = readyToCancel([settlementRow()]);
+    const voidSpy = jest.spyOn(dueSettlement, 'cancelDueCollection').mockResolvedValue({});
+
+    await saleService.cancelSale(SHOP, new mongoose.Types.ObjectId(), 'id', 'ভুল', null, {}, false);
+
+    expect(sale.status).toBe('cancelled');
+    // `false` must mean exactly what the code did before the choice existed:
+    // the invoice is voided and the customer keeps credit for money they paid.
+    expect(voidSpy).not.toHaveBeenCalled();
+  });
+
+  it('reverses the collection when told the cash was never taken', async () => {
+    const row = settlementRow();
+    const sale = readyToCancel([row]);
+    const voidSpy = jest.spyOn(dueSettlement, 'cancelDueCollection').mockResolvedValue({});
+
+    await saleService.cancelSale(SHOP, new mongoose.Types.ObjectId(), 'id', 'ভুল', null, {}, true);
+
+    expect(sale.status).toBe('cancelled');
+    expect(voidSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ shopId: SHOP, paymentId: row._id }),
+      // The session, which the `runInTransaction` shim at the top of this file
+      // makes `null`. Passed through rather than opened afresh: the reversal has
+      // to commit or roll back with the cancellation as one unit.
+      null
+    );
+  });
+
+  it('reverses the deposit half too, not just the debt half', async () => {
+    // `settleCustomerDue` splits one tendered amount into up to two rows when
+    // the customer overpays. Voiding only the `due_collection` would strand the
+    // `advance` in exactly the way this whole guard exists to prevent.
+    const debt = settlementRow();
+    const deposit = settlementRow({ type: 'advance', amount: 550, receiptNo: 'RCP-X' });
+    readyToCancel([debt, deposit]);
+    const voidSpy = jest.spyOn(dueSettlement, 'cancelDueCollection').mockResolvedValue({});
+
+    await saleService.cancelSale(SHOP, new mongoose.Types.ObjectId(), 'id', 'ভুল', null, {}, true);
+
+    expect(voidSpy).toHaveBeenCalledTimes(2);
+    expect(voidSpy.mock.calls.map((c) => c[0].paymentId)).toEqual([debt._id, deposit._id]);
+  });
+
+  it('looks for both row types, and only live ones', async () => {
+    readyToCancel([]);
+    await saleService.cancelSale(SHOP, new mongoose.Types.ObjectId(), 'id', 'ভুল');
+
+    // `$ne: 'cancelled'` and never `'active'`: rows written before the status
+    // field existed carry none at all, so an equality test would report every
+    // shop's history as already voided and the guard would never fire.
+    expect(Payment.find).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: { $in: ['due_collection', 'advance'] },
+        status: { $ne: 'cancelled' },
+      }),
+      null,
+      expect.anything()
+    );
+  });
+
+  it('does not ask when the checkout settled nothing', async () => {
+    // The overwhelming majority of cancellations. An unnecessary 409 here would
+    // be a worse regression than the bug this guard fixes.
+    const sale = readyToCancel([]);
+    await saleService.cancelSale(SHOP, new mongoose.Types.ObjectId(), 'id', 'duplicate');
+    expect(sale.status).toBe('cancelled');
   });
 });

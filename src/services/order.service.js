@@ -1701,7 +1701,16 @@ class OrderService {
         userId,
         existing.sale,
         reason || `অনলাইন অর্ডার ${existing.orderNo} বাতিল`,
-        req.branchId || null
+        req.branchId || null,
+        {},
+        // A খাতা settlement stands. Stated rather than left undefined, which
+        // `cancelSale` now refuses: there is no operator at this call site to
+        // put the question to, and an order screen that started 409-ing would
+        // strand parcels. `false` is exactly what this path did before the
+        // choice existed, so online cancellation is unchanged. An orphan here
+        // is rare — an online checkout rarely settles an old bill — and
+        // `scripts/void-orphaned-checkout-settlement.js` finds it if one arises.
+        false
       );
     }
 
@@ -1835,7 +1844,11 @@ class OrderService {
           userId,
           existing.sale,
           trimmedReason || `অনলাইন অর্ডার ${existing.orderNo} ফেরত এসেছে (RTO)`,
-          req.branchId || null
+          req.branchId || null,
+          {},
+          // See the matching note in `cancelOrder` — unattended call site, so
+          // the settlement stands and behaviour is unchanged.
+          false
         );
       }
     }

@@ -39,6 +39,19 @@ const MONEY_IN_KINDS = ['due_collection', 'advance', 'sale'];
 const escapeRegex = (value) => String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
+ * Pagination inputs, clamped rather than trusted.
+ *
+ * `limit` used to go from the query string straight into `.limit()`, so one
+ * `?limit=100000` pulled a shop's whole book into a worker's heap. 1000 is
+ * above every page size the app asks for (the SMS recipient picker asks for
+ * exactly that; report downloads walk 200 at a time), so no screen sees a
+ * different answer — only an abusive or mistyped request does. Same clamp as
+ * sale.service.getSales and product.service.getProducts.
+ */
+const pageNumber = (raw) => Math.max(1, parseInt(raw) || 1);
+const pageSize = (raw) => Math.min(1000, Math.max(1, parseInt(raw) || 20));
+
+/**
  * The name/phone search clause, in the one shape every customer read uses.
  *
  * ── Why the phone gets its own term ──────────────────────────────────────────
@@ -236,13 +249,15 @@ class CustomerService {
    * know which mode it is in.
    */
   async _getBranchCustomers(shopId, branchId, options = {}) {
-    const { page = 1, limit = 20, search, hasDue, sortBy = 'createdAt', sortOrder = 'desc', deleted = false } = options;
+    const { search, hasDue, sortBy = 'createdAt', sortOrder = 'desc', deleted = false } = options;
+    const page = pageNumber(options.page);
+    const limit = pageSize(options.limit);
 
     // Union of what the list and the leaderboard each allow — both funnel here.
     const sortField = ['createdAt', 'name', 'totalDue', 'totalPurchases', 'purchaseCount', 'lastPurchase'].includes(sortBy)
       ? sortBy : 'createdAt';
     const direction = sortOrder === 'asc' ? 1 : -1;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const skip = (page - 1) * limit;
 
     const match = {
       shop: new mongoose.Types.ObjectId(shopId),
@@ -299,7 +314,7 @@ class CustomerService {
           // Sorting by `name` sorts the resolved name, because the $project
           // above runs first — so the list orders by what the branch actually
           // reads, not by a label it never sees.
-          data: [{ $sort: { [sortField]: direction } }, { $skip: skip }, { $limit: parseInt(limit) }],
+          data: [{ $sort: { [sortField]: direction } }, { $skip: skip }, { $limit: limit }],
           count: [{ $count: 'total' }],
           // The stat cards, over the WHOLE filtered set rather than the page.
           // See `_listSummary` for why this cannot be left to the client.
@@ -314,10 +329,10 @@ class CustomerService {
       data: result?.data || [],
       summary: normalizeSummary(result?.totals?.[0]),
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: page,
+        limit: limit,
         total,
-        pages: Math.ceil(total / parseInt(limit)),
+        pages: Math.ceil(total / limit),
       },
     };
   }
@@ -334,14 +349,14 @@ class CustomerService {
     }
 
     const {
-      page = 1,
-      limit = 20,
       search,
       hasDue,
       sortBy = 'createdAt',
       sortOrder = 'desc',
       deleted,
     } = opts;
+    const page = pageNumber(opts.page);
+    const limit = pageSize(opts.limit);
 
     const query = { shop: shopId, isActive: !deleted };
 
@@ -363,7 +378,7 @@ class CustomerService {
       Customer.find(query)
         .sort(sort)
         .skip(skip)
-        .limit(parseInt(limit))
+        .limit(limit)
         .lean(),
       Customer.countDocuments(query),
       // Same figures the branch-scoped path returns from its $facet, so both
@@ -383,8 +398,8 @@ class CustomerService {
       data: customers,
       summary: normalizeSummary(totals[0]),
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: page,
+        limit: limit,
         total,
         pages: Math.ceil(total / limit),
       },

@@ -20,6 +20,19 @@ router.get('/daily-summary', rbac('reports', 'view_profit'), reportController.ge
 router.get('/staff', rbac('reports', 'view'), reportController.getStaffReport);
 router.get('/staff-detailed', rbac('reports', 'view'), reportController.getDetailedStaffReport);
 router.get('/date-wise', rbac('reports', 'view'), reportController.getDateWiseSummary);
+// The month book — `/date-wise` a zoom level out, and gated exactly like it.
+//
+// `reports.view` rather than `view_profit`, and the distinction is the same one
+// `/daily-summary` resolves the other way: that payload IS a profit picture and
+// has nothing left once profit is withheld, while this one keeps বিক্রি, খরচ,
+// কেনা, বাকি and নগদ — the "total business amount" half of the question — for a
+// reader who may not see margin. `sanitizeReport` in the controller strips the
+// profit keys per user, so the route decides who may ask and the sanitiser
+// decides what comes back.
+//
+// Whether the per-BRANCH columns come back is a third question, and the
+// controller answers that one from the caller's branch scope.
+router.get('/month-wise', rbac('reports', 'view'), reportController.getMonthWiseSummary);
 router.get('/date-wise/:date', rbac('reports', 'view'), reportController.getSalesByDate);
 router.get('/trending-products', rbac('reports', 'view'), reportController.getTrendingProducts);
 router.get('/due-aging', rbac('reports', 'view'), reportController.getDueAging);

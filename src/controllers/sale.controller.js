@@ -96,7 +96,27 @@ exports.reviseSale = asyncHandler(async (req, res) => {
 
 // Cancel sale
 exports.cancelSale = asyncHandler(async (req, res) => {
-  const sale = await saleService.cancelSale(req.shop._id, req.user._id, req.params.id, req.body.reason, req.branchId);
+  /**
+   * Tri-state, and an ABSENT body field must stay `undefined`.
+   *
+   * `voidSettlement` says whether a খাতা collection taken at this checkout is
+   * reversed with the invoice. The service refuses to guess when there is one
+   * to decide about, so coercing a missing field to `false` here would answer
+   * on the client's behalf and restore the silent behaviour the guard exists to
+   * end. Only an explicit boolean is forwarded; anything else stays unasked.
+   */
+  const { voidSettlement } = req.body;
+  const settlementChoice = typeof voidSettlement === 'boolean' ? voidSettlement : undefined;
+
+  const sale = await saleService.cancelSale(
+    req.shop._id,
+    req.user._id,
+    req.params.id,
+    req.body.reason,
+    req.branchId,
+    {},
+    settlementChoice
+  );
   return ApiResponse.success(res, {
     data: sanitizeSales(sale, req),
     message: 'Sale cancelled successfully',

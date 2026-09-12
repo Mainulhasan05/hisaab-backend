@@ -99,6 +99,35 @@ exports.getDateWiseSummary = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * Get Month-wise Summary — the month book, with a branch breakdown.
+ *
+ * The branch split is decided HERE and not in the service, from the same two
+ * facts every other branch-aware endpoint reads: the shop has multi-branch
+ * turned on, and the caller is not already pinned to one branch. A user scoped
+ * to a single counter gets that counter's months and no comparison — the
+ * per-branch table is the shop owner's view, and handing it to a branch
+ * manager would show them their colleagues' takings.
+ *
+ * `req.branchId` is the scope the branch middleware resolved. When it is set,
+ * the service is scoped to it and the breakdown is switched off; when it is
+ * null and the shop is split, the breakdown is the point of the report.
+ */
+exports.getMonthWiseSummary = asyncHandler(async (req, res) => {
+  const wantBranchBreakdown = req.shop.multiBranchEnabled === true && !req.branchId;
+  const report = await reportService.getMonthWiseSummary(
+    req.shop._id,
+    req.query,
+    req.branchId,
+    wantBranchBreakdown
+  );
+  return ApiResponse.success(res, {
+    data: sanitizeReport(report, req),
+    message: 'Month-wise summary retrieved successfully',
+    messageBn: 'মাস অনুসারে সারাংশ সফলভাবে লোড হয়েছে',
+  });
+});
+
 // Get sales for a specific date (drill-down)
 exports.getSalesByDate = asyncHandler(async (req, res) => {
   const { date } = req.params;

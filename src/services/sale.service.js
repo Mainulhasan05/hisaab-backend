@@ -230,11 +230,18 @@ class SaleService {
   // Get all sales with filtering, searching, pagination
   async getSales(shopId, options = {}) {
     const {
-      page = 1,
-      limit = 20,
       sortBy = 'createdAt',
       sortOrder = 'desc',
     } = options;
+
+    // Clamped, not trusted. `limit` used to go straight from the query string
+    // into `.limit()`, so `?limit=100000` materialised every sale the shop had
+    // ever made — plus two populate chains — into one worker's heap. 1000 is
+    // above every page size the app asks for (the SMS recipient picker asks
+    // for exactly that; report downloads walk 200 at a time), so no caller
+    // sees a different answer; only an abusive or mistyped request does.
+    const page = Math.max(1, parseInt(options.page) || 1);
+    const limit = Math.min(1000, Math.max(1, parseInt(options.limit) || 20));
 
     const query = this._buildQuery(shopId, options);
 
@@ -255,7 +262,7 @@ class SaleService {
         .populate('createdBy', 'name')
         .sort(sort)
         .skip(skip)
-        .limit(parseInt(limit))
+        .limit(limit)
         .lean(),
       Sale.countDocuments(query),
     ]);
@@ -263,8 +270,8 @@ class SaleService {
     return {
       data: sales,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page,
+        limit,
         total,
         pages: Math.ceil(total / limit),
       },
@@ -3017,8 +3024,14 @@ class SaleService {
    * @param {object} internalOptions NOT derived from any request body.
    *   `session` joins an ambient transaction; `revisedTo` records that this
    *   cancellation is a supersession rather than a void.
+   * @param {boolean|undefined} voidSettlement Whether a খাতা settlement taken at
+   *   this checkout is reversed along with the invoice. TRI-STATE: `undefined`
+   *   means the caller has not been asked, and is REFUSED when there is one to
+   *   decide about. Appended last so the three internal callers keep working
+   *   positionally; it is request-derived, which is why it is not folded into
+   *   `internalOptions`.
    */
-  async cancelSale(shopId, userId, saleId, reason, activeBranchId = null, internalOptions = {}) {
+  async cancelSale(shopId, userId, saleId, reason, activeBranchId = null, internalOptions = {}, voidSettlement = undefined) {
     return await runInTransaction(async (session) => {
     const sessionOpt = session ? { session } : {};
     const saleQuery = { _id: saleId, shop: shopId };
@@ -3122,6 +3135,55 @@ class SaleService {
           409
         );
       }
+    }
+
+    /**
+     * ── A খাতা settlement taken at this checkout is its OWN decision ─────────
+     *
+     * A cashier can clear part of the customer's older খাতা in the same breath
+     * as ringing up this bill. `createSale` books that as its own row —
+     * `Payment{type:'due_collection'|'advance', viaSale:<this invoice>}` — kept
+     * deliberately out of `sale.paid`, for the reason spelled out at
+     * `Sale.ledgerSettled`.
+     *
+     * Reversing it automatically is wrong: that money is normally real, and
+     * clawing it back hands the customer a debt they have already cleared, with
+     * their receipt still in their hand to prove it. Leaving it is equally wrong
+     * when the whole checkout was a mis-punch — rung up and voided seconds
+     * later — because then no cash crossed the counter and the collection has
+     * nothing behind it. Until this guard, the code silently chose the second,
+     * and the orphaned receipt was invisible from every screen in the app.
+     *
+     * Only the person pressing বাতিল knows which case this is, so this REFUSES
+     * to guess. `voidSettlement` is a tri-state and `undefined` means "nobody
+     * has been asked": a default in either direction is exactly the silence
+     * this exists to end.
+     *
+     * Both row types, because `settleCustomerDue` splits one tendered amount
+     * into up to two — the debt half and, if the customer overpaid, a deposit.
+     * Voiding only the first would strand the second in precisely the same way.
+     *
+     * Read before any write, like every other guard here, so a refusal leaves
+     * the invoice exactly as it found it. The rows are carried down to the
+     * reversal below rather than queried twice.
+     */
+    const checkoutSettlements = await Payment.find(
+      {
+        shop: shopId,
+        viaSale: sale._id,
+        type: { $in: ['due_collection', 'advance'] },
+        ...LIVE_PAYMENT,
+      },
+      null,
+      sessionOpt
+    );
+
+    if (checkoutSettlements.length > 0 && voidSettlement === undefined) {
+      throw new AppError(
+        'This checkout also collected money against the customer\'s khata — say whether that collection stands before voiding the invoice.',
+        'এই চেকআউটে পুরোনো বাকি আদায়ও হয়েছিল — আদায়টি থাকবে না বাতিল হবে, সেটি জানিয়ে আবার চেষ্টা করুন।',
+        409
+      );
     }
 
     // --- BATCH: Restore stock using bulkWrite ---
@@ -3456,6 +3518,56 @@ class SaleService {
     if (internalOptions.revisedTo) sale.revisedTo = internalOptions.revisedTo;
     await sale.save(sessionOpt);
 
+    /**
+     * ── And now unwind the খাতা settlement, if that is what was asked ────────
+     *
+     * AFTER the status stamp above, deliberately. `cancelDueCollection` ends by
+     * recomputing the customer's whole invoice allocation, and that recompute
+     * has to see this invoice already cancelled or it can hand the freed money
+     * straight back to the bill being voided. Running last also makes its
+     * allocation the final word, which supersedes the one `reallocateCustomerInvoices`
+     * produced earlier in this block — cheaper and more obviously correct than
+     * trying to order the two passes so the first is already right.
+     *
+     * The `dueSettlement` call rather than `customerService.cancelDueCollection`:
+     * that wrapper opens its own `runInTransaction`, and this must commit or
+     * roll back with the cancellation as one unit. The audit entry the wrapper
+     * would have written is therefore written here instead — it is the answer to
+     * "why does this customer owe money again", and it must exist on both paths.
+     */
+    for (const settlement of (voidSettlement === true ? checkoutSettlements : [])) {
+      await dueSettlementService.cancelDueCollection(
+        {
+          shopId,
+          userId,
+          paymentId: settlement._id,
+          reason: `ইনভয়েস ${sale.invoiceNo} বাতিল: ${reason}`,
+        },
+        session
+      );
+
+      // Not passed `sessionOpt`, for the same reason the `sale_cancel` entry
+      // below is not: a failed log must never roll back a completed reversal.
+      await AuditLog.create({
+        shop: shopId,
+        user: userId,
+        customer: sale.customer,
+        action: 'due_collection_cancel',
+        actionBn: 'বাকি আদায় বাতিল',
+        description:
+          `Cancelled ৳${settlement.amount} ${settlement.type} ` +
+          `${settlement.receiptNo || settlement._id} with invoice ${sale.invoiceNo}`,
+        descriptionBn:
+          `ইনভয়েস ${sale.invoiceNo} বাতিলের সাথে ৳${settlement.amount} আদায় বাতিল ` +
+          `(রসিদ ${settlement.receiptNo || '—'})`,
+        entity: {
+          type: 'sale',
+          id: sale._id,
+          name: sale.invoiceNo,
+        },
+      });
+    }
+
     // ── Give back the counter `createSale` took ───────────────────────────────
     //
     // `createSale` does `$inc: { 'stats.totalSales': 1 }` and nothing gave it
@@ -3720,7 +3832,12 @@ class SaleService {
         original._id,
         'revised',
         original.branch || null,
-        { session }
+        { session },
+        // A revision rewrites the BASKET; it does not un-collect money. The
+        // settlement stands and the replacement inherits its snapshot — see
+        // `carryDueSnapshot` below. Stated rather than left undefined so the
+        // new guard cannot turn সংশোধন into a 409.
+        false
       );
 
       const revised = await this.createSale(shopId, userId, saleData, req, {

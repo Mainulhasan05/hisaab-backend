@@ -215,6 +215,18 @@ customerSchema.index(
   { partialFilterExpression: { advanceBalance: { $gt: 0 } } }
 );
 customerSchema.index({ shop: 1, createdAt: -1 }); // Listing by date
+// The two remaining hot sorts, added 2026-09-12. `totalPurchases` is what the
+// customer report's "top customers" reads (report.service.getCustomerReport)
+// and what the list whitelists as a client sort; without an index it is an
+// in-memory sort over the shop's whole book, which aborts at 32 MB. `name` is
+// the same shape Product.model.js carries for the same reason — the
+// name-regex `$or` in getCustomers runs as a shop-bounded index scan instead
+// of a collection scan.
+//
+// `autoIndex` is off in production (config/database.js), so these ship only
+// through `npm run sync-indexes:apply`; nothing is built at boot.
+customerSchema.index({ shop: 1, totalPurchases: -1 }); // Top customers / sortBy=totalPurchases
+customerSchema.index({ shop: 1, name: 1 }); // Search: shop-bounded name-regex scans
 // Note: Text search removed - use regex for name search or implement Elasticsearch
 
 // Normalize phone before saving
