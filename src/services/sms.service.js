@@ -484,6 +484,27 @@ class SMSService {
     const smsInfo = countSms(body);
     const segmentCost = smsInfo.segments || 1;
 
+    /* Which branch this send belongs to — resolved BEFORE anything is spent.
+     *
+     * It used to be `req ? requireBranch(req) : null` inline in both
+     * `SMSLog.create` calls below, which failed two ways:
+     *
+     *   1. Every background receipt (sale, due collection, invoice payment) has
+     *      no `req`, so it was logged `branch: null`. On a multi-branch shop the
+     *      history screen filters `{ shop, branch }`, so those rows were
+     *      invisible from every branch — the message went out, the quota was
+     *      charged, and the shopkeeper's log said nothing had been sent.
+     *      Those callers now pass the branch of the record they report on.
+     *
+     *   2. `requireBranch` throws for "All Branches". Called after the gateway,
+     *      it threw AFTER the message had left: the catch refunded the quota and
+     *      the failure log threw again — delivered, free, and unlogged. Resolved
+     *      here, a refusal happens before the quota or the gateway is touched.
+     */
+    const branch = options.branch !== undefined
+      ? (options.branch || null)
+      : (req ? requireBranch(req) : null);
+
     // Reserve up front — see reserveQuota. Refunded below if the send fails, so
     // a gateway outage never quietly eats a shop's balance.
     await this.reserveQuota(shopId, segmentCost);
@@ -503,7 +524,7 @@ class SMSService {
       // Log SMS
       const smsLog = await SMSLog.create({
         shop: shopId,
-        branch: req ? requireBranch(req) : null,
+        branch,
         recipients: [{
           phone: formattedPhone,
           customer: customerId,
@@ -511,6 +532,10 @@ class SMSService {
         }],
         message: body,
         type: SMS_TYPES.SINGLE,
+        // What produced it — 'sale_receipt', 'payment_receipt', 'order_shipped'.
+        // Callers have always passed this; it was dropped here, so a payment
+        // receipt and a hand-typed message were indistinguishable in the log.
+        audience: options.audience || undefined,
         transactionId: result.messageId,
         cost: segmentCost,
         status: SMS_STATUS.SENT,
@@ -551,10 +576,11 @@ class SMSService {
       // Log failed attempt
       await SMSLog.create({
         shop: shopId,
-        branch: req ? requireBranch(req) : null,
+        branch,
         recipients: [{ phone: formattedPhone, customer: customerId, status: SMS_STATUS.FAILED }],
         message: body,
         type: SMS_TYPES.SINGLE,
+        audience: options.audience || undefined,
         status: SMS_STATUS.FAILED,
         failedCount: 1,
         errorMessage: error.message,
@@ -2099,7 +2125,11 @@ class SMSService {
         const sendResult = await this.sendSingle(shopId, userId, customerPhone, message, saleData.customerId, null, {
           invoiceNumber: invoiceNo,
           saleId: saleDoc?._id || null,
-          shopName: shop.name
+          shopName: shop.name,
+          // The sale's own branch — there is no `req` out here, and without it
+          // the receipt is invisible in every branch's SMS history.
+          branch: saleDoc?.branch ?? saleData.branch ?? null,
+          audience: 'sale_receipt',
         });
 
         // Mark Sale document as smsSent: true
@@ -2155,6 +2185,9 @@ class SMSService {
    *        The collection screen's SMS switch. Overrides the shop's auto-send
    *        setting exactly as the till's checkbox does for a sale receipt — the
    *        shopkeeper is looking at the preview and has asked for this one.
+   * @param {ObjectId|null} [paymentData.branch]
+   *        `Payment.branch`. Required on a multi-branch shop for the receipt to
+   *        appear in that branch's SMS history — this runs with no `req`.
    */
   sendPaymentReceiptAsync(shopId, userId, paymentData) {
     const Shop = require('../models/Shop.model');
@@ -2206,6 +2239,10 @@ class SMSService {
 
         await this.sendSingle(shopId, userId, customer.phone, message, customer._id, null, {
           shopName: shop.name,
+          // The Payment row's branch: the till the money entered, which is the
+          // branch that collected it and the one whose history should show it.
+          branch: paymentData.branch ?? null,
+          audience: 'payment_receipt',
         });
         logger.info(`SMS: Payment receipt sent to ${customer.phone}`);
 

@@ -665,6 +665,11 @@ saleSchema.index({ shop: 1, createdAt: -1 }); // Single-branch listing, recent s
 saleSchema.index({ shop: 1, due: 1 }); // Dues listing/sort
 saleSchema.index({ shop: 1, total: -1 }); // Sort by amount (whitelisted sort field)
 saleSchema.index({ shop: 1, createdBy: 1, createdAt: -1 }); // Staff attribution filter + staff sales report
+// পণ্যভিত্তিক বিক্রি: "every sale of this product, newest first". Without it the
+// report scans the shop's whole sale history to find one product's lines.
+// Multikey on `items.product`; production runs autoIndex:false, so this needs
+// sync-indexes before the report is fast there.
+saleSchema.index({ shop: 1, 'items.product': 1, createdAt: -1 });
 // Cross-shop, admin-only. Every index above is shop-prefixed, which is correct
 // for the shop app — but the operator console has no shop predicate by
 // definition: the dashboard's recent-sales feed and GET /api/admin/sales both

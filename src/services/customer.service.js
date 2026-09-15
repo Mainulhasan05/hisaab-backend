@@ -1482,6 +1482,7 @@ class CustomerService {
       amount: result.payment.amount,
       remainingDue: result.dueAfter,
       forceSend: paymentData.sendSms === true,
+      branch: result.payment?.branch ?? null,
     });
 
     return result;

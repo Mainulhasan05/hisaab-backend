@@ -56,6 +56,10 @@ router.get('/payable-aging', rbac('reports', 'view'), reportController.getPayabl
 router.get('/customer-statement', rbac('reports', 'view'), reportController.getCustomerStatement);
 router.get('/supplier-statement', rbac('reports', 'view'), reportController.getSupplierStatement);
 router.get('/stock', rbac('reports', 'view'), reportController.getStockReport);
+// পণ্যভিত্তিক বিক্রি — one row per sale line: when, who sold it, which invoice,
+// which customer, at what price. `reports.view` like the rest of this router;
+// it names customers and staff, so it is not opened to `products.view` alone.
+router.get('/product-sales', rbac('reports', 'view'), reportController.getProductSales);
 
 router.get('/:type/export/:format', rbac('reports', 'view'), reportController.exportReport);
 

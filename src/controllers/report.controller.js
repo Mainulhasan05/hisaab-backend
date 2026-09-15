@@ -5,6 +5,7 @@ const customerService = require('../services/customer.service');
 // Payable aging lives with the suppliers it ages, the same way receivable aging
 // lives in `customer.service` — the report router is the caller, not the owner.
 const supplierService = require('../services/supplier.service');
+const productSalesService = require('../services/productSales.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 const { sanitizeReport, canViewExpenses } = require('../utils/dataSanitizer.util');
@@ -76,6 +77,18 @@ exports.getDetailedStaffReport = asyncHandler(async (req, res) => {
     data: sanitizeReport(report, req),
     message: 'Detailed staff sales report retrieved successfully',
     messageBn: 'বিস্তারিত স্টাফ বিক্রয় রিপোর্ট সফলভাবে লোড হয়েছে',
+  });
+});
+
+// পণ্যভিত্তিক বিক্রি — every sale line of a product, with seller, invoice and customer
+exports.getProductSales = asyncHandler(async (req, res) => {
+  const report = await productSalesService.getProductSales(req.shop._id, req.query, req.branchId);
+  return ApiResponse.success(res, {
+    // Cost and profit ride under the standard key names, so the sanitiser strips
+    // them per user exactly as it does on every other report.
+    data: sanitizeReport(report, req),
+    message: 'Product sales retrieved successfully',
+    messageBn: 'পণ্যভিত্তিক বিক্রি লোড হয়েছে',
   });
 });
 

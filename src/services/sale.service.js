@@ -459,6 +459,9 @@ class SaleService {
       forceTaxRate = null,
       order: linkedOrder = null,
     } = internalOptions;
+    // The sale's id, minted up front so the stock ledger rows written before
+    // `Sale.create` can reference it. See the note at `StockTransaction.insertMany`.
+    const newSaleId = new mongoose.Types.ObjectId();
     // The quoted price wins over every pricing rule, including wholesale —
     // an online order is billed at what the customer was shown.
     const overrideFor = (productId, variantId = null) => {
@@ -1539,6 +1542,20 @@ class SaleService {
       if (pinnedAt) {
         for (const txn of stockTransactions) txn.createdAt = pinnedAt;
       }
+      /**
+       * Which invoice took the goods.
+       *
+       * These rows used to carry no `reference` at all — only the cancel and
+       * return rows did — so a product's stock history showed "বিক্রি −৩" with
+       * no way to open the sale behind it. The sale does not exist yet at this
+       * point (it is created below, after the ledger), so its id is minted here
+       * and handed to `Sale.create`. The invoice NUMBER is not known yet either
+       * — it is drawn inside the create's retry loop — and is not needed: the
+       * id is what a link opens, and the number is one lookup away.
+       */
+      for (const txn of stockTransactions) {
+        if (!txn.reference) txn.reference = { type: 'sale', id: newSaleId };
+      }
       await StockTransaction.insertMany(stockTransactions, sessionOpt);
     }
 
@@ -1793,6 +1810,10 @@ class SaleService {
           || customInvoiceNo
           || await this.generateInvoiceNumber(shopId, branchCode, branchId, pinnedAt);
         const [newSale] = await Sale.create([{
+          // Minted before the stock ledger so its rows can point here. Reusing
+          // it across the retry loop is safe: a duplicate-invoice failure
+          // writes nothing, so the id is still free on the next attempt.
+          _id: newSaleId,
           shop: shopId,
           branch: branchId,
           invoiceNo,
@@ -2462,6 +2483,8 @@ class SaleService {
       customerId: customer?._id,
       customerName: finalCustomerName,
       customerPhone: finalCustomerPhone,
+      // Fallback only — the receipt prefers the re-read sale document's branch.
+      branch: sale.branch ?? null,
       // What the shop KEPT of their money. The customer-trust line: without it
       // a receipt for a ৳300 bill paid with ৳1,000 says nothing about the ৳700,
       // and the only reasonable conclusion is that it was pocketed.
@@ -2762,6 +2785,7 @@ class SaleService {
         amount: result.payment.amount,
         remainingDue: customerDueAfter,
         forceSend: paymentData.sendSms === true,
+        branch: result.payment?.branch ?? null,
       });
     }
 

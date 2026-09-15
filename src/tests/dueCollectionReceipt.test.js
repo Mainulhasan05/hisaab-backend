@@ -240,6 +240,16 @@ describe('collectDuePayment — the receipt SMS', () => {
     expect(payload.remainingDue).toBe(1000);
   });
 
+  it('tags the receipt with the collecting branch, or it vanishes from that branch\'s SMS history', async () => {
+    // The sender runs with no `req`. Without the Payment row's branch the log
+    // was written `branch: null`, and a branch-filtered history never showed it.
+    stubCustomer(5000);
+    await customerService.collectDuePayment(
+      SHOP, USER, CUSTOMER, { amount: 500, method: 'cash' }, reqAt(BRANCH_B)
+    );
+    expect(String(SMSService.sendPaymentReceiptAsync.mock.calls[0][2].branch)).toBe(String(BRANCH_B));
+  });
+
   it('forwards the collection screen\'s SMS switch', async () => {
     stubCustomer(5000);
     await customerService.collectDuePayment(
