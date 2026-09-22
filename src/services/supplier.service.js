@@ -15,6 +15,7 @@ const { paidAtMatch, LIVE_PAYMENT } = require('../utils/paymentDate.util');
 const { endOfBangladeshDay } = require('../utils/bdTime.util');
 const { runInTransaction } = require('../utils/transaction.util');
 const { quantizeMoney } = require('../utils/quantity.util');
+const { laterPaymentsLookup, PAID_AT_PURCHASE_EXPR } = require('../utils/purchasePayment.util');
 
 /** Escape user input before it reaches $regex — raw input is a ReDoS vector. */
 const escapeRegex = (value) => String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -756,12 +757,11 @@ class SupplierService {
     // the date predicate and the search are `$or`s, and assigning the second
     // over the first drops the date range without a word.
     const clauses = [];
-    if (startDate || endDate) {
-      const range = {};
-      if (startDate) range.$gte = new Date(startDate);
-      if (endDate) range.$lte = endOfBangladeshDay(new Date(endDate));
-      clauses.push(paidAtMatch(range));
-    }
+    const range = {};
+    if (startDate) range.$gte = new Date(startDate);
+    if (endDate) range.$lte = endOfBangladeshDay(new Date(endDate));
+    const hasRange = Boolean(startDate || endDate);
+    if (hasRange) clauses.push(paidAtMatch(range));
 
     /**
      * Search resolves to supplier ids first, for the same reason the customer
@@ -771,8 +771,9 @@ class SupplierService {
      * the purchase, so the invoice numbers have to be resolved to ids too.
      */
     const term = String(search || '').trim();
+    const rx = term ? new RegExp(escapeRegex(term), 'i') : null;
+    let searchSupplierIds = [];
     if (term) {
-      const rx = new RegExp(escapeRegex(term), 'i');
       const [suppliers, bills] = await Promise.all([
         Supplier.find(
           { shop: shopId, $or: [{ name: rx }, { companyName: rx }, { phone: rx }] },
@@ -780,8 +781,9 @@ class SupplierService {
         ).limit(500).lean(),
         Purchase.find({ shop: shopId, invoiceNo: rx }, '_id').limit(500).lean(),
       ]);
+      searchSupplierIds = suppliers.map((x) => x._id);
       const searchOr = [
-        ...(suppliers.length ? [{ supplier: { $in: suppliers.map((x) => x._id) } }] : []),
+        ...(suppliers.length ? [{ supplier: { $in: searchSupplierIds } }] : []),
         ...(bills.length ? [{ purchase: { $in: bills.map((x) => x._id) } }] : []),
       ];
       // An `$or: []` is a Mongo error, and a search that matched no vendor and
@@ -790,10 +792,75 @@ class SupplierService {
     }
     if (clauses.length) match.$and = clauses;
 
+    /**
+     * ── The bill arm: money paid AT THE COUNTER, which has no Payment row ────
+     *
+     * `createPurchase` only sets `Purchase.paid`; it writes no `Payment`. So a
+     * shopkeeper who took delivery and paid ৳20,000 on the spot found nothing
+     * here — the register listed only what was paid LATER — while the supplier
+     * statement, which has always derived this figure, showed it. This is the
+     * mirror of the customer register's `Sale.paid` arm, and it was missing.
+     *
+     * Shaped like a Payment row so the facet below needs no second code path:
+     * `purchase` and a single allocation name the bill, `status` carries the
+     * bill's own (a cancelled purchase is struck through and excluded from the
+     * totals exactly like a voided payment), `paidAt` is the bill's `date`.
+     * The amount is `purchasePayment.util`'s formula, the same one the
+     * statement prints, so the two screens cannot disagree.
+     *
+     * Only when the caller wants `purchase_payment` rows — an অগ্রিম-only view
+     * has no business listing bills.
+     */
+    const pipeline = [{ $match: match }];
+    if (wanted.includes(PAYMENT_TYPES.PURCHASE_PAYMENT)) {
+      const shopOid = new mongoose.Types.ObjectId(String(shopId));
+      const billMatch = branchMatch(req || {}, { shop: shopOid, paid: { $gt: 0 } });
+      if (!includeCancelled) billMatch.status = { $ne: 'cancelled' };
+      if (hasRange) billMatch.date = range;
+      if (term) {
+        billMatch.$or = [
+          { invoiceNo: rx },
+          ...(searchSupplierIds.length ? [{ supplier: { $in: searchSupplierIds } }] : []),
+        ];
+      }
+
+      pipeline.push({
+        $unionWith: {
+          coll: Purchase.collection.name,
+          pipeline: [
+            { $match: billMatch },
+            laterPaymentsLookup(shopOid),
+            { $addFields: { atPurchaseAmount: PAID_AT_PURCHASE_EXPR } },
+            // A bill paid entirely LATER has nothing left over — its money is
+            // already in the payment arm, and a ৳0 row would only be noise.
+            { $match: { atPurchaseAmount: { $gt: 0 } } },
+            {
+              $project: {
+                type: { $literal: PAYMENT_TYPES.PURCHASE_PAYMENT },
+                atPurchase: { $literal: true },
+                amount: '$atPurchaseAmount',
+                method: '$paymentMethod',
+                paidAt: '$date',
+                createdAt: 1,
+                supplier: 1,
+                purchase: '$_id',
+                allocations: [{ purchase: '$_id', amount: '$atPurchaseAmount' }],
+                status: 1,
+                receivedBy: '$createdBy',
+                branch: 1,
+                notes: 1,
+                receiptNo: { $literal: null },
+              },
+            },
+          ],
+        },
+      });
+    }
+
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
     const [faceted] = await Payment.aggregate([
-      { $match: match },
+      ...pipeline,
       {
         $facet: {
           rows: [
@@ -959,7 +1026,45 @@ class SupplierService {
       .populate('receivedBy', 'name')
       .lean();
 
-    return rows.map((r) => ({
+    /**
+     * Money paid ON the bill at delivery — no Payment row exists for it (see
+     * `purchasePayment.util`), so without this the history of a vendor the
+     * shop always pays cash-on-delivery read as empty. Same formula, and the
+     * same row shape, as the shop-wide register's bill arm.
+     */
+    const atPurchase = bills.length === 0 ? [] : await Purchase.aggregate([
+      {
+        $match: {
+          shop: new mongoose.Types.ObjectId(String(shopId)),
+          _id: { $in: bills.map((b) => b._id) },
+          paid: { $gt: 0 },
+        },
+      },
+      laterPaymentsLookup(new mongoose.Types.ObjectId(String(shopId))),
+      { $addFields: { atPurchaseAmount: PAID_AT_PURCHASE_EXPR } },
+      { $match: { atPurchaseAmount: { $gt: 0 } } },
+      {
+        $project: {
+          type: { $literal: PAYMENT_TYPES.PURCHASE_PAYMENT },
+          atPurchase: { $literal: true },
+          amount: '$atPurchaseAmount',
+          method: '$paymentMethod',
+          paidAt: '$date',
+          createdAt: 1,
+          purchase: '$_id',
+          status: 1,
+          receivedBy: '$createdBy',
+          notes: 1,
+        },
+      },
+    ]);
+
+    const effective = (r) => new Date(r.paidAt || r.createdAt).getTime() || 0;
+    const merged = [...rows, ...atPurchase]
+      .sort((a, b) => effective(b) - effective(a))
+      .slice(0, limit);
+
+    return merged.map((r) => ({
       ...r,
       voided: r.status === 'cancelled',
       // What it settled, in the shopkeeper's vocabulary: a row with no bill

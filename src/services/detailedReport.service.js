@@ -18,6 +18,7 @@ const { isBranchCustomerScope } = require('../utils/branchScope.util');
 const { quantizeMoney } = require('../utils/quantity.util');
 const { paidAtMatch, PAID_AT_EXPR, LIVE_PAYMENT } = require('../utils/paymentDate.util');
 const { PAYMENT_TYPES } = require('../config/constants');
+const { laterPaymentsLookup } = require('../utils/purchasePayment.util');
 
 /**
  * The three printable business documents: a customer statement of account, a
@@ -111,72 +112,6 @@ function applyRunningBalance(entries, opening) {
 /** Sum a numeric key over rows. */
 const sumBy = (rows, key) => quantizeMoney(rows.reduce((acc, r) => acc + (r[key] || 0), 0));
 
-/**
- * The later-payment `$lookup` both supplier-statement passes hang off a
- * purchase, with each joined row projected down to `applied` — what THIS
- * purchase absorbed of it.
- *
- * A plain `foreignField: 'purchase'` join stopped being the truth twice over:
- *
- *   - a payment may settle SEVERAL bills (F-4). The row names only the primary
- *     purchase, so the primary would soak up the whole `amount` (driving its
- *     computed cash-on-delivery negative, which the `> 0` guard then hides)
- *     while the other bills read as settled on the spot. `allocations` carries
- *     the real split, so where it exists the slice is what counts;
- *   - a voided row (`cancelPurchase` unwinds its payments now) is money the
- *     drawer got back, excluded the way `LIVE_PAYMENT` does it — `$ne`, never
- *     an equality on a field legacy rows do not carry.
- *
- * `shop` and `type` ride as plain predicates so the join stays on the
- * `{shop, purchase}` index prefix instead of scanning every payment per bill.
- */
-const laterPaymentsLookup = (shopOid) => ({
-  $lookup: {
-    from: 'payments',
-    let: { pid: '$_id' },
-    pipeline: [
-      {
-        $match: {
-          shop: shopOid,
-          type: PAYMENT_TYPES.PURCHASE_PAYMENT,
-          status: { $ne: 'cancelled' },
-          $expr: {
-            $or: [
-              { $eq: ['$purchase', '$$pid'] },
-              { $in: ['$$pid', { $ifNull: ['$allocations.purchase', []] }] },
-            ],
-          },
-        },
-      },
-      {
-        $project: {
-          applied: {
-            $cond: [
-              { $gt: [{ $size: { $ifNull: ['$allocations', []] } }, 0] },
-              {
-                $sum: {
-                  $map: {
-                    input: {
-                      $filter: {
-                        input: '$allocations',
-                        as: 'a',
-                        cond: { $eq: ['$$a.purchase', '$$pid'] },
-                      },
-                    },
-                    as: 'a',
-                    in: { $ifNull: ['$$a.amount', 0] },
-                  },
-                },
-              },
-              '$amount',
-            ],
-          },
-        },
-      },
-    ],
-    as: 'laterPayments',
-  },
-});
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────

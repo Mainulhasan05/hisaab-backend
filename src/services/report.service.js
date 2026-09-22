@@ -7,6 +7,7 @@ const Expense = require('../models/Expense.model');
 const SalesReturn = require('../models/SalesReturn.model');
 const Purchase = require('../models/Purchase.model');
 const AccountTransfer = require('../models/AccountTransfer.model');
+const { LIVE_TRANSFER } = AccountTransfer;
 // The stock ledger. Read by the P&L for one thing only: the ক্ষতি term, which
 // exists in no sales figure — see the shrinkage aggregation in getProfitLoss.
 const StockTransaction = require('../models/StockTransaction.model');
@@ -1695,6 +1696,8 @@ class ReportService {
         {
           $match: {
             shop: shopObjId,
+            // A voided transfer's fee was never really paid — it was a typo.
+            ...LIVE_TRANSFER,
             ...(branchId ? { branch: new mongoose.Types.ObjectId(branchId) } : {}),
             ...(dateQuery ? { date: dateQuery } : {}),
           },

@@ -96,6 +96,17 @@ const createTransfer = Joi.object({
 });
 
 /**
+ * The reason is required: a void moves two balances back, and "why is the bank
+ * ৳60,000 short again" has to have an answer six months later.
+ */
+const cancelTransfer = Joi.object({
+  reason: Joi.string().trim().min(1).max(500).required().messages({
+    'any.required': 'বাতিলের কারণ লিখুন',
+    'string.empty': 'বাতিলের কারণ লিখুন',
+  }),
+});
+
+/**
  * `direction` is accepted but only MEANS anything for `adjustment` — every other
  * type has one answer and the service derives it. Listing it here rather than
  * refusing it keeps a client that always sends the field working, and the
@@ -142,6 +153,7 @@ module.exports = {
   createAccount,
   updateAccount,
   createTransfer,
+  cancelTransfer,
   createEntry,
   reconcileAccount,
 };

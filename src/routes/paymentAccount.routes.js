@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const paymentAccountController = require('../controllers/paymentAccount.controller');
-const { protect } = require('../middleware/auth.middleware');
+const { protect, ownerOnly } = require('../middleware/auth.middleware');
 const { rbac } = require('../middleware/permission.middleware');
 const { validate } = require('../middleware/validate.middleware');
 const { requireFeature } = require('../utils/features.util');
@@ -46,6 +46,18 @@ router.post(
   rbac('accounts', 'transfer'),
   validate(paymentAccountValidation.createTransfer),
   paymentAccountController.createTransfer
+);
+/**
+ * Void — owner only, and not a grantable permission. `accounts.transfer` is the
+ * authority to move money; undoing a movement after the fact is the authority
+ * to rewrite what the books say happened, which stays with the owner the same
+ * way `adjustment` entries do. POST, not DELETE: the row is kept.
+ */
+router.post(
+  '/transfers/:id/cancel',
+  ownerOnly,
+  validate(paymentAccountValidation.cancelTransfer),
+  paymentAccountController.cancelTransfer
 );
 
 /**

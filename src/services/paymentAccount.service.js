@@ -1,9 +1,12 @@
 const mongoose = require('mongoose');
 const PaymentAccount = require('../models/PaymentAccount.model');
 const AccountTransfer = require('../models/AccountTransfer.model');
+const { LIVE_TRANSFER } = AccountTransfer;
 const AccountEntry = require('../models/AccountEntry.model');
 const AccountReconciliation = require('../models/AccountReconciliation.model');
 const AuditLog = require('../models/AuditLog.model');
+const CashRegister = require('../models/CashRegister.model');
+const { getBangladeshDayRange, toBangladeshDateStr } = require('../utils/bdTime.util');
 const { AppError } = require('../middleware/error.middleware');
 const { requireBranch, branchFilter } = require('../utils/branchScope.util');
 const { runInTransaction } = require('../utils/transaction.util');
@@ -475,6 +478,117 @@ class PaymentAccountService {
     };
   }
 
+  /**
+   * Void a transfer entered by mistake — owner only, reason required.
+   *
+   * ── Void, never delete ────────────────────────────────────────────────────
+   *
+   * The row stays, marked `cancelled`, and both legs are reversed with the
+   * opposite sign inside one transaction. Deleting it instead would leave both
+   * balances wrong by the transfer and make `recalc-account-balances` report the
+   * CORRECT balance as drifted, because the row it replays from would be gone.
+   * A typo'd amount is fixed by voiding and entering it again; the client
+   * pre-fills the new form so that is one step for the shopkeeper.
+   *
+   * ── A counted drawer does not move ────────────────────────────────────────
+   *
+   * If either end is a cash box whose register for that day is CLOSED, this
+   * refuses with 409 — the same call `cancelSale` makes. Voiding would restate
+   * what the drawer should have held after someone counted it, and nothing on
+   * the register would say why. Reopening the day is the deliberate way round.
+   * Bank ↔ bKash transfers never touch a drawer, so they are never blocked.
+   *
+   * The owner check is in the route (`ownerOnly`); this assumes it passed.
+   */
+  async cancelTransfer(shopId, userId, transferId, reason, req) {
+    const note = String(reason || '').trim();
+    if (!note) {
+      throw new AppError('A reason is required', 'বাতিলের কারণ লিখুন', 400);
+    }
+
+    return runInTransaction(async (session) => {
+      const sessionOpt = session ? { session } : {};
+
+      // `branchFilter`: an owner looking at branch A cannot void branch B's
+      // transfer by id, exactly as they cannot see it in the list. Cancelled
+      // rows are INCLUDED — that is what lets a double-tap be refused below
+      // instead of reading as "not found".
+      const transfer = await AccountTransfer.findOne(
+        branchFilter(req, { _id: transferId, shop: shopId }),
+        null,
+        sessionOpt
+      ).populate('fromAccount', 'name type branch').populate('toAccount', 'name type branch');
+
+      if (!transfer) {
+        throw new AppError('Transfer not found', 'ট্রান্সফার পাওয়া যায়নি', 404);
+      }
+      if (transfer.status === 'cancelled') {
+        throw new AppError(
+          'This transfer is already cancelled',
+          'এই ট্রান্সফারটি আগেই বাতিল করা হয়েছে',
+          400
+        );
+      }
+
+      const { startOfDay, endOfDay } = getBangladeshDayRange(toBangladeshDateStr(transfer.date));
+      for (const account of [transfer.fromAccount, transfer.toAccount]) {
+        if (account?.type !== 'cash') continue;
+        const register = await CashRegister.findOne(
+          {
+            shop: shopId,
+            // Single-branch cash boxes carry `branch: null`, and so do their
+            // registers — an unconditional predicate would still match, but
+            // this is the shape `cancelSale` uses and the two should read alike.
+            ...(account.branch ? { branch: account.branch } : {}),
+            date: { $gte: startOfDay, $lte: endOfDay },
+          },
+          'status',
+          sessionOpt
+        ).lean();
+        if (register?.status === 'closed') {
+          throw new AppError(
+            'The cash register for this day is closed',
+            'এই দিনের ক্যাশ রেজিস্টার বন্ধ করা হয়েছে — আগে রেজিস্টার আবার খুলুন, তারপর বাতিল করুন।',
+            409
+          );
+        }
+      }
+
+      // 1 — the mark, BEFORE the balances move, so a throw below rolls both
+      // back together rather than leaving reversed money on a live-looking row.
+      transfer.status = 'cancelled';
+      transfer.cancelledAt = new Date();
+      transfer.cancelledBy = userId;
+      transfer.cancelReason = note;
+      await transfer.save(sessionOpt);
+
+      // 2 — both legs, exact mirror of `createTransfer`. The charge reverses
+      // with them: it was only ever the gap between these two figures.
+      await this.applyAccountDelta({
+        shop: shopId, account: transfer.fromAccount._id, amount: transfer.amountOut, session,
+      });
+      await this.applyAccountDelta({
+        shop: shopId, account: transfer.toAccount._id, amount: -transfer.amountIn, session,
+      });
+
+      const fromName = transfer.fromAccount?.name || '—';
+      const toName = transfer.toAccount?.name || '—';
+      await AuditLog.create([{
+        shop: shopId,
+        branch: transfer.branch,
+        user: userId,
+        action: 'account_transfer_cancel',
+        actionBn: 'ফান্ড ট্রান্সফার বাতিল',
+        description: `Cancelled transfer ${transfer.transferNo}: ৳${transfer.amountOut} ${fromName} → ৳${transfer.amountIn} ${toName} — ${note}`,
+        descriptionBn: `ফান্ড ট্রান্সফার ${transfer.transferNo} বাতিল: ${fromName} থেকে ৳${transfer.amountOut}, ${toName} এ ৳${transfer.amountIn} — ${note}`,
+        entity: { type: 'account_transfer', id: transfer._id, name: transfer.transferNo },
+        changes: { before: { status: 'active' }, after: { status: 'cancelled', cancelReason: note } },
+      }], sessionOpt);
+
+      return transfer;
+    });
+  }
+
   // ── Money that is not trade ────────────────────────────────────────────────
 
   /**
@@ -684,11 +798,11 @@ class PaymentAccountService {
     // second, subtly different P&L.
     const [transfersOut, transfersIn, entries] = await Promise.all([
       AccountTransfer.aggregate([
-        { $match: { shop: shopOid, fromAccount: { $in: ids }, ...(hasPeriod ? { date: dateMatch } : {}) } },
+        { $match: { shop: shopOid, fromAccount: { $in: ids }, ...LIVE_TRANSFER, ...(hasPeriod ? { date: dateMatch } : {}) } },
         { $group: { _id: '$fromAccount', total: { $sum: '$amountOut' } } },
       ]),
       AccountTransfer.aggregate([
-        { $match: { shop: shopOid, toAccount: { $in: ids }, ...(hasPeriod ? { date: dateMatch } : {}) } },
+        { $match: { shop: shopOid, toAccount: { $in: ids }, ...LIVE_TRANSFER, ...(hasPeriod ? { date: dateMatch } : {}) } },
         { $group: { _id: '$toAccount', total: { $sum: '$amountIn' } } },
       ]),
       AccountEntry.aggregate([

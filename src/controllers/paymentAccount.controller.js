@@ -99,6 +99,21 @@ exports.createTransfer = asyncHandler(async (req, res) => {
   });
 });
 
+exports.cancelTransfer = asyncHandler(async (req, res) => {
+  const transfer = await paymentAccountService.cancelTransfer(
+    req.shop._id,
+    req.user._id,
+    req.params.id,
+    req.body.reason,
+    req
+  );
+  ApiResponse.success(res, {
+    data: transfer,
+    message: 'Transfer cancelled',
+    messageBn: 'ট্রান্সফার বাতিল হয়েছে',
+  });
+});
+
 exports.getEntries = asyncHandler(async (req, res) => {
   const result = await paymentAccountService.getEntries(req.shop._id, req, {
     page: parseInt(req.query.page, 10) || 1,

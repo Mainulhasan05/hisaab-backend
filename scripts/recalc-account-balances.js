@@ -289,13 +289,13 @@ async function rebuildShop(db, shopId, accounts) {
     //
     // Harmless before Phase 3 lands — the collection simply does not exist yet.
     const transfersOut = await db.collection('accounttransfers').aggregate([
-      { $match: { shop: shopId, fromAccount: accountId, ...since(account) } },
+      { $match: { shop: shopId, fromAccount: accountId, ...since(account), ...LIVE } },
       { $group: { _id: null, total: { $sum: '$amountOut' } } },
     ]).toArray();
     add(accountId, -(transfersOut[0]?.total || 0));
 
     const transfersIn = await db.collection('accounttransfers').aggregate([
-      { $match: { shop: shopId, toAccount: accountId, ...since(account) } },
+      { $match: { shop: shopId, toAccount: accountId, ...since(account), ...LIVE } },
       { $group: { _id: null, total: { $sum: '$amountIn' } } },
     ]).toArray();
     add(accountId, transfersIn[0]?.total || 0);

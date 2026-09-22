@@ -34,12 +34,18 @@ const AccountTransferCounter = require('./AccountTransferCounter.model');
  * `charge` is therefore a VIRTUAL, derived, never stored — the same rule D-1
  * applies to the grand total. Two copies of one number is how they disagree.
  *
- * ── Immutable ──────────────────────────────────────────────────────────────
+ * ── Immutable, but voidable ─────────────────────────────────────────────────
  *
  * There is no edit and no delete. A transfer has already moved two balances;
- * "correcting" one would have to unwind both, and a reversing transfer is the
- * honest way to do that — it leaves both the mistake and the correction on the
- * record, which is what a ledger is for.
+ * "correcting" one would have to unwind both. What the owner CAN do is void it
+ * (`status: 'cancelled'`, with a reason) — `cancelTransfer` reverses both legs
+ * in one transaction and the row stays on the record, struck through, so the
+ * mistake and the correction are both still there. Editing is void + re-enter:
+ * a new number for the new facts, never the old number restated.
+ *
+ * Every reader that SUMS transfers must spread `LIVE_TRANSFER`. A cancelled row
+ * has already been reversed, so counting it again moves the till, the money
+ * position and the P&L charge by the whole amount.
  */
 const accountTransferSchema = new mongoose.Schema({
   shop: {
@@ -108,6 +114,19 @@ const accountTransferSchema = new mongoose.Schema({
     ref: 'User',
     required: true,
   },
+  /**
+   * `'active'` by default, and ABSENT on every row written before voiding
+   * existed — which is why readers match `{ $ne: 'cancelled' }` rather than
+   * `'active'`. An equality match would drop every historical transfer.
+   */
+  status: {
+    type: String,
+    enum: ['active', 'cancelled'],
+    default: 'active',
+  },
+  cancelledAt: { type: Date, default: null },
+  cancelledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  cancelReason: { type: String, trim: true, maxlength: 500, default: null },
 }, {
   timestamps: true,
   toJSON: { virtuals: true },
@@ -159,4 +178,8 @@ accountTransferSchema.plugin(immutableGuard, { modelName: 'AccountTransfer' });
 
 const AccountTransfer = mongoose.model('AccountTransfer', accountTransferSchema);
 
+/** Spread into every `$match` that sums transfers. Same shape as `LIVE_PAYMENT`. */
+const LIVE_TRANSFER = Object.freeze({ status: { $ne: 'cancelled' } });
+
 module.exports = AccountTransfer;
+module.exports.LIVE_TRANSFER = LIVE_TRANSFER;

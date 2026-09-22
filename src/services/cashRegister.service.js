@@ -5,6 +5,7 @@ const Payment = require('../models/Payment.model');
 const Expense = require('../models/Expense.model');
 const Purchase = require('../models/Purchase.model');
 const AccountTransfer = require('../models/AccountTransfer.model');
+const { LIVE_TRANSFER } = AccountTransfer;
 const AccountEntry = require('../models/AccountEntry.model');
 const PaymentAccount = require('../models/PaymentAccount.model');
 const AuditLog = require('../models/AuditLog.model');
@@ -350,6 +351,8 @@ class CashRegisterService {
             shop: shopOid,
             toAccount: { $in: cashAccountIds },
             date: { $gte: start, $lte: end },
+            // A voided transfer has already been reversed on the balance.
+            ...LIVE_TRANSFER,
           },
         },
         { $group: { _id: null, total: { $sum: '$amountIn' } } },
@@ -361,6 +364,8 @@ class CashRegisterService {
             shop: shopOid,
             fromAccount: { $in: cashAccountIds },
             date: { $gte: start, $lte: end },
+            // A voided transfer has already been reversed on the balance.
+            ...LIVE_TRANSFER,
           },
         },
         { $group: { _id: null, total: { $sum: '$amountOut' } } },
