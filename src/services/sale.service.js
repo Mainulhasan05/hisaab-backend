@@ -56,6 +56,7 @@ const { buildPaymentReceiptNo } = require('../utils/receiptNo.util');
 const { deductBatches, restoreBatches, batchWriteOp } = require('../utils/batch.util');
 const { hasFeature } = require('../utils/features.util');
 const { isCombo, findComponentVariant, isChooseSlot } = require('../utils/combo.util');
+const { isStockTracked } = require('../utils/stockTracking.util');
 
 /**
  * Is this payload asking for an ONLINE sale?
@@ -982,7 +983,9 @@ class SaleService {
           const spokenFor = pendingPerShelf.get(stockKey) || 0;
           const onShelf = variant ? (variant.stock || 0) : (comp.stock || 0);
           const availableStock = onShelf - spokenFor;
-          if (availableStock < required) {
+          // An uncounted component (the ভাত in a ভাত-মাছ-ডাল থালি) has no
+          // shelf to be short on.
+          if (isStockTracked(comp) && availableStock < required) {
             const what = variant && variant.sku ? `${comp.name} (${variant.sku})` : comp.name;
             throw new AppError(
               `Insufficient stock for "${what}" in combo "${product.name}". Available: ${availableStock}, needed: ${required}`,
@@ -1029,64 +1032,68 @@ class SaleService {
             ? quantizeMoney(comboUnitPrice * (compRetail / retailSum))
             : 0;
 
-          let previousStock;
-          let newStock;
-          if (variant) {
-            previousStock = variant.stock;
-            variant.stock = quantize(variant.stock - required, compStkUnit);
-            newStock = variant.stock;
-            bulkStockOps.push({
-              updateOne: {
-                filter: { _id: comp._id, variants: { $elemMatch: { _id: variant._id, stock: { $gte: required } } } },
-                update: buildVariantStockUpdate(variant._id, -required, compStkUnit),
-              },
-            });
-          } else {
-            previousStock = comp.stock;
-            comp.stock = quantize(comp.stock - required, compStkUnit);
-            newStock = comp.stock;
-            bulkStockOps.push({
-              updateOne: {
-                filter: { _id: comp._id, stock: { $gte: required } },
-                update: buildStockUpdate(-required, compStkUnit),
-              },
-            });
-          }
-          expectedStockOps++;
-
           comboBuying += compBuying * ci.quantity;
+          // Uncounted component: no stock op, no ledger row, no batches — the
+          // same skip an ordinary uncounted line takes. The combo snapshot
+          // below still records it, so the invoice lists what went on the plate.
+          if (isStockTracked(comp)) {
+            let previousStock;
+            let newStock;
+            if (variant) {
+              previousStock = variant.stock;
+              variant.stock = quantize(variant.stock - required, compStkUnit);
+              newStock = variant.stock;
+              bulkStockOps.push({
+                updateOne: {
+                  filter: { _id: comp._id, variants: { $elemMatch: { _id: variant._id, stock: { $gte: required } } } },
+                  update: buildVariantStockUpdate(variant._id, -required, compStkUnit),
+                },
+              });
+            } else {
+              previousStock = comp.stock;
+              comp.stock = quantize(comp.stock - required, compStkUnit);
+              newStock = comp.stock;
+              bulkStockOps.push({
+                updateOne: {
+                  filter: { _id: comp._id, stock: { $gte: required } },
+                  update: buildStockUpdate(-required, compStkUnit),
+                },
+              });
+            }
+            expectedStockOps++;
 
-          stockTransactions.push({
-            shop: shopId,
-            branch: branchId,
-            product: comp._id,
-            productName: comp.name,
-            productCode: comp.code,
-            variantId: variant ? variant._id : null,
-            variantSku: variant ? variant.sku : null,
-            variantAttributes: variant ? variant.attributes : null,
-            type: 'sale',
-            quantity: -required,
-            previousStock,
-            newStock,
-            unitCost: compBuying,
-            totalCost: compBuying * required,
-            unitPrice: perUnitAlloc,
-            totalPrice: quantizeMoney(perUnitAlloc * required),
-            notes: `Sold via combo: ${product.name}`,
-            viaCombo: {
-              product: product._id,
-              name: product.name,
-              code: product.code,
-              comboQuantity: comboQty,
-            },
-            createdBy: userId,
-          });
+            stockTransactions.push({
+              shop: shopId,
+              branch: branchId,
+              product: comp._id,
+              productName: comp.name,
+              productCode: comp.code,
+              variantId: variant ? variant._id : null,
+              variantSku: variant ? variant.sku : null,
+              variantAttributes: variant ? variant.attributes : null,
+              type: 'sale',
+              quantity: -required,
+              previousStock,
+              newStock,
+              unitCost: compBuying,
+              totalCost: compBuying * required,
+              unitPrice: perUnitAlloc,
+              totalPrice: quantizeMoney(perUnitAlloc * required),
+              notes: `Sold via combo: ${product.name}`,
+              viaCombo: {
+                product: product._id,
+                name: product.name,
+                code: product.code,
+                comboQuantity: comboQty,
+              },
+              createdBy: userId,
+            });
 
-          // FEFO on the component — same helper, same owner rule as an
-          // ordinary line.
-          if (deductBatches(comp, ci.variantId || null, required)) {
-            bulkBatchOps.push(batchWriteOp(comp));
+            // FEFO on the component — same helper, same owner rule as an
+            // ordinary line.
+            if (deductBatches(comp, ci.variantId || null, required)) {
+              bulkBatchOps.push(batchWriteOp(comp));
+            }
           }
 
           comboComponents.push({
@@ -1105,6 +1112,7 @@ class SaleService {
             quantityPerCombo: ci.quantity,
             totalQuantity: required,
             unitCost: compBuying,
+            ...(isStockTracked(comp) ? {} : { stockUntracked: true }),
           });
         }
 
@@ -1167,6 +1175,13 @@ class SaleService {
       // on any product that has no wholesale price, and the pack branch below
       // has to know which of the two happened.
       let lineWholesale = false;
+      // This line's own ledger row, or null for an uncounted product
+      // (`trackStock: false` — a plate of rice), which writes no stock and no
+      // row. The pack and total blocks below used to reach the row as
+      // `stockTransactions[length - 1]`: with a row skipped that is ANOTHER
+      // line's row, silently repriced. Hold the reference instead.
+      let lineTxn = null;
+      const stockTracked = isStockTracked(product);
 
       if (item.variantId) {
         const variant = (product.variants && typeof product.variants.id === 'function')
@@ -1177,7 +1192,7 @@ class SaleService {
         }
 
         // Check stock
-        if (variant.stock < item.quantity) {
+        if (stockTracked && variant.stock < item.quantity) {
           throw new AppError(
             `Insufficient stock for ${product.name}. Available: ${variant.stock}`,
             `${product.name} এর পর্যাপ্ত স্টক নেই। আছে: ${variant.stock}টি, চাই: ${item.quantity}টি`,
@@ -1213,58 +1228,61 @@ class SaleService {
           variantAttributes: variant.attributes,
         };
 
-        const previousStock = variant.stock;
-        // Track stock change in memory for validation of subsequent items of the
-        // same product. Quantized for the same reason the DB write is: a cart
-        // with the same fractional item on several lines would otherwise drift
-        // in memory and mis-report `newStock` on the stock transaction.
-        variant.stock = quantize(variant.stock - item.quantity, stkUnit);
+        if (stockTracked) {
+          const previousStock = variant.stock;
+          // Track stock change in memory for validation of subsequent items of the
+          // same product. Quantized for the same reason the DB write is: a cart
+          // with the same fractional item on several lines would otherwise drift
+          // in memory and mis-report `newStock` on the stock transaction.
+          variant.stock = quantize(variant.stock - item.quantity, stkUnit);
 
-        {
-          // Queue bulkWrite operation for variant stock with atomic $gte guard.
-          //
-          // The FILTER is unchanged and must stay that way — the `$gte` inside
-          // `$elemMatch` is what makes two concurrent cashiers safe, and the
-          // `modifiedCount < expectedStockOps` check below is what turns a lost
-          // race into a 409 instead of oversold stock.
-          //
-          // Only the UPDATE varies: integer units keep the positional `$inc`
-          // byte for byte; fractional units get a `$map` pipeline that re-rounds
-          // in the same atomic operation (a pipeline update has no positional
-          // `$`). See utils/quantity.util.js.
-          bulkStockOps.push({
-            updateOne: {
-              filter: { _id: product._id, variants: { $elemMatch: { _id: variant._id, stock: { $gte: item.quantity } } } },
-              update: buildVariantStockUpdate(variant._id, -item.quantity, stkUnit),
-            },
-          });
-          expectedStockOps++;
+          {
+            // Queue bulkWrite operation for variant stock with atomic $gte guard.
+            //
+            // The FILTER is unchanged and must stay that way — the `$gte` inside
+            // `$elemMatch` is what makes two concurrent cashiers safe, and the
+            // `modifiedCount < expectedStockOps` check below is what turns a lost
+            // race into a 409 instead of oversold stock.
+            //
+            // Only the UPDATE varies: integer units keep the positional `$inc`
+            // byte for byte; fractional units get a `$map` pipeline that re-rounds
+            // in the same atomic operation (a pipeline update has no positional
+            // `$`). See utils/quantity.util.js.
+            bulkStockOps.push({
+              updateOne: {
+                filter: { _id: product._id, variants: { $elemMatch: { _id: variant._id, stock: { $gte: item.quantity } } } },
+                update: buildVariantStockUpdate(variant._id, -item.quantity, stkUnit),
+              },
+            });
+            expectedStockOps++;
+          }
+
+          // Queue stock transaction
+          lineTxn = {
+            shop: shopId,
+            branch: branchId,
+            product: product._id,
+            productName: product.name,
+            productCode: product.code,
+            variantId: variant._id,
+            variantSku: variant.sku,
+            variantAttributes: variant.attributes,
+            type: 'sale',
+            quantity: -item.quantity,
+            previousStock,
+            newStock: variant.stock,
+            unitCost: buyingPrice,
+            totalCost: buyingPrice * item.quantity,
+            unitPrice,
+            totalPrice: 0, // will be set below
+            notes: 'Sale item',
+            createdBy: userId,
+          };
+          stockTransactions.push(lineTxn);
         }
-
-        // Queue stock transaction
-        stockTransactions.push({
-          shop: shopId,
-          branch: branchId,
-          product: product._id,
-          productName: product.name,
-          productCode: product.code,
-          variantId: variant._id,
-          variantSku: variant.sku,
-          variantAttributes: variant.attributes,
-          type: 'sale',
-          quantity: -item.quantity,
-          previousStock,
-          newStock: variant.stock,
-          unitCost: buyingPrice,
-          totalCost: buyingPrice * item.quantity,
-          unitPrice,
-          totalPrice: 0, // will be set below
-          notes: 'Sale item',
-          createdBy: userId,
-        });
       } else {
         // Check stock
-        if (product.stock < item.quantity) {
+        if (stockTracked && product.stock < item.quantity) {
           throw new AppError(
             `Insufficient stock for ${product.name}. Available: ${product.stock}`,
             `${product.name} এর পর্যাপ্ত স্টক নেই। আছে: ${product.stock}টি, চাই: ${item.quantity}টি`,
@@ -1288,45 +1306,48 @@ class SaleService {
           buyingPrice = quotedCost !== null ? quotedCost : (product.buyingPrice || 0);
         }
 
-        const previousStock = product.stock;
-        // Track stock change in memory for validation of subsequent items of the
-        // same product — quantized, see the variant branch above.
-        product.stock = quantize(product.stock - item.quantity, stkUnit);
+        if (stockTracked) {
+          const previousStock = product.stock;
+          // Track stock change in memory for validation of subsequent items of the
+          // same product — quantized, see the variant branch above.
+          product.stock = quantize(product.stock - item.quantity, stkUnit);
 
-        {
-          // Queue bulkWrite operation for product stock with atomic $gte guard.
-          // Filter unchanged (see the variant branch above); only the update
-          // shape varies by unit precision.
-          bulkStockOps.push({
-            updateOne: {
-              filter: { _id: product._id, stock: { $gte: item.quantity } },
-              update: buildStockUpdate(-item.quantity, stkUnit),
-            },
-          });
-          expectedStockOps++;
+          {
+            // Queue bulkWrite operation for product stock with atomic $gte guard.
+            // Filter unchanged (see the variant branch above); only the update
+            // shape varies by unit precision.
+            bulkStockOps.push({
+              updateOne: {
+                filter: { _id: product._id, stock: { $gte: item.quantity } },
+                update: buildStockUpdate(-item.quantity, stkUnit),
+              },
+            });
+            expectedStockOps++;
+          }
+
+          // Queue stock transaction
+          lineTxn = {
+            shop: shopId,
+            branch: branchId,
+            product: product._id,
+            productName: product.name,
+            productCode: product.code,
+            variantId: null,
+            variantSku: null,
+            variantAttributes: null,
+            type: 'sale',
+            quantity: -item.quantity,
+            previousStock,
+            newStock: product.stock,
+            unitCost: buyingPrice,
+            totalCost: buyingPrice * item.quantity,
+            unitPrice,
+            totalPrice: 0, // will be set below
+            notes: 'Sale item',
+            createdBy: userId,
+          };
+          stockTransactions.push(lineTxn);
         }
-
-        // Queue stock transaction
-        stockTransactions.push({
-          shop: shopId,
-          branch: branchId,
-          product: product._id,
-          productName: product.name,
-          productCode: product.code,
-          variantId: null,
-          variantSku: null,
-          variantAttributes: null,
-          type: 'sale',
-          quantity: -item.quantity,
-          previousStock,
-          newStock: product.stock,
-          unitCost: buyingPrice,
-          totalCost: buyingPrice * item.quantity,
-          unitPrice,
-          totalPrice: 0, // will be set below
-          notes: 'Sale item',
-          createdBy: userId,
-        });
 
       }
 
@@ -1368,7 +1389,7 @@ class SaleService {
       // in the stock one: `modifiedCount < expectedStockOps` is the oversell
       // guard, and adding unrelated ops to the batch it counts would let a lost
       // stock race hide behind a successful batch write.
-      if (deductBatches(product, item.variantId || null, item.quantity)) {
+      if (stockTracked && deductBatches(product, item.variantId || null, item.quantity)) {
         bulkBatchOps.push(batchWriteOp(product));
       }
 
@@ -1407,7 +1428,7 @@ class SaleService {
         // The ledger records what the stock actually went out at, so it has to
         // follow the wholesale rate too — otherwise a carton sold below retail
         // reports a profit the shop never made.
-        stockTransactions[stockTransactions.length - 1].unitPrice = unitPrice;
+        if (lineTxn) lineTxn.unitPrice = unitPrice;
       }
 
       // ── The line discount, coerced and bounded ──────────────────────────────
@@ -1469,8 +1490,8 @@ class SaleService {
       // unrounded line total propagates into subtotal, profit and the invoice.
       const itemTotal = quantizeMoney((unitPrice * item.quantity) - itemDiscount);
 
-      // Update totalPrice in the last queued stock transaction
-      stockTransactions[stockTransactions.length - 1].totalPrice = itemTotal;
+      // Update totalPrice on this line's own stock transaction
+      if (lineTxn) lineTxn.totalPrice = itemTotal;
 
       processedItems.push({
         product: product._id,
@@ -1493,6 +1514,7 @@ class SaleService {
         buyingPrice,
         discount: itemDiscount,
         total: itemTotal,
+        ...(stockTracked ? {} : { stockUntracked: true }),
       });
 
       // Quantized on every accumulation — see the combo branch above.
@@ -3274,6 +3296,9 @@ class SaleService {
       // everything needed lives in `comboComponents`.
       if (item.itemType === 'combo' && Array.isArray(item.comboComponents)) {
         for (const c of item.comboComponents) {
+          // Sold uncounted: nothing went out, so nothing comes back. Read from
+          // the snapshot, never from the product's setting today.
+          if (c.stockUntracked) continue;
           const comp = cancelProductMap.get(String(c.product));
           if (!comp) continue;
 
@@ -3340,6 +3365,10 @@ class SaleService {
         }
         continue;
       }
+
+      // Sold uncounted (a plate of rice): no stock went out, so none comes back
+      // — decided by the line's snapshot, see `stockUntracked` on Sale.model.
+      if (item.stockUntracked) continue;
 
       const product = cancelProductMap.get(item.product.toString());
       if (!product) continue;

@@ -184,6 +184,7 @@ const effectiveValueExpr = (field) => ({
 // about which day a sale landed on.
 const { BD_OFFSET_MS, BD_TZ, getBangladeshTodayStr, getBangladeshDayRange } = require('../utils/bdTime.util');
 const { paidAtMatch, LIVE_PAYMENT, PAID_AT_EXPR } = require('../utils/paymentDate.util');
+const { TRACKED_FILTER } = require('../utils/stockTracking.util');
 
 class ReportService {
   /**
@@ -244,7 +245,7 @@ class ReportService {
     if (cached != null) return cached;
 
     const count = await Product.countDocuments(
-      productScope(shopId, branchId, { isActive: true, $expr: { $lt: [effectiveStockExpr, '$minStock'] } })
+      productScope(shopId, branchId, { isActive: true, ...TRACKED_FILTER, $expr: { $lt: [effectiveStockExpr, '$minStock'] } })
     );
     await cacheService.set(cacheKey, count, getTTL.lowStock);
     return count;
@@ -661,7 +662,7 @@ class ReportService {
         const [lowStock, noStock, summaryResult] = await Promise.all([
           // Low stock products
           Product.aggregate([
-            { $match: productScope(shopId, branchId, { isActive: true }) },
+            { $match: productScope(shopId, branchId, { isActive: true, ...TRACKED_FILTER }) },
             { $set: { stock: effectiveStockExpr } },
             { $match: { $expr: { $lt: ['$stock', '$minStock'] } } },
             { $sort: { stock: 1 } },
@@ -671,7 +672,7 @@ class ReportService {
 
           // No stock products
           Product.aggregate([
-            { $match: productScope(shopId, branchId, { isActive: true }) },
+            { $match: productScope(shopId, branchId, { isActive: true, ...TRACKED_FILTER }) },
             { $set: { stock: effectiveStockExpr } },
             { $match: { stock: { $lte: 0 } } },
             { $limit: 20 },
@@ -1156,7 +1157,7 @@ class ReportService {
       // 11. Low stock products — `$set` overwrites `stock` with the variant
       // fold so the rows keep the shape the old `.select(...)` returned.
       Product.aggregate([
-        { $match: productScope(shopId, branchId, { isActive: true }) },
+        { $match: productScope(shopId, branchId, { isActive: true, ...TRACKED_FILTER }) },
         { $set: { stock: effectiveStockExpr } },
         { $match: { $expr: { $lte: ['$stock', '$minStock'] } } },
         { $sort: { stock: 1 } },

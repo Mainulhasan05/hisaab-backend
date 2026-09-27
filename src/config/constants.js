@@ -84,6 +84,7 @@ module.exports = {
     SHOE: 'shoe',
     SUPERSHOP: 'supershop',
     STATIONERY: 'stationery',
+    RESTAURANT: 'restaurant',
     OTHER: 'other'
   },
 

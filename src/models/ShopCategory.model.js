@@ -62,7 +62,18 @@ const shopCategorySchema = new mongoose.Schema({
     type: [String],
     default: ['size', 'color']
   },
-  defaultCategories: [defaultCategorySeedSchema]
+  defaultCategories: [defaultCategorySeedSchema],
+  /**
+   * Capabilities (`Shop.features` keys) switched on for a shop that signs up
+   * under this category — `['restaurant']` for রেস্টুরেন্ট. Empty for every
+   * other category, which is what keeps their signups unchanged. Read only at
+   * registration, through `features.util.signupFeatures`; changing it later
+   * never touches an existing shop.
+   */
+  defaultFeatures: {
+    type: [String],
+    default: []
+  }
 }, {
   timestamps: true
 });

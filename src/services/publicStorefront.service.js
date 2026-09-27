@@ -68,6 +68,8 @@ const PUBLIC_PRODUCT_FIELDS = [
   'images',
   'stock',
   'minStock',
+  // Read, never published — it only turns into `inStock: true` (see _stock).
+  'trackStock',
   'tags',
   'createdAt',
 ].join(' ');
@@ -316,6 +318,8 @@ class PublicStorefrontService {
       $or: [
         { hasVariants: { $ne: true }, stock: { $gt: 0 } },
         { hasVariants: true, variants: { $elemMatch: { isActive: true, stock: { $gt: 0 } } } },
+        // Uncounted food (a restaurant's dishes) is never out of stock.
+        { trackStock: false },
       ],
     };
   }
@@ -437,6 +441,7 @@ class PublicStorefrontService {
    * need a real number, and that is the point to decide how much to show.
    */
   _stock(p) {
+    if (p.trackStock === false) return { inStock: true };
     if (p.hasVariants) {
       const active = (p.variants || []).filter((v) => v.isActive !== false);
       return { inStock: active.some((v) => (Number(v.stock) || 0) > 0) };
@@ -501,7 +506,7 @@ class PublicStorefrontService {
           if (v[key] !== undefined) out[key] = v[key];
         }
         // Availability only, never the count — same rule as the parent.
-        out.inStock = (Number(v.stock) || 0) > 0;
+        out.inStock = p.trackStock === false || (Number(v.stock) || 0) > 0;
         return { ...out, ...this._effective(v, parentOnline) };
       });
   }

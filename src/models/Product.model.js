@@ -469,6 +469,23 @@ const productSchema = new mongoose.Schema({
     min: [0, 'নূন্যতম স্টক ০ এর কম হতে পারবে না']
   },
   /**
+   * `false` = nobody counts this: a plate of rice, a bowl of ডাল. It sells
+   * with no stock check and writes no stock, and every stock-in path
+   * (purchase, adjust, transfer, write-off) refuses it. Applies to the whole
+   * product, variants included — হাফ / ফুল প্লেট are both uncounted or both not.
+   *
+   * NO DEFAULT, deliberately. Absent means tracked, which is what every
+   * product ever created before this field is, so there is no back-fill and a
+   * shop without `features.restaurant` stores the document it always did. Read
+   * it ONLY through `utils/stockTracking.util.isStockTracked`.
+   *
+   * `stock` is left exactly as it was when this flips to false, so flipping
+   * back restores the old figure rather than inventing zero.
+   */
+  trackStock: {
+    type: Boolean
+  },
+  /**
    * Batch / expiry tracking. Opt-in per PRODUCT, never per variant — a shop
    * that tracks the expiry of ডানো গুঁড়ো দুধ tracks it for the ৫০০ গ্রাম packet
    * and the ২ কেজি packet alike. There is no case for half a product being
@@ -779,6 +796,8 @@ productSchema.pre('save', function(next) {
 
 // Virtual: Is low stock
 productSchema.virtual('isLowStock').get(function() {
+  // Uncounted food is never "low" — its stock is not a number anyone keeps.
+  if (this.trackStock === false) return false;
   if (this.hasVariants && Array.isArray(this.variants) && this.variants.length) {
     return this.variants.some(v => v.isActive && v.stock <= this.minStock);
   }

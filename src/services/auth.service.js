@@ -17,6 +17,7 @@ const cacheService = require('./cache.service');
 const { seedCategories } = require('../seeds/categorySeeder');
 const { INITIAL_SHOP_CATEGORIES } = require('../seeds/shopCategorySeeder');
 const ShopCategory = require('../models/ShopCategory.model');
+const { signupFeatures } = require('../utils/features.util');
 const { normalizePhone } = require('../utils/phone.util');
 const { applyPresetUpgrades } = require('../utils/rolePreset.util');
 const { invalidateUserAuthCache } = require('../utils/authCache.util');
@@ -86,6 +87,9 @@ class AuthService {
     // definitions (and finally to a generic set for unknown/custom keys).
     const resolvedShopType = shopType || 'other';
     const enabledVariantTypes = await this.resolveDefaultVariantTypes(resolvedShopType);
+    // `{}` for every category but the ones configured with capabilities —
+    // রেস্টুরেন্ট starts with `features.restaurant` on.
+    const startingFeatures = await this.resolveDefaultFeatures(resolvedShopType);
 
     // Trial length and starting prices come from the platform settings document
     // so the operator can change them without a deploy. The constants remain the
@@ -114,7 +118,10 @@ class AuthService {
       },
       settings: {
         enabledVariantTypes
-      }
+      },
+      // Omitted entirely when empty, so every other signup creates exactly the
+      // document it always did and the schema defaults (all false) apply.
+      ...(Object.keys(startingFeatures).length ? { features: startingFeatures } : {})
     });
 
     /**
@@ -246,6 +253,31 @@ class AuthService {
 
     const seed = INITIAL_SHOP_CATEGORIES.find((cat) => cat.key === shopType);
     return seed ? seed.defaultVariantTypes : GENERIC_VARIANT_TYPES;
+  }
+
+  /**
+   * Capabilities a new shop starts with, from its category's `defaultFeatures`
+   * — DB (admin-managed) first, then the seed list, then none. Filtered by
+   * `signupFeatures`, so a bad key in admin data is dropped, never thrown.
+   *
+   * A failed read means NO starting features: the shop is created exactly as
+   * it would have been before this existed, and an admin can switch the
+   * capability on by hand. Signup never fails over it.
+   */
+  async resolveDefaultFeatures(shopType) {
+    let keys;
+    try {
+      const dbCategory = await ShopCategory.findOne({ key: shopType }).select('defaultFeatures').lean();
+      if (dbCategory && Array.isArray(dbCategory.defaultFeatures)) keys = dbCategory.defaultFeatures;
+    } catch (error) {
+      console.error('Failed to read shop category features:', error.message);
+      return {};
+    }
+    if (!keys) {
+      const seed = INITIAL_SHOP_CATEGORIES.find((cat) => cat.key === shopType);
+      keys = seed?.defaultFeatures || [];
+    }
+    return signupFeatures(keys);
   }
 
   /**

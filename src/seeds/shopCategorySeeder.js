@@ -22,7 +22,10 @@ const INITIAL_SHOP_CATEGORIES = [
   { key: 'general-trading', name: 'পণ্য বিক্রয় ও হিসাব', icon: '📦', sortOrder: 16, defaultVariantTypes: ['size', 'color', 'weight', 'pack-size'], description: 'সাধারণ পণ্য বিক্রয়, ইনভেন্টরি ও হিসাব' },
   { key: 'shoe', name: 'জুতা', icon: '👟', sortOrder: 17, defaultVariantTypes: ['size', 'color'], description: 'পুরুষ, নারী ও শিশুদের জুতা' },
   { key: 'supershop', name: 'সুপার শপ', icon: '🏬', sortOrder: 18, defaultVariantTypes: ['weight', 'pack-size', 'size'], description: 'ডিপার্টমেন্টাল ও সুপার স্টোর' },
-  { key: 'stationery', name: 'স্টেশনারি', icon: '✏️', sortOrder: 19, defaultVariantTypes: ['size', 'color', 'pack-size'], description: 'কলম, খাতা, অফিস ও স্কুল সামগ্রী' }
+  { key: 'stationery', name: 'স্টেশনারি', icon: '✏️', sortOrder: 19, defaultVariantTypes: ['size', 'color', 'pack-size'], description: 'কলম, খাতা, অফিস ও স্কুল সামগ্রী' },
+  // The one category that switches a capability on at signup. Half plates are
+  // a unit (প্লেট takes halves), not a variant, hence no variant types.
+  { key: 'restaurant', name: 'রেস্টুরেন্ট / খাবারের হোটেল', icon: '🍛', sortOrder: 20, defaultVariantTypes: [], defaultFeatures: ['restaurant'], description: 'ভাতের হোটেল, রেস্টুরেন্ট, চা-নাস্তার দোকান' }
 ];
 
 /**
@@ -51,6 +54,7 @@ async function seedShopCategories() {
           description: cat.description || '',
           sortOrder: cat.sortOrder,
           defaultVariantTypes: cat.defaultVariantTypes,
+          defaultFeatures: cat.defaultFeatures || [],
           isActive: true,
           defaultCategories: formattedDefaultCategories
         });

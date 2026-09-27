@@ -181,6 +181,11 @@ const baseProduct = {
   wholesalePrice: Joi.number().min(0).allow(null, ''),
   stock: quantityField,
   minStock: quantityField,
+  // `false` = stock is not counted (a plate of rice). Structural only, and NO
+  // default — not even in CREATE_DEFAULTS: absent must stay absent, so a shop
+  // without `features.restaurant` stores exactly the document it always did.
+  // The entitlement is `stockTracking.util.normalizeTrackStock`.
+  trackStock: Joi.boolean(),
   hasVariants: Joi.boolean(),
   variants: Joi.when('hasVariants', {
     is: true,

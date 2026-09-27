@@ -304,6 +304,23 @@ const FEATURES = Object.freeze({
      */
     requires: [],
   },
+  restaurant: {
+    bn: 'রেস্টুরেন্ট ও খাবারের হোটেল',
+    en: 'Restaurant',
+    description:
+      'For food sold as it is cooked. A product may be marked "stock not ' +
+      'counted" — it sells without a stock figure, and purchases, adjustments ' +
+      'and transfers refuse it — and the serving units প্লেট / বাটি / কাপ / ' +
+      'গ্লাস are offered, প্লেট and বাটি in halves (১.৫ প্লেট ভাত). Off = no ' +
+      'such checkbox or units anywhere. A product already marked untracked ' +
+      'keeps selling after the switch goes off: the flag gates the SETTING, ' +
+      'never whether lunch can be sold.',
+    /**
+     * Not `packaging`. A ভাতের হোটেল needs half a plate, not 52 units and a
+     * sack calculator; the serving units carry their own precision.
+     */
+    requires: [],
+  },
 });
 
 /**
@@ -613,8 +630,41 @@ function requireAnyFeature(keys) {
   };
 }
 
+/**
+ * The capabilities a brand-new shop starts with, from its shop category's
+ * `defaultFeatures` (a রেস্টুরেন্ট signup gets `restaurant`).
+ *
+ * Filtered hard, because the list is admin-editable data and a typo or a
+ * stale key must not reach `Shop.create`:
+ *   - unknown keys are dropped (never thrown — signup must not fail on data);
+ *   - storage-backed features are dropped: a new shop has no storage, and
+ *     enabling one would hand it an upload button wired to a 403;
+ *   - a feature whose prerequisites are not ALSO in the list is dropped.
+ *
+ * Returns `{}` for an empty list — the case for every category but the ones
+ * an admin has deliberately configured — so the caller can omit `features`
+ * from the create entirely and the document is exactly what it always was.
+ *
+ * @param {string[]|undefined} keys
+ * @returns {Object<string, true>}
+ */
+function signupFeatures(keys) {
+  const wanted = new Set(
+    (Array.isArray(keys) ? keys : []).filter(
+      (k) => FEATURE_KEYS.includes(k) && !STORAGE_BACKED_FEATURES.includes(k)
+    )
+  );
+  const out = {};
+  for (const key of wanted) {
+    const requires = FEATURES[key].requires || [];
+    if (requires.every((dep) => wanted.has(dep))) out[key] = true;
+  }
+  return out;
+}
+
 module.exports = {
   FEATURES,
+  signupFeatures,
   FEATURE_KEYS,
   STORAGE_BACKED_FEATURES,
   missingDepsFor,

@@ -23,6 +23,7 @@ const {
 } = require('../utils/quantity.util');
 const { deductBatches, batchWriteOp, sameOwner } = require('../utils/batch.util');
 const { _prorate } = require('../utils/purchaseMath.util');
+const { assertTracked } = require('../utils/stockTracking.util');
 
 /**
  * কেনা ফেরত — RTV to the supplier. The mirror of `salesReturn.service`, with
@@ -266,6 +267,10 @@ class PurchaseReturnService {
           availableStock(product, line.variantId) - alreadyClaimed,
           storageUnit(product)
         );
+
+        // Bought while counted, flipped to uncounted since: its stock figure is
+        // a stale number nobody keeps, so taking goods back out of it is refused.
+        if (product) assertTracked(product, 'কেনা ফেরত');
 
         if (!product || quantity > onShelf) {
           throw new AppError(

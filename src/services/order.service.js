@@ -17,6 +17,7 @@ const { resolveAddress, _norm: geoNorm } = require('../utils/bdGeo.util');
 const { buildOrderStatusSms, ORDER_SMS_KINDS } = require('../utils/smsTemplates.util');
 const { channelForOrder } = require('../utils/channel.util');
 const logger = require('../utils/logger.util');
+const { isStockTracked } = require('../utils/stockTracking.util');
 
 /**
  * Per-phone daily ceiling on storefront orders, per shop.
@@ -186,7 +187,8 @@ class OrderService {
   /** A line for a product with no variants. */
   _simpleLine(product, quantity) {
     const { price, compareAt } = publicStorefrontService._effective(product);
-    this._assertStock(product.stock, quantity, product.name);
+    // Uncounted food has no shelf to run out of — the kitchen decides.
+    if (isStockTracked(product)) this._assertStock(product.stock, quantity, product.name);
 
     return {
       product: product._id,
@@ -237,7 +239,7 @@ class OrderService {
     // own — the same precedence the catalogue rendered with.
     const parentOnline = publicStorefrontService._onlinePriceOf(product);
     const { price, compareAt } = publicStorefrontService._effective(variant, parentOnline);
-    this._assertStock(variant.stock, quantity, product.name);
+    if (isStockTracked(product)) this._assertStock(variant.stock, quantity, product.name);
 
     return {
       product: product._id,
@@ -1151,9 +1153,11 @@ class OrderService {
         shop: req.shop._id,
         isDeleted: { $ne: true },
       })
-        .select('name code stock')
+        .select('name code stock trackStock')
         .lean();
       shortProducts = products
+        // An uncounted dish is never "short" — it has no stock to be short of.
+        .filter((p) => isStockTracked(p))
         .map((p) => ({
           _id: p._id,
           name: p.name,

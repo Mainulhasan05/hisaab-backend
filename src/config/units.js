@@ -67,6 +67,9 @@ const UNIT_GROUPS = {
   solid:  { bn: 'ঘনফল',      canonical: 'cft' },
   pack:   { bn: 'মোড়ক',      canonical: null },
   time:   { bn: 'সময়',       canonical: 'hour' },
+  // Restaurant portions. No canonical: a প্লেট is whatever this hotel serves,
+  // and nothing converts through it.
+  serving: { bn: 'পরিবেশন',  canonical: null },
 };
 
 /**
@@ -153,6 +156,14 @@ const UNITS = {
   unit:   { bn: 'একক',      group: 'count', decimals: 0, value: 1 },
   hour:   { bn: 'ঘণ্টা',    group: 'time',  decimals: 2, value: 1 },
   day:    { bn: 'দিন',      group: 'time',  decimals: 1, value: 24 },
+
+  // ── পরিবেশন — offered ONLY with `features.restaurant`, see unitsForShop. ──
+  // প্লেট and বাটি take one decimal because "দেড় প্লেট ভাত" is an ordinary
+  // order; a cup of tea or a glass of lassi is not sold in halves.
+  plate:  { bn: 'প্লেট',     group: 'serving', decimals: 1, value: null },
+  bowl:   { bn: 'বাটি',      group: 'serving', decimals: 1, value: null },
+  cup:    { bn: 'কাপ',       group: 'serving', decimals: 0, value: null },
+  glass:  { bn: 'গ্লাস',     group: 'serving', decimals: 0, value: null },
 };
 
 /** Default when a product has no unit set, and the fallback for unknown keys. */
@@ -288,6 +299,18 @@ function outerUnitsFor(baseUnit) {
 }
 
 /**
+ * The পরিবেশন units — offered only to a shop with `features.restaurant`.
+ * NOT part of what the packaging flag unlocks: a shop that sells rice by the
+ * sack must not find প্লেট in its picker because a restaurant needed it.
+ */
+const SERVING_UNITS = Object.freeze(ALL_UNITS.filter(u => UNITS[u].group === 'serving'));
+
+/** True when `unit` is a restaurant portion — প্লেট, বাটি, কাপ, গ্লাস. */
+function isServingUnit(unit) {
+  return UNITS[unit]?.group === 'serving';
+}
+
+/**
  * Units a shop may choose from.
  *
  * WITHOUT the packaging flag this returns the original 13, in the original
@@ -296,19 +319,30 @@ function outerUnitsFor(baseUnit) {
  * is part of the paid feature, and an ungated unit like `maund` would let a
  * shop store a quantity the rest of their UI cannot interpret.
  *
- * @param {boolean} packagingEnabled
+ * The serving units are a SECOND axis (`features.restaurant`), appended after
+ * whatever the packaging axis gives. With packaging on and restaurant off the
+ * list is exactly what it was before serving units existed.
+ *
+ * Accepts the old bare boolean (= packaging) so no existing caller changes.
+ *
+ * @param {boolean|{packaging?:boolean, restaurant?:boolean}} flags
  * @returns {string[]}
  */
-function unitsForShop(packagingEnabled) {
-  return packagingEnabled ? ALL_UNITS.slice() : LEGACY_UNITS.slice();
+function unitsForShop(flags) {
+  const { packaging, restaurant } =
+    typeof flags === 'object' && flags !== null ? flags : { packaging: Boolean(flags) };
+  const base = packaging
+    ? ALL_UNITS.filter(u => !isServingUnit(u))
+    : LEGACY_UNITS.slice();
+  return restaurant ? base.concat(SERVING_UNITS) : base;
 }
 
 /**
  * Picker payload: units grouped, with labels and precision, ready to render.
- * @param {boolean} packagingEnabled
+ * @param {boolean|{packaging?:boolean, restaurant?:boolean}} flags
  */
-function unitCatalogue(packagingEnabled) {
-  const allowed = new Set(unitsForShop(packagingEnabled));
+function unitCatalogue(flags) {
+  const allowed = new Set(unitsForShop(flags));
   const groups = [];
 
   for (const [key, meta] of Object.entries(UNIT_GROUPS)) {
@@ -338,6 +372,8 @@ module.exports = {
   COMMON_UNITS,
   PACK_UNITS,
   isPackUnit,
+  SERVING_UNITS,
+  isServingUnit,
   outerUnitsFor,
   DEFAULT_UNIT,
   MAX_DECIMALS,

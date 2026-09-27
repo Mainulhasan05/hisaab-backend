@@ -216,6 +216,9 @@ class SalesReturnService {
         total: itemReturnTotal,
         profitLoss: itemProfitLoss,
         reason: returnItem.reason || reason || '',
+        // Sold uncounted → the refund is paid, but no stock comes back. Carried
+        // from the SALE's snapshot, never the product's setting today.
+        ...(saleItem.stockUntracked ? { stockUntracked: true } : {}),
       };
 
       // ── Combo lines return WHOLE ─────────────────────────────────────────
@@ -240,6 +243,7 @@ class SalesReturnService {
           // unit precision is known; this keeps float noise out of the record.
           totalQuantity: Math.round(c.quantityPerCombo * returnItem.quantity * 1e6) / 1e6,
           unitCost: c.unitCost || 0,
+          ...(c.stockUntracked ? { stockUntracked: true } : {}),
         }));
       }
 
@@ -359,6 +363,7 @@ class SalesReturnService {
       // ── Combo line: restore each component from the return's snapshot ─────
       if (item.itemType === 'combo' && Array.isArray(item.comboComponents)) {
         for (const c of item.comboComponents) {
+          if (c.stockUntracked) continue;
           const comp = stockProductMap.get(String(c.product));
           if (!comp) continue;
 
@@ -436,6 +441,7 @@ class SalesReturnService {
         continue;
       }
 
+      if (item.stockUntracked) continue;
       const product = stockProductMap.get(String(item.product));
       if (!product) continue;
 

@@ -44,6 +44,8 @@ const USER_ID = new mongoose.Types.ObjectId();
 const stubRegistration = () => {
   jest.spyOn(User, 'findOne').mockResolvedValue(null);
   jest.spyOn(authService, 'resolveDefaultVariantTypes').mockResolvedValue(['size']);
+  // Category-driven starting capabilities — covered in restaurantSignup.test.js.
+  jest.spyOn(authService, 'resolveDefaultFeatures').mockResolvedValue({});
   jest.spyOn(authService, 'seedDefaultRoles').mockResolvedValue(undefined);
   // The fund accounts every new shop is seeded with. Not the subject here
   // either, and unstubbed it reaches for a database that is not attached —

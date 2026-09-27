@@ -2260,6 +2260,20 @@ const CATEGORY_SEEDS = {
     { name: 'স্টেশনারি ও অন্যান্য', icon: 'pen', order: 12, subcategories: sub(['খাতা ও কলম', 'ব্যাটারি', 'লাইটার']) }
   ],
 
+  // Product categories OFFERED to a restaurant (suggestions panel) — never
+  // pre-created, same as every other shop type.
+  "restaurant": [
+    { name: 'ভাত ও পোলাও', icon: 'utensils', order: 1, subcategories: sub(['সাদা ভাত', 'পোলাও', 'খিচুড়ি', 'বিরিয়ানি']) },
+    { name: 'মাছ', icon: 'fish', order: 2, subcategories: sub(['রুই', 'ইলিশ', 'পাঙ্গাস', 'চিংড়ি', 'ছোট মাছ']) },
+    { name: 'মাংস', icon: 'drumstick', order: 3, subcategories: sub(['মুরগি', 'গরু', 'খাসি', 'হাঁস']) },
+    { name: 'ডিম', icon: 'egg', order: 4, subcategories: sub(['ডিম ভাজি', 'ডিম ভুনা', 'ডিমের তরকারি']) },
+    { name: 'সবজি ও ভর্তা', icon: 'salad', order: 5, subcategories: sub(['সবজি', 'শাক', 'ভর্তা', 'ভাজি']) },
+    { name: 'ডাল', icon: 'soup', order: 6, subcategories: sub(['পাতলা ডাল', 'ঘন ডাল', 'ডাল চচ্চড়ি']) },
+    { name: 'নাস্তা', icon: 'croissant', order: 7, subcategories: sub(['পরোটা', 'রুটি', 'সিঙ্গারা ও সমুচা', 'হালিম']) },
+    { name: 'পানীয়', icon: 'coffee', order: 8, subcategories: sub(['চা', 'কফি', 'লাচ্ছি', 'কোমল পানীয়', 'পানি']) },
+    { name: 'মিষ্টি ও ডেজার্ট', icon: 'cake', order: 9, subcategories: sub(['দই', 'মিষ্টি', 'ফিরনি', 'পায়েস']) }
+  ],
+
   "stationery": [
     { name: 'লেখার সামগ্রী', icon: 'pen', order: 1, subcategories: sub(['বলপেন', 'জেল পেন', 'পেন্সিল', 'মার্কার', 'হাইলাইটার']) },
     { name: 'খাতা ও কাগজ', icon: 'notebook', order: 2, subcategories: sub(['খাতা', 'নোটবুক', 'এ৪ কাগজ', 'ড্রয়িং খাতা', 'ডায়েরি']) },

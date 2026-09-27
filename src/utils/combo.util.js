@@ -13,6 +13,15 @@
 
 const { AppError } = require('../middleware/error.middleware');
 const { quantizeMoney } = require('./quantity.util');
+const { isStockTracked } = require('./stockTracking.util');
+
+/**
+ * What `available` reads for a combo made ONLY of uncounted components — a
+ * থালি of ভাত, ডাল and ভাজি in a hotel that counts none of them. There is no
+ * shelf to divide, so the answer is "as many as are ordered", flagged by
+ * `unlimited: true` so a screen can say so rather than print a big number.
+ */
+const UNLIMITED_COMBO_AVAILABILITY = 1_000_000;
 
 /** Is this product a combo? Null-safe: absent `type` means 'standard'. */
 function isCombo(product) {
@@ -164,6 +173,8 @@ function computeComboAvailability(combo, compMap) {
   let available = Infinity;
   for (const entry of demand.values()) {
     const { comp, totalNeed, pinned, pooled } = entry;
+    // Uncounted (a plate of rice): no shelf, so it never limits the combo.
+    if (!isStockTracked(comp)) continue;
 
     for (const { stock, need } of pinned.values()) {
       if (need > 0) available = Math.min(available, Math.floor(stock / need));
@@ -179,8 +190,21 @@ function computeComboAvailability(combo, compMap) {
     }
   }
 
+  // Every component uncounted: nothing limited it. `demand` is non-empty here
+  // (an empty combo returned `broken: 'empty'` above), so Infinity can only
+  // mean that — it used to be unreachable and read as 0.
+  if (available === Infinity) {
+    return {
+      available: UNLIMITED_COMBO_AVAILABILITY,
+      unlimited: true,
+      cost: quantizeMoney(costMax),
+      costMin: quantizeMoney(costMin),
+      broken: null,
+    };
+  }
+
   return {
-    available: Number.isFinite(available) ? Math.max(0, available) : 0,
+    available: Math.max(0, available),
     cost: quantizeMoney(costMax),
     costMin: quantizeMoney(costMin),
     broken: null,
@@ -194,4 +218,5 @@ module.exports = {
   isChooseSlot,
   eligibleVariants,
   computeComboAvailability,
+  UNLIMITED_COMBO_AVAILABILITY,
 };

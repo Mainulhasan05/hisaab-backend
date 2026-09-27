@@ -63,6 +63,7 @@ const {
   unitDecimals,
   unitLabel,
   isDivisible,
+  isServingUnit,
   SAFE_QUANTITY_MAX,
   DEFAULT_UNIT,
 } = require('../config/units');
@@ -276,6 +277,13 @@ function formatQuantityWithUnit(value, unit = DEFAULT_UNIT) {
  * @returns {string} a units.js key
  */
 function quantityUnit(req, product) {
+  // দেড় প্লেট: the serving units carry their own halves under
+  // `features.restaurant`, without the 52-unit packaging feature. A প্লেট
+  // product in a shop that has since lost the flag falls through to the
+  // packaging rule below — whole plates only, never unsellable.
+  if (isServingUnit(product?.unit) && hasFeature(req, 'restaurant')) {
+    return product.unit;
+  }
   if (!hasFeature(req, 'packaging')) return DEFAULT_UNIT;
   return product?.unit || DEFAULT_UNIT;
 }

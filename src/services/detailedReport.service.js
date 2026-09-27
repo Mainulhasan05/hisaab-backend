@@ -19,6 +19,7 @@ const { quantizeMoney } = require('../utils/quantity.util');
 const { paidAtMatch, PAID_AT_EXPR, LIVE_PAYMENT } = require('../utils/paymentDate.util');
 const { PAYMENT_TYPES } = require('../config/constants');
 const { laterPaymentsLookup } = require('../utils/purchasePayment.util');
+const { TRACKED_FILTER } = require('../utils/stockTracking.util');
 
 /**
  * The three printable business documents: a customer statement of account, a
@@ -1075,7 +1076,9 @@ class DetailedReportService {
 
     // Products are per-branch documents, so scope is shop plus optional branch —
     // the same `productScope` shape report.service.js uses.
-    const match = { shop: oid(shopId), isDeleted: { $ne: true } };
+    // Uncounted food (`trackStock: false`) is left out entirely: it has no
+    // stock to value, and listing ভাত as "out of stock" every day is noise.
+    const match = { shop: oid(shopId), isDeleted: { $ne: true }, ...TRACKED_FILTER };
     if (branchId) match.branch = oid(branchId);
     if (!includeInactive) match.isActive = true;
     if (categoryId) match.category = oid(categoryId);

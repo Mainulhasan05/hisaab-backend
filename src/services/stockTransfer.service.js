@@ -9,6 +9,7 @@ const { isActiveBranch, isAllBranchesView, isMultiBranch } = require('../utils/b
 const { storageUnit, quantize } = require('../utils/quantity.util');
 const { takeBatches, addBatches, batchWriteOp } = require('../utils/batch.util');
 const { assertNotCombo } = require('../utils/combo.util');
+const { assertTracked } = require('../utils/stockTracking.util');
 
 /**
  * A refusal this service authored, in Bengali, with a status code.
@@ -424,6 +425,7 @@ exports.createTransfer = async (data, userId, req = null) => {
     }
     // A combo has no stock to move between branches — transfer its components.
     assertNotCombo(product, 'শাখা স্থানান্তর');
+    assertTracked(product, 'শাখা স্থানান্তর');
     assertVariantChosen(product, item);
     const available = readStock(product, item.variantId || null);
     if (available < item.quantity) {

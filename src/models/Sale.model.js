@@ -176,9 +176,17 @@ const saleItemSchema = new mongoose.Schema({
       // figure the stock guard deducted and a cancel puts back.
       totalQuantity: { type: Number, required: true, min: 0.001 },
       unitCost: { type: Number, default: 0, min: 0 },
+      // See `stockUntracked` on the line below — same meaning, per component.
+      stockUntracked: { type: Boolean },
     }],
     default: undefined
-  }
+  },
+  // `true` = this line moved NO stock: the product was uncounted
+  // (`Product.trackStock: false`) when it was sold. A snapshot, like `unit`:
+  // cancel and return read THIS, never the product's current setting, or a
+  // dish sold uncounted and later switched to counted would get back stock it
+  // never gave. Absent on every other line, so no existing invoice changes shape.
+  stockUntracked: { type: Boolean }
 }, { _id: true });
 
 const saleSchema = new mongoose.Schema({

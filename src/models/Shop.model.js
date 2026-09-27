@@ -752,6 +752,17 @@ const shopSchema = new mongoose.Schema({
     fundAccounts: {
       type: Boolean,
       default: false
+    },
+
+    // Restaurants and ভাতের হোটেল. Two things, both for food sold as it is
+    // cooked: a product may be marked "stock not counted" (`Product.trackStock:
+    // false` — nobody counts plates of rice), and the serving units প্লেট /
+    // বাটি / কাপ / গ্লাস are offered, প্লেট and বাটি in halves. Off = neither
+    // is offered and every screen is what it was. A product already marked
+    // untracked STAYS sellable when this goes off — see utils/stockTracking.util.js.
+    restaurant: {
+      type: Boolean,
+      default: false
     }
   },
 

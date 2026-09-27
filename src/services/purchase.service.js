@@ -26,6 +26,7 @@ const { assertPeriodOpen } = require('../utils/periodLock.util');
 const { resolveLineQuantity } = require('../utils/packaging.util');
 const { deductBatches, batchWriteOp, sameOwner } = require('../utils/batch.util');
 const { assertNotCombo } = require('../utils/combo.util');
+const { assertTracked } = require('../utils/stockTracking.util');
 const {
   buildProductCostUpdate,
   buildVariantCostUpdate,
@@ -240,6 +241,8 @@ class PurchaseService {
       // The shop purchases the COMPONENT products; the combo's availability
       // follows from theirs.
       assertNotCombo(product, 'ক্রয়');
+      // Nor can it buy 50 plates of rice: it buys the rice, as an expense.
+      assertTracked(product, 'ক্রয়');
 
       // `parseInt` used to live here, which is what made purchases integer-only.
       // `parseQuantity` keeps that behaviour exactly for any shop without the

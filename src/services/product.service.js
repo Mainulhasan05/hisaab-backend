@@ -18,6 +18,9 @@ const { unitsForShop, DEFAULT_UNIT } = require('../config/units');
 const { normalizePackaging } = require('../utils/packaging.util');
 const { hasFeature } = require('../utils/features.util');
 const { normalizeWholesalePrice } = require('../utils/pricing.util');
+const {
+  normalizeTrackStock, assertTracked, isStockTracked, TRACKED_FILTER,
+} = require('../utils/stockTracking.util');
 const cacheService = require('./cache.service');
 /**
  * The shop's variant vocabulary is DERIVED from these products, so every write
@@ -144,7 +147,7 @@ const PROJECTION = Symbol('projection');
 const POS_FIELDS = [
   'name', 'code', 'barcode', 'hasVariants', 'buyingPrice', 'sellingPrice',
   'wholesalePrice', 'stock', 'minStock', 'unit', 'packaging', 'category',
-  'totalSold', 'variants', 'type', 'comboItems',
+  'totalSold', 'variants', 'type', 'comboItems', 'trackStock',
 ].join(' ');
 
 class ProductService {
@@ -277,6 +280,8 @@ class ProductService {
         { hasVariants: { $ne: true }, $expr: { $lt: ['$stock', '$minStock'] } },
         { hasVariants: true, 'variants.stock': { $lt: 5 } },
       ];
+      // An uncounted dish is never "low".
+      Object.assign(query, TRACKED_FILTER);
     }
 
     // Combine search and lowStock filters — use $and when both are active to avoid $or overwrite
@@ -524,6 +529,8 @@ class ProductService {
         // Already on the document — surfaced so the POS grid can flag best
         // sellers without a second request.
         totalSold: product.totalSold || 0,
+        // Only when uncounted, so every other shop's payload keeps its shape.
+        ...(product.trackStock === false ? { trackStock: false } : {}),
         // Combo rows: the till renders the derived availability instead of
         // `stock`, and the component list under the line. Advisory only —
         // `createSale` re-checks each component under its own atomic guard.
@@ -531,6 +538,7 @@ class ProductService {
           type: 'combo',
           comboItems: product.comboItems || [],
           comboAvailability: product.comboAvailability ?? 0,
+          ...(product.comboUnlimited ? { comboUnlimited: true } : {}),
           comboCost: product.comboCost,
           comboCostMin: product.comboCostMin,
           comboBroken: product.comboBroken || null,
@@ -664,9 +672,46 @@ class ProductService {
    * @param {Object|null} req
    * @param {string|undefined} unit  absent/empty is fine; the schema defaults it
    */
+  /**
+   * Validate `data.trackStock` in place (see utils/stockTracking.util.js).
+   * Leaves the key absent when it was absent — on a create that keeps a
+   * flag-off shop's document identical, on an update it means "leave it".
+   *
+   * An uncounted product cannot carry batches or serials: both ARE stock
+   * counts. And a combo has no stock of its own to not count, so the key is
+   * dropped there.
+   */
+  _applyTrackStock(data, req, existing = null) {
+    if (!('trackStock' in data)) return;
+    if (data.type === 'combo' || existing?.type === 'combo') {
+      delete data.trackStock;
+      return;
+    }
+    const value = normalizeTrackStock(data.trackStock, req);
+    if (value === undefined) {
+      delete data.trackStock;
+      return;
+    }
+    data.trackStock = value;
+    // Refused rather than silently switched off: clearing `trackBatches` would
+    // make "count it again" come back without the expiry tracking it had.
+    const batches = 'trackBatches' in data ? data.trackBatches : existing?.trackBatches;
+    const serials = 'trackSerials' in data ? data.trackSerials : existing?.trackSerials;
+    if (value === false && (batches || serials)) {
+      throw new AppError(
+        'An uncounted product cannot track batches or serials',
+        'ব্যাচ বা সিরিয়াল ট্র্যাক করা পণ্যের স্টক না গুনে রাখা যায় না — আগে সেটি বন্ধ করুন',
+        400
+      );
+    }
+  }
+
   _assertUnitAllowed(req, unit) {
     if (!unit) return;
-    const allowed = unitsForShop(hasFeature(req, 'packaging'));
+    const allowed = unitsForShop({
+      packaging: hasFeature(req, 'packaging'),
+      restaurant: hasFeature(req, 'restaurant'),
+    });
     if (!allowed.includes(unit)) {
       throw new AppError(
         `Unit "${unit}" is not available for this shop`,
@@ -1014,13 +1059,15 @@ class ProductService {
       combos.flatMap((c) => c.comboItems.map((ci) => String(ci.product)))
     )];
     const components = await Product.find({ _id: { $in: compIds } })
-      .select('stock hasVariants variants._id variants.sku variants.attributes variants.stock variants.buyingPrice variants.sellingPrice variants.isActive buyingPrice sellingPrice isActive isDeleted')
+      .select('stock hasVariants variants._id variants.sku variants.attributes variants.stock variants.buyingPrice variants.sellingPrice variants.isActive buyingPrice sellingPrice isActive isDeleted trackStock')
       .lean();
     const compMap = new Map(components.map((c) => [String(c._id), c]));
 
     for (const combo of combos) {
-      const { available, cost, costMin, broken } = computeComboAvailability(combo, compMap);
+      const { available, unlimited, cost, costMin, broken } = computeComboAvailability(combo, compMap);
       combo.comboAvailability = available;
+      // Only on a combo of uncounted food — absent everywhere else.
+      if (unlimited) combo.comboUnlimited = true;
       combo.comboCost = cost;
       combo.comboCostMin = costMin;
       combo.comboBroken = broken;
@@ -1031,6 +1078,9 @@ class ProductService {
       for (const ci of combo.comboItems) {
         const comp = compMap.get(String(ci.product));
         if (!comp) continue;
+        // Only on an uncounted component, so the till's picker stops greying
+        // out its variants at stock 0. Absent on every other row.
+        if (!isStockTracked(comp)) ci.trackStock = false;
 
         if (isChooseSlot(ci)) {
           // The till has not picked yet, so there is no single price to show.
@@ -1116,6 +1166,8 @@ class ProductService {
     }
 
     this._assertUnitAllowed(req, rest.unit);
+    if (creatingCombo) delete rest.trackStock;
+    else this._applyTrackStock(rest, req);
     await this._assertBarcodeUnique(shopId, rest.barcode, req);
     // Validated against the product's OWN unit, so `outerUnitsFor` can refuse a
     // pack that cannot physically hold it. Returns undefined when packaging is
@@ -1272,7 +1324,12 @@ class ProductService {
       delete updateData.comboItems;
     }
 
-    this._assertUnitAllowed(req, updateData.unit);
+    // Re-posting the unit the product ALREADY has is never a new choice. Without
+    // this, a প্লেট product saved from a packaging form after `restaurant` went
+    // off would 400 on every edit — the product would become uneditable.
+    if (updateData.unit !== product.unit) {
+      this._assertUnitAllowed(req, updateData.unit);
+    }
     if ('barcode' in updateData) {
       await this._assertBarcodeUnique(shopId, updateData.barcode, req, productId);
     }
@@ -1297,6 +1354,12 @@ class ProductService {
     // as `undefined`, clear it, and quietly destroy every wholesale price in
     // the shop the first time each product was touched — an unrecoverable loss
     // from a switch that is supposed to be reversible.
+    // `in`-guarded like `wholesalePrice` below: a flag-off form never sends the
+    // key, and an unguarded normalise would read that as "count it again".
+    if ('trackStock' in updateData) {
+      this._applyTrackStock(updateData, req, product);
+    }
+
     const wholesaleEnabled = hasFeature(req, 'wholesale');
     if ('wholesalePrice' in updateData) {
       updateData.wholesalePrice = normalizeWholesalePrice(
@@ -1349,6 +1412,12 @@ class ProductService {
     if (variantsWithStock && Array.isArray(variantsWithStock)) {
       const formattedInputVariants = this._formatVariants(variantsWithStock, wholesaleEnabled);
       const updatedVariants = [];
+      // Uncounted after this edit? Then a variant row's stock box is hidden and
+      // whatever it posts is not a recount — carry the stored figure forward
+      // and write no adjustment row.
+      const untrackedAfter = !isStockTracked(
+        'trackStock' in updateData ? updateData : product
+      );
 
       for (const variant of formattedInputVariants) {
         const existingVariant = product.variants?.find(v =>
@@ -1390,6 +1459,8 @@ class ProductService {
             variant.imageMediaId = existingVariant.imageMediaId || null;
           }
         }
+
+        if (untrackedAfter) inputStock = currentStock;
 
         // If the stock is different, we must update it
         if (inputStock !== currentStock) {
@@ -1478,7 +1549,10 @@ class ProductService {
     // cache TTL, while failing a product write over it would not be.
     variantCatalogService.invalidate(shopId).catch(() => {});
 
-    if (stock !== undefined && stock !== null && !product.hasVariants) {
+    // Not for an uncounted product: `updateStock` refuses one (assertTracked),
+    // and a form that still carries a stale stock box must not turn an
+    // ordinary edit into a 400 AFTER the product has already been saved.
+    if (stock !== undefined && stock !== null && !product.hasVariants && isStockTracked(product)) {
       const updatedProduct = await this.updateStock(shopId, userId, productId, {
         quantity: parseInt(stock) || 0,
         type: 'set',
@@ -1664,6 +1738,7 @@ class ProductService {
     }
     // A combo has no stock to adjust — its availability is its components'.
     assertNotCombo(product, 'স্টক সমন্বয়');
+    assertTracked(product, 'স্টক সমন্বয়');
 
     let previousStock, newStock;
     // Writing to a product implies its branch. requireBranch still runs so an
@@ -1865,6 +1940,7 @@ class ProductService {
     // A combo holds no stock of its own — its availability is its components'.
     // Writing one off would destroy nothing and record a cost for it.
     assertNotCombo(product, 'ক্ষতি');
+    assertTracked(product, 'ক্ষতি');
 
     // Writing to a product implies its branch. `requireBranch` still runs so an
     // owner in "All Branches" is told to pick one rather than writing stock off
@@ -2186,6 +2262,10 @@ class ProductService {
   async addProductBatch(shopId, userId, productId, batchData, req = null) {
     if (req) requireBranch(req);
     const product = await this._loadProductForBatches(shopId, productId, req);
+    // A batch IS a stock count — the same refusal the product form gives.
+    // A no-op for every counted product, i.e. every shop without the
+    // restaurant capability.
+    assertTracked(product, 'মেয়াদের ব্যাচ');
 
     const variantId = batchData.variantId || null;
     if (variantId && !product.hasVariants) {
@@ -2599,6 +2679,7 @@ class ProductService {
       shop: shopId,
       isActive: true,
       isDeleted: { $ne: true },
+      ...TRACKED_FILTER,
       $expr: { $lt: ['$stock', '$minStock'] },
     }))
       .sort({ stock: 1 })

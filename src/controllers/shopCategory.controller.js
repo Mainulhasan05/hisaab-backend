@@ -2,6 +2,7 @@ const ShopCategory = require('../models/ShopCategory.model');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
 const { refuseDeletion } = require('../utils/deletionDisabled.util');
+const { FEATURE_KEYS } = require('../utils/features.util');
 
 
 
@@ -56,11 +57,15 @@ exports.getShopCategoryById = asyncHandler(async (req, res) => {
   });
 });
 
+/** Registry keys only — a typo stored here would silently enable nothing. */
+const knownFeatures = (raw) =>
+  (Array.isArray(raw) ? raw : []).filter((k) => FEATURE_KEYS.includes(k));
+
 /**
  * Admin: Create new shop category
  */
 exports.createShopCategory = asyncHandler(async (req, res) => {
-  const { key, name, icon, description, sortOrder, defaultVariantTypes, defaultCategories, isActive } = req.body;
+  const { key, name, icon, description, sortOrder, defaultVariantTypes, defaultCategories, defaultFeatures, isActive } = req.body;
 
   if (!name) {
     return ApiResponse.badRequest(res, 'ক্যাটাগরির নাম বাধ্যতামূলক');
@@ -88,6 +93,7 @@ exports.createShopCategory = asyncHandler(async (req, res) => {
     sortOrder: sortOrder || 0,
     defaultVariantTypes: Array.isArray(defaultVariantTypes) ? defaultVariantTypes : ['size', 'color'],
     defaultCategories: Array.isArray(defaultCategories) ? defaultCategories : [],
+    defaultFeatures: knownFeatures(defaultFeatures),
     isActive: isActive !== undefined ? isActive : true
   });
 
@@ -102,7 +108,7 @@ exports.createShopCategory = asyncHandler(async (req, res) => {
  */
 exports.updateShopCategory = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { key, name, icon, description, sortOrder, defaultVariantTypes, defaultCategories, isActive } = req.body;
+  const { key, name, icon, description, sortOrder, defaultVariantTypes, defaultCategories, defaultFeatures, isActive } = req.body;
 
   const category = await ShopCategory.findById(id);
   if (!category) {
@@ -123,6 +129,8 @@ exports.updateShopCategory = asyncHandler(async (req, res) => {
   if (sortOrder !== undefined) category.sortOrder = sortOrder;
   if (defaultVariantTypes !== undefined) category.defaultVariantTypes = defaultVariantTypes;
   if (defaultCategories !== undefined) category.defaultCategories = defaultCategories;
+  // Absent = leave it: the admin form predates this field and never sends it.
+  if (defaultFeatures !== undefined) category.defaultFeatures = knownFeatures(defaultFeatures);
   if (isActive !== undefined) category.isActive = isActive;
 
   await category.save();

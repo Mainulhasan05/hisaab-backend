@@ -85,7 +85,7 @@ const AUDIT_FIELDS = {
   product: [
     'name', 'code', 'barcode', 'category', 'unit', 'buyingPrice', 'sellingPrice',
     'wholesalePrice',
-    'stock', 'minStock', 'isActive', 'isAvailableOnline', 'hasVariants',
+    'stock', 'minStock', 'trackStock', 'isActive', 'isAvailableOnline', 'hasVariants',
     'trackBatches', 'packaging',
   ],
   customer: [

@@ -426,9 +426,12 @@ describe('the query that is built', () => {
     await publicService.listProducts('rahim-store', {});
     const filter = Product.find.mock.calls[0][0];
     const stockClause = filter.$and.find((c) => c.$or);
-    expect(stockClause.$or).toHaveLength(2);
+    expect(stockClause.$or).toHaveLength(3);
     // The second arm is what keeps variant products from vanishing wholesale.
     expect(stockClause.$or[1]).toMatchObject({ hasVariants: true });
+    // The third lets a restaurant's uncounted dishes (stock 0 by design)
+    // through. It matches no document in a shop that never set the field.
+    expect(stockClause.$or[2]).toEqual({ trackStock: false });
   });
 
   it('keeps out-of-stock products when the shop asked for that', async () => {

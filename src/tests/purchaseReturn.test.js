@@ -1201,9 +1201,11 @@ describe('the supplier statement learns কেনা ফেরত', () => {
   it('keeps purchase_refund Payment rows OUT of the statement', () => {
     // They are drawer movements, not debt movements. The payment scope names
     // exactly one type and it is not this one.
-    const src = require('fs').readFileSync(
-      require.resolve('../services/detailedReport.service.js'), 'utf8'
-    );
+    // The later-payments lookup moved to purchasePayment.util so the পরিশোধ
+    // register could share it; the rule applies to both files.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/detailedReport.service.js'), 'utf8')
+      + fs.readFileSync(require.resolve('../utils/purchasePayment.util.js'), 'utf8');
     expect(src).toContain('type: PAYMENT_TYPES.PURCHASE_PAYMENT');
     expect(src).not.toContain('PAYMENT_TYPES.PURCHASE_REFUND');
   });
