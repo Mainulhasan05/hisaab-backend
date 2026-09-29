@@ -9,6 +9,8 @@ router.use(protect);
 
 router.get('/', rbac('stock_transfers', 'view'), stockTransferController.getTransfers);
 router.post('/', rbac('stock_transfers', 'create'), stockTransferController.createTransfer);
+// Before '/:id', or Express reads 'report' as a transfer id and 404s it.
+router.get('/report', rbac('stock_transfers', 'view'), stockTransferController.getTransferReport);
 router.get('/:id', rbac('stock_transfers', 'view'), stockTransferController.getTransferById);
 router.patch('/:id/approve', rbac('stock_transfers', 'update'), stockTransferController.approveTransfer);
 router.patch('/:id/receive', rbac('stock_transfers', 'update'), stockTransferController.receiveTransfer);

@@ -23,6 +23,19 @@ const transferItemSchema = new mongoose.Schema({
   variantAttributes: {
     type: mongoose.Schema.Types.Mixed,
   },
+  /**
+   * The source product's unit, snapshotted at create — the same reason a sale
+   * line carries `item.unit`. The transfer screen, the চালান and the report
+   * all need a line's precision to print and to accept a received quantity;
+   * without this every line read as পিস, and a partial receipt of 12.5 kg was
+   * rounded to a whole number in the receive box before it was ever sent.
+   *
+   * No default: absent means a line written before the field existed, and the
+   * service fills it from the product on read (`fillLineUnits`).
+   */
+  unit: {
+    type: String,
+  },
   // 0-exclusive rather than `min: 1` — fractional units (kg / litre / yard).
   // The flag-and-unit-aware refusal lives in `parseQuantity`; schema bounds are
   // the floor, not the policy. See AGENT_WORKFLOW.md I-6.

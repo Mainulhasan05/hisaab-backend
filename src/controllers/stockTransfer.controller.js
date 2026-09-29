@@ -25,6 +25,16 @@ exports.getTransfers = asyncHandler(async (req, res) => {
   res.json(result);
 });
 
+// Product-wise and line-wise detail across many transfers — the চালান register.
+exports.getTransferReport = asyncHandler(async (req, res) => {
+  const result = await stockTransferService.getTransferReport(
+    req.shop._id,
+    req.query,
+    req
+  );
+  res.json(result);
+});
+
 exports.getTransferById = asyncHandler(async (req, res) => {
   const result = await stockTransferService.getTransferById(
     req.params.id,

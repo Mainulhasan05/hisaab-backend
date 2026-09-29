@@ -7,6 +7,7 @@ const { runInTransaction } = require('../utils/transaction.util');
 const { STOCK_TRANSACTION_TYPES } = require('../config/constants');
 const { isActiveBranch, isAllBranchesView, isMultiBranch } = require('../utils/branchScope.util');
 const { storageUnit, quantize } = require('../utils/quantity.util');
+const { buildDateMatch } = require('../utils/reportScope.util');
 const { takeBatches, addBatches, batchWriteOp } = require('../utils/batch.util');
 const { assertNotCombo } = require('../utils/combo.util');
 const { assertTracked } = require('../utils/stockTracking.util');
@@ -433,8 +434,27 @@ exports.createTransfer = async (data, userId, req = null) => {
     }
   }
 
+  // Only the fields a request may set. The body used to be handed to `create`
+  // whole, so a hand-built request could seed `received` or `batches` — and a
+  // seeded `batches` array survives an approval that takes no batches, then
+  // gets replayed at the destination as dated stock nobody dispatched. `unit`
+  // is the server's, from the product, never the client's.
+  const lines = items.map((item) => {
+    const product = productMap.get(String(item.product));
+    return {
+      product: item.product,
+      productName: item.productName || product.name,
+      productCode: item.productCode || product.code,
+      variantId: item.variantId || null,
+      variantSku: item.variantSku,
+      variantAttributes: item.variantAttributes,
+      unit: product.unit || 'piece',
+      quantity: item.quantity,
+    };
+  });
+
   const transfer = await StockTransfer.create({
-    shop, fromBranch, toBranch, items, notes,
+    shop, fromBranch, toBranch, items: lines, notes,
     requestedBy: userId,
     status: 'pending',
   });
@@ -764,6 +784,47 @@ exports.rejectTransfer = async (transferId, shopId, userId, reason, req = null) 
 };
 
 /**
+ * Fill `items[].unit` on lines written before the field existed, from the
+ * product each line names — ONE query for every line of every transfer given.
+ *
+ * Mutates lean docs in place and returns them. A line whose product has since
+ * been deleted falls back to পিস, which is what every screen showed for it
+ * before this function existed. A line that already carries a unit is never
+ * touched: the snapshot wins over the product's CURRENT unit, for the reason a
+ * sale line's does (CLAUDE.md §13.3 — changing a unit does not restate history).
+ */
+const fillLineUnits = async (transfers, shopId) => {
+  const missing = new Set();
+  for (const t of transfers) {
+    for (const item of t.items || []) {
+      if (!item.unit && item.product) missing.add(String(item.product._id || item.product));
+    }
+  }
+  if (missing.size === 0) return transfers;
+
+  const products = await Product.find({ shop: shopId, _id: { $in: [...missing] } })
+    .select('unit')
+    .lean();
+  const unitOf = new Map(products.map((p) => [String(p._id), p.unit]));
+
+  for (const t of transfers) {
+    for (const item of t.items || []) {
+      if (!item.unit) item.unit = unitOf.get(String(item.product?._id || item.product)) || 'piece';
+    }
+  }
+  return transfers;
+};
+
+/** Who the list and the চালান name, and which branch fields they print. */
+const BRANCH_FIELDS = 'name code address phone';
+const withParties = (query) => query
+  .populate('fromBranch', BRANCH_FIELDS)
+  .populate('toBranch', BRANCH_FIELDS)
+  .populate('requestedBy', 'name')
+  .populate('approvedBy', 'name')
+  .populate('receivedBy', 'name');
+
+/**
  * Get transfers list with filters
  */
 exports.getTransfers = async (shopId, query = {}, req = null) => {
@@ -781,18 +842,15 @@ exports.getTransfers = async (shopId, query = {}, req = null) => {
   }
 
   const [transfers, total] = await Promise.all([
-    StockTransfer.find(filter)
-      .populate('fromBranch', 'name code')
-      .populate('toBranch', 'name code')
-      .populate('requestedBy', 'name')
-      .populate('approvedBy', 'name')
-      .populate('receivedBy', 'name')
+    withParties(StockTransfer.find(filter))
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit)
       .lean(),
     StockTransfer.countDocuments(filter),
   ]);
+
+  await fillLineUnits(transfers, shopId);
 
   return { data: transfers, total, page: Number(page), totalPages: Math.ceil(total / limit) };
 };
@@ -806,17 +864,216 @@ exports.getTransferById = async (transferId, shopId, req = null) => {
     scope.$or = [{ fromBranch: req.branchId }, { toBranch: req.branchId }];
   }
 
-  const transfer = await StockTransfer.findOne(scope)
-    .populate('fromBranch', 'name code')
-    .populate('toBranch', 'name code')
-    .populate('requestedBy', 'name')
-    .populate('approvedBy', 'name')
-    .populate('receivedBy', 'name')
-    .populate('items.product', 'name code')
+  const transfer = await withParties(StockTransfer.findOne(scope))
+    .populate('items.product', 'name code unit')
     .lean();
 
   // `AppError` is not imported in this file — this threw ReferenceError (500)
   // instead of the intended 404 whenever a transfer was not found.
   if (!transfer) throw createError('ট্রান্সফার পাওয়া যায়নি', 404);
+  await fillLineUnits([transfer], shopId);
   return transfer;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE DETAILED TRANSFER REPORT — which product, how much, from where to where
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * How many transfers one report may cover. A shop moving stock daily between
+ * three branches writes ~1,000 a year; past this the paper is not a report
+ * anyone reads, and `truncated` tells the screen to say so.
+ */
+const REPORT_MAX_TRANSFERS = 2000;
+
+const REPORT_STATUSES = ['pending', 'in_transit', 'received', 'rejected'];
+
+/**
+ * What one line MEANS, by the status of the transfer it sits on.
+ *
+ *   pending     asked for; nothing has moved
+ *   in_transit  left the source; not yet counted in anywhere
+ *   received    left the source; `received` of it arrived, the rest is ঘাটতি
+ *   rejected    nothing moved (a rejected in-transit transfer was put back)
+ *
+ * `short` is the number this report exists to surface. The source was debited
+ * `quantity` and the destination credited `received`; the difference is stock
+ * the shop no longer has and no sale, expense or adjustment accounts for.
+ */
+const lineFigures = (status, item, unit) => {
+  const qty = Number(item.quantity) || 0;
+  const zero = { requested: qty, sent: 0, received: 0, short: 0, inTransit: 0, pending: 0, rejected: 0 };
+  switch (status) {
+    case 'pending': return { ...zero, pending: qty };
+    case 'in_transit': return { ...zero, sent: qty, inTransit: qty };
+    case 'received': {
+      const got = Math.min(qty, Number(item.received) || 0);
+      return { ...zero, sent: qty, received: got, short: quantize(qty - got, unit) };
+    }
+    case 'rejected': return { ...zero, rejected: qty };
+    default: return zero;
+  }
+};
+
+/**
+ * The cross-branch identity of a line. Each branch owns its own product
+ * documents, so the source's `_id` differs from the destination's — the key is
+ * the code (the rule `findCounterpart` matches by), then the variant.
+ */
+const productKey = (item) => {
+  const base = item.productCode || item.productName || String(item.product?._id || item.product);
+  const a = item.variantAttributes || {};
+  const variant = item.variantSku
+    || [a.size, a.color, a.weight, a.material, a.style].filter(Boolean).join('/');
+  return variant ? `${base}::${variant}` : base;
+};
+
+const FIGURE_KEYS = ['requested', 'sent', 'received', 'short', 'inTransit', 'pending', 'rejected'];
+
+/**
+ * Pure: transfers (lean, with `items[].unit` filled) → the report's two views.
+ *
+ * `lines` is one row per product per transfer, newest transfer first — the
+ * register. `products` rolls the same lines up per product — the summary.
+ * Sums are re-quantized at the line's STORAGE precision, so 0.1 kg sent ten
+ * times reads 1, not 0.9999999999999999.
+ *
+ * Quantities are never summed ACROSS products: kg and pieces do not add up,
+ * so there is deliberately no grand-total quantity in the output.
+ */
+exports.summariseTransferLines = (transfers) => {
+  const lines = [];
+  const byProduct = new Map();
+  const statusCount = Object.fromEntries(REPORT_STATUSES.map((s) => [s, 0]));
+
+  for (const t of transfers) {
+    if (statusCount[t.status] !== undefined) statusCount[t.status] += 1;
+
+    (t.items || []).forEach((item, index) => {
+      const unit = storageUnit({ unit: item.unit });
+      const figures = lineFigures(t.status, item, unit);
+
+      lines.push({
+        transferId: t._id,
+        transferNo: t.transferNo,
+        status: t.status,
+        createdAt: t.createdAt,
+        approvedAt: t.approvedAt || null,
+        receivedAt: t.receivedAt || null,
+        fromBranch: t.fromBranch || null,
+        toBranch: t.toBranch || null,
+        requestedBy: t.requestedBy?.name || null,
+        receivedBy: t.receivedBy?.name || null,
+        lineNo: index + 1,
+        productName: item.productName,
+        productCode: item.productCode || '',
+        variantSku: item.variantSku || '',
+        variantAttributes: item.variantAttributes || null,
+        unit: item.unit || 'piece',
+        ...figures,
+      });
+
+      const key = productKey(item);
+      let row = byProduct.get(key);
+      if (!row) {
+        row = {
+          key,
+          productName: item.productName,
+          productCode: item.productCode || '',
+          variantSku: item.variantSku || '',
+          variantAttributes: item.variantAttributes || null,
+          unit: item.unit || 'piece',
+          transfers: 0,
+          ...Object.fromEntries(FIGURE_KEYS.map((k) => [k, 0])),
+        };
+        byProduct.set(key, row);
+      }
+      row.transfers += 1;
+      for (const k of FIGURE_KEYS) row[k] = quantize(row[k] + figures[k], unit);
+    });
+  }
+
+  // Most-moved first: the summary is read top-down for "what did we move".
+  const products = [...byProduct.values()].sort(
+    (a, b) => b.sent - a.sent
+      || b.requested - a.requested
+      || String(a.productName || '').localeCompare(String(b.productName || ''))
+  );
+
+  return {
+    lines,
+    products,
+    totals: {
+      transfers: transfers.length,
+      lines: lines.length,
+      products: products.length,
+      byStatus: statusCount,
+      // Counts of lines, not quantities — see the note above on mixed units.
+      shortLines: lines.filter((l) => l.short > 0).length,
+      inTransitLines: lines.filter((l) => l.inTransit > 0).length,
+    },
+  };
+};
+
+/**
+ * GET /stock-transfers/report
+ *
+ * Query: startDate, endDate (YYYY-MM-DD, Bangladesh days, on `createdAt`),
+ *        status, branch (owner in All Branches only), direction ('in'|'out').
+ *
+ * ── Scope ──────────────────────────────────────────────────────────────────
+ * Same rule as the list (H-8): a user pinned to a branch sees transfers that
+ * branch is either END of. `branch` from the query is honoured only when the
+ * request is NOT already pinned — so staff, who are always pinned, cannot
+ * widen or move their view with it. `direction` narrows to one end.
+ *
+ * `find`, not `aggregate`, on purpose: every id in this filter is cast by
+ * Mongoose, so the I-3 trap (an uncast string matching nothing) cannot arise.
+ */
+exports.getTransferReport = async (shopId, query = {}, req = null) => {
+  if (!shopId) throw createError('দোকান পাওয়া যায়নি', 400); // I-5: never an unscoped read
+
+  const filter = { shop: shopId };
+
+  const range = buildDateMatch(query.startDate, query.endDate);
+  if (range) {
+    const invalid = (d) => d && Number.isNaN(d.getTime());
+    if (invalid(range.$gte) || invalid(range.$lte)) throw createError('তারিখ সঠিক নয়', 400);
+    filter.createdAt = range;
+  }
+
+  if (query.status) {
+    if (!REPORT_STATUSES.includes(query.status)) throw createError('অবস্থা সঠিক নয়', 400);
+    filter.status = query.status;
+  }
+
+  let branch = req?.branchId || null;
+  if (!branch && query.branch) {
+    if (!mongoose.isValidObjectId(query.branch)) throw createError('শাখা সঠিক নয়', 400);
+    branch = query.branch;
+  }
+
+  const direction = query.direction || '';
+  if (direction && !['in', 'out'].includes(direction)) throw createError('দিক সঠিক নয়', 400);
+
+  if (branch) {
+    if (direction === 'out') filter.fromBranch = branch;
+    else if (direction === 'in') filter.toBranch = branch;
+    else filter.$or = [{ fromBranch: branch }, { toBranch: branch }];
+  }
+
+  const found = await withParties(StockTransfer.find(filter))
+    .sort({ createdAt: -1 })
+    .limit(REPORT_MAX_TRANSFERS + 1)
+    .lean();
+
+  const truncated = found.length > REPORT_MAX_TRANSFERS;
+  const transfers = truncated ? found.slice(0, REPORT_MAX_TRANSFERS) : found;
+  await fillLineUnits(transfers, shopId);
+
+  return {
+    ...exports.summariseTransferLines(transfers),
+    truncated,
+    maxTransfers: REPORT_MAX_TRANSFERS,
+  };
 };
