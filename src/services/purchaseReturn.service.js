@@ -205,7 +205,7 @@ class PurchaseReturnService {
       const productIds = [...new Set(
         items
           .map((ri) => findPurchaseItem(purchase, ri.purchaseItemId))
-          .filter(Boolean)
+          .filter((pi) => pi && pi.product)
           .map((pi) => String(pi.product))
       )];
       const products = await Product.find({
@@ -229,6 +229,16 @@ class PurchaseReturnService {
             `Purchase item not found: ${raw.purchaseItemId}`,
             'ক্রয়ের আইটেম পাওয়া যায়নি',
             404
+          );
+        }
+        // কাঁচামাল (CLAUDE.md §18) is not returnable through this path in v1:
+        // its stock lives in the ingredient store room, which this service does
+        // not write. Refused by name rather than failing as "not in stock".
+        if (line.ingredient) {
+          throw new AppError(
+            'Ingredient lines cannot be returned here',
+            `"${line.productName}" কাঁচামাল — কেনা ফেরত এখনো কাঁচামালে চালু নয়`,
+            400
           );
         }
 
@@ -946,13 +956,16 @@ class PurchaseReturnService {
       }
     }
 
-    const productIds = [...new Set((purchase.items || []).map(i => String(i.product)))];
+    // Product lines only — a কাঁচামাল line has no product (and is not
+    // returnable here; see createReturn). Identical for every other bill.
+    const returnableLines = (purchase.items || []).filter((i) => i.product);
+    const productIds = [...new Set(returnableLines.map(i => String(i.product)))];
     const products = await Product.find({ _id: { $in: productIds }, shop: shopId })
       .select('_id unit stock hasVariants variants')
       .lean();
     const productMap = new Map(products.map(p => [String(p._id), p]));
 
-    const items = (purchase.items || [])
+    const items = returnableLines
       .map((line) => {
         const product = productMap.get(String(line.product));
         const stkUnit = storageUnit(product);

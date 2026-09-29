@@ -2,10 +2,25 @@ const mongoose = require('mongoose');
 const { immutableGuard } = require('../utils/immutableGuard.util');
 
 const purchaseItemSchema = new mongoose.Schema({
+  // Required on every line EXCEPT a কাঁচামাল line, which points at
+  // `ingredient` instead. For every shop without features.restaurant every
+  // line has a product, so the validation is exactly what it was.
   product: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Product',
-    required: [true, 'পণ্য নির্বাচন করুন']
+    required: [function () { return !this.ingredient; }, 'পণ্য নির্বাচন করুন']
+  },
+  /**
+   * A restaurant's raw material (চাল, মাছ) — CLAUDE.md §18. Set INSTEAD of
+   * `product`. `productName` still carries the name, so every bill-level
+   * reader (list, print, supplier ledger) renders the line unchanged; the
+   * product stock loop skips it because it has no product, and
+   * `ingredient.service.receivePurchase` stocks it instead. Absent on every
+   * ordinary line.
+   */
+  ingredient: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Ingredient'
   },
   productName: {
     type: String,

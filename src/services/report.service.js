@@ -185,6 +185,7 @@ const effectiveValueExpr = (field) => ({
 const { BD_OFFSET_MS, BD_TZ, getBangladeshTodayStr, getBangladeshDayRange } = require('../utils/bdTime.util');
 const { paidAtMatch, LIVE_PAYMENT, PAID_AT_EXPR } = require('../utils/paymentDate.util');
 const { TRACKED_FILTER } = require('../utils/stockTracking.util');
+const ingredientService = require('./ingredient.service');
 
 class ReportService {
   /**
@@ -1190,8 +1191,14 @@ class ReportService {
     // `totalProfit` are now gross, so this is the one place the day's returns
     // are deducted — once, and on the day they happened.
     const netSales = quantizeMoney(sales.totalRevenue - returns.totalReturns);
+    // কাঁচামাল খরচ for the day (CLAUDE.md §18) — a hotel's daily screen is
+    // where it reads its profit, and without this its dishes show 100% margin.
+    // 0 for every shop that has never issued an ingredient.
+    const ingredientCost = options.withIngredientCost
+      ? await ingredientService.costTotals(shopId, branchId, { start: startOfDay, end: endOfDay })
+      : ingredientService.emptyCost();
     const netProfit = quantizeMoney(
-      sales.totalProfit - returns.totalProfitLoss - expenses.totalExpenses
+      sales.totalProfit - returns.totalProfitLoss - expenses.totalExpenses - ingredientCost.total
     );
 
     // Build hourly chart data (0-23 hours)
@@ -1214,6 +1221,8 @@ class ReportService {
       // as "the money we actually made"; it could be positive on a day the
       // drawer went backwards. `netProfit` is what it always computed, named
       // honestly, and `netCashFlow` beside it is the money.
+      // Only when there is a figure — every other shop's response keeps its shape.
+      ...(ingredientCost.total > 0 ? { ingredientCost: ingredientCost.total } : {}),
       netProfit,
       netSales,
       netCashFlow,
@@ -1925,8 +1934,28 @@ class ReportService {
       (shrinkageAgg || []).reduce((sum, r) => sum + (r.total || 0), 0)
     );
 
+    /**
+     * কাঁচামাল খরচ — what the kitchen used (CLAUDE.md §18). A restaurant's
+     * dishes carry no buying price; their cost reaches the P&L here, on the day
+     * the rice was COOKED, never on the day it was bought (purchases have never
+     * been a P&L term). Its own line for the same reason as `shrinkage`.
+     *
+     * 0 for every shop that has never issued an ingredient, so `netProfit` is
+     * unchanged for them — and the key below is only added when there is a
+     * figure, so their response keeps its shape.
+     */
+    // Queried only for a restaurant (`options.withIngredientCost`, set by the
+    // controller from `features.restaurant`) — every other shop runs exactly
+    // the queries it always did (M-12).
+    const ingredientCost = options.withIngredientCost
+      ? await ingredientService.costTotals(shopId, branchId, {
+        start: dateQuery?.$gte, end: dateQuery?.$lte,
+      })
+      : ingredientService.emptyCost();
+
     const netProfit = quantizeMoney(
       sales.totalProfit - returns.totalProfitLoss - expenses.totalExpenses - charges - shrinkage
+        - ingredientCost.total
     );
 
     // Merge daily sales and expenses into a single chart dataset
@@ -2039,6 +2068,7 @@ class ReportService {
       // through the door and goods that never made it out are both losses the
       // owner can do something about, and they call for different actions.
       shrinkage,
+      ...(ingredientCost.total > 0 ? { ingredientCost } : {}),
       netProfit,
 
       /**

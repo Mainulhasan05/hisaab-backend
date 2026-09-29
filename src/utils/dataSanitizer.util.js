@@ -269,6 +269,9 @@ const COST_KEYS = new Set([
   // decompose. That is the same trade `cogs` already makes and is correct: the
   // permission says they may see what the shop earned, not what it paid.
   'shrinkage',
+  // কাঁচামাল খরচ (CLAUDE.md §18) — same reasoning as `shrinkage`: its rows
+  // carry quantities, so value ÷ quantity is the ingredient's buying price.
+  'ingredientCost',
 ]);
 
 function isPlainObject(val) {

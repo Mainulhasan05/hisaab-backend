@@ -12,6 +12,7 @@ const auditRoutes = require('./audit.routes');
 const adminRoutes = require('./admin.routes');
 const categoryRoutes = require('./category.routes');
 const brandRoutes = require('./brand.routes');
+const ingredientRoutes = require('./ingredient.routes');
 const expenseRoutes = require('./expense.routes');
 const supplierRoutes = require('./supplier.routes');
 const purchaseRoutes = require('./purchase.routes');
@@ -52,6 +53,8 @@ router.use('/media', mediaRoutes);
 router.use('/categories', categoryRoutes);
 // Gated end-to-end on `features.brands` inside the router itself.
 router.use('/brands', brandRoutes);
+// কাঁচামাল — gated end-to-end on `features.restaurant` inside the router.
+router.use('/ingredients', ingredientRoutes);
 router.use('/shop-categories', shopCategoryRoutes);
 router.use('/customers', customerRoutes);
 

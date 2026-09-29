@@ -27,6 +27,7 @@ const { resolveLineQuantity } = require('../utils/packaging.util');
 const { deductBatches, batchWriteOp, sameOwner } = require('../utils/batch.util');
 const { assertNotCombo } = require('../utils/combo.util');
 const { assertTracked } = require('../utils/stockTracking.util');
+const ingredientService = require('./ingredient.service');
 const {
   buildProductCostUpdate,
   buildVariantCostUpdate,
@@ -224,7 +225,24 @@ class PurchaseService {
     }).session(session || null);
     const purchaseProductMap = new Map(purchaseProducts.map(p => [String(p._id), p]));
 
+    // কাঁচামাল lines (features.restaurant, CLAUDE.md §18) — resolved in one
+    // read, 403 without the capability. Empty for every other shop, so the
+    // loop below runs exactly as it always has.
+    const ingredientIds = [...new Set(items.map((i) => i.ingredient).filter(Boolean).map(String))];
+    const ingredientMap = await ingredientService.loadForPurchase(req, ingredientIds, session);
+
     for (const item of items) {
+      if (item.ingredient) {
+        const ingredient = ingredientMap.get(String(item.ingredient));
+        if (!ingredient) {
+          throw new AppError('কাঁচামালটি পাওয়া যায়নি', 'Ingredient not found', 404);
+        }
+        const prepared = ingredientService.prepareLine(item, ingredient);
+        preparedItems.push(prepared);
+        totalAmount = quantizeMoney(totalAmount + prepared.total);
+        continue;
+      }
+
       const rawProdId = normalizeProductId(item);
       const product = rawProdId ? purchaseProductMap.get(String(rawProdId)) : null;
 
@@ -1078,6 +1096,12 @@ class PurchaseService {
       await purchase.save(sessionOpt);
     }
 
+    // কাঁচামাল into the store room, at the landed rate. A no-op for any bill
+    // without an ingredient line — i.e. every bill outside features.restaurant.
+    if (ingredientIds.length) {
+      await ingredientService.receivePurchase(purchase, ingredientMap, userId, session);
+    }
+
     // Update supplier stats
     if (supplierDoc) {
       // Seeded before anything moves — see the field's header. A supplier from
@@ -1336,7 +1360,10 @@ class PurchaseService {
     // Batched the same way as the receive path above: one read for every
     // referenced product, one bulkWrite, one ledger insert — instead of a
     // findById + save + create per line.
-    const cancelIds = [...new Set(purchase.items.map(i => String(i.product)))];
+    // `.filter(i => i.product)`: a কাঁচামাল line has no product, and
+    // `String(undefined)` in an `$in` is a CastError that would make the bill
+    // uncancellable. Every line of every other bill has one — same query.
+    const cancelIds = [...new Set(purchase.items.filter(i => i.product).map(i => String(i.product)))];
     const cancelProducts = await Product.find({ _id: { $in: cancelIds }, shop: shopId })
       .session(session || null);
     const cancelProductMap = new Map(cancelProducts.map(p => [String(p._id), p]));
@@ -1584,6 +1611,9 @@ class PurchaseService {
     if (cancelTxns.length > 0) {
       await StockTransaction.insertMany(cancelTxns, sessionOpt);
     }
+
+    // কাঁচামাল lines back out of the store room (no-op without any).
+    await ingredientService.reversePurchase(purchase, userId, session);
 
     // Update supplier stats
     if (purchase.supplier) {

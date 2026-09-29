@@ -8,6 +8,7 @@ const supplierService = require('../services/supplier.service');
 const productSalesService = require('../services/productSales.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
+const { hasFeature } = require('../utils/features.util');
 const { sanitizeReport, canViewExpenses } = require('../utils/dataSanitizer.util');
 
 // Get dashboard statistics
@@ -52,7 +53,12 @@ exports.getCustomerReport = asyncHandler(async (req, res) => {
 
 // Get Daily Business Summary
 exports.getDailySummary = asyncHandler(async (req, res) => {
-  const report = await reportService.getDailySummary(req.shop._id, req.query, req.branchId);
+  const report = await reportService.getDailySummary(req.shop._id, {
+    ...req.query,
+    // কাঁচামাল খরচ — a restaurant only (CLAUDE.md §18). Server-decided; a
+    // query string cannot switch it on.
+    withIngredientCost: hasFeature(req, 'restaurant'),
+  }, req.branchId);
   return ApiResponse.success(res, {
     data: sanitizeReport(report, req),
     message: 'Daily summary retrieved successfully',
@@ -94,7 +100,10 @@ exports.getProductSales = asyncHandler(async (req, res) => {
 
 // Get Profit & Loss statement
 exports.getProfitLoss = asyncHandler(async (req, res) => {
-  const report = await reportService.getProfitLoss(req.shop._id, req.query, req.branchId);
+  const report = await reportService.getProfitLoss(req.shop._id, {
+    ...req.query,
+    withIngredientCost: hasFeature(req, 'restaurant'),
+  }, req.branchId);
   return ApiResponse.success(res, {
     data: sanitizeReport(report, req),
     message: 'Profit & Loss report retrieved successfully',

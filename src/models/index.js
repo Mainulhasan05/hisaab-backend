@@ -70,6 +70,10 @@ module.exports = {
   // collection scan or, in the unique case, to no guard at all.
   PurchaseReturn: require('./PurchaseReturn.model'),
   StockTransaction: require('./StockTransaction.model'),
+  // কাঁচামাল (features.restaurant) — CLAUDE.md §18. Registered so
+  // `sync-indexes` ships their indexes; production runs autoIndex off.
+  Ingredient: require('./Ingredient.model'),
+  IngredientMovement: require('./IngredientMovement.model'),
   AuditLog: require('./AuditLog.model'),
   SMSLog: require('./SMSLog.model'),
   SMSQuota: require('./SMSQuota.model'),

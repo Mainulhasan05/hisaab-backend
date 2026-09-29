@@ -17,6 +17,8 @@ const Product = require('../models/Product.model');
 const Branch = require('../models/Branch.model');
 const { normalizeInvoicePhones } = require('../utils/phone.util');
 const HeldCart = require('../models/HeldCart.model');
+const Ingredient = require('../models/Ingredient.model');
+const IngredientMovement = require('../models/IngredientMovement.model');
 const ShopAiUsage = require('../models/ShopAiUsage.model');
 const PlatformSetting = require('../models/PlatformSetting.model');
 const mongoose = require('mongoose');
@@ -2763,7 +2765,10 @@ class AdminService {
     const branchScopedModels = [
       Sale, Purchase, Expense, CashRegister, StockTransaction,
       Payment, SalesReturn, PurchaseReturn, SMSLog, AuditLog, HeldCart, Order,
-      DueAdjustment, SupplierDueAdjustment
+      DueAdjustment, SupplierDueAdjustment,
+      // কাঁচামাল and its ledger are per-branch like Product; untagged rows
+      // would vanish from every branch the moment multi-branch is enabled.
+      Ingredient, IngredientMovement
     ];
 
     // Batched so a large history never builds one unbounded write, and so a
