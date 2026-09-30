@@ -377,8 +377,31 @@ const aiParseLimiter = rateLimit({
   }
 });
 
+/**
+ * Deep health check limiter — 10 requests per minute per IP.
+ *
+ * An uptime monitor polls 2–3 times a minute; 10 leaves room for its retries
+ * and a manual curl without letting anyone turn the probe into a way to fire
+ * unlimited pings at MongoDB and Redis. Its own bucket, and mounted outside
+ * `/api`, so polling never spends the allowance the till relies on.
+ */
+const healthLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: parseInt(process.env.HEALTH_RATE_LIMIT_MAX) || 10,
+  store: new HybridStore('rl:health:'),
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    return ApiResponse.tooManyRequests(res, {
+      message: 'Too many health checks, please slow down.',
+      messageBn: 'অনেক বেশি অনুরোধ, কিছুক্ষণ পর চেষ্টা করুন।'
+    });
+  }
+});
+
 module.exports = {
   apiLimiter,
+  healthLimiter,
   authLimiter,
   passwordResetLimiter,
   smsLimiter,

@@ -10,12 +10,14 @@ const morgan = require('morgan');
 const {
   apiLimiter,
   authLimiter,
+  healthLimiter,
   isPublicStorefrontPath,
   isPaymentReturnPath,
 } = require('./middleware/rateLimiter.middleware');
 const { errorHandler, notFoundHandler } = require('./middleware/error.middleware');
 const { requestContext } = require('./middleware/requestContext.middleware');
 const { getCacheInfo } = require('./config/redis.config');
+const { getHealthStatus } = require('./services/health.service');
 const logger = require('./utils/logger.util');
 
 // Create Express app
@@ -38,6 +40,22 @@ app.get('/health', (req, res) => {
     db: { readyState: mongoose.connection.readyState },
     cache: cacheInfo
   });
+});
+
+// Deep health check for an uptime monitor — actually pings MongoDB and Redis
+// (see health.service). Rate-limited, unlike the probe above, because each
+// call does real round-trips. 200 = ok/degraded, 503 = database down.
+app.get('/health/status', healthLimiter, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const report = await getHealthStatus();
+    res.status(report.status === 'down' ? 503 : 200).json(report);
+  } catch (err) {
+    // Express 4 does not catch async rejections; a probe that hangs reads as
+    // "up" to some monitors, so answer 503 explicitly.
+    logger.error(`Health status check failed: ${err.message}`);
+    res.status(503).json({ status: 'down', timestamp: new Date().toISOString() });
+  }
 });
 
 // Security Middleware
