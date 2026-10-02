@@ -168,7 +168,9 @@ describe('every reader that sums transfers skips cancelled rows', () => {
 
   it.each([
     ['services/cashRegister.service.js', 2],
-    ['services/paymentAccount.service.js', 2],
+    // 3: the transfer register's range totals (getTransfers) joined the two
+    // money-position sums.
+    ['services/paymentAccount.service.js', 3],
     ['services/report.service.js', 1],
   ])('%s', (file, n) => {
     const src = read(file);

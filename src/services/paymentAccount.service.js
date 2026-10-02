@@ -8,7 +8,8 @@ const AuditLog = require('../models/AuditLog.model');
 const CashRegister = require('../models/CashRegister.model');
 const { getBangladeshDayRange, toBangladeshDateStr } = require('../utils/bdTime.util');
 const { AppError } = require('../middleware/error.middleware');
-const { requireBranch, branchFilter } = require('../utils/branchScope.util');
+const { requireBranch, branchFilter, branchMatch } = require('../utils/branchScope.util');
+const { buildDateMatch } = require('../utils/reportScope.util');
 const { runInTransaction } = require('../utils/transaction.util');
 const { accountFilter, canUseAccount } = require('../utils/accountScope.util');
 const { shopHasFeature } = require('../utils/features.util');
@@ -453,28 +454,90 @@ class PaymentAccountService {
    * which can be shop-wide; a transfer never is.
    */
   async getTransfers(shopId, req, options = {}) {
-    const { page = 1, limit = 20, accountId } = options;
+    const {
+      page = 1, limit = 20, accountId, startDate, endDate, status = 'all',
+    } = options;
+
+    const dateMatch = buildDateMatch(startDate, endDate);
 
     const filter = branchFilter(req, { shop: shopId });
     if (accountId) {
       filter.$or = [{ fromAccount: accountId }, { toAccount: accountId }];
     }
+    if (dateMatch) filter.date = dateMatch;
+    if (status === 'live') Object.assign(filter, LIVE_TRANSFER);
+    else if (status === 'cancelled') filter.status = 'cancelled';
 
-    const [transfers, total] = await Promise.all([
+    /**
+     * The totals for the WHOLE filtered range, not the page on screen.
+     *
+     * With twenty rows a page, footing the loaded rows told the owner what
+     * twenty transfers cost — and called it the charge. These are computed over
+     * every row the period and account select, so the cards read the same on
+     * page 1, page 9 and "show all", and they agree with the PDF's footer.
+     *
+     * `status` is deliberately NOT applied: the cards always describe what the
+     * money did in the period (live rows), plus how many were voided in it.
+     *
+     * An aggregation, so every id is CAST (I-3) — `shopId` may arrive as a
+     * string and `accountId` always does, from the query string. Uncast, this
+     * $match matches nothing and every card reads ৳০ with no error.
+     */
+    const summaryMatch = branchMatch(req, { shop: new mongoose.Types.ObjectId(shopId) });
+    if (accountId) {
+      const accountOid = new mongoose.Types.ObjectId(accountId);
+      summaryMatch.$or = [{ fromAccount: accountOid }, { toAccount: accountOid }];
+    }
+    if (dateMatch) summaryMatch.date = dateMatch;
+
+    // The voided count goes through `find`-style casting, on the list's own
+    // filter minus its status — so it cannot disagree with the rows above it.
+    const periodFilter = { ...filter };
+    delete periodFilter.status;
+
+    const [transfers, total, totals, cancelledCount] = await Promise.all([
       AccountTransfer.find(filter)
-        .sort({ date: -1, createdAt: -1 })
+        // `_id` last: skip-paging over a tie in date + createdAt is otherwise
+        // free to return a row on two pages and drop another from both.
+        .sort({ date: -1, createdAt: -1, _id: -1 })
         .skip((page - 1) * limit)
         .limit(limit)
         .populate('fromAccount', 'name type method')
         .populate('toAccount', 'name type method')
         .populate('createdBy', 'name')
+        .populate('cancelledBy', 'name')
         .lean(),
       AccountTransfer.countDocuments(filter),
+      AccountTransfer.aggregate([
+        { $match: { ...summaryMatch, ...LIVE_TRANSFER } },
+        {
+          $group: {
+            _id: null,
+            count: { $sum: 1 },
+            amountOut: { $sum: '$amountOut' },
+            amountIn: { $sum: '$amountIn' },
+            // Same definition as the model's `charge` virtual.
+            charge: { $sum: { $max: [0, { $subtract: ['$amountOut', '$amountIn'] }] } },
+            firstDate: { $min: '$date' },
+          },
+        },
+      ]),
+      AccountTransfer.countDocuments({ ...periodFilter, status: 'cancelled' }),
     ]);
 
+    const t = totals[0] || {};
     return {
       transfers,
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+      summary: {
+        count: t.count || 0,
+        cancelledCount: cancelledCount || 0,
+        amountOut: t.amountOut || 0,
+        amountIn: t.amountIn || 0,
+        charge: t.charge || 0,
+        // The earliest transfer in scope — what "শুরু থেকে" means on paper.
+        firstDate: t.firstDate || null,
+      },
     };
   }
 

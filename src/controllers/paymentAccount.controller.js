@@ -73,10 +73,10 @@ exports.updateAccount = asyncHandler(async (req, res) => {
 });
 
 exports.getTransfers = asyncHandler(async (req, res) => {
+  // Already parsed, defaulted and bounded by `validate(listTransfers, 'query')`.
+  const { page, limit, accountId, startDate, endDate, status } = req.query;
   const result = await paymentAccountService.getTransfers(req.shop._id, req, {
-    page: parseInt(req.query.page, 10) || 1,
-    limit: parseInt(req.query.limit, 10) || 20,
-    accountId: req.query.accountId,
+    page, limit, accountId, startDate, endDate, status,
   });
   ApiResponse.success(res, {
     data: result,

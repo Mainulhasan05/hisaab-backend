@@ -40,7 +40,12 @@ router.get('/options', paymentAccountController.getAccountOptions);
  * Reading the history rides on `view`, which is the balances permission, because
  * a transfer list IS a statement of what the shop's money did.
  */
-router.get('/transfers', rbac('accounts', 'view'), paymentAccountController.getTransfers);
+router.get(
+  '/transfers',
+  rbac('accounts', 'view'),
+  validate(paymentAccountValidation.listTransfers, 'query'),
+  paymentAccountController.getTransfers
+);
 router.post(
   '/transfers',
   rbac('accounts', 'transfer'),

@@ -99,6 +99,33 @@ const createTransfer = Joi.object({
  * The reason is required: a void moves two balances back, and "why is the bank
  * ৳60,000 short again" has to have an answer six months later.
  */
+/**
+ * The transfer register's query.
+ *
+ * `limit` has a ceiling, and above it the request is refused, not trusted.
+ * Before this schema existed the route read `parseInt(req.query.limit)` with
+ * no ceiling at all, so `?limit=10000000` asked Mongo
+ * for the whole collection, populated three refs on every row, and held it in
+ * one response. "Show all" and the full-history PDF walk pages of `MAX` instead
+ * — same rows, bounded memory per request.
+ *
+ * Dates are `YYYY-MM-DD` only: `buildDateMatch` reads them as Bangladesh
+ * calendar days, and a timestamp would make the range depend on the device's
+ * timezone. Both blank = from the very first transfer.
+ */
+const TRANSFER_LIST_MAX_LIMIT = 500;
+const isoDay = Joi.string().trim().pattern(/^\d{4}-\d{2}-\d{2}$/).allow('', null);
+
+const listTransfers = Joi.object({
+  page: Joi.number().integer().min(1).default(1),
+  limit: Joi.number().integer().min(1).max(TRANSFER_LIST_MAX_LIMIT).default(20),
+  accountId: objectId.allow('', null),
+  startDate: isoDay,
+  endDate: isoDay,
+  // `live` is what the money did; `all` keeps voided rows on the record.
+  status: Joi.string().valid('all', 'live', 'cancelled').default('all'),
+});
+
 const cancelTransfer = Joi.object({
   reason: Joi.string().trim().min(1).max(500).required().messages({
     'any.required': 'বাতিলের কারণ লিখুন',
@@ -153,6 +180,8 @@ module.exports = {
   createAccount,
   updateAccount,
   createTransfer,
+  listTransfers,
+  TRANSFER_LIST_MAX_LIMIT,
   cancelTransfer,
   createEntry,
   reconcileAccount,
