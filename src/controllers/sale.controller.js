@@ -124,6 +124,58 @@ exports.cancelSale = asyncHandler(async (req, res) => {
   });
 });
 
+// Correct a typed invoice number (features.customInvoiceNo).
+exports.renameInvoiceNo = asyncHandler(async (req, res) => {
+  const sale = await saleService.renameInvoiceNo(
+    req.shop._id,
+    req.user._id,
+    req.params.id,
+    req.body.invoiceNo,
+    req.body.reason,
+    req
+  );
+  return ApiResponse.success(res, {
+    data: sanitizeSales(sale, req),
+    message: 'Invoice number changed',
+    messageBn: 'ইনভয়েস নম্বর পরিবর্তন করা হয়েছে',
+  });
+});
+
+// Permanently delete an invoice — owner only. See saleService.deleteSale.
+exports.deleteSale = asyncHandler(async (req, res) => {
+  // Tri-state, exactly as `cancelSale` above: an absent field stays undefined.
+  const { voidSettlement } = req.body;
+  const settlementChoice = typeof voidSettlement === 'boolean' ? voidSettlement : undefined;
+
+  const result = await saleService.deleteSale(
+    req.shop._id,
+    req.user._id,
+    req.params.id,
+    {
+      reason: req.body.reason,
+      confirmInvoiceNo: req.body.confirmInvoiceNo,
+      voidSettlement: settlementChoice,
+      password: req.body.password,
+    },
+    req
+  );
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Invoice deleted permanently',
+    messageBn: 'ইনভয়েসটি স্থায়ীভাবে মুছে ফেলা হয়েছে',
+  });
+});
+
+// The owner's record of deleted invoices.
+exports.getDeletedSales = asyncHandler(async (req, res) => {
+  const data = await saleService.getDeletedSales(req.shop._id, req.query, req);
+  return ApiResponse.success(res, {
+    data,
+    message: 'Deleted invoices retrieved',
+    messageBn: 'মুছে ফেলা ইনভয়েস লোড হয়েছে',
+  });
+});
+
 // Get filtered sales summary (aggregated stats)
 exports.getSalesSummary = asyncHandler(async (req, res) => {
   const options = { ...req.query };

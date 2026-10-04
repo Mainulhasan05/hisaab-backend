@@ -336,6 +336,8 @@ module.exports = {
     SALE_CREATE: { en: 'sale_create', bn: 'নতুন বিক্রয়' },
     SALE_UPDATE: { en: 'sale_update', bn: 'বিক্রয় সম্পাদনা' },
     SALE_CANCEL: { en: 'sale_cancel', bn: 'বিক্রয় বাতিল' },
+    SALE_DELETE: { en: 'sale_delete', bn: 'ইনভয়েস স্থায়ীভাবে মুছে ফেলা' },
+    SALE_INVOICE_RENAME: { en: 'sale_invoice_rename', bn: 'ইনভয়েস নম্বর পরিবর্তন' },
     PAYMENT_RECEIVED: { en: 'payment_received', bn: 'পেমেন্ট গ্রহণ' },
 
     // Customers

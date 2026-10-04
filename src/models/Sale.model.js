@@ -454,6 +454,30 @@ const saleSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  /**
+   * Every number this invoice has carried before its current one, oldest first
+   * — written ONLY by `saleService.renameInvoiceNo` (features.customInvoiceNo).
+   *
+   * `default: undefined`, not `[]`: a Mongoose array defaults to an empty one,
+   * which would add a key to every sale response on the platform. Absent means
+   * "never renamed", which is every invoice that exists today.
+   *
+   * Kept on the document, not only in the audit log, because the log expires
+   * after 90 days and the customer's carbon copy does not: "why does my paper
+   * say A-1034 when you have A-1043" must be answerable from the invoice.
+   */
+  invoiceNoHistory: {
+    type: [{
+      _id: false,
+      from: { type: String, required: true },
+      to: { type: String, required: true },
+      at: { type: Date, default: Date.now },
+      by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      byName: String,
+      reason: String,
+    }],
+    default: undefined,
+  },
   // ── Return tracking ────────────────────────────────────────────────────────
   //
   // Three accumulators, all `$inc`-ed by the returns path. They exist as STORED

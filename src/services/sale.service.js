@@ -9,6 +9,9 @@ const CashRegister = require('../models/CashRegister.model');
 const Shop = require('../models/Shop.model');
 const AuditLog = require('../models/AuditLog.model');
 const InvoiceCounter = require('../models/InvoiceCounter.model');
+const SalesReturn = require('../models/SalesReturn.model');
+const SMSLog = require('../models/SMSLog.model');
+const DeletedSale = require('../models/DeletedSale.model');
 const { AppError } = require('../middleware/error.middleware');
 const cacheService = require('./cache.service');
 const paymentAccountService = require('./paymentAccount.service');
@@ -17,6 +20,7 @@ const paymentAccountService = require('./paymentAccount.service');
 // implementation here was not an option.
 const dueSettlementService = require('./dueSettlement.service');
 const logger = require('../utils/logger.util');
+const { getAuditMetadata } = require('../utils/requestStore.util');
 const {
   branchFilter,
   requireBranch,
@@ -372,6 +376,26 @@ class SaleService {
         const err = elsewhere?.branch && wrongBranchError(req, elsewhere.branch);
         if (err) throw err;
       }
+
+      // A deleted invoice is still reached by old links — the stock history
+      // links every row to its sale. Say what happened instead of "not found",
+      // which reads as data loss.
+      const gone = await DeletedSale.findOne({
+        shop: shopId,
+        sale: saleId,
+        ...(branchId ? { branch: branchId } : {}),
+      }).select('invoiceNo deletedAt deletedByName').lean();
+      if (gone) {
+        const when = toBangladeshDateStr(gone.deletedAt);
+        const error = new AppError(
+          `Invoice ${gone.invoiceNo} was permanently deleted on ${when}`,
+          `ইনভয়েস ${gone.invoiceNo} ${when} তারিখে স্থায়ীভাবে মুছে ফেলা হয়েছে`
+            + (gone.deletedByName ? ` (${gone.deletedByName})` : ''),
+          410
+        );
+        error.code = 'SALE_DELETED';
+        throw error;
+      }
       throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
     }
 
@@ -394,6 +418,26 @@ class SaleService {
     result.reviseBlockedReason = blocked
       ? { code: blocked.code, message: blocked.message, messageBn: blocked.messageBn }
       : null;
+
+    // Delete is owner-only, so only an owner's response carries the answer —
+    // staff responses (and every response before this feature) keep their
+    // shape, and staff pay none of the three extra lookups.
+    if (req?.user?.isOwner) {
+      const deleteBlocked = await this.deleteBlockedReason(shopId, sale, req);
+      result.canDelete = deleteBlocked === null;
+      result.deleteBlockedReason = deleteBlocked
+        ? { code: deleteBlocked.code, message: deleteBlocked.message, messageBn: deleteBlocked.messageBn }
+        : null;
+    }
+
+    // Same rule for renaming: only shops that type their own numbers see it.
+    if (hasFeature(req, 'customInvoiceNo')) {
+      const renameBlocked = this.renameBlockedReason(sale, req);
+      result.canRenameInvoiceNo = renameBlocked === null;
+      result.renameBlockedReason = renameBlocked
+        ? { code: renameBlocked.code, message: renameBlocked.message, messageBn: renameBlocked.messageBn }
+        : null;
+    }
 
     return result;
   }
@@ -3671,6 +3715,433 @@ class SaleService {
   }
 
   /**
+   * Why this invoice cannot be deleted, or null if it can.
+   *
+   * Shared by `deleteSale` and `getSaleById` (as `canDelete` /
+   * `deleteBlockedReason`) so the button and the API cannot disagree.
+   *
+   * Every refusal is a case where removing the document would leave something
+   * else pointing at an invoice that no longer exists, or would erase money
+   * that really changed hands. Each one names the step that comes first.
+   */
+  async deleteBlockedReason(shopId, sale, req) {
+    if (!sale) return null;
+
+    if (!(req?.isAdmin || req?.user?.isOwner)) {
+      return {
+        code: 'OWNER_ONLY',
+        message: 'Only the shop owner can delete an invoice.',
+        messageBn: 'শুধুমাত্র দোকান মালিক ইনভয়েস মুছে ফেলতে পারবেন।',
+        statusCode: 403,
+      };
+    }
+
+    // A revision chain is one invoice across several documents; deleting one
+    // link strands the others with a `revisedTo`/`revisedFrom` to nowhere.
+    if (sale.revisedTo || sale.revisedFrom) {
+      return {
+        code: 'REVISION_CHAIN',
+        message: 'A revised invoice cannot be deleted — cancel it instead.',
+        messageBn: 'সংশোধিত ইনভয়েস মুছে ফেলা যায় না — বাতিল করুন।',
+        statusCode: 409,
+      };
+    }
+
+    // A return is its own document with its own refund and its own stock rows,
+    // linked to this sale by id. Deleting the sale orphans all of it.
+    const hasReturn = (sale.returnedAmount || 0) > 0
+      || await SalesReturn.exists({ shop: shopId, sale: sale._id });
+    if (hasReturn) {
+      return {
+        code: 'HAS_RETURN',
+        message: 'This invoice has a sales return against it and cannot be deleted.',
+        messageBn: 'এই ইনভয়েসে মাল ফেরত নেওয়া হয়েছে — মুছে ফেলা যাবে না।',
+        statusCode: 409,
+      };
+    }
+
+    // An online order points at this sale and has its own lifecycle.
+    if (sale.order) {
+      return {
+        code: 'ONLINE_ORDER',
+        message: 'This invoice belongs to an online order — cancel the order instead.',
+        messageBn: 'এটি অনলাইন অর্ডারের ইনভয়েস — মুছে না ফেলে অর্ডারটি বাতিল করুন।',
+        statusCode: 409,
+      };
+    }
+
+    if (sale.courier) {
+      return {
+        code: 'WITH_COURIER',
+        message: 'This parcel is still with a courier — record its return first.',
+        messageBn: 'পার্সেলটি এখনো কুরিয়ারের কাছে আছে — আগে ফেরত এসেছে বলে রেকর্ড করুন।',
+        statusCode: 409,
+      };
+    }
+
+    // Money that arrived AFTER checkout is a separate, receipted event with its
+    // own fund-account movement — `cancelSale` does not reverse it, and
+    // deleting the invoice would leave that receipt pointing at nothing.
+    // cancelled-inclusive: a voided receipt is still history that names this
+    // invoice, and deleting the invoice would leave it pointing at nothing.
+    // This also catches refund rows (`undispatchFromCourier`).
+    const laterPayment = await Payment.exists({
+      shop: shopId,
+      sale: sale._id,
+      atCheckout: { $ne: true },
+    });
+    if (laterPayment) {
+      return {
+        code: 'LATER_PAYMENT',
+        message: 'A payment was recorded against this invoice after the sale — it cannot be deleted.',
+        messageBn: 'বিক্রির পরে এই ইনভয়েসে টাকা জমা নেওয়া হয়েছে — মুছে ফেলা যাবে না, বাতিল করুন।',
+        statusCode: 409,
+      };
+    }
+
+    // Only a LIVE sale moves money when deleted (it is cancelled first), so
+    // only a live one is stopped by a counted drawer. An already-cancelled
+    // invoice moved its money back on the day it was cancelled.
+    if (sale.status !== 'cancelled') {
+      const saleDay = toBangladeshDateStr(sale.createdAt);
+      if (saleDay) {
+        const { startOfDay, endOfDay } = getBangladeshDayRange(saleDay);
+        const register = await CashRegister.findOne({
+          shop: shopId,
+          ...(sale.branch ? { branch: sale.branch._id || sale.branch } : {}),
+          date: { $gte: startOfDay, $lte: endOfDay },
+        }).select('status').lean();
+        if (register?.status === 'closed') {
+          return {
+            code: 'REGISTER_CLOSED',
+            message: 'The cash register for that day is closed — reopen it first.',
+            messageBn: 'ওই দিনের ক্যাশ রেজিস্টার বন্ধ করা হয়েছে — আগে রেজিস্টার আবার খুলুন।',
+            statusCode: 409,
+          };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Permanently delete an invoice. OWNER ONLY.
+   *
+   * ── Why this exists when `cancelSale` does ───────────────────────────────
+   *
+   * A cancelled invoice is still an invoice: it sits in the list, in search,
+   * in the customer's history, forever. Shops ring up genuine mistakes — the
+   * wrong customer, a test sale, a double tap — and asked for those to be
+   * gone. This is the one sanctioned exception to `immutableGuard` on `Sale`.
+   *
+   * ── What it does ────────────────────────────────────────────────────────
+   *
+   *   1. LIVE sale → `cancelSale` first, in this transaction. Stock, batches,
+   *      the customer's two books (I-4), fund accounts, the খাতা settlement
+   *      question and `Shop.stats` are all reversed by the path that has always
+   *      reversed them. Nothing here re-implements any of it.
+   *   2. A complete snapshot goes to `DeletedSale` — permanent, no TTL,
+   *      itself undeletable.
+   *   3. The `Sale` document and its checkout `Payment` row (the invoice's own
+   *      payment-history line, the checkout-flagged row — it moves no balance; the
+   *      legs did, and step 1 reversed them) are removed.
+   *   4. Receipt-SMS log rows are re-keyed `<no>~deleted`, so a future invoice
+   *      typed with the same number is not mistaken for an already-texted one.
+   *
+   * ── What it deliberately leaves ─────────────────────────────────────────
+   *
+   * `StockTransaction` rows (the sale-out and the cancel-back pair). They are
+   * the product's stock ledger and their running previousStock/newStock would
+   * show a jump if a pair vanished; they net to zero and keep the invoice
+   * number as their label. Audit-log entries. A `Payment{viaSale}` খাতা
+   * collection, which is the customer's money, not this invoice's — it stands
+   * or is voided exactly as `cancelSale`'s tri-state decides.
+   *
+   * ── The safeguards ──────────────────────────────────────────────────────
+   *
+   * Owner-only (route AND here), the account password checked on the server
+   * every time, the invoice number typed back as confirmation, a reason.
+   * `deleteBlockedReason` refuses whenever the delete would orphan another
+   * document — see there.
+   *
+   * The generated-number counter is NOT rewound; `INV-…-0007` is never issued
+   * twice. A shop-typed number IS freed, which is usually the point: delete the
+   * mistyped invoice, ring it up again under the number on the paper.
+   */
+  async deleteSale(shopId, userId, saleId, { reason, confirmInvoiceNo, voidSettlement, password } = {}, req = null) {
+    const cleanReason = typeof reason === 'string' ? reason.trim() : '';
+    if (cleanReason.length < 3) {
+      throw new AppError(
+        'Write why this invoice is being deleted',
+        'কেন মুছে ফেলছেন তা লিখুন (কমপক্ষে ৩ অক্ষর)',
+        400
+      );
+    }
+
+    // Belt and braces: the route is `ownerOnly`, and this stays true if the
+    // route ever changes. Checked before the password so a cashier is told the
+    // real reason rather than invited to guess the owner's password.
+    if (!(req?.isAdmin || req?.user?.isOwner)) {
+      throw new AppError(
+        'Only the shop owner can delete an invoice',
+        'শুধুমাত্র দোকান মালিক ইনভয়েস মুছে ফেলতে পারবেন',
+        403
+      );
+    }
+
+    // Verified HERE, not trusted from a browser timestamp. A platform admin
+    // acting inside the shop has no `User` password and is attributed as the
+    // admin by the audit hook.
+    if (!req?.isAdmin) {
+      if (!password || typeof password !== 'string') {
+        throw new AppError('Password is required', 'পাসওয়ার্ড দেওয়া আবশ্যক', 400);
+      }
+      const owner = await User.findById(userId).select('+password');
+      if (!owner || !(await owner.comparePassword(password))) {
+        const error = new AppError('Incorrect password', 'পাসওয়ার্ড সঠিক নয়', 400);
+        error.code = 'BAD_PASSWORD';
+        throw error;
+      }
+    }
+
+    const result = await runInTransaction(async (session) => {
+      const sessionOpt = session ? { session } : {};
+
+      const saleQuery = { _id: saleId, shop: shopId };
+      if (req?.branchId) saleQuery.branch = req.branchId;
+      const sale = await Sale.findOne(saleQuery, null, sessionOpt);
+      if (!sale) {
+        throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
+      }
+
+      // Typed back, character for character. The number is what is on the
+      // paper; making the owner read it off the screen is what stops a delete
+      // aimed at INV-0043 landing on INV-0042 in the next tab.
+      const typed = typeof confirmInvoiceNo === 'string'
+        ? confirmInvoiceNo.normalize('NFC').trim().replace(/\s+/g, ' ')
+        : '';
+      if (typed !== sale.invoiceNo) {
+        const error = new AppError(
+          'The invoice number typed does not match',
+          `নিশ্চিত করতে ইনভয়েস নম্বরটি হুবহু লিখুন: ${sale.invoiceNo}`,
+          400
+        );
+        error.code = 'CONFIRM_MISMATCH';
+        throw error;
+      }
+
+      const blocked = await this.deleteBlockedReason(shopId, sale, req);
+      if (blocked) {
+        const error = new AppError(blocked.message, blocked.messageBn, blocked.statusCode);
+        error.code = blocked.code;
+        throw error;
+      }
+
+      const statusBeforeDelete = sale.status;
+      const reversedOnDelete = sale.status !== 'cancelled';
+      const invoiceNo = sale.invoiceNo;
+
+      // 1. Reverse a live sale through the one path that knows how. Its own
+      //    guards (closed register, courier, the খাতা settlement tri-state)
+      //    still apply and still refuse before any write.
+      let settlementVoided = null;
+      if (reversedOnDelete) {
+        await this.cancelSale(
+          shopId,
+          userId,
+          sale._id,
+          `মুছে ফেলা হয়েছে: ${cleanReason}`,
+          null,
+          { session },
+          voidSettlement
+        );
+        if ((sale.dueSettled || 0) > 0 && typeof voidSettlement === 'boolean') {
+          settlementVoided = voidSettlement;
+        }
+      }
+
+      // 2. The snapshot — read AFTER the reversal so it is the final state.
+      const finalSale = await Sale.findOne({ _id: sale._id, shop: shopId }, null, sessionOpt).lean();
+      // cancelled-inclusive: every checkout row of this invoice leaves with it,
+      // whatever its status — a row left behind would name a deleted invoice.
+      // `cancelSale` never touches these rows, so they are normally `active`
+      // even on a cancelled sale; that is why `getCustomerLedger` still
+      // credits them, and why removing them corrects that ledger rather than
+      // distorting it.
+      const checkoutPayments = await Payment.find(
+        // `$eq`, not the bare literal: cashDrawerNoDoubleCount counts the literal
+        // to prove createSale is the ONLY writer of the flag.
+        { shop: shopId, sale: sale._id, atCheckout: { $eq: true } },
+        null,
+        sessionOpt
+      ).lean();
+
+      const actor = req?.user || null;
+      const [archived] = await DeletedSale.create([{
+        shop: shopId,
+        branch: finalSale.branch || null,
+        sale: finalSale._id,
+        invoiceNo,
+        statusBeforeDelete,
+        reversedOnDelete,
+        reason: cleanReason,
+        saleDate: finalSale.createdAt || null,
+        total: finalSale.total || 0,
+        paid: finalSale.paid || 0,
+        due: finalSale.due || 0,
+        itemCount: (finalSale.items || []).length,
+        customer: finalSale.customer || null,
+        customerName: finalSale.customerName || null,
+        customerPhone: finalSale.customerPhone || null,
+        soldBy: finalSale.createdBy || null,
+        deletedBy: userId,
+        deletedByName: actor?.name || null,
+        deletedAt: new Date(),
+        snapshot: finalSale,
+        removedPayments: checkoutPayments,
+        settlementVoided,
+        metadata: getAuditMetadata() || undefined,
+      }], sessionOpt);
+
+      // 3. Remove. Through the driver handle on purpose: `immutableGuard`
+      //    stays on the model for every other caller, and this is the one
+      //    reviewed exception. `saleDelete.test.js` pins that no other line
+      //    in the codebase carries the marker.
+      await Sale.collection.deleteOne({ _id: finalSale._id, shop: shopId }, sessionOpt); // sale-delete:reviewed
+      if (checkoutPayments.length > 0) {
+        await Payment.collection.deleteMany( // sale-delete:reviewed
+          { _id: { $in: checkoutPayments.map((p) => p._id) }, shop: shopId },
+          sessionOpt
+        );
+      }
+
+      // 4. Free the number for the receipt-SMS duplicate guard (see header).
+      await SMSLog.updateMany(
+        { shop: shopId, invoiceNumber: invoiceNo },
+        { $set: { invoiceNumber: `${invoiceNo}~deleted` } },
+        sessionOpt
+      );
+
+      return { archived, finalSale, statusBeforeDelete, reversedOnDelete, invoiceNo, checkoutPayments };
+    });
+
+    const { archived, finalSale, statusBeforeDelete, reversedOnDelete, invoiceNo } = result;
+
+    // Outside the transaction, like every audit write in this service. The
+    // permanent record is `DeletedSale`, written inside it; this entry puts the
+    // delete in the activity log the owner already reads.
+    AuditLog.create({
+      shop: shopId,
+      branch: finalSale.branch || null,
+      user: userId,
+      customer: finalSale.customer || null,
+      action: 'sale_delete',
+      actionBn: 'ইনভয়েস স্থায়ীভাবে মুছে ফেলা',
+      description:
+        `Permanently deleted invoice ${invoiceNo} (৳${finalSale.total}, `
+        + `${(finalSale.items || []).length} lines, was ${statusBeforeDelete}`
+        + `${reversedOnDelete ? ', stock and money reversed' : ''}). Reason: ${cleanReason}`,
+      descriptionBn:
+        `ইনভয়েস ${invoiceNo} স্থায়ীভাবে মুছে ফেলা হয়েছে (৳${finalSale.total}`
+        + `${reversedOnDelete ? ', স্টক ও টাকা ফেরত হিসাব করা হয়েছে' : ''})। কারণ: ${cleanReason}`,
+      entity: { type: 'sale', id: finalSale._id, name: invoiceNo },
+      changes: {
+        before: {
+          invoiceNo,
+          status: statusBeforeDelete,
+          total: finalSale.total,
+          paid: finalSale.paid,
+          due: finalSale.due,
+          customerName: finalSale.customerName || null,
+          items: (finalSale.items || []).map((i) => ({
+            productName: i.productName,
+            quantity: i.quantity,
+            unitPrice: i.unitPrice,
+            total: i.total,
+          })),
+        },
+        after: { deleted: true, archiveId: archived._id, reason: cleanReason },
+      },
+    }).catch((err) => logger.error(`Audit log (sale_delete) failed: ${err.message}`));
+
+    this.invalidateCache(shopId).catch(() => {});
+
+    return {
+      invoiceNo,
+      deletedAt: archived.deletedAt,
+      reversedOnDelete,
+      archiveId: archived._id,
+    };
+  }
+
+  /**
+   * The owner's record of deleted invoices, newest first. Branch-scoped like
+   * the sales list (I-2). The full snapshot is returned for line items and
+   * payments only — enough to answer "what was on it" without shipping every
+   * internal field of a Sale to the browser.
+   */
+  async getDeletedSales(shopId, query = {}, req = null) {
+    if (!(req?.isAdmin || req?.user?.isOwner)) {
+      throw new AppError('Only the shop owner can view deleted invoices', 'শুধুমাত্র দোকান মালিক দেখতে পারবেন', 403);
+    }
+    const page = Math.max(1, parseInt(query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || 20));
+
+    const filter = branchFilter(req, { shop: shopId });
+    if (query.search) {
+      const escaped = String(query.search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.$or = [
+        { invoiceNo: { $regex: escaped, $options: 'i' } },
+        { customerName: { $regex: escaped, $options: 'i' } },
+        { customerPhone: { $regex: escaped, $options: 'i' } },
+      ];
+    }
+
+    const [rows, total] = await Promise.all([
+      // Inclusion ONLY. Excluding `snapshot` while including `snapshot.items.*`
+      // is a path collision MongoDB refuses at query time — and a mocked test
+      // would never notice.
+      DeletedSale.find(filter)
+        .select({
+          invoiceNo: 1,
+          branch: 1,
+          statusBeforeDelete: 1,
+          reversedOnDelete: 1,
+          reason: 1,
+          saleDate: 1,
+          total: 1,
+          paid: 1,
+          due: 1,
+          itemCount: 1,
+          customerName: 1,
+          customerPhone: 1,
+          deletedByName: 1,
+          deletedAt: 1,
+          settlementVoided: 1,
+          'snapshot.items.productName': 1,
+          'snapshot.items.variantAttributes': 1,
+          'snapshot.items.quantity': 1,
+          'snapshot.items.unit': 1,
+          'snapshot.items.unitPrice': 1,
+          'snapshot.items.total': 1,
+          'snapshot.payments.method': 1,
+          'snapshot.payments.amount': 1,
+        })
+        .sort({ deletedAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      DeletedSale.countDocuments(filter),
+    ]);
+
+    return {
+      deletedSales: rows,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    };
+  }
+
+  /**
    * Why this invoice cannot be revised, or null if it can.
    *
    * Split out of `reviseSale` so the sale detail page can ask the SAME question
@@ -3998,6 +4469,242 @@ class SaleService {
 
       return revised;
     });
+  }
+
+  /**
+   * Why this invoice's number cannot be changed, or null if it can.
+   *
+   * Shared by `renameInvoiceNo` and `getSaleById`, for the same reason
+   * `reviseBlockedReason` is: a ঠিক করুন button the API then refuses is worse
+   * than no button.
+   *
+   * Deliberately NOT refused: a closed cash register, a different day, a
+   * return, a later payment. A rename moves no money and no stock — everything
+   * that matters downstream links to the sale by `_id`, and the few string
+   * copies are carried along inside the rename itself.
+   */
+  renameBlockedReason(sale, req) {
+    if (!sale) return null;
+    if (!hasFeature(req, 'customInvoiceNo')) {
+      return {
+        code: 'FEATURE_OFF',
+        message: 'This shop does not have its own invoice numbering enabled.',
+        messageBn: 'এই দোকানে নিজের ইনভয়েস নম্বর দেওয়ার সুবিধা চালু নেই।',
+        statusCode: 403,
+      };
+    }
+    if (sale.status === 'cancelled') {
+      return {
+        code: 'SALE_CANCELLED',
+        message: 'A cancelled invoice keeps the number it was cancelled under.',
+        messageBn: 'বাতিল ইনভয়েসের নম্বর বদলানো যায় না।',
+        statusCode: 400,
+      };
+    }
+    // A superseded version carries `<number>~rN`, and its number is owned by
+    // the live revision. Renaming the old version would fork the chain.
+    if (sale.revisedTo || String(sale.invoiceNo || '').includes('~')) {
+      return {
+        code: 'ALREADY_REVISED',
+        message: 'This is an older version of a revised invoice — rename the current version.',
+        messageBn: 'এটি সংশোধিত ইনভয়েসের পুরোনো সংস্করণ — নতুন সংস্করণটি খুলে নম্বর ঠিক করুন।',
+        statusCode: 400,
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Correct a typed invoice number after the sale was saved.
+   *
+   * ── Who and why ───────────────────────────────────────────────────────────
+   *
+   * `features.customInvoiceNo` shops copy their number off a paper invoice
+   * book, and a slip of the finger (A-1034 for A-1043) used to be permanent:
+   * the only way out was cancelling a correct sale and ringing it up again.
+   * Gated exactly as typing the number is — the shop's capability, plus
+   * `sales.update` on the route — because fixing a transcription is the same
+   * act as making it.
+   *
+   * ── What moves with the number ────────────────────────────────────────────
+   *
+   * `Sale.invoiceNo` is the key, and the `{shop, invoiceNo}` unique index is
+   * still the only uniqueness guard: a number already used — by a live, a
+   * cancelled or a superseded invoice — is refused by the database, not by a
+   * read-then-write check two tills could race.
+   *
+   * Copies that are display labels on rows linked by id are carried along, so
+   * no screen shows the old number beside the new one:
+   *   · superseded revisions `OLD~rN` → `NEW~rN`, keeping the prefix search
+   *     `reviseSale` relies on;
+   *   · `SalesReturn.invoiceNo` — the returns list searches on it;
+   *   · `StockTransaction.reference.invoiceNo` — the stock-history label;
+   *   · `SMSLog.invoiceNumber` — LOAD-BEARING, not cosmetic. The receipt-SMS
+   *     duplicate guard matches on this string; left behind, the next sale that
+   *     legitimately reuses the old number would have its receipt suppressed
+   *     and be marked `smsSent` without one ever going out.
+   *
+   * Prose is NOT rewritten — audit descriptions, stock `notes`, the text of an
+   * SMS already delivered. Those record what was true when they were written.
+   * Paper already printed keeps the old number too, which is why the UI warns.
+   *
+   * The old→new pair is pushed onto `Sale.invoiceNoHistory` (permanent) and
+   * written to the audit log (90 days, with IP and device).
+   */
+  async renameInvoiceNo(shopId, userId, saleId, rawInvoiceNo, reason, req) {
+    const cleanReason = typeof reason === 'string' ? reason.trim().slice(0, 300) : '';
+
+    const result = await runInTransaction(async (session) => {
+      const sessionOpt = session ? { session } : {};
+
+      const saleQuery = { _id: saleId, shop: shopId };
+      if (req?.branchId) saleQuery.branch = req.branchId;
+      const sale = await Sale.findOne(saleQuery, null, sessionOpt);
+      if (!sale) {
+        throw new AppError('Sale not found', 'বিক্রয় পাওয়া যায়নি', 404);
+      }
+
+      const blocked = this.renameBlockedReason(sale, req);
+      if (blocked) {
+        const error = new AppError(blocked.message, blocked.messageBn, blocked.statusCode);
+        error.code = blocked.code;
+        throw error;
+      }
+
+      // Same rules as typing it at the till — charset, length, the reserved `~`.
+      const newNo = resolveCustomInvoiceNo({ raw: rawInvoiceNo, shop: req?.shop || null });
+      if (!newNo) {
+        throw new AppError('Invoice number cannot be blank', 'ইনভয়েস নম্বর খালি রাখা যাবে না', 400);
+      }
+
+      const oldNo = sale.invoiceNo;
+      if (newNo === oldNo) {
+        throw new AppError(
+          'That is already this invoice\'s number',
+          'এটিই এই ইনভয়েসের বর্তমান নম্বর — নতুন নম্বর দিন',
+          400
+        );
+      }
+
+      const actor = req?.user || null;
+      const historyEntry = {
+        from: oldNo,
+        to: newNo,
+        at: new Date(),
+        by: userId,
+        byName: actor?.name || null,
+        ...(cleanReason ? { reason: cleanReason } : {}),
+      };
+
+      // `invoiceNo: oldNo` in the filter: if the number moved under us (a
+      // concurrent rename), this matches nothing and we say so instead of
+      // overwriting someone else's correction.
+      let renamed;
+      try {
+        renamed = await Sale.updateOne(
+          { _id: sale._id, shop: shopId, invoiceNo: oldNo },
+          { $set: { invoiceNo: newNo }, $push: { invoiceNoHistory: historyEntry } },
+          sessionOpt
+        );
+      } catch (err) {
+        if (err.code === 11000) {
+          const error = new AppError(
+            `Invoice number ${newNo} is already used in this shop`,
+            `এই ইনভয়েস নম্বর (${newNo}) আগে থেকেই ব্যবহার করা হয়েছে — অন্য নম্বর দিন`,
+            409
+          );
+          error.code = 'INVOICE_NO_TAKEN';
+          throw error;
+        }
+        throw err;
+      }
+      if (renamed.matchedCount !== 1) {
+        throw new AppError(
+          'This invoice was changed by someone else — reload and try again.',
+          'ইনভয়েসটি এইমাত্র অন্য কেউ বদলেছেন — পাতা রিফ্রেশ করে আবার চেষ্টা করুন।',
+          409
+        );
+      }
+
+      // Every document whose number moves: this one, plus superseded versions.
+      const moved = [{ id: sale._id, from: oldNo, to: newNo }];
+      if (sale.revisedFrom) {
+        const escaped = oldNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const versions = await Sale.find(
+          { shop: shopId, invoiceNo: { $regex: `^${escaped}~r\\d+$` } },
+          '_id invoiceNo',
+          sessionOpt
+        ).lean();
+        for (const v of versions) {
+          const suffix = v.invoiceNo.slice(oldNo.length); // "~r1"
+          const to = `${newNo}${suffix}`;
+          try {
+            await Sale.updateOne({ _id: v._id, shop: shopId }, { $set: { invoiceNo: to } }, sessionOpt);
+          } catch (err) {
+            if (err.code === 11000) {
+              const error = new AppError(
+                `Invoice number ${newNo} is already used in this shop`,
+                `এই ইনভয়েস নম্বর (${newNo}) আগে থেকেই ব্যবহার করা হয়েছে — অন্য নম্বর দিন`,
+                409
+              );
+              error.code = 'INVOICE_NO_TAKEN';
+              throw error;
+            }
+            throw err;
+          }
+          moved.push({ id: v._id, from: v.invoiceNo, to });
+        }
+      }
+
+      for (const m of moved) {
+        await StockTransaction.updateMany(
+          { shop: shopId, 'reference.id': m.id, 'reference.invoiceNo': m.from },
+          { $set: { 'reference.invoiceNo': m.to } },
+          sessionOpt
+        );
+        await SalesReturn.updateMany(
+          { shop: shopId, sale: m.id },
+          { $set: { invoiceNo: m.to } },
+          sessionOpt
+        );
+        await SMSLog.updateMany(
+          { shop: shopId, invoiceNumber: m.from },
+          { $set: { invoiceNumber: m.to } },
+          sessionOpt
+        );
+      }
+
+      return { sale, oldNo, newNo, versionsMoved: moved.length - 1 };
+    });
+
+    const { sale, oldNo, newNo, versionsMoved } = result;
+
+    // Outside the transaction, as everywhere in this service: a failed log must
+    // never roll back a completed correction.
+    AuditLog.create({
+      shop: shopId,
+      branch: sale.branch || null,
+      user: userId,
+      customer: sale.customer || null,
+      action: 'sale_invoice_rename',
+      actionBn: 'ইনভয়েস নম্বর পরিবর্তন',
+      description:
+        `Invoice number changed: ${oldNo} → ${newNo}`
+        + (versionsMoved ? ` (and ${versionsMoved} earlier version(s))` : '')
+        + (cleanReason ? `. Reason: ${cleanReason}` : ''),
+      descriptionBn:
+        `ইনভয়েস নম্বর পরিবর্তন: ${oldNo} → ${newNo}`
+        + (cleanReason ? `। কারণ: ${cleanReason}` : ''),
+      entity: { type: 'sale', id: sale._id, name: newNo },
+      changes: {
+        before: { invoiceNo: oldNo },
+        after: { invoiceNo: newNo, versionsMoved, reason: cleanReason || null },
+      },
+    }).catch((err) => logger.error(`Audit log (sale_invoice_rename) failed: ${err.message}`));
+
+    this.invalidateCache(shopId).catch(() => {});
+
+    return Sale.findOne({ _id: sale._id, shop: shopId });
   }
 
   // Get today's sales summary

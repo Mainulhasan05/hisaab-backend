@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const saleController = require('../controllers/sale.controller');
-const { protect } = require('../middleware/auth.middleware');
+const { protect, ownerOnly } = require('../middleware/auth.middleware');
 const { rbac } = require('../middleware/permission.middleware');
 const idempotency = require('../middleware/idempotency.middleware');
 const { validate } = require('../middleware/validate.middleware');
@@ -27,6 +27,9 @@ router.get('/recent', rbac('sales', 'view'), saleController.getRecentSales);
 // whoever is ringing it up, about a line they are already holding. A cashier
 // who can see the invoice can see what the last one said.
 router.get('/customer-history', rbac('sales', 'view'), saleController.getCustomerProductHistory);
+// The record of permanently deleted invoices. Owner-only like the delete
+// itself; before `/:id` for the same reason as the route above.
+router.get('/deleted', ownerOnly, saleController.getDeletedSales);
 router.get('/:id/payments', rbac('sales', 'view'), saleController.getSalePayments);
 router.get('/:id', rbac('sales', 'view'), saleController.getSale);
 router.patch('/:id/payment', idempotency(), rbac('sales', 'update'), saleController.recordPayment);
@@ -54,5 +57,12 @@ router.post('/:id/undispatch', idempotency(), rbac('sales', 'update'), validate(
 // `sales.revise`, not `update` — see the note on the action in config/permissions.js.
 router.post('/:id/revise', idempotency(), rbac('sales', 'revise'), validate(saleValidation.createSale), saleController.reviseSale);
 router.post('/:id/cancel', rbac('sales', 'delete'), saleController.cancelSale);
+// Fix a mistyped invoice number. `sales.update`, plus `features.customInvoiceNo`
+// checked in the service — the same people who may type the number may fix it.
+router.patch('/:id/invoice-no', idempotency(), rbac('sales', 'update'), saleController.renameInvoiceNo);
+// Permanent deletion. OWNER ONLY, never a delegable permission: `sales.delete`
+// is held by managers and means "cancel", which leaves a trace on the list.
+// The service checks ownership again, so a future route change cannot widen it.
+router.delete('/:id', idempotency(), ownerOnly, saleController.deleteSale);
 
 module.exports = router;

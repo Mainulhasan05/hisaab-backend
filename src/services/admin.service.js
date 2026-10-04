@@ -2762,10 +2762,14 @@ class AdminService {
     const Order = require('../models/Order.model');
     const DueAdjustment = require('../models/DueAdjustment.model');
     const SupplierDueAdjustment = require('../models/SupplierDueAdjustment.model');
+    const DeletedSale = require('../models/DeletedSale.model');
     const branchScopedModels = [
       Sale, Purchase, Expense, CashRegister, StockTransaction,
       Payment, SalesReturn, PurchaseReturn, SMSLog, AuditLog, HeldCart, Order,
       DueAdjustment, SupplierDueAdjustment,
+      // The record of deleted invoices is listed per branch like the sales
+      // list it was taken from; untagged rows would vanish on enable.
+      DeletedSale,
       // কাঁচামাল and its ledger are per-branch like Product; untagged rows
       // would vanish from every branch the moment multi-branch is enabled.
       Ingredient, IngredientMovement

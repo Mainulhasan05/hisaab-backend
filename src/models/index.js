@@ -25,6 +25,11 @@ module.exports = {
   Category: require('./Category.model'),
   Product: require('./Product.model'),
   Sale: require('./Sale.model'),
+  // The permanent record of owner-deleted invoices (saleService.deleteSale).
+  // Registered here or `sync-indexes` never ships its unique {shop, sale} key
+  // to production, where autoIndex is off, and a retried delete could archive
+  // the same invoice twice.
+  DeletedSale: require('./DeletedSale.model'),
   Payment: require('./Payment.model'),
   // Platform billing — what shops pay HisaabBD. Separate from `Payment`, which
   // is what a shop's customers pay the shop.
