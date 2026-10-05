@@ -13,6 +13,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Production is cPanel / Phusion Passenger, not pm2. Passenger does NOT
+      # restart on its own when files change — an upload alone leaves the old
+      # code running until the process happens to recycle. A new mtime on
+      # tmp/restart.txt is Passenger's restart signal, so write a fresh one
+      # every deploy (it differs each run, so the FTP sync always uploads it).
+      - name: Mark the app for restart
+        run: mkdir -p tmp && date -u +%Y-%m-%dT%H:%M:%SZ > tmp/restart.txt
+
       - name: Upload via FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
@@ -21,7 +29,20 @@ jobs:
           password: ${{ secrets.FTP_PASSWORD }}
           server-dir: /
           local-dir: ./                       # repo root
+          # Setting `exclude` REPLACES the action's defaults. `**/.git*` alone
+          # matches the folder NAME, not the files in it — the action's own
+          # default list pairs it with `**/.git*/**` for exactly that reason.
+          # Without the second line every deploy shipped the repo's packed git
+          # history to the server, on an account that has run out of disk.
+          # Tests, logs and backups are never run in production either.
           exclude: |
             **/.git*
+            **/.git*/**
             **/.github*
+            **/.github*/**
             **/node_modules/**
+            src/tests/**
+            backups/**
+            logs/**
+            coverage/**
+            **/*.log

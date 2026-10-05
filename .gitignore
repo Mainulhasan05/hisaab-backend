@@ -2,3 +2,5 @@
 /node_modules
 /logs
 /backups
+# Runtime logs never belong in the repo — they were being FTP-deployed.
+*.log
