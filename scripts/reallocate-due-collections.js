@@ -65,12 +65,18 @@ async function main() {
   console.log(`\n${APPLY ? '*** APPLYING ***' : '--- DRY RUN (no writes) ---'}\n`);
 
   /**
-   * Only customers who have ever had a khata collection can be affected: the
-   * allocation pool is `Σ Payment{type:'due_collection'}`, and for everyone else
-   * it is empty and the recompute is a no-op. Narrowing here keeps the run
-   * proportional to the damage rather than to the size of the database.
+   * Only customers who have ever had a khata collection or left a deposit can
+   * be affected: the allocation pool is `Σ Payment{type: due_collection |
+   * advance}`, and for everyone else it is empty and the recompute is a no-op.
+   * Narrowing here keeps the run proportional to the damage rather than to the
+   * size of the database.
+   *
+   * `advance` MUST be here. A deposit spent by a later bill was left unallocated
+   * whenever that bill absorbed the whole deposit (createSale's guard read the
+   * post-rollup `advanceBalance`, fixed 2026-10-06), and those customers have
+   * no `due_collection` row at all.
    */
-  const match = { type: 'due_collection', customer: { $ne: null } };
+  const match = { type: { $in: ['due_collection', 'advance'] }, customer: { $ne: null } };
   if (ONLY_SHOP) match.shop = new mongoose.Types.ObjectId(ONLY_SHOP);
 
   const affected = await db.collection('payments').aggregate([

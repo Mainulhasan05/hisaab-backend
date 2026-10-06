@@ -341,6 +341,36 @@ describe('createSale reads the book before it moves it', () => {
   });
 });
 
+describe('createSale spends a held advance on the invoice being written', () => {
+  // REGRESSION. Production, 2026-10-06: ৳10,000 on deposit, a ৳17,390 bill
+  // with ৳7,390 paid. The customer book read ৳0 owed; the invoice read ৳10,000
+  // due. The guard read `customer.advanceBalance` AFTER the rollup's
+  // `applyBalances` had already spent it to zero, so the reallocator never ran
+  // whenever the bill absorbed the whole deposit.
+  const source = read('../services/sale.service');
+  const body = methodBody(source, 'async createSale(');
+  const guard = '} else if (customer && !revisedFrom && heldAdvance) {';
+
+  it('gates the reallocator on the pre-rollup snapshot, not the live field', () => {
+    expect(body).toContain(guard);
+    expect(body).not.toMatch(/else if \(customer && !revisedFrom && \(customer\.advanceBalance/);
+  });
+
+  it('takes the snapshot before the rollup and reads it after', () => {
+    const snapAt = body.indexOf('heldAdvance = (customer.advanceBalance || 0) > 0 || branchAdvance > 0');
+    const rollupAt = body.indexOf('Customer.applyBalances(customer)');
+    const guardAt = body.indexOf(guard);
+    expect(snapAt).toBeGreaterThan(-1);
+    expect(snapAt).toBeLessThan(rollupAt);
+    expect(rollupAt).toBeLessThan(guardAt);
+  });
+
+  it('calls the reallocator inside that branch', () => {
+    const branch = body.slice(body.indexOf(guard), body.indexOf('if (paid > 0)', body.indexOf(guard)));
+    expect(branch).toContain('reallocateCustomerInvoices');
+  });
+});
+
 describe('the field survives the route it arrives on', () => {
   const { createSale: schema } = require('../validations/sale.validation');
 

@@ -2010,6 +2010,10 @@ class SaleService {
       }
     }
 
+    // Declared out here because the spend-the-credit branch further down reads
+    // it too, and by then the rollup has already consumed `advanceBalance`.
+    let heldAdvance = false;
+
     // Update customer statistics if customer exists
     if (customer) {
       const purchasedAt = occurredAt;
@@ -2028,7 +2032,7 @@ class SaleService {
        * path, which is the point. Almost every checkout is to someone who has
        * never left a deposit, and they must not pay for this.
        */
-      const heldAdvance = (customer.advanceBalance || 0) > 0 || branchAdvance > 0;
+      heldAdvance = (customer.advanceBalance || 0) > 0 || branchAdvance > 0;
 
       customer.totalPurchases += total;
       customer.totalPaid += paid;
@@ -2238,7 +2242,7 @@ class SaleService {
        * silently dropping by ৳2,200 never is.
        */
       dueAllocations = settled.allocations || [];
-    } else if (customer && !revisedFrom && (customer.advanceBalance || 0) > 0) {
+    } else if (customer && !revisedFrom && heldAdvance) {
       /**
        * ── A customer holding credit spends it HERE, not eventually ───────────
        *
@@ -2270,6 +2274,18 @@ class SaleService {
        * instead would put an aggregate on the hottest path in the app to
        * discover, almost always, that there was nothing to do. Same instinct as
        * the reallocator's own early return on an empty pool.
+       *
+       * ── Why `heldAdvance` and not `customer.advanceBalance` ────────────────
+       *
+       * By the time this line runs, `applyBalances` in the rollup has ALREADY
+       * spent the credit on this sale in memory. ৳10,000 on deposit, a ৳17,390
+       * bill with ৳7,390 paid: the rollup leaves `advanceBalance` at 0, so a
+       * guard reading the live field skips the reallocator exactly when the
+       * invoice absorbs the whole deposit. The customer page then reads ৳0
+       * owed and the invoice reads ৳10,000 due, for good — this happened in
+       * production. Only a bill SMALLER than the deposit left a remainder for
+       * the old guard to see. The snapshot is taken before the rollup, and it
+       * also catches credit held only at this branch under separate books.
        *
        * ORDER IS LOAD-BEARING: this sits after the rollup above, so THIS
        * invoice is already in the queue and can absorb the credit. Run before
