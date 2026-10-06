@@ -369,6 +369,16 @@ describe('createSale spends a held advance on the invoice being written', () => 
     const branch = body.slice(body.indexOf(guard), body.indexOf('if (paid > 0)', body.indexOf(guard)));
     expect(branch).toContain('reallocateCustomerInvoices');
   });
+
+  it('snapshots what the deposit paid on THIS invoice as advanceUsed', () => {
+    // Without it the slip cannot say "অগ্রিম থেকে কাটা": the reallocator pools
+    // advances and collections, so ledgerSettled alone cannot tell them apart.
+    const branch = body.slice(body.indexOf(guard), body.indexOf('if (paid > 0)', body.indexOf(guard)));
+    const reallocAt = branch.indexOf('reallocateCustomerInvoices');
+    const snapAt = branch.indexOf('$set: { advanceUsed }');
+    expect(snapAt).toBeGreaterThan(reallocAt);
+    expect(branch).toContain('String(a.sale) === String(sale._id)');
+  });
 });
 
 describe('the field survives the route it arrives on', () => {

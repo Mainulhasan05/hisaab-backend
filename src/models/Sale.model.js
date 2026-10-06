@@ -555,6 +555,25 @@ const saleSchema = new mongoose.Schema({
     default: 0,
     min: [0, 'খাতা সমন্বয় ০ এর কম হতে পারবে না']
   },
+  /**
+   * How much of this bill the customer's অগ্রিম paid AT CHECKOUT — a snapshot,
+   * for the same reason `previousDue` and `dueSettled` are.
+   *
+   * `ledgerSettled` cannot answer it: the reallocator pools `advance` and
+   * `due_collection` together, so the invoice knows money landed on it but not
+   * whose. A slip reading "মোট ৳400 · পরিশোধিত ৳305 · বাকি ৳0" with nothing
+   * between the last two was the complaint; "অগ্রিম থেকে কাটা ৳95" is the
+   * sentence it was missing. Prints as min(this, ledgerSettled), since a later
+   * return can shrink what the invoice still holds.
+   *
+   * `default: undefined`, so it is ABSENT on every sale that did not spend a
+   * deposit and no other response changes shape (I-1).
+   */
+  advanceUsed: {
+    type: Number,
+    default: undefined,
+    min: [0, 'অগ্রিম সমন্বয় ০ এর কম হতে পারবে না']
+  },
   // Accumulated `SalesReturn.profitReduction`. Subtracted from the item-derived
   // profit below, so a returned line stops counting as earnings.
   returnedProfit: {

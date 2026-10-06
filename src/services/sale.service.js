@@ -2302,6 +2302,17 @@ class SaleService {
         customerId: customer._id,
         branchScoped: branchCustomerScope,
       }, session);
+
+      // What the deposit paid on THIS bill, recorded so the slip can say
+      // "অগ্রিম থেকে কাটা" — see `Sale.advanceUsed`. A brand-new invoice held
+      // nothing before this pass, so its `applied` is the whole of it.
+      // `updateOne` for the reason the `dueSettled` write above gives.
+      const own = (dueAllocations || []).find((a) => String(a.sale) === String(sale._id));
+      const advanceUsed = toMoney(own?.applied);
+      if (advanceUsed > 0) {
+        await Sale.updateOne({ _id: sale._id }, { $set: { advanceUsed } }, sessionOpt);
+        sale.advanceUsed = advanceUsed;
+      }
     }
 
     // Create payment record if paid amount > 0.
