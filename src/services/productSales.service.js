@@ -36,6 +36,11 @@ const { baseMatch, buildDateMatch, roundReportQty } = require('../utils/reportSc
  * the invoice's line, and pro-rating a bill discount onto one product would
  * invent a per-line number no document carries.
  *
+ * So `totalProfit` (Σ line total − line cost) is before it too. When no filter
+ * picks lines out of bills, the summary adds `billDiscount`, `billProfit` and
+ * `profitAfterReturns` from the stored invoice figures — that is the profit an
+ * owner means when they open this from a customer's page.
+ *
  * ── Scope ────────────────────────────────────────────────────────────────────
  *
  * `branchId` goes through `baseMatch`, which casts (I-3). Cost and profit ride
@@ -130,6 +135,13 @@ class ProductSalesService {
     const notCancelled = { $ne: ['$status', 'cancelled'] };
     const whenLive = (expr) => ({ $cond: [notCancelled, expr, 0] });
 
+    // True when every filter is on the BILL (date, seller, customer, status) and
+    // none picks lines out of it (product, variant, search). Only then does the
+    // scope hold whole invoices, and only then can the bill-level discount and
+    // the stored `Sale.profit` be reported without pro-rating them onto lines —
+    // see `bills` below.
+    const wholeBills = Object.keys(line).length === 0;
+
     const [result] = await Sale.aggregate([
       ...lineStages,
       {
@@ -191,6 +203,48 @@ class ProductSalesService {
               },
             },
           ],
+          /**
+           * The bill-level terms the line sum cannot see.
+           *
+           * `totalProfit` above is Σ(line total − line cost). It never sees the
+           * invoice discount, so a customer who gets "বিলে ১০% ছাড়" read as more
+           * profitable than they are, with nothing on screen to say so.
+           * `Sale.profit` is the stored figure the save hook keeps net of the bill
+           * discount AND of returns, and `returnedProfit` is the returns part, so:
+           *
+           *   billProfit          = profit + returnedProfit   (after bill discount, before returns)
+           *   profitAfterReturns  = profit
+           *
+           * Both are reported because the report's own rule is that a return
+           * shows BESIDE the sale and never quietly shrinks the day it was sold
+           * on — `billProfit` honours that, and `profitAfterReturns` is the
+           * answer to "what did this customer actually earn us".
+           *
+           * Re-grouped by `_id` first because the pipeline has unwound to lines:
+           * summing a bill-level field straight off the lines counts it once per
+           * line. Absent when a line filter is on.
+           */
+          ...(wholeBills ? {
+            bills: [
+              { $match: { status: { $ne: 'cancelled' } } },
+              {
+                $group: {
+                  _id: '$_id',
+                  profit: { $first: '$profit' },
+                  returnedProfit: { $first: '$returnedProfit' },
+                  discountAmount: { $first: '$discountAmount' },
+                },
+              },
+              {
+                $group: {
+                  _id: null,
+                  profit: { $sum: { $ifNull: ['$profit', 0] } },
+                  returnedProfit: { $sum: { $ifNull: ['$returnedProfit', 0] } },
+                  billDiscount: { $sum: { $ifNull: ['$discountAmount', 0] } },
+                },
+              },
+            ],
+          } : {}),
         },
       },
     ]);
@@ -260,6 +314,12 @@ class ProductSalesService {
         firstSale: s.firstSale,
         lastSale: s.lastSale,
       };
+      if (wholeBills) {
+        const b = result?.bills?.[0] || { profit: 0, returnedProfit: 0, billDiscount: 0 };
+        summary.billDiscount = quantizeMoney(b.billDiscount);
+        summary.billProfit = quantizeMoney(b.profit + b.returnedProfit);
+        summary.profitAfterReturns = quantizeMoney(b.profit);
+      }
     }
 
     const [product, staffOptions] = await Promise.all([

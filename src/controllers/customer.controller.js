@@ -1,6 +1,8 @@
 const customerService = require('../services/customer.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
+const { AppError } = require('../middleware/error.middleware');
+const { canViewProfit } = require('../utils/dataSanitizer.util');
 
 // Get all customers
 exports.getCustomers = asyncHandler(async (req, res) => {
@@ -179,6 +181,23 @@ exports.getCustomerHistory = asyncHandler(async (req, res) => {
     data: result,
     message: 'Customer history retrieved successfully',
     messageBn: 'কাস্টমার ইতিহাস সফলভাবে লোড হয়েছে',
+  });
+});
+
+// What this customer has earned the shop. Its own endpoint rather than a key on
+// GET /customers/:id, so the detail response keeps its shape for everyone and
+// the aggregation runs only for a reader allowed to see the answer. Refused
+// outright rather than stripped: every field here is either profit or the base
+// it is a percentage of.
+exports.getCustomerProfit = asyncHandler(async (req, res) => {
+  if (!canViewProfit(req)) {
+    throw new AppError('You do not have permission to view profit', 'লাভ দেখার অনুমতি নেই', 403);
+  }
+  const result = await customerService.getCustomerProfit(req.shop._id, req.params.id, req);
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Customer profit retrieved successfully',
+    messageBn: 'কাস্টমারের লাভ লোড হয়েছে',
   });
 });
 

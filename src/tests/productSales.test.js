@@ -139,6 +139,65 @@ describe('getProductSales', () => {
   });
 });
 
+describe('bill-level profit — the line sum never sees the invoice discount', () => {
+  // One live bill: two lines totalling ৳1,000 at ৳700 cost (line profit ৳300),
+  // ৳100 off the bill, and a return that took ৳50 of profit back. The stored
+  // `Sale.profit` is therefore 300 − 100 − 50 = 150, `returnedProfit` 50.
+  const withBills = () => Sale.aggregate.mockImplementation(async (p) => {
+    pipelines.push(p);
+    return [{
+      rows: [],
+      summary: [{
+        lineCount: 2, cancelledLines: 0, bills: [new mongoose.Types.ObjectId()], customers: [null],
+        quantity: 2, grossAmount: 1000, discount: 0, totalAmount: 1000, totalCost: 700,
+      }],
+      bills: [{ profit: 150, returnedProfit: 50, billDiscount: 100 }],
+    }];
+  });
+
+  it('reports profit after the bill discount when the scope is whole bills', async () => {
+    withBills();
+    const out = await service.getProductSales(String(SHOP), { customerId: String(new mongoose.Types.ObjectId()) }, null);
+    expect(out.summary.totalProfit).toBe(300);         // the line sum, unchanged
+    expect(out.summary.billDiscount).toBe(100);
+    expect(out.summary.billProfit).toBe(200);          // 300 − 100: before returns
+    expect(out.summary.profitAfterReturns).toBe(150);  // the stored Sale.profit
+  });
+
+  it('groups by bill before summing — a bill-level field must not count once per line', async () => {
+    withBills();
+    await service.getProductSales(String(SHOP), {}, null);
+    const facet = pipelines[0].at(-1).$facet.bills;
+    expect(facet[0].$match.status).toEqual({ $ne: 'cancelled' });
+    expect(facet[1].$group._id).toBe('$_id');
+    expect(facet[1].$group.profit).toEqual({ $first: '$profit' });
+  });
+
+  it.each([
+    ['a product', { productId: String(PRODUCT) }],
+    ['a variant', { variantId: String(new mongoose.Types.ObjectId()) }],
+    ['a search', { search: 'চাল' }],
+  ])('is absent when %s picks lines out of bills — no pro-rating', async (_label, query) => {
+    withBills();
+    const out = await service.getProductSales(String(SHOP), query, null);
+    expect(pipelines[0].at(-1).$facet).not.toHaveProperty('bills');
+    expect(out.summary).not.toHaveProperty('billProfit');
+    expect(out.summary).not.toHaveProperty('profitAfterReturns');
+    expect(out.summary).not.toHaveProperty('billDiscount');
+    expect(out.summary.totalProfit).toBe(300);
+  });
+
+  it('both new figures are stripped without view_profit', () => {
+    const out = sanitizeReport(
+      { summary: { totalAmount: 1000, billDiscount: 100, billProfit: 200, profitAfterReturns: 150 } },
+      { user: { isOwner: false, permissions: { reports: { view: true }, products: { view_cost: true } } } }
+    );
+    expect(out.summary).not.toHaveProperty('billProfit');
+    expect(out.summary).not.toHaveProperty('profitAfterReturns');
+    expect(out.summary.billDiscount).toBe(100); // a discount, not a profit figure
+  });
+});
+
 describe('who may see cost', () => {
   const report = {
     rows: [{ unitPrice: 100, total: 200, buyingPrice: 80, totalCost: 160, profit: 40 }],

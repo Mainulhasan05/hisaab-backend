@@ -250,6 +250,9 @@ const PROFIT_KEYS = new Set([
   // The returns summary's own name for `profitReduction` — how much profit the
   // day's returns gave back.
   'totalProfitLoss', 'returnsLoss',
+  // পণ্যভিত্তিক বিক্রি's bill-level profit — after the invoice discount, before
+  // and after returns. See productSales.service `bills`.
+  'billProfit', 'profitAfterReturns',
 ]);
 const COST_KEYS = new Set([
   'buyingPrice', 'unitCost', 'totalCost', 'totalBuyingValue', 'inventoryValue',

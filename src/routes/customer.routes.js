@@ -83,5 +83,9 @@ router.get(
 );
 router.get('/:id([0-9a-fA-F]{24})/ledger', rbac('customers', 'view'), customerController.getCustomerLedger);
 router.get('/:id([0-9a-fA-F]{24})/history', rbac('customers', 'view'), customerController.getCustomerHistory);
+// Lifetime profit from this customer. `customers.view` at the door; the
+// controller then requires `view_profit` (sales or reports), the same either-of
+// rule `canViewProfit` applies everywhere else.
+router.get('/:id([0-9a-fA-F]{24})/profit', rbac('customers', 'view'), customerController.getCustomerProfit);
 
 module.exports = router;

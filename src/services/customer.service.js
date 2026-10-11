@@ -2205,6 +2205,83 @@ class CustomerService {
   }
 
   /**
+   * "এই কাস্টমার থেকে কত লাভ হয়েছে" — lifetime, over the same invoices the
+   * history above lists.
+   *
+   * ── Why `Sale.profit` and not a sum of lines ──────────────────────────────
+   *
+   * The stored figure is already net of everything that reduces it: line
+   * discounts, the bill-level discount (`discountAmount`) and every return
+   * (`returnedProfit`), maintained by the save hook. Re-deriving it from
+   * `items[]` is how পণ্যভিত্তিক বিক্রি came to overstate a customer who gets
+   * "বিলে ১০% ছাড়" — the line sum never sees the bill discount.
+   *
+   * Cancelled sales are out, and that includes superseded revisions, which ARE
+   * cancelled (see `revisedTo` on the schema) — so a revised invoice counts once.
+   *
+   * ── The margin's base ─────────────────────────────────────────────────────
+   *
+   * Merchandise net of the bill discount and of returns: `subtotal −
+   * discountAmount − returnedAmount`. VAT and delivery are excluded because
+   * `profit` excludes them — dividing by `total` would understate the margin of
+   * every customer who pays for delivery. `returnedAmount` is on that same
+   * merchandise base (salesReturn.service), so the subtraction is like for like.
+   *
+   * ── Scope ─────────────────────────────────────────────────────────────────
+   *
+   * Exactly `getCustomerHistory`'s, so the figure covers the invoices the page
+   * lists beneath it: shop-wide under a shared book, this branch under separate
+   * books (I-4). The ids are cast because this is a `$match` (I-3).
+   */
+  async getCustomerProfit(shopId, customerId, req = null) {
+    // Same visibility rule as the history: 404 for a customer this branch has
+    // never served, rather than a figure for someone it cannot see.
+    await this.getCustomerById(shopId, customerId, req);
+
+    const match = {
+      shop: new mongoose.Types.ObjectId(shopId),
+      customer: new mongoose.Types.ObjectId(customerId),
+      status: { $ne: 'cancelled' },
+    };
+    if (isBranchCustomerScope(req)) {
+      match.branch = new mongoose.Types.ObjectId(req.branchId);
+    }
+
+    const [row] = await Sale.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: null,
+          profit: { $sum: { $ifNull: ['$profit', 0] } },
+          merchandise: {
+            $sum: { $subtract: [{ $ifNull: ['$subtotal', 0] }, { $ifNull: ['$discountAmount', 0] }] },
+          },
+          returnedAmount: { $sum: { $ifNull: ['$returnedAmount', 0] } },
+          billCount: { $sum: 1 },
+          firstSale: { $min: '$createdAt' },
+          lastSale: { $max: '$createdAt' },
+        },
+      },
+    ]);
+
+    const profit = quantizeMoney(row?.profit || 0);
+    const returnedAmount = quantizeMoney(row?.returnedAmount || 0);
+    const netSales = quantizeMoney((row?.merchandise || 0) - returnedAmount);
+
+    return {
+      profit,
+      netSales,
+      returnedAmount,
+      // One decimal place. Null rather than 0 when nothing was sold — "০% লাভ"
+      // on a customer with no purchases reads as selling at cost.
+      profitMargin: netSales > 0 ? Math.round((profit / netSales) * 1000) / 10 : null,
+      billCount: row?.billCount || 0,
+      firstSale: row?.firstSale || null,
+      lastSale: row?.lastSale || null,
+    };
+  }
+
+  /**
    * Top N of this branch's ledger, joined back to the customer.
    *
    * Sorted and limited BEFORE the $lookup, so the join only ever touches the
