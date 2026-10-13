@@ -409,6 +409,26 @@ const saleSchema = new mongoose.Schema({
     type: String,
     maxlength: [500, 'নোট ৫০০ অক্ষরের বেশি হতে পারবে না']
   },
+  /**
+   * The note as it PRINTS on the customer's receipt — a snapshot, not `notes`.
+   *
+   * `notes` was internal-only until 2026-10-13: the till said "প্রিন্ট হবে না",
+   * and cashiers wrote things like "দাম কম রাখা হয়েছে, পরে বাকি নেবে" on that
+   * promise. So the switch to printing is keyed on this field, written only by
+   * `createSale` from the till's own note — every invoice saved before it has
+   * none, and a reprint of one still prints no note. It is also immune to what
+   * happens to `notes` later: `cancelSale` appends "Cancelled: …" there, and
+   * that must never reach a slip. An online-order sale's `notes` (customer
+   * note, source, order number) is internal and never copied here.
+   *
+   * `default: undefined` — absent on every sale without a printable note, so
+   * no response changes shape.
+   */
+  receiptNote: {
+    type: String,
+    maxlength: [500, 'নোট ৫০০ অক্ষরের বেশি হতে পারবে না'],
+    default: undefined
+  },
   cancelledAt: {
     type: Date
   },

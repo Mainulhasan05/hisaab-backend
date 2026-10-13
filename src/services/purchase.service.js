@@ -5,9 +5,13 @@ const Payment = require('../models/Payment.model');
 const SupplierBalance = require('../models/SupplierBalance.model');
 const StockTransaction = require('../models/StockTransaction.model');
 const AuditLog = require('../models/AuditLog.model');
+const User = require('../models/User.model');
+const DeletedPurchase = require('../models/DeletedPurchase.model');
+const { getAuditMetadata } = require('../utils/requestStore.util');
+const logger = require('../utils/logger.util');
 const { AppError } = require('../middleware/error.middleware');
 const { branchFilter, requireBranch } = require('../utils/branchScope.util');
-const { endOfBangladeshDay, getBangladeshTodayRange, getBangladeshMonthRange, toBangladeshMonthStr } = require('../utils/bdTime.util');
+const { endOfBangladeshDay, getBangladeshTodayRange, getBangladeshMonthRange, toBangladeshMonthStr, toBangladeshDateStr } = require('../utils/bdTime.util');
 const mongoose = require('mongoose');
 const { runInTransaction } = require('../utils/transaction.util');
 const paymentAccountService = require('./paymentAccount.service');
@@ -161,7 +165,36 @@ class PurchaseService {
       .populate('cancelledBy', 'name');
 
     if (!purchase) {
+      // A deleted purchase is still reached by old links — the stock history
+      // and the supplier's খাতা link to it. Say what happened instead of "not
+      // found", which reads as data loss. Same branch scope as the read above.
+      const gone = await DeletedPurchase.findOne(branchFilter(req, {
+        shop: shopId,
+        purchase: purchaseId,
+      })).select('invoiceNo deletedAt deletedByName').lean();
+      if (gone) {
+        const when = toBangladeshDateStr(gone.deletedAt);
+        const error = new AppError(
+          `Purchase ${gone.invoiceNo} was permanently deleted on ${when}`,
+          `ক্রয় ${gone.invoiceNo} ${when} তারিখে স্থায়ীভাবে মুছে ফেলা হয়েছে`
+            + (gone.deletedByName ? ` (${gone.deletedByName})` : ''),
+          410
+        );
+        error.code = 'PURCHASE_DELETED';
+        throw error;
+      }
       throw new AppError('ক্রয়টি পাওয়া যায়নি', 'Purchase not found', 404);
+    }
+
+    // Delete is owner-only, so only an owner's response carries the answer —
+    // staff responses keep their shape and pay none of the extra lookups.
+    // Decided here so the button and the API cannot disagree.
+    if (req?.user?.isOwner) {
+      const blocked = await this.deleteBlockedReason(shopId, purchase, req);
+      purchase.set('canDelete', blocked === null, { strict: false });
+      purchase.set('deleteBlockedReason', blocked
+        ? { code: blocked.code, message: blocked.message, messageBn: blocked.messageBn }
+        : null, { strict: false });
     }
 
     return purchase;
@@ -1253,8 +1286,12 @@ class PurchaseService {
   // supplier still owed, or the supplier balance unwound while the goods stayed
   // on the shelf. Every write below — stock, batches, ledger, supplier, status —
   // now lands together or not at all.
+  //
+  // `options.session` joins a transaction already in progress instead of
+  // opening a second one — `deletePurchase` reverses a live bill through here
+  // and must commit or abort as one unit with its archive and removal.
   async cancelPurchase(shopId, userId, purchaseId, req = null, options = {}) {
-    const { reason } = options;
+    const { reason, session: ambientSession } = options;
     return await runInTransaction(async (session) => {
       const sessionOpt = session ? { session } : {};
 
@@ -1768,7 +1805,323 @@ class PurchaseService {
     }], sessionOpt);
 
     return { success: true };
+    }, ambientSession ? { session: ambientSession } : {});
+  }
+
+  /**
+   * Why this purchase cannot be deleted, or null if it can.
+   *
+   * Shared by `deletePurchase` and `getPurchaseById` (as `canDelete` /
+   * `deleteBlockedReason`) so the button and the API cannot disagree. Every
+   * refusal is a case where removing the document would leave something else
+   * pointing at a bill that no longer exists. Each one names the step that
+   * comes first.
+   */
+  async deleteBlockedReason(shopId, purchase, req) {
+    if (!purchase) return null;
+
+    if (!(req?.isAdmin || req?.user?.isOwner)) {
+      return {
+        code: 'OWNER_ONLY',
+        message: 'Only the shop owner can delete a purchase.',
+        messageBn: 'শুধুমাত্র দোকান মালিক ক্রয় মুছে ফেলতে পারবেন।',
+        statusCode: 403,
+      };
+    }
+
+    // A কেনা ফেরত is its own document with its own stock rows and its own
+    // supplier credit, linked here by id. `cancelPurchase` already refuses it
+    // (D-4), and a cancelled bill cannot have one — so this is the live case.
+    const PurchaseReturn = require('../models/PurchaseReturn.model');
+    const hasReturn = (purchase.returnedAmount || 0) > 0
+      || await PurchaseReturn.exists({ shop: shopId, purchase: purchase._id });
+    if (hasReturn) {
+      return {
+        code: 'HAS_RETURN',
+        message: 'This purchase has goods returned against it and cannot be deleted.',
+        messageBn: 'এই ক্রয়ের মাল ফেরত দেওয়া হয়েছে — মুছে ফেলা যাবে না।',
+        statusCode: 409,
+      };
+    }
+
+    // A supplier payment recorded after the purchase — as the bill it names,
+    // or as one slice of a multi-bill payment (F-4). Checkout money is not in
+    // `Payment` at all (it lives on `purchase.payments[]` and leaves with the
+    // snapshot), so any row here is a separate, receipted event.
+    //
+    // cancelled-inclusive, as `saleService.deleteBlockedReason` is: a payment
+    // `cancelPurchase` voided is still history that names this bill, and the
+    // supplier's খাতা would show a voided payment against nothing. So a bill
+    // paid later can be cancelled but never deleted.
+    const linkedPayment = await Payment.exists({
+      shop: shopId,
+      $or: [{ purchase: purchase._id }, { 'allocations.purchase': purchase._id }],
     });
+    if (linkedPayment) {
+      const live = purchase.status !== 'cancelled';
+      return {
+        code: 'LINKED_PAYMENT',
+        message: 'A supplier payment was recorded against this purchase — it cannot be deleted'
+          + (live ? ', cancel it instead.' : '.'),
+        messageBn: 'এই ক্রয়ের বিপরীতে সরবরাহকারীকে আলাদা পেমেন্ট দেওয়া হয়েছে — মুছে ফেলা যাবে না'
+          + (live ? ', বাতিল করুন।' : '।'),
+        statusCode: 409,
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * Permanently delete a purchase. OWNER ONLY.
+   *
+   * The purchase-side twin of `saleService.deleteSale` — read its header; the
+   * reasoning is the same and is not repeated here. What differs:
+   *
+   *   1. LIVE purchase → `cancelPurchase` first, in this transaction. Stock,
+   *      batches, cost and price restores, কাঁচামাল, the supplier's two
+   *      books, fund accounts and the freed অগ্রিম are all reversed by the
+   *      path that has always reversed them. Nothing here re-implements any.
+   *   2. A complete snapshot goes to `DeletedPurchase` — permanent, no TTL,
+   *      itself undeletable.
+   *   3. The `Purchase` document is removed. There is no Payment row to remove
+   *      with it: checkout legs live on the bill, and any `Payment` naming the
+   *      bill refuses the delete (`deleteBlockedReason`).
+   *
+   * Left deliberately: the `StockTransaction` and `IngredientMovement` pairs
+   * (they net to zero and their running figures would jump if a pair
+   * vanished), audit rows, and any পুরোনো বাকি / অগ্রিম rows taken at the same
+   * counter — those settled OTHER bills or the vendor's balance, never this
+   * one, and `cancelPurchase` has always left them standing too.
+   *
+   * No SMS re-keying: purchase SMS has no duplicate guard keyed on the number.
+   * The number is never re-issued — `Purchase.generateInvoiceNo` seeds from the
+   * highest number issued, deleted ones included.
+   */
+  async deletePurchase(shopId, userId, purchaseId, { reason, confirmInvoiceNo, password } = {}, req = null) {
+    const cleanReason = typeof reason === 'string' ? reason.trim() : '';
+    if (cleanReason.length < 3) {
+      throw new AppError(
+        'Write why this purchase is being deleted',
+        'কেন মুছে ফেলছেন তা লিখুন (কমপক্ষে ৩ অক্ষর)',
+        400
+      );
+    }
+
+    // Belt and braces: the route is `ownerOnly`. Checked before the password
+    // so a staff member is told the real reason rather than invited to guess.
+    if (!(req?.isAdmin || req?.user?.isOwner)) {
+      throw new AppError(
+        'Only the shop owner can delete a purchase',
+        'শুধুমাত্র দোকান মালিক ক্রয় মুছে ফেলতে পারবেন',
+        403
+      );
+    }
+
+    // Verified HERE, every time. A platform admin acting inside the shop has
+    // no `User` password and is attributed as the admin by the audit hook.
+    if (!req?.isAdmin) {
+      if (!password || typeof password !== 'string') {
+        throw new AppError('Password is required', 'পাসওয়ার্ড দেওয়া আবশ্যক', 400);
+      }
+      const owner = await User.findById(userId).select('+password');
+      if (!owner || !(await owner.comparePassword(password))) {
+        const error = new AppError('Incorrect password', 'পাসওয়ার্ড সঠিক নয়', 400);
+        error.code = 'BAD_PASSWORD';
+        throw error;
+      }
+    }
+
+    const result = await runInTransaction(async (session) => {
+      const sessionOpt = session ? { session } : {};
+
+      const purchase = await Purchase.findOne(branchFilter(req, {
+        _id: purchaseId,
+        shop: shopId,
+      })).session(session || null);
+      if (!purchase) {
+        throw new AppError('Purchase not found', 'ক্রয়টি পাওয়া যায়নি', 404);
+      }
+
+      // Typed back, character for character — what stops a delete aimed at
+      // one bill landing on the one in the next tab.
+      const typed = typeof confirmInvoiceNo === 'string'
+        ? confirmInvoiceNo.normalize('NFC').trim().replace(/\s+/g, ' ')
+        : '';
+      if (typed !== purchase.invoiceNo) {
+        const error = new AppError(
+          'The purchase number typed does not match',
+          `নিশ্চিত করতে ক্রয় নম্বরটি হুবহু লিখুন: ${purchase.invoiceNo}`,
+          400
+        );
+        error.code = 'CONFIRM_MISMATCH';
+        throw error;
+      }
+
+      const blocked = await this.deleteBlockedReason(shopId, purchase, req);
+      if (blocked) {
+        const error = new AppError(blocked.message, blocked.messageBn, blocked.statusCode);
+        error.code = blocked.code;
+        throw error;
+      }
+
+      const statusBeforeDelete = purchase.status;
+      const reversedOnDelete = purchase.status !== 'cancelled';
+      const invoiceNo = purchase.invoiceNo;
+
+      // 1. Reverse a live bill through the one path that knows how. Its own
+      //    guards (returns, multi-bill payments, কাঁচামাল) still refuse
+      //    before any write.
+      if (reversedOnDelete) {
+        await this.cancelPurchase(shopId, userId, purchase._id, req, {
+          reason: `মুছে ফেলা হয়েছে: ${cleanReason}`,
+          session,
+        });
+      }
+
+      // 2. The snapshot — read AFTER the reversal so it is the final state.
+      const finalPurchase = await Purchase.findOne({ _id: purchase._id, shop: shopId })
+        .session(session || null)
+        .lean();
+
+      const actor = req?.user || null;
+      const [archived] = await DeletedPurchase.create([{
+        shop: shopId,
+        branch: finalPurchase.branch || null,
+        purchase: finalPurchase._id,
+        invoiceNo,
+        statusBeforeDelete,
+        reversedOnDelete,
+        reason: cleanReason,
+        purchaseDate: finalPurchase.date || finalPurchase.createdAt || null,
+        totalAmount: finalPurchase.totalAmount || 0,
+        paid: finalPurchase.paid || 0,
+        due: finalPurchase.due || 0,
+        itemCount: (finalPurchase.items || []).length,
+        supplier: finalPurchase.supplier || null,
+        supplierName: finalPurchase.supplierName || null,
+        supplierInvoiceNo: finalPurchase.supplierInvoiceNo || null,
+        purchasedBy: finalPurchase.createdBy || null,
+        deletedBy: userId,
+        deletedByName: actor?.name || null,
+        deletedAt: new Date(),
+        snapshot: finalPurchase,
+        metadata: getAuditMetadata() || undefined,
+      }], sessionOpt);
+
+      // 3. Remove. Through the driver handle on purpose: `immutableGuard`
+      //    stays on the model for every other caller, and this is the one
+      //    reviewed exception. `purchaseDelete.test.js` pins that no other
+      //    line in the codebase carries the marker.
+      await Purchase.collection.deleteOne({ _id: finalPurchase._id, shop: shopId }, sessionOpt); // purchase-delete:reviewed
+
+      return { archived, finalPurchase, statusBeforeDelete, reversedOnDelete, invoiceNo };
+    });
+
+    const { archived, finalPurchase, statusBeforeDelete, reversedOnDelete, invoiceNo } = result;
+
+    // Outside the transaction: the permanent record is `DeletedPurchase`,
+    // written inside it; this puts the delete in the activity log.
+    AuditLog.create({
+      shop: shopId,
+      branch: finalPurchase.branch || null,
+      user: userId,
+      action: 'purchase_delete',
+      actionBn: 'ক্রয় স্থায়ীভাবে মুছে ফেলা',
+      description:
+        `Permanently deleted purchase ${invoiceNo} (৳${finalPurchase.totalAmount}, `
+        + `${(finalPurchase.items || []).length} lines, was ${statusBeforeDelete}`
+        + `${reversedOnDelete ? ', stock and money reversed' : ''}). Reason: ${cleanReason}`,
+      descriptionBn:
+        `ক্রয় ${invoiceNo} স্থায়ীভাবে মুছে ফেলা হয়েছে (৳${finalPurchase.totalAmount}`
+        + `${reversedOnDelete ? ', স্টক ও টাকা ফেরত হিসাব করা হয়েছে' : ''})। কারণ: ${cleanReason}`,
+      entity: { type: 'purchase', id: finalPurchase._id, name: invoiceNo },
+      changes: {
+        before: {
+          invoiceNo,
+          status: statusBeforeDelete,
+          totalAmount: finalPurchase.totalAmount,
+          paid: finalPurchase.paid,
+          due: finalPurchase.due,
+          supplierName: finalPurchase.supplierName || null,
+          items: (finalPurchase.items || []).map((i) => ({
+            productName: i.productName,
+            quantity: i.quantity,
+            unitPrice: i.unitPrice,
+            total: i.total,
+          })),
+        },
+        after: { deleted: true, archiveId: archived._id, reason: cleanReason },
+      },
+    }).catch((err) => logger.error(`Audit log (purchase_delete) failed: ${err.message}`));
+
+    return {
+      invoiceNo,
+      deletedAt: archived.deletedAt,
+      reversedOnDelete,
+      archiveId: archived._id,
+    };
+  }
+
+  /**
+   * The owner's record of deleted purchases, newest first. Branch-scoped like
+   * the purchase list (I-2). Line items only from the snapshot — enough to
+   * answer "what was on it".
+   */
+  async getDeletedPurchases(shopId, query = {}, req = null) {
+    if (!(req?.isAdmin || req?.user?.isOwner)) {
+      throw new AppError('Only the shop owner can view deleted purchases', 'শুধুমাত্র দোকান মালিক দেখতে পারবেন', 403);
+    }
+    const page = Math.max(1, parseInt(query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || 20));
+
+    const filter = branchFilter(req, { shop: shopId });
+    if (query.search) {
+      const escaped = String(query.search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.$or = [
+        { invoiceNo: { $regex: escaped, $options: 'i' } },
+        { supplierName: { $regex: escaped, $options: 'i' } },
+        { supplierInvoiceNo: { $regex: escaped, $options: 'i' } },
+      ];
+    }
+
+    const [rows, total] = await Promise.all([
+      // Inclusion ONLY — excluding `snapshot` while including `snapshot.items.*`
+      // is a path collision MongoDB refuses at query time.
+      DeletedPurchase.find(filter)
+        .select({
+          invoiceNo: 1,
+          branch: 1,
+          statusBeforeDelete: 1,
+          reversedOnDelete: 1,
+          reason: 1,
+          purchaseDate: 1,
+          totalAmount: 1,
+          paid: 1,
+          due: 1,
+          itemCount: 1,
+          supplierName: 1,
+          supplierInvoiceNo: 1,
+          deletedByName: 1,
+          deletedAt: 1,
+          'snapshot.items.productName': 1,
+          'snapshot.items.variantLabel': 1,
+          'snapshot.items.quantity': 1,
+          'snapshot.items.unit': 1,
+          'snapshot.items.unitPrice': 1,
+          'snapshot.items.total': 1,
+        })
+        .sort({ deletedAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      DeletedPurchase.countDocuments(filter),
+    ]);
+
+    return {
+      deletedPurchases: rows,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    };
   }
 
   // Get purchase summary

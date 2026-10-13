@@ -48,6 +48,36 @@ exports.cancelPurchase = asyncHandler(async (req, res) => {
   });
 });
 
+// Permanently delete a purchase — owner only. See purchaseService.deletePurchase.
+exports.deletePurchase = asyncHandler(async (req, res) => {
+  const result = await purchaseService.deletePurchase(
+    req.shop._id,
+    req.user._id,
+    req.params.id,
+    {
+      reason: req.body?.reason,
+      confirmInvoiceNo: req.body?.confirmInvoiceNo,
+      password: req.body?.password,
+    },
+    req
+  );
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Purchase deleted permanently',
+    messageBn: 'ক্রয়টি স্থায়ীভাবে মুছে ফেলা হয়েছে',
+  });
+});
+
+// The owner's record of deleted purchases.
+exports.getDeletedPurchases = asyncHandler(async (req, res) => {
+  const data = await purchaseService.getDeletedPurchases(req.shop._id, req.query, req);
+  return ApiResponse.success(res, {
+    data: sanitizePurchases(data, req),
+    message: 'Deleted purchases retrieved',
+    messageBn: 'মুছে ফেলা ক্রয় লোড হয়েছে',
+  });
+});
+
 // Get purchase summary
 exports.getSummary = asyncHandler(async (req, res) => {
   const summary = await purchaseService.getSummary(req.shop._id, req.query, req);

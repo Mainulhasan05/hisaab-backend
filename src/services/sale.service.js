@@ -1914,6 +1914,13 @@ class SaleService {
           payments,
           status,
           notes,
+          // What prints on the receipt — the till's own note, snapshotted. Not
+          // for an online order, whose `notes` is assembled internal text, and
+          // absent when there is no note so the document keeps its old shape.
+          // See the field on `Sale`.
+          ...(!linkedOrder && typeof notes === 'string' && notes.trim()
+            ? { receiptNote: notes.trim().slice(0, 500) }
+            : {}),
           isOnline: Boolean(isOnline),
           channel: channel || 'pos',
           // The `Order` behind this invoice, or null for a till sale. Written

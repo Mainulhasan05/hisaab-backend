@@ -30,6 +30,8 @@ module.exports = {
   // to production, where autoIndex is off, and a retried delete could archive
   // the same invoice twice.
   DeletedSale: require('./DeletedSale.model'),
+  // Same, for owner-deleted purchases (purchaseService.deletePurchase).
+  DeletedPurchase: require('./DeletedPurchase.model'),
   Payment: require('./Payment.model'),
   // Platform billing — what shops pay HisaabBD. Separate from `Payment`, which
   // is what a shop's customers pay the shop.

@@ -834,16 +834,40 @@ purchaseSchema.statics.generateInvoiceNo = async function(shopId) {
   const monthStr = toBangladeshMonthStr(new Date());
   const { startOfMonth, startOfNext } = getBangladeshMonthRange(monthStr);
 
+  const prefix = `PUR${monthStr.replace('-', '')}`;
+
   // Consulted only the first time this shop records a purchase in this month —
   // the counter seeds itself from what is already there, so a shop switching
   // over mid-month continues its sequence rather than restarting at 0001.
-  const countExisting = () => this.countDocuments({
-    shop: shopId,
-    createdAt: { $gte: startOfMonth, $lt: startOfNext },
-  });
+  //
+  // ── Seeded from the HIGHEST number issued, not the count ─────────────────
+  //
+  // This is not only a first-of-month path. The counter row carries a 30-day
+  // TTL from its creation, so in a 31-day month it expires on the 31st and
+  // this runs again. A count then undershoots whenever a number left the
+  // sequence — an owner-deleted purchase (`deletePurchase`), or one burned by
+  // an aborted transaction — and the next purchase is handed a number that
+  // already exists: an E11000 on `{shop, invoiceNo}` for the rest of the day,
+  // or a live bill sharing its number with a deleted one. The count still
+  // floors it, for numbers written before this prefix scheme.
+  const countExisting = async () => {
+    const DeletedPurchase = require('./DeletedPurchase.model');
+    const pattern = new RegExp(`^${prefix}(\\d+)$`);
+    const filter = { shop: shopId, invoiceNo: { $regex: `^${prefix}\\d+$` } };
+    const [count, live, deleted] = await Promise.all([
+      this.countDocuments({ shop: shopId, createdAt: { $gte: startOfMonth, $lt: startOfNext } }),
+      this.find(filter).select('invoiceNo').lean(),
+      DeletedPurchase.find(filter).select('invoiceNo').lean(),
+    ]);
+    const highest = [...live, ...deleted].reduce((max, row) => {
+      const m = pattern.exec(row.invoiceNo || '');
+      return m ? Math.max(max, Number(m[1])) : max;
+    }, 0);
+    return Math.max(count, highest);
+  };
 
   const seq = await InvoiceCounter.nextSeq(shopId, null, `PUR:${monthStr}`, countExisting);
-  return `PUR${monthStr.replace('-', '')}${String(seq).padStart(4, '0')}`;
+  return `${prefix}${String(seq).padStart(4, '0')}`;
 };
 
 // Static: Get purchase summary
