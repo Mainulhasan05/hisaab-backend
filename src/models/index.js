@@ -36,6 +36,8 @@ module.exports = {
   // Platform billing — what shops pay HisaabBD. Separate from `Payment`, which
   // is what a shop's customers pay the shop.
   PlatformPayment: require('./PlatformPayment.model'),
+  // ...and what HisaabBD spends. No `shop` field: the platform's own book.
+  PlatformExpense: require('./PlatformExpense.model'),
   // One attempt to pay us through the gateway — the intent that sits between
   // "the owner tapped a package" and "the money arrived". Registered here or
   // `sync-indexes` never ships them to production, where autoIndex is off, and

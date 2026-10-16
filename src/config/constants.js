@@ -242,6 +242,26 @@ module.exports = {
     ONLINE: 'online'
   },
 
+  // What the PLATFORM spends — the operator's own expense book, never a shop's
+  // (see PlatformExpense.model). A fixed list rather than free text so the P&L
+  // can group by it without a typo splitting "Server" from "server" into two
+  // lines. `other` exists so nothing is ever unrecordable.
+  PLATFORM_EXPENSE_CATEGORIES: {
+    HOSTING: 'hosting',
+    DOMAIN: 'domain',
+    SMS_GATEWAY: 'sms_gateway',
+    SOFTWARE: 'software',
+    MARKETING: 'marketing',
+    SALARY: 'salary',
+    PAYMENT_FEES: 'payment_fees',
+    OFFICE: 'office',
+    INTERNET: 'internet',
+    HARDWARE: 'hardware',
+    LEGAL_TAX: 'legal_tax',
+    TRAVEL: 'travel',
+    OTHER: 'other'
+  },
+
   // Warn a shop this many calendar days before its subscription expires.
   // The enforcement threshold lives in utils/subscriptionState.util.js; this is
   // the platform default the admin panel shows and the worklist filters on.

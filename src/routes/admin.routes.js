@@ -6,6 +6,7 @@ const adminStorefrontController = require('../controllers/adminStorefront.contro
 const adminMediaController = require('../controllers/adminMedia.controller');
 const adminLandingController = require('../controllers/adminLanding.controller');
 const billingController = require('../controllers/billing.controller');
+const platformFinanceController = require('../controllers/platformFinance.controller');
 const platformCheckoutController = require('../controllers/platformCheckout.controller');
 const platformSmsController = require('../controllers/platformSms.controller');
 const smsProviderController = require('../controllers/smsProvider.controller');
@@ -249,6 +250,19 @@ router.post('/shops/:id/subscription/preview', billingController.previewExtensio
 router.post('/shops/:id/subscription/extend', billingController.extendSubscription);
 router.post('/shops/:id/access', billingController.setAccess);
 router.patch('/shops/:id/billing', billingController.updateBillingProfile);
+
+/* ── Platform finance — HisaabBD's own books ───────────────────────────────
+ *
+ * Income is the PlatformPayment ledger above; this adds the expense book and
+ * the P&L that reads both. Expenses are voided, never deleted — the void is a
+ * POST so the deny-by-default DELETE policy needs no exception.
+ */
+router.get('/finance/overview', platformFinanceController.getOverview);
+router.get('/finance/advances', platformFinanceController.getAdvances);
+router.get('/finance/expenses', platformFinanceController.listExpenses);
+router.post('/finance/expenses', platformFinanceController.createExpense);
+router.patch('/finance/expenses/:id', platformFinanceController.amendExpense);
+router.post('/finance/expenses/:id/void', platformFinanceController.voidExpense);
 
 /* ── Self-serve checkout orders ───────────────────────────────────────────
  *
