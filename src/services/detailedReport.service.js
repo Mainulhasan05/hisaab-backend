@@ -1089,6 +1089,10 @@ class DetailedReportService {
         { name: { $regex: escaped, $options: 'i' } },
         { code: { $regex: escaped, $options: 'i' } },
         { barcode: { $regex: escaped, $options: 'i' } },
+        // A variant's code lives on the variant, not the product — scanning the
+        // barcode on a shirt's XL tag must find the shirt.
+        { 'variants.sku': { $regex: escaped, $options: 'i' } },
+        { 'variants.barcode': { $regex: escaped, $options: 'i' } },
       ];
     }
 
@@ -1119,6 +1123,49 @@ class DetailedReportService {
         { $multiply: [{ $ifNull: ['$stock', 0] }, { $ifNull: [`$${field}`, 0] }] },
       ],
     });
+
+    // The per-variant breakdown on a variant product's row. Without it the
+    // report printed "৪০টি" for a shirt and nothing about which sizes those
+    // were, so a shop could not see that M was sold out while XL sat on 30.
+    //
+    // Each figure uses the SAME fallback as `variantAware` (variant price, else
+    // the parent's), so the variant lines add up to the row's totals — a
+    // breakdown that does not sum to its own heading reads as a wrong report.
+    // The money keys keep the names `sanitizeReport` strips; it walks nested
+    // arrays, so a cashier gets the stock per variant and no cost.
+    //
+    // Guarded on `hasVariants` like the valuation, and absent (`$$REMOVE`, not
+    // `[]`) on every other row: a shop with no variant products receives the
+    // payload it always did, and a converted-back product's stale `variants[]`
+    // is not resurrected as a breakdown.
+    const variantPrice = (field) => ({ $ifNull: [`$$v.${field}`, { $ifNull: [`$${field}`, 0] }] });
+    const variantBreakdown = {
+      $cond: [
+        { $eq: ['$hasVariants', true] },
+        {
+          $map: {
+            input: { $ifNull: ['$variants', []] },
+            as: 'v',
+            in: {
+              _id: '$$v._id',
+              sku: '$$v.sku',
+              barcode: '$$v.barcode',
+              attributes: '$$v.attributes',
+              isActive: { $ne: ['$$v.isActive', false] },
+              stock: { $ifNull: ['$$v.stock', 0] },
+              buyingPrice: variantPrice('buyingPrice'),
+              sellingPrice: variantPrice('sellingPrice'),
+              totalCost: { $round: [{ $multiply: [{ $ifNull: ['$$v.stock', 0] }, variantPrice('buyingPrice')] }, 2] },
+              totalRetail: { $round: [{ $multiply: [{ $ifNull: ['$$v.stock', 0] }, variantPrice('sellingPrice')] }, 2] },
+              // Out only. A variant has no reorder point of its own — `minStock`
+              // is the product's and is compared against the product's total.
+              stockStatus: { $cond: [{ $lte: [{ $ifNull: ['$$v.stock', 0] }, 0] }, 'out', 'ok'] },
+            },
+          },
+        },
+        '$$REMOVE',
+      ],
+    };
 
     const valuationStage = {
       $addFields: {
@@ -1168,6 +1215,7 @@ class DetailedReportService {
                 minStock: { $ifNull: ['$minStock', 0] },
                 hasVariants: { $ifNull: ['$hasVariants', false] },
                 variantCount: { $size: { $ifNull: ['$variants', []] } },
+                variants: variantBreakdown,
                 buyingPrice: { $ifNull: ['$buyingPrice', 0] },
                 sellingPrice: { $ifNull: ['$sellingPrice', 0] },
                 totalCost: { $round: ['$totalCost', 2] },

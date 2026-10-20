@@ -548,6 +548,73 @@ describe('stock report', () => {
     expect(match.isActive).toBe(true);
   });
 
+  // ── The per-variant breakdown ──────────────────────────────────────────────
+  // The report used to print a variant product as one total — "৪০টি" for a
+  // shirt — with no way to see that M was sold out while XL sat on 30, on
+  // screen or in the export.
+
+  function rowProjection(pipeline) {
+    const facet = pipeline.find((stage) => stage.$facet).$facet;
+    return facet.rows.find((stage) => stage.$project).$project;
+  }
+
+  it('lists each variant on its product row', async () => {
+    const project = rowProjection(await capturePipeline({}));
+    const [guard, breakdown] = project.variants.$cond;
+
+    expect(guard).toEqual({ $eq: ['$hasVariants', true] });
+    expect(breakdown.$map.input).toEqual({ $ifNull: ['$variants', []] });
+    expect(Object.keys(breakdown.$map.in)).toEqual(expect.arrayContaining([
+      '_id', 'sku', 'barcode', 'attributes', 'isActive', 'stock',
+      'buyingPrice', 'sellingPrice', 'totalCost', 'totalRetail', 'stockStatus',
+    ]));
+  });
+
+  it('adds no variants key to a product without variants', async () => {
+    // Invariant guard: a shop with no variant products gets the payload it
+    // always did. `[]` instead of `$$REMOVE` would add a key to every row.
+    const project = rowProjection(await capturePipeline({}));
+    expect(project.variants.$cond[2]).toBe('$$REMOVE');
+  });
+
+  it('prices a variant line with the same fallback the row total uses', async () => {
+    // A variant with no price of its own is valued at the parent's in the
+    // row total. The line must do the same, or the lines stop summing to it.
+    const pipeline = await capturePipeline({});
+    const line = rowProjection(pipeline).variants.$cond[1].$map.in;
+    const valuation = pipeline.find((stage) => stage.$addFields?.effectiveStock).$addFields;
+    const totalFallback = valuation.totalRetail.$cond[1].$reduce.in.$add[1].$multiply[1];
+
+    expect(line.sellingPrice).toEqual({ $ifNull: ['$$v.sellingPrice', { $ifNull: ['$sellingPrice', 0] }] });
+    expect(totalFallback).toEqual({ $ifNull: ['$$this.sellingPrice', { $ifNull: ['$sellingPrice', 0] }] });
+  });
+
+  it('strips cost from the variant lines for a user without view_cost', () => {
+    // The breakdown carries cost under the sanitiser's key names one level
+    // down. This proves the strip reaches it — a top-level-only sanitiser
+    // would hand a cashier the cost of every size.
+    const { sanitizeReport } = require('../utils/dataSanitizer.util');
+    const cashier = { user: { isOwner: false, permissions: { reports: { view: true } } } };
+    const report = {
+      rows: [{
+        name: 'শার্ট', buyingPrice: 300, totalCost: 9000, totalRetail: 15000,
+        variants: [{ sku: 'SH-XL', stock: 30, buyingPrice: 300, sellingPrice: 500, totalCost: 9000, totalRetail: 15000 }],
+      }],
+    };
+
+    const [variant] = sanitizeReport(report, cashier).rows[0].variants;
+    expect(variant).not.toHaveProperty('buyingPrice');
+    expect(variant).not.toHaveProperty('totalCost');
+    expect(variant).toMatchObject({ sku: 'SH-XL', stock: 30, sellingPrice: 500, totalRetail: 15000 });
+  });
+
+  it('finds a product by its variant SKU or barcode', async () => {
+    const pipeline = await capturePipeline({ search: 'SH-XL' });
+    const fields = pipeline[0].$match.$or.map((clause) => Object.keys(clause)[0]);
+
+    expect(fields).toEqual(expect.arrayContaining(['variants.sku', 'variants.barcode']));
+  });
+
   async function capturePipeline(options, req = null) {
     let captured = null;
     jest.spyOn(Product, 'aggregate').mockImplementation((pipeline) => {
