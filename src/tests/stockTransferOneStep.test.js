@@ -116,11 +116,21 @@ beforeEach(() => {
   // Stock values are already on the in-memory docs (the service mutates what
   // it read). Only the variant append has to be applied here.
   jest.spyOn(Product, 'bulkWrite').mockImplementation((ops) => {
+    let matchedCount = 0;
     for (const { updateOne } of ops) {
+      const doc = products.get(String(updateOne.filter._id));
       const push = updateOne.update?.$push?.variants?.$each;
-      if (push) products.get(String(updateOne.filter._id)).variants.push(...push);
+      if (push) doc.variants.push(...push);
+      // The link write: applied only where its filter (unlinked, or already on
+      // this lineage) holds — the fake must refuse what Mongo would.
+      if (updateOne.update?.$set && 'clonedFrom' in updateOne.update.$set) {
+        if (doc && matches(doc, updateOne.filter)) {
+          doc.clonedFrom = updateOne.update.$set.clonedFrom;
+          matchedCount++;
+        }
+      }
     }
-    return Promise.resolve({});
+    return Promise.resolve({ matchedCount });
   });
 
   jest.spyOn(StockTransaction, 'insertMany').mockImplementation((rows) => {
@@ -413,5 +423,142 @@ describe('getTransferSuggestions', () => {
   it('is owner only — it reads the other branch\'s stock', async () => {
     await expect(suggest(req({ owner: false, perms: STAFF_ALL })))
       .rejects.toMatchObject({ statusCode: 403 });
+  });
+});
+
+// ── Same name, different code — the production case (2026-10-22) ───────────
+//
+// A shop typed its second branch in by hand, so every shared item had a
+// different random code there. Four transfers sat in transit for two months:
+// the source had deducted, the destination could never receive.
+
+describe('same name, different code', () => {
+  const twins = (opts = {}) => {
+    const src = product({ code: 'MED0127', branch: BRANCH_A, stock: 12, extra: { name: 'ইষ্ট ৫০০ গ্রাম' } });
+    const dest = product({
+      code: 'MTS2297', branch: BRANCH_B, stock: 0,
+      extra: { name: ' ইষ্ট  ৫০০ গ্রাম ', unit: opts.destUnit || 'piece' },
+    });
+    return { src, dest };
+  };
+
+  it('is never cloned silently — not even with createMissing', async () => {
+    const { src } = twins();
+    await expect(service.createTransfer(body([line(src, 5)], { createMissing: true }), USER, req()))
+      .rejects.toMatchObject({ statusCode: 409, code: 'TRANSFER_NAME_MATCH' });
+    expect(Product.insertMany).not.toHaveBeenCalled();
+    expect(inBranch(BRANCH_B)).toHaveLength(1);
+  });
+
+  it('preview offers the match, and says when the units differ', async () => {
+    const { src, dest } = twins({ destUnit: 'pack' });
+    const out = await service.previewTransfer(body([line(src, 1)]), req());
+    expect(out.missing[0].nameMatch).toMatchObject({ _id: dest._id, code: 'MTS2297', unitDiffers: true });
+    expect(out.canLink).toBe(true);
+  });
+
+  it('a confirmed link credits the existing product, and is remembered', async () => {
+    const { src, dest } = twins();
+
+    await service.createTransfer(
+      body([line(src, 5)], { receiveNow: true, links: [{ product: src._id, target: dest._id }] }), USER, req()
+    );
+    expect(dest.stock).toBe(5);
+    expect(String(dest.clonedFrom)).toBe(String(src._id));
+    expect(inBranch(BRANCH_B)).toHaveLength(1);
+
+    // The next transfer needs no question at all.
+    const t2 = await service.createTransfer(body([line(src, 2)], { receiveNow: true }), USER, req());
+    expect(t2.status).toBe('received');
+    expect(dest.stock).toBe(7);
+  });
+
+  it('"it is a different item" (createNew) clones beside it', async () => {
+    const { src } = twins();
+    await service.createTransfer(
+      body([line(src, 1)], { createMissing: true, createNew: [String(src._id)] }), USER, req()
+    );
+    expect(inBranch(BRANCH_B)).toHaveLength(2);
+  });
+
+  it('linking needs products.update', async () => {
+    const { src, dest } = twins();
+    const staff = req({ owner: false, perms: { stock_transfers: { create: true, update: true }, products: { create: true } } });
+    await expect(service.createTransfer(
+      body([line(src, 1)], { links: [{ product: src._id, target: dest._id }] }), USER, staff
+    )).rejects.toMatchObject({ statusCode: 403 });
+    expect(dest.clonedFrom).toBeNull();
+  });
+
+  it('refuses to re-point a product other copies already follow', async () => {
+    const { src, dest } = twins();
+    product({ code: 'X1', branch: oid(), extra: { clonedFrom: dest._id } });
+    await expect(service.createTransfer(
+      body([line(src, 1)], { dispatchNow: true, links: [{ product: src._id, target: dest._id }] }), USER, req()
+    )).rejects.toMatchObject({ statusCode: 409 });
+    expect(dest.clonedFrom).toBeNull();
+    expect(src.stock).toBe(12);
+  });
+});
+
+describe('a transfer already stuck in transit', () => {
+  // Built the way the old code left them: dispatched, source deducted, the
+  // destination holding the same items under other codes — or not at all.
+  const stuck = () => {
+    const yeast = product({ code: 'MED0127', branch: BRANCH_A, stock: 2, extra: { name: 'ইষ্ট ৫০০ গ্রাম' } });
+    const feed = product({ code: 'MTS7731', branch: BRANCH_A, stock: 25, extra: { name: 'পপুলার ভাষমান ফিড' } });
+    const destYeast = product({ code: 'MTS2297', branch: BRANCH_B, stock: 0, extra: { name: 'ইষ্ট ৫০০ গ্রাম' } });
+    const t = {
+      _id: oid(), shop: SHOP, fromBranch: BRANCH_A, toBranch: BRANCH_B, transferNo: 'TRF-000003',
+      status: 'in_transit',
+      items: [
+        { _id: oid(), product: yeast._id, productName: yeast.name, quantity: 10, variantId: null },
+        { _id: oid(), product: feed._id, productName: feed.name, quantity: 8, variantId: null },
+      ],
+      save: jest.fn(function save() { return Promise.resolve(this); }),
+    };
+    transfers.set(String(t._id), t);
+    return { t, yeast, feed, destYeast };
+  };
+  const atB = () => req({ branch: BRANCH_B });
+
+  it('the receive check names what each line needs', async () => {
+    const { t, destYeast } = stuck();
+    const out = await service.getReceiveCheck(t._id, SHOP, atB());
+    expect(out.lines.map((l) => l.status)).toEqual(['nameMatch', 'missing']);
+    expect(out.lines[0].nameMatch).toMatchObject({ _id: destYeast._id, code: 'MTS2297' });
+  });
+
+  it('a plain receive still refuses, by name, with a way forward', async () => {
+    const { t } = stuck();
+    await expect(service.receiveTransfer(t._id, SHOP, USER, null, atB()))
+      .rejects.toMatchObject({ statusCode: 409, code: 'TRANSFER_MISSING_AT_DESTINATION' });
+    expect(t.status).toBe('in_transit');
+  });
+
+  it('link + create from the receive screen lands every line', async () => {
+    const { t, yeast, destYeast } = stuck();
+
+    await service.receiveTransfer(t._id, SHOP, USER, null, atB(), {
+      resolve: { links: [{ product: yeast._id, target: destYeast._id }], createMissing: true },
+    });
+
+    expect(t.status).toBe('received');
+    expect(destYeast.stock).toBe(10);
+    const feedCopy = inBranch(BRANCH_B).find((p) => p.code === 'MTS7731');
+    expect(feedCopy.stock).toBe(8);
+    expect(txns.filter((x) => x.type === 'transfer_in')).toHaveLength(2);
+  });
+
+  it('a received quantity of 0 is honoured — for goods already counted by hand', async () => {
+    const { t, yeast, feed, destYeast } = stuck();
+    await service.receiveTransfer(t._id, SHOP, USER, [
+      { itemId: t.items[0]._id, received: 0 },
+      { itemId: t.items[1]._id, received: 8 },
+    ], atB(), {
+      resolve: { links: [{ product: yeast._id, target: destYeast._id }], createMissing: true },
+    });
+    expect(destYeast.stock).toBe(0);
+    expect(feed.stock).toBe(25); // the source is never touched by a receive
   });
 });

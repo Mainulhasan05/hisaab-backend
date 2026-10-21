@@ -74,13 +74,24 @@ exports.approveTransfer = asyncHandler(async (req, res) => {
 });
 
 exports.receiveTransfer = asyncHandler(async (req, res) => {
+  const { links, createMissing, createNew } = req.body || {};
+  // Only the decisions — never `skipActingBranch`, which the service accepts
+  // from createTransfer's owner path alone.
+  const resolve = (links || createMissing || createNew) ? { links, createMissing, createNew } : null;
   const result = await stockTransferService.receiveTransfer(
     req.params.id,
     req.shop._id,
     req.user._id,
     req.body.receivedItems,
-    req
+    req,
+    resolve ? { resolve } : {}
   );
+  res.json(result);
+});
+
+// Before receiving: which lines land, which need a match or a new product.
+exports.getReceiveCheck = asyncHandler(async (req, res) => {
+  const result = await stockTransferService.getReceiveCheck(req.params.id, req.shop._id, req);
   res.json(result);
 });
 

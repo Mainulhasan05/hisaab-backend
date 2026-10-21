@@ -187,3 +187,43 @@ describe('admin cloneBranchProducts', () => {
     expect(inBranch(BRANCH_B)[0]).toMatchObject({ isAvailableOnline: true, stock: 0 });
   });
 });
+
+describe('copyProductsToBranch — same name, different code', () => {
+  const twins = () => {
+    const src = product({ code: 'MED0127', branch: BRANCH_A, extra: { name: 'ইষ্ট ৫০০ গ্রাম' } });
+    const dest = product({ code: 'MTS2297', branch: BRANCH_B, extra: { name: 'ইষ্ট ৫০০ গ্রাম' } });
+    return { src, dest };
+  };
+
+  beforeEach(() => {
+    jest.spyOn(Product, 'bulkWrite').mockImplementation((ops) => {
+      for (const { updateOne } of ops) {
+        const doc = products.get(String(updateOne.filter._id));
+        if (doc) doc.clonedFrom = updateOne.update.$set.clonedFrom;
+      }
+      return Promise.resolve({ matchedCount: ops.length });
+    });
+  });
+
+  it('never copies a second one — it is counted as same-name', async () => {
+    twins();
+    const out = await copy({});
+    expect(out).toMatchObject({ copied: 0, sameName: 1, linked: 0 });
+    expect(out.sameNameExamples[0]).toMatchObject({ code: 'MED0127', otherCode: 'MTS2297' });
+    expect(inBranch(BRANCH_B)).toHaveLength(1);
+  });
+
+  it('linkSameName links them, so transfers match from now on', async () => {
+    const { src, dest } = twins();
+    const out = await copy({ linkSameName: true });
+    expect(out).toMatchObject({ copied: 0, linked: 1 });
+    expect(String(dest.clonedFrom)).toBe(String(src._id));
+    expect(dest.code).toBe('MTS2297'); // nothing the shopkeeper sees changes
+  });
+
+  it('dryRun links nothing', async () => {
+    const { dest } = twins();
+    await copy({ linkSameName: true, dryRun: true });
+    expect(dest.clonedFrom).toBeNull();
+  });
+});

@@ -2686,8 +2686,11 @@ class ProductService {
    */
   async copyProductsToBranch(shopId, userId, payload = {}, req = null) {
     const Branch = require('../models/Branch.model');
-    const { cloneIntoBranch, attachClonedMedia, findCounterpartsBatch } = require('../utils/branchClone.util');
+    const {
+      cloneIntoBranch, attachClonedMedia, findCounterpartsBatch, findNameMatches, linkToSource,
+    } = require('../utils/branchClone.util');
     const BATCH = 500;
+    const linkSameName = payload.linkSameName === true;
 
     if (!req?.shop?.multiBranchEnabled) {
       throw new AppError('Multi-branch is not enabled', 'এই দোকানে একাধিক শাখা চালু নেই', 400);
@@ -2712,7 +2715,10 @@ class ProductService {
       base._id = { $in: productIds.slice(0, 1000) };
     }
 
-    const result = { toCopy: 0, copied: 0, alreadyThere: 0, combos: 0, conflicts: 0, conflictNames: [] };
+    const result = {
+      toCopy: 0, copied: 0, alreadyThere: 0, combos: 0, conflicts: 0, conflictNames: [],
+      sameName: 0, sameNameExamples: [], linked: 0,
+    };
     const inserted = [];
     let cursorId = null;
 
@@ -2730,14 +2736,41 @@ class ProductService {
         candidates.push(p);
       }
 
+      // Same name, different code — the destination already has this item,
+      // typed in by hand under a random code. NEVER copied (that is how a
+      // branch ends up with two "ইষ্ট ৫০০ গ্রাম"); linked when asked, so
+      // transfers match it from now on. Its code, price and stock stay.
+      const nameHits = await findNameMatches(candidates, shopId, toBranch);
+      if (nameHits.size > 0) {
+        const pairs = [];
+        for (const p of candidates) {
+          const hit = nameHits.get(String(p._id));
+          if (!hit) continue;
+          result.sameName++;
+          if (result.sameNameExamples.length < 10) {
+            result.sameNameExamples.push({ name: p.name, code: p.code, otherCode: hit.code });
+          }
+          pairs.push({ source: p, target: hit });
+        }
+        if (linkSameName && !dryRun && pairs.length > 0) {
+          // A target other copies already point at cannot be re-pointed
+          // (`linkToSource` refuses the whole set) — leave those out by name.
+          const roots = new Set((await Product.find({
+            shop: shopId, clonedFrom: { $in: pairs.map((x) => x.target._id) },
+          }).select('clonedFrom').lean()).map((r) => String(r.clonedFrom)));
+          const linkable = pairs.filter((x) => !roots.has(String(x.target._id)));
+          result.linked += await linkToSource(linkable, shopId);
+        }
+      }
+
       // A code the destination still holds on a DELETED row would fail the
       // whole insert on the unique index. Found up front, named, skipped.
-      let missing = candidates;
-      if (candidates.length > 0) {
+      let missing = candidates.filter((p) => !nameHits.has(String(p._id)));
+      if (missing.length > 0) {
         const held = new Set((await Product.find({
-          shop: shopId, branch: toBranch, code: { $in: candidates.map((p) => p.code) },
+          shop: shopId, branch: toBranch, code: { $in: missing.map((p) => p.code) },
         }).select('code').lean()).map((p) => p.code));
-        missing = candidates.filter((p) => {
+        missing = missing.filter((p) => {
           if (!held.has(p.code)) return true;
           result.conflicts++;
           if (result.conflictNames.length < 10) result.conflictNames.push(p.name);
@@ -2755,7 +2788,7 @@ class ProductService {
       if (batch.length < BATCH) break;
     }
 
-    if (dryRun || inserted.length === 0) return result;
+    if (dryRun || (inserted.length === 0 && result.linked === 0)) return result;
 
     await attachClonedMedia(shopId, inserted);
 
@@ -2771,9 +2804,10 @@ class ProductService {
       user: userId,
       action: 'product_create',
       actionBn: 'অন্য শাখা থেকে পণ্য কপি',
-      description: `Copied ${inserted.length} products from another branch`,
-      descriptionBn: `অন্য শাখা থেকে ${inserted.length}টি পণ্য কপি করা হয়েছে (স্টক ০)`,
-      entity: { type: 'product', name: `${inserted.length}টি পণ্য` },
+      description: `Copied ${inserted.length} products from another branch, linked ${result.linked} same-name products`,
+      descriptionBn: `অন্য শাখা থেকে ${inserted.length}টি পণ্য কপি করা হয়েছে (স্টক ০)`
+        + (result.linked ? `, একই নামের ${result.linked}টি পণ্য মিলিয়ে দেওয়া হয়েছে` : ''),
+      entity: { type: 'product', name: `${inserted.length + result.linked}টি পণ্য` },
     }).catch((err) => logger.warn(`copyProductsToBranch audit failed: ${err.message}`));
 
     return result;

@@ -196,10 +196,131 @@ const attachClonedMedia = async (shopId, cloned = [], appended = []) => {
   }
 };
 
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * SAME NAME, DIFFERENT CODE — the case that stranded a whole shop's transfers
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * A product's code is the category's letters plus a RANDOM four digits
+ * (`lib/productCode.js`). A branch whose catalogue was typed in by hand, rather
+ * than cloned by the admin, therefore holds every shared item under a
+ * DIFFERENT code. In production (2026-10-22) one shop had 18 items in both
+ * branches by name and 0 by code, and every transfer it ever sent — four, back
+ * to August — sat in transit forever: the source deducted, the destination
+ * could never receive.
+ *
+ * Matching by name automatically would be wrong the other way (two different
+ * items can share a name, and the units can differ — পিস here, প্যাক there).
+ * So a name match is only ever a SUGGESTION, and the shopkeeper confirms it
+ * once. Confirming writes `clonedFrom` on the destination product, which is
+ * the lineage rule `findCounterpartsBatch` already follows, so every later
+ * transfer — in either direction — matches with no further question. Nothing
+ * the shopkeeper sees changes: not the code, not the price, not the barcode.
+ */
+
+/** Compare names as a shopkeeper would: spacing, case and zero-width marks ignored. */
+const normName = (s) => String(s || '')
+  .normalize('NFC')
+  .replace(/[​-‍﻿]/g, '')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .toLowerCase();
+
+/** The lineage id every linked copy of `p` points at. */
+const rootOf = (p) => p.clonedFrom || p._id;
+
+/**
+ * For each source product with NO counterpart in `branchId`, the destination
+ * product carrying the same name — offered, never applied.
+ *
+ * Offered only when it is unambiguous and free to link: exactly one live
+ * destination product by that name, not a combo, and not already linked to a
+ * DIFFERENT item.
+ *
+ * Reads only names and a few fields, and only when there is something to look
+ * for.
+ *
+ * @returns {Map<string, Product>} keyed by the SOURCE product's id
+ */
+const findNameMatches = async (sources, shopId, branchId, session = null) => {
+  const out = new Map();
+  if (sources.length === 0) return out;
+
+  const rows = await Product.find({ shop: shopId, branch: branchId, isDeleted: { $ne: true } })
+    .select('name code unit stock clonedFrom type trackStock hasVariants variants')
+    .session(session || null);
+
+  const byName = new Map();
+  for (const r of rows) {
+    const k = normName(r.name);
+    if (!k) continue;
+    byName.set(k, [...(byName.get(k) || []), r]);
+  }
+
+  for (const src of sources) {
+    const hits = byName.get(normName(src.name)) || [];
+    if (hits.length !== 1) continue;
+    const [hit] = hits;
+    if (hit.type === 'combo' || String(hit._id) === String(src._id)) continue;
+    if (hit.clonedFrom && String(hit.clonedFrom) !== String(rootOf(src))) continue;
+    out.set(String(src._id), hit);
+  }
+  return out;
+};
+
+/**
+ * Confirm "these are the same item": point each destination product's lineage
+ * at its source. Returns the number linked; refuses as a whole if any target
+ * cannot be linked, so a transfer never half-resolves.
+ *
+ * Refused when the target is already the ROOT other copies point at — re-
+ * pointing it would cut those copies loose — or already linked elsewhere.
+ *
+ * @param {Array<{source: Product, target: Product}>} pairs
+ */
+const linkToSource = async (pairs, shopId, session = null) => {
+  if (pairs.length === 0) return 0;
+  const sessionOpt = session ? { session } : {};
+
+  const targetIds = pairs.map((p) => p.target._id);
+  const isRoot = await Product.find({ shop: shopId, clonedFrom: { $in: targetIds } })
+    .select('clonedFrom name')
+    .session(session || null);
+  if (isRoot.length > 0) {
+    const name = pairs.find((p) => String(p.target._id) === String(isRoot[0].clonedFrom))?.target.name;
+    throw operationalError(`"${name || 'পণ্যটি'}" আগে থেকেই অন্য শাখার একটি পণ্যের সাথে যুক্ত, এটাকে আবার মিলানো যাবে না।`, 409);
+  }
+
+  const res = await Product.bulkWrite(pairs.map(({ source, target }) => ({
+    updateOne: {
+      filter: {
+        _id: target._id,
+        shop: shopId,
+        isDeleted: { $ne: true },
+        $or: [{ clonedFrom: null }, { clonedFrom: rootOf(source) }],
+      },
+      update: { $set: { clonedFrom: rootOf(source) } },
+    },
+  })), sessionOpt);
+
+  const matched = res?.matchedCount ?? res?.nMatched ?? pairs.length;
+  if (matched < pairs.length) {
+    throw operationalError('একটি পণ্য এর মধ্যে অন্য পণ্যের সাথে যুক্ত হয়ে গেছে। পেজটি রিফ্রেশ করে আবার চেষ্টা করুন।', 409);
+  }
+  // Mirror the write on the in-memory docs, so a caller that re-plans in the
+  // same request sees the link.
+  for (const { source, target } of pairs) target.clonedFrom = rootOf(source);
+  return pairs.length;
+};
+
 module.exports = {
   plainOf,
+  normName,
+  rootOf,
   findCounterpart,
   findCounterpartsBatch,
+  findNameMatches,
+  linkToSource,
   cloneDocFor,
   cloneIntoBranch,
   attachClonedMedia,

@@ -16,6 +16,7 @@ router.get('/report', rbac('stock_transfers', 'view'), stockTransferController.g
 router.get('/suggestions', rbac('stock_transfers', 'create'), stockTransferController.getTransferSuggestions);
 router.get('/:id', rbac('stock_transfers', 'view'), stockTransferController.getTransferById);
 router.patch('/:id/approve', rbac('stock_transfers', 'update'), stockTransferController.approveTransfer);
+router.get('/:id/receive-check', rbac('stock_transfers', 'update'), stockTransferController.getReceiveCheck);
 router.patch('/:id/receive', rbac('stock_transfers', 'update'), stockTransferController.receiveTransfer);
 router.patch('/:id/reject', rbac('stock_transfers', 'update'), stockTransferController.rejectTransfer);
 

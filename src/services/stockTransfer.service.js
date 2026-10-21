@@ -14,6 +14,7 @@ const { assertTracked, TRACKED_FILTER } = require('../utils/stockTracking.util')
 const { hasPermission } = require('../middleware/permission.middleware');
 const {
   plainOf, findCounterpartsBatch, cloneIntoBranch, attachClonedMedia,
+  findNameMatches, linkToSource,
 } = require('../utils/branchClone.util');
 
 /**
@@ -340,7 +341,7 @@ const flushStockOps = async (stockOps, txns, sessionOpt) => {
  * receive matches the destination variant by sku/attributes, and a hand-built
  * body naming the wrong sku would otherwise credit the wrong size.
  */
-const planDestination = async (items, productMap, shopId, toBranch, session = null) => {
+const planDestination = async (items, productMap, shopId, toBranch, session = null, linkTargets = new Map()) => {
   const counterparts = await findCounterpartsBatch(
     [...productMap.values()], shopId, toBranch, session
   );
@@ -348,13 +349,20 @@ const planDestination = async (items, productMap, shopId, toBranch, session = nu
   const missingProducts = new Map();   // source id → source product
   const missingVariants = [];          // { target, variant, item }
   const blocked = [];                  // { item, message }
+  const linked = new Map();            // source id → { source, target } — confirmed by the user
   const seenVariant = new Set();
 
   for (const item of items) {
     const src = productMap.get(String(item.product));
     if (!src) continue;
     const name = item.productName || src.name;
-    const target = counterparts.get(String(src._id));
+    // A real counterpart always wins; a link the user chose is used only where
+    // there is none, so a request can never re-point an existing match.
+    let target = counterparts.get(String(src._id));
+    if (!target && linkTargets.has(String(src._id))) {
+      target = linkTargets.get(String(src._id));
+      linked.set(String(src._id), { source: src, target });
+    }
 
     if (!target) {
       missingProducts.set(String(src._id), src);
@@ -397,8 +405,135 @@ const planDestination = async (items, productMap, shopId, toBranch, session = nu
     missingVariants.push({ target, variant: srcVariant, item });
   }
 
-  return { missingProducts: [...missingProducts.values()], missingVariants, blocked };
+  // Same name, different code — see branchClone.util. Offered, never applied.
+  const nameMatches = await findNameMatches([...missingProducts.values()], shopId, toBranch, session);
+
+  return {
+    missingProducts: [...missingProducts.values()],
+    missingVariants,
+    blocked,
+    linked: [...linked.values()],
+    nameMatches,
+  };
 };
+
+/**
+ * The destination products a request asked to link to, validated: each must be
+ * a live, non-combo product of the DESTINATION branch, and each source must be
+ * a line of this transfer.
+ *
+ * @param {Array<{product, target}>} links  as posted
+ * @returns {Map<string, Product>} source id → destination product
+ */
+const loadLinkTargets = async (links, productMap, shopId, toBranch, session = null) => {
+  const out = new Map();
+  if (!Array.isArray(links) || links.length === 0) return out;
+
+  const ids = [...new Set(links.map((l) => String(l?.target || '')).filter((x) => mongoose.isValidObjectId(x)))];
+  const docs = ids.length
+    ? await Product.find({ shop: shopId, branch: toBranch, isDeleted: { $ne: true }, _id: { $in: ids } }).session(session || null)
+    : [];
+  const byId = new Map(docs.map((d) => [String(d._id), d]));
+
+  for (const l of links) {
+    const src = productMap.get(String(l?.product));
+    const target = byId.get(String(l?.target));
+    if (!src || !target || target.type === 'combo') {
+      throw createError('মিলানোর জন্য বাছাই করা পণ্যটি গন্তব্য শাখায় পাওয়া যায়নি', 400);
+    }
+    out.set(String(src._id), target);
+  }
+  return out;
+};
+
+/**
+ * What to do about each line the destination cannot take as it stands — and
+ * the refusal, by name, for any line nobody decided about.
+ *
+ *   linked      the user confirmed "same item" → link (needs products.update)
+ *   name match  a destination product has the same name: NEVER cloned silently.
+ *               Either linked, or listed in `createNew` ("it is a different
+ *               item") — the guard that stops a second "ইষ্ট ৫০০ গ্রাম" being
+ *               made beside the first
+ *   missing     nothing by code or name → cloned when `createMissing`
+ *               (needs products.create)
+ *   variants    appended when `createMissing`
+ *
+ * Pure decision; throws before anything is written.
+ */
+const decideDestination = (plan, { createMissing = false, createNew = new Set() } = {}, req = null) => {
+  if (plan.blocked.length > 0) throw createError(plan.blocked[0].message, 400);
+
+  const toClone = [];
+  const ambiguous = [];
+  const unresolved = [];
+  for (const src of plan.missingProducts) {
+    const id = String(src._id);
+    const hit = plan.nameMatches.get(id);
+    if (hit && !createNew.has(id)) { ambiguous.push({ src, hit }); continue; }
+    if (createMissing || createNew.has(id)) { toClone.push(src); continue; }
+    unresolved.push(src.name);
+  }
+
+  if (ambiguous.length > 0) {
+    const { src, hit } = ambiguous[0];
+    const more = ambiguous.length > 1 ? ` (আরও ${ambiguous.length - 1}টি এমন পণ্য আছে)` : '';
+    const err = createError(
+      `"${src.name}" গন্তব্য শাখায় একই নামে আছে (কোড ${hit.code}), কিন্তু কোড আলাদা। পণ্যটি মিলিয়ে নিন, বা আলাদা পণ্য হলে নতুন তৈরি করুন।${more}`,
+      409
+    );
+    err.code = 'TRANSFER_NAME_MATCH';
+    throw err;
+  }
+
+  const variantsToAppend = createMissing ? plan.missingVariants : [];
+  if (!createMissing) {
+    unresolved.push(...plan.missingVariants.map(({ item, variant }) =>
+      `${item.productName || variant.sku} (${variantLabel(variant)})`));
+  }
+  if (unresolved.length > 0) {
+    const err = createError(
+      `${nameList(unresolved)} গন্তব্য শাখায় নেই। ওই শাখায় পণ্যটি যোগ করুন, বা তৈরি করে নিন।`,
+      409
+    );
+    err.code = 'TRANSFER_MISSING_AT_DESTINATION';
+    throw err;
+  }
+
+  if (plan.linked.length > 0 && req && !hasPermission(req, 'products', 'update')) {
+    throw createError('দুই শাখার পণ্য মিলানোর অনুমতি আপনার নেই — মালিককে বলুন', 403);
+  }
+  if ((toClone.length > 0 || variantsToAppend.length > 0) && req && !hasPermission(req, 'products', 'create')) {
+    throw createError('গন্তব্য শাখায় পণ্য তৈরি করার অনুমতি আপনার নেই', 403);
+  }
+
+  return { toLink: plan.linked, toClone, variantsToAppend };
+};
+
+/** A same-name candidate as the client sees it — enough to decide by. */
+const describeMatch = (hit, src) => ({
+  _id: hit._id,
+  name: hit.name,
+  code: hit.code,
+  unit: hit.unit || 'piece',
+  stock: hit.stock || 0,
+  // পিস here, প্যাক there: linking still credits 1 for 1, so say so.
+  unitDiffers: (hit.unit || 'piece') !== (src.unit || 'piece'),
+});
+
+/** Whether a decision writes anything (and so needs the transaction). */
+const decisionWrites = (d) => d.toLink.length + d.toClone.length + d.variantsToAppend.length > 0;
+
+/** Carry out a decision inside the caller's transaction. */
+const applyDestination = async (decision, shopId, toBranch, session = null) => {
+  await linkToSource(decision.toLink, shopId, session);
+  const cloned = await cloneIntoBranch(decision.toClone, toBranch, session);
+  const appended = await appendMissingVariants(decision.variantsToAppend, shopId, session);
+  return { cloned, appended };
+};
+
+/** `createNew` as posted — source ids the user says are a DIFFERENT item. */
+const idSet = (raw) => new Set((Array.isArray(raw) ? raw : []).map(String));
 
 /**
  * Append the missing variants to destination products that already carry
@@ -473,9 +608,12 @@ exports.previewTransfer = async (data, req = null) => {
   for (const item of items) {
     const src = productMap.get(String(item.product));
     if (src && plan.missingProducts.some((p) => String(p._id) === String(src._id))) {
+      const hit = plan.nameMatches.get(String(src._id));
       missing.push({
         product: item.product, variantId: item.variantId || null,
         productName: src.name, kind: 'product',
+        // Same name, different code: offered for linking, never auto-applied.
+        nameMatch: hit ? describeMatch(hit, src) : null,
       });
     }
   }
@@ -525,8 +663,59 @@ exports.previewTransfer = async (data, req = null) => {
       })),
     ],
     canCreateMissing: !req || hasPermission(req, 'products', 'create'),
+    canLink: !req || hasPermission(req, 'products', 'update'),
     canDispatch: !req || hasPermission(req, 'stock_transfers', 'update'),
     canReceiveNow: mayReceiveNow(req),
+  };
+};
+
+/**
+ * ── Before "মাল বুঝে নিন": can every line land? ───────────────────────────────
+ *
+ * The destination's view of an arriving transfer, line by line:
+ *
+ *   ok         a counterpart exists — it will be credited
+ *   nameMatch  a product with the same name exists under another code — the
+ *              receiver confirms it is the same item (one click, remembered)
+ *   missing    nothing by code or name — the receiver may create it here
+ *   variant    the product is here, this size/colour is not — may be added
+ *   blocked    a shape mismatch nobody should guess at
+ *
+ * This is what un-sticks a transfer created before the create-time check
+ * existed: every one of them failed here with a refusal and no way forward.
+ * Writes nothing.
+ */
+exports.getReceiveCheck = async (transferId, shopId, req = null) => {
+  const transfer = await StockTransfer.findOne({ _id: transferId, shop: shopId }).session(null);
+  if (!transfer) throw createError('ট্রান্সফার পাওয়া যায়নি', 404);
+  assertActingBranch(req, transfer.toBranch, 'destination');
+
+  const sourceMap = await loadProductsFor(transfer.items, { shop: shopId });
+  const plan = await planDestination(transfer.items, sourceMap, shopId, transfer.toBranch);
+
+  const missingIds = new Set(plan.missingProducts.map((p) => String(p._id)));
+  const variantKeys = new Set(plan.missingVariants.map(({ item }) => String(item._id)));
+  const blockedBy = new Map(plan.blocked.map(({ item, message }) => [String(item._id), message]));
+
+  const lines = transfer.items.map((item) => {
+    const src = sourceMap.get(String(item.product));
+    const base = { itemId: item._id, product: item.product, productName: item.productName };
+    if (!src) return { ...base, status: 'blocked', message: `"${item.productName}" পাঠানো শাখায় আর নেই` };
+    if (blockedBy.has(String(item._id))) return { ...base, status: 'blocked', message: blockedBy.get(String(item._id)) };
+    if (missingIds.has(String(src._id))) {
+      const hit = plan.nameMatches.get(String(src._id));
+      return hit
+        ? { ...base, status: 'nameMatch', nameMatch: describeMatch(hit, src) }
+        : { ...base, status: 'missing' };
+    }
+    if (variantKeys.has(String(item._id))) return { ...base, status: 'variant' };
+    return { ...base, status: 'ok' };
+  });
+
+  return {
+    lines,
+    canLink: !req || hasPermission(req, 'products', 'update'),
+    canCreateMissing: !req || hasPermission(req, 'products', 'create'),
   };
 };
 
@@ -721,32 +910,20 @@ exports.createTransfer = async (data, userId, req = null) => {
     }
   }
 
+  // The destination is checked HERE, before any stock moves — see
+  // `planDestination` and `decideDestination`. Read outside the transaction;
+  // the receive step re-checks inside it, so a product deleted in between still
+  // fails closed.
+  const linkTargets = await loadLinkTargets(data.links, productMap, shop, toBranch);
+  const plan = await planDestination(items, productMap, shop, toBranch, null, linkTargets);
+  const decision = decideDestination(plan, { createMissing, createNew: idSet(data.createNew) }, req);
+
   // Only the fields a request may set. The body used to be handed to `create`
   // whole, so a hand-built request could seed `received` or `batches` — and a
   // seeded `batches` array survives an approval that takes no batches, then
   // gets replayed at the destination as dated stock nobody dispatched. `unit`
   // is the server's, from the product, never the client's.
-  // The destination is checked HERE, before any stock moves — see
-  // `planDestination`. Read outside the transaction; the receive step re-checks
-  // inside it, so a product deleted in between still fails closed.
-  const plan = await planDestination(items, productMap, shop, toBranch);
-  if (plan.blocked.length > 0) {
-    throw createError(plan.blocked[0].message, 400);
-  }
-  const missingNames = [
-    ...plan.missingProducts.map((p) => p.name),
-    ...plan.missingVariants.map(({ item, variant }) =>
-      `${item.productName || variant.sku} (${variantLabel(variant)})`),
-  ];
-  if (missingNames.length > 0 && !createMissing) {
-    const err = createError(
-      `${nameList(missingNames)} গন্তব্য শাখায় নেই। ওই শাখায় পণ্যটি যোগ করুন, বা তৈরি করে পাঠান।`,
-      409
-    );
-    err.code = 'TRANSFER_MISSING_AT_DESTINATION';
-    throw err;
-  }
-
+  //
   // `variantSku` / `variantAttributes` come from the SOURCE variant when there
   // is one: receive matches the destination's variant by them, so a client-sent
   // sku that disagreed would credit a different size.
@@ -776,8 +953,8 @@ exports.createTransfer = async (data, userId, req = null) => {
 
   // A plain request writes one document, exactly as it always has — no
   // transaction is opened for it.
-  const needsCreate = createMissing && missingNames.length > 0;
-  if (!needsCreate && !dispatchNow) {
+  const needsWrites = decisionWrites(decision);
+  if (!needsWrites && !dispatchNow) {
     return StockTransfer.create(doc);
   }
 
@@ -785,9 +962,8 @@ exports.createTransfer = async (data, userId, req = null) => {
   let appended = [];
 
   const transfer = await runInTransaction(async (session) => {
-    if (needsCreate) {
-      cloned = await cloneIntoBranch(plan.missingProducts, toBranch, session);
-      appended = await appendMissingVariants(plan.missingVariants, shop, session);
+    if (needsWrites) {
+      ({ cloned, appended } = await applyDestination(decision, shop, toBranch, session));
     }
 
     let created = session
@@ -915,7 +1091,10 @@ exports.approveTransfer = async (transferId, shopId, userId, req = null, options
  * branch. The route never passes options, so a request cannot reach it.
  */
 exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req = null, options = {}) => {
-  return runInTransaction(async (session) => {
+  let cloned = [];
+  let appended = [];
+
+  const result = await runInTransaction(async (session) => {
     // runInTransaction falls back to a null session when the topology can't do
     // transactions, so options are built the same way as in sale/salesReturn.
     const sessionOpt = session ? { session } : {};
@@ -929,6 +1108,27 @@ exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req 
     // to cost a findById PLUS up to three findOne calls (findCounterpart tries
     // three matching rules in turn) PLUS a save PLUS a ledger insert — per line.
     const sourceMap = await loadProductsFor(transfer.items, { shop: shopId }, session);
+
+    // The receiver's decisions from the receive screen — link a same-name
+    // product, create a missing one — applied in THIS transaction, before the
+    // counterparts are read, so the lines they resolve are credited below.
+    // Absent (the route without a body, or the one-step path), nothing changes.
+    if (options.resolve) {
+      const linkTargets = await loadLinkTargets(
+        options.resolve.links, sourceMap, shopId, transfer.toBranch, session
+      );
+      const plan = await planDestination(
+        transfer.items, sourceMap, shopId, transfer.toBranch, session, linkTargets
+      );
+      const decision = decideDestination(plan, {
+        createMissing: options.resolve.createMissing === true,
+        createNew: idSet(options.resolve.createNew),
+      }, req);
+      if (decisionWrites(decision)) {
+        ({ cloned, appended } = await applyDestination(decision, shopId, transfer.toBranch, session));
+      }
+    }
+
     const counterparts = await findCounterpartsBatch(
       [...sourceMap.values()], shopId, transfer.toBranch, session
     );
@@ -970,10 +1170,12 @@ exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req 
 
       const target = counterparts.get(String(sourceProduct._id));
       if (!target) {
-        throw createError(
-          `"${item.productName || sourceProduct.name}" গন্তব্য শাখায় নেই। আগে ওই শাখায় পণ্যটি যোগ করুন।`,
-          400
+        const err = createError(
+          `"${item.productName || sourceProduct.name}" গন্তব্য শাখায় পাওয়া যায়নি। গ্রহণের পাতায় পণ্যটি মিলিয়ে নিন বা তৈরি করুন।`,
+          409
         );
+        err.code = 'TRANSFER_MISSING_AT_DESTINATION';
+        throw err;
       }
 
       // The destination's OWN variant id, which is not necessarily the one the
@@ -1063,6 +1265,11 @@ exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req 
 
     return transfer;
   }, { session: options.session });
+
+  // After commit — see `attachClonedMedia`. Only the receive-screen path can
+  // have cloned anything here.
+  await attachClonedMedia(shopId, cloned, appended);
+  return result;
 };
 
 /**
