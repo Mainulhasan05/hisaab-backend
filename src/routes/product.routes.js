@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const productController = require('../controllers/product.controller');
 const { protect } = require('../middleware/auth.middleware');
-const { rbac, rbacAny } = require('../middleware/permission.middleware');
+const { rbac, rbacAny, ownerOnly } = require('../middleware/permission.middleware');
 const { validate } = require('../middleware/validate.middleware');
 const productValidation = require('../validations/product.validation');
 const { requireFeature } = require('../utils/features.util');
@@ -30,6 +30,8 @@ router.get('/stock-transactions', rbacAny([['products', 'view'], ['stock', 'view
 // stock.manual_adjust is the dedicated permission for it
 router.post('/bulk-stock', rbacAny([['products', 'update'], ['stock', 'manual_adjust']]), validate(productValidation.bulkUpdateStock), productController.bulkUpdateStock);
 router.post('/bulk-import', rbac('products', 'create'), validate(productValidation.bulkImportProducts), productController.bulkImport);
+// Multi-branch UI is the owner's (CLAUDE.md I-1) — not a permission.
+router.post('/copy-to-branch', ownerOnly, productController.copyToBranch);
 // The online catalogue screen's write path. Behind `onlineSelling` — the same
 // capability that puts the online section on the product form — so a shop
 // without it gets a 404 rather than a way in through the side door.

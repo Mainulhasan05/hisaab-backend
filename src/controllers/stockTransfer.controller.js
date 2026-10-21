@@ -16,6 +16,25 @@ exports.createTransfer = asyncHandler(async (req, res) => {
   res.status(201).json(result);
 });
 
+// What the destination is missing, before anything is created. Writes nothing.
+exports.previewTransfer = asyncHandler(async (req, res) => {
+  const result = await stockTransferService.previewTransfer(
+    { ...req.body, shop: req.shop._id },
+    req
+  );
+  res.json(result);
+});
+
+// What the destination is low on that this branch can spare. Owner only.
+exports.getTransferSuggestions = asyncHandler(async (req, res) => {
+  const result = await stockTransferService.getTransferSuggestions(
+    req.shop._id,
+    req.query,
+    req
+  );
+  res.json(result);
+});
+
 exports.getTransfers = asyncHandler(async (req, res) => {
   const result = await stockTransferService.getTransfers(
     req.shop._id,

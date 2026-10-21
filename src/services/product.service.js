@@ -2656,6 +2656,129 @@ class ProductService {
     };
   }
 
+  /**
+   * ── অন্য শাখায় কপি — fill another branch's catalogue from this one ────────
+   *
+   * A branch gets the catalogue copied ONCE, when the admin creates it; every
+   * product added since exists only in the branch it was typed into. Before
+   * this, the owner's only way to stock the same item at a second branch was
+   * to type it in again — and a typo in the code made the two copies strangers
+   * that no transfer could ever match.
+   *
+   * Copies what the destination does NOT already stock (by the transfer
+   * matching rule, `branchClone.util`), at zero stock, online off. Existing
+   * copies are never touched — not their price, not their name: the two
+   * branches are allowed to differ, and that is the point of per-branch
+   * products.
+   *
+   * Skipped, by name:
+   *   combos     their components point at THIS branch's documents
+   *   conflicts  a deleted product in the destination still holds the code
+   *              (`{shop, branch, code}` is unique and counts deleted rows)
+   *
+   * Owner only (route). Idempotent: run it twice and the second run copies
+   * nothing. Not transactional — no money moves, it is batched for a large
+   * catalogue the way the admin clone is, and an interruption leaves only
+   * complete documents behind, which the next run skips.
+   *
+   * @param {Object} payload `{ toBranch, categoryId?, productIds?, dryRun? }`
+   * @returns {{ toCopy, copied, alreadyThere, combos, conflicts, conflictNames }}
+   */
+  async copyProductsToBranch(shopId, userId, payload = {}, req = null) {
+    const Branch = require('../models/Branch.model');
+    const { cloneIntoBranch, attachClonedMedia, findCounterpartsBatch } = require('../utils/branchClone.util');
+    const BATCH = 500;
+
+    if (!req?.shop?.multiBranchEnabled) {
+      throw new AppError('Multi-branch is not enabled', 'এই দোকানে একাধিক শাখা চালু নেই', 400);
+    }
+    const fromBranch = requireBranch(req);
+    const { toBranch, categoryId, productIds } = payload;
+    const dryRun = payload.dryRun === true;
+
+    if (!toBranch) throw new AppError('Destination required', 'কোন শাখায় কপি করবেন তা বাছাই করুন', 400);
+    if (String(toBranch) === String(fromBranch)) {
+      throw new AppError('Same branch', 'একই শাখায় কপি করা যায় না', 400);
+    }
+    const dest = await Branch.validateBranchOwnership(toBranch, shopId);
+    if (!dest) throw new AppError('Branch not found', 'গন্তব্য শাখা পাওয়া যায়নি', 404);
+
+    const base = { shop: shopId, branch: fromBranch, isDeleted: { $ne: true } };
+    if (categoryId) base.category = categoryId;
+    if (Array.isArray(productIds)) {
+      if (productIds.length === 0) {
+        throw new AppError('No products', 'কোনো পণ্য বাছাই করা হয়নি', 400);
+      }
+      base._id = { $in: productIds.slice(0, 1000) };
+    }
+
+    const result = { toCopy: 0, copied: 0, alreadyThere: 0, combos: 0, conflicts: 0, conflictNames: [] };
+    const inserted = [];
+    let cursorId = null;
+
+    for (;;) {
+      const filter = cursorId ? { ...base, _id: { ...(base._id || {}), $gt: cursorId } } : base;
+      const batch = await Product.find(filter).sort({ _id: 1 }).limit(BATCH).lean();
+      if (batch.length === 0) break;
+      cursorId = batch[batch.length - 1]._id;
+
+      const counterparts = await findCounterpartsBatch(batch, shopId, toBranch);
+      const candidates = [];
+      for (const p of batch) {
+        if (counterparts.has(String(p._id))) { result.alreadyThere++; continue; }
+        if (isCombo(p)) { result.combos++; continue; }
+        candidates.push(p);
+      }
+
+      // A code the destination still holds on a DELETED row would fail the
+      // whole insert on the unique index. Found up front, named, skipped.
+      let missing = candidates;
+      if (candidates.length > 0) {
+        const held = new Set((await Product.find({
+          shop: shopId, branch: toBranch, code: { $in: candidates.map((p) => p.code) },
+        }).select('code').lean()).map((p) => p.code));
+        missing = candidates.filter((p) => {
+          if (!held.has(p.code)) return true;
+          result.conflicts++;
+          if (result.conflictNames.length < 10) result.conflictNames.push(p.name);
+          return false;
+        });
+      }
+
+      result.toCopy += missing.length;
+      if (!dryRun && missing.length > 0) {
+        const docs = await cloneIntoBranch(missing, toBranch);
+        inserted.push(...docs);
+        result.copied += docs.length;
+      }
+
+      if (batch.length < BATCH) break;
+    }
+
+    if (dryRun || inserted.length === 0) return result;
+
+    await attachClonedMedia(shopId, inserted);
+
+    // The destination's totals change by nothing (stock 0), but its product
+    // COUNT does, and the stats card counts products.
+    const statsKeyBase = `shop:${shopId}:invstats:`;
+    cacheService.delete(`${statsKeyBase}all`).catch(() => {});
+    cacheService.delete(`${statsKeyBase}${toBranch}`).catch(() => {});
+
+    await AuditLog.create({
+      shop: shopId,
+      branch: toBranch,
+      user: userId,
+      action: 'product_create',
+      actionBn: 'অন্য শাখা থেকে পণ্য কপি',
+      description: `Copied ${inserted.length} products from another branch`,
+      descriptionBn: `অন্য শাখা থেকে ${inserted.length}টি পণ্য কপি করা হয়েছে (স্টক ০)`,
+      entity: { type: 'product', name: `${inserted.length}টি পণ্য` },
+    }).catch((err) => logger.warn(`copyProductsToBranch audit failed: ${err.message}`));
+
+    return result;
+  }
+
   // Get low stock products
   //
   // `$expr` compares two fields of the same document, which no index can serve,

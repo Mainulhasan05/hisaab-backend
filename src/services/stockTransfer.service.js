@@ -10,7 +10,11 @@ const { storageUnit, quantize } = require('../utils/quantity.util');
 const { buildDateMatch } = require('../utils/reportScope.util');
 const { takeBatches, addBatches, batchWriteOp } = require('../utils/batch.util');
 const { assertNotCombo } = require('../utils/combo.util');
-const { assertTracked } = require('../utils/stockTracking.util');
+const { assertTracked, TRACKED_FILTER } = require('../utils/stockTracking.util');
+const { hasPermission } = require('../middleware/permission.middleware');
+const {
+  plainOf, findCounterpartsBatch, cloneIntoBranch, attachClonedMedia,
+} = require('../utils/branchClone.util');
 
 /**
  * A refusal this service authored, in Bengali, with a status code.
@@ -88,84 +92,6 @@ const assertActingBranch = (req, branchId, role) => {
       403
     );
   }
-};
-
-/**
- * Resolve the destination branch's copy of a product.
- *
- * Each branch owns its own product documents, so "the same item" in another
- * branch is a different document. They are matched by `code` — the clone that
- * seeds a new branch keeps the code identical — with `clonedFrom` lineage as a
- * fallback for products whose code was later edited.
- *
- * Returns null when the destination branch does not stock the item, which the
- * callers surface as a named error rather than silently transferring nothing.
- */
-const findCounterpart = async (sourceProduct, shopId, branchId, session = null) => {
-  const q = (filter) => Product.findOne(filter).session(session || null);
-
-  return (
-    (await q({ shop: shopId, branch: branchId, code: sourceProduct.code, isDeleted: { $ne: true } })) ||
-    (await q({ shop: shopId, branch: branchId, clonedFrom: sourceProduct.clonedFrom || sourceProduct._id, isDeleted: { $ne: true } })) ||
-    (await q({ shop: shopId, branch: branchId, _id: sourceProduct.clonedFrom, isDeleted: { $ne: true } }))
-  );
-};
-
-/**
- * Batched twin of `findCounterpart` — resolves every source product's
- * destination-branch copy in ONE query instead of up to three per line.
- *
- * `findCounterpart` is kept above because it is still the clearest statement of
- * the matching RULE, and the precedence here is a faithful copy of it:
- *
- *   1. same `code` in the destination branch   (the clone keeps the code)
- *   2. same `clonedFrom` lineage               (code was edited since)
- *   3. the destination product IS the original the source was cloned from
- *
- * Candidates for all three arms are fetched together, then resolved in memory
- * in that same order. If you change the rule, change both — or delete the
- * single-item version and route its callers here.
- */
-const findCounterpartsBatch = async (sourceProducts, shopId, branchId, session = null) => {
-  if (sourceProducts.length === 0) return new Map();
-
-  const codes = [...new Set(sourceProducts.map((p) => p.code).filter(Boolean))];
-  const lineage = [...new Set(
-    sourceProducts.map((p) => String(p.clonedFrom || p._id)).filter(Boolean)
-  )];
-  const originIds = [...new Set(
-    sourceProducts.map((p) => p.clonedFrom).filter(Boolean).map(String)
-  )];
-
-  const or = [];
-  if (codes.length) or.push({ code: { $in: codes } });
-  if (lineage.length) or.push({ clonedFrom: { $in: lineage } });
-  if (originIds.length) or.push({ _id: { $in: originIds } });
-  if (or.length === 0) return new Map();
-
-  const candidates = await Product.find({
-    shop: shopId, branch: branchId, isDeleted: { $ne: true }, $or: or,
-  }).session(session || null);
-
-  const byCode = new Map();
-  const byClonedFrom = new Map();
-  const byId = new Map();
-  for (const c of candidates) {
-    if (c.code && !byCode.has(c.code)) byCode.set(c.code, c);
-    if (c.clonedFrom && !byClonedFrom.has(String(c.clonedFrom))) byClonedFrom.set(String(c.clonedFrom), c);
-    byId.set(String(c._id), c);
-  }
-
-  const resolved = new Map();
-  for (const src of sourceProducts) {
-    const match =
-      (src.code && byCode.get(src.code)) ||
-      byClonedFrom.get(String(src.clonedFrom || src._id)) ||
-      (src.clonedFrom && byId.get(String(src.clonedFrom))) ||
-      null;
-    if (match) resolved.set(String(src._id), match);
-  }
-  return resolved;
 };
 
 /** Does this product actually carry variants, whatever the flag says? */
@@ -393,12 +319,373 @@ const flushStockOps = async (stockOps, txns, sessionOpt) => {
 };
 
 /**
- * Create a new stock transfer request
+ * ── Can the DESTINATION receive these lines as they stand? ──────────────────
+ *
+ * Each branch owns its own product documents, and a branch only gets a copy of
+ * the catalogue once — when the admin creates it. Every product added since
+ * exists in the branch it was entered in and nowhere else. The receive step
+ * used to be the first place that noticed: the source had already deducted the
+ * stock, the goods were on the van, and the destination was told
+ * "গন্তব্য শাখায় নেই" with no way to take them. The transfer then had to be
+ * rejected and started again after someone typed the product in by hand.
+ *
+ * So the question is asked at create time, and answered in three buckets:
+ *
+ *   missingProducts  no counterpart at all          → can be cloned
+ *   missingVariants  product there, variant not     → can be appended
+ *   blocked          a shape mismatch nobody should guess at (one side has
+ *                    variants and the other does not) → refused, by name
+ *
+ * The variant probe is built from the SOURCE variant, never from the request:
+ * receive matches the destination variant by sku/attributes, and a hand-built
+ * body naming the wrong sku would otherwise credit the wrong size.
+ */
+const planDestination = async (items, productMap, shopId, toBranch, session = null) => {
+  const counterparts = await findCounterpartsBatch(
+    [...productMap.values()], shopId, toBranch, session
+  );
+
+  const missingProducts = new Map();   // source id → source product
+  const missingVariants = [];          // { target, variant, item }
+  const blocked = [];                  // { item, message }
+  const seenVariant = new Set();
+
+  for (const item of items) {
+    const src = productMap.get(String(item.product));
+    if (!src) continue;
+    const name = item.productName || src.name;
+    const target = counterparts.get(String(src._id));
+
+    if (!target) {
+      missingProducts.set(String(src._id), src);
+      continue;
+    }
+
+    if (!item.variantId) {
+      // Crediting `stock` on a variant product writes the ROLL-UP, which the
+      // next recompute silently undoes — the mirror of `assertVariantChosen`.
+      if (hasRealVariants(target)) {
+        blocked.push({
+          item,
+          message: `"${name}" গন্তব্য শাখায় ভ্যারিয়েন্টসহ আছে, কিন্তু এখানে ভ্যারিয়েন্ট ছাড়া। দুই শাখায় পণ্যটি একরকম করুন।`,
+        });
+      }
+      continue;
+    }
+
+    const srcVariant = variantById(src, item.variantId);
+    const probe = {
+      variantId: item.variantId,
+      variantSku: srcVariant?.sku || item.variantSku,
+      variantAttributes: srcVariant?.attributes || item.variantAttributes,
+    };
+    if (resolveDestinationVariant(target, probe)) continue;
+
+    // Appending a variant to a plain product would turn its stock into a
+    // roll-up of one zero-stock variant and lose what it holds.
+    if (!hasRealVariants(target) || !srcVariant) {
+      blocked.push({
+        item,
+        message: `"${name}" গন্তব্য শাখায় ভ্যারিয়েন্ট ছাড়া আছে। দুই শাখায় পণ্যটি একরকম করুন।`,
+      });
+      continue;
+    }
+
+    const key = `${target._id}:${srcVariant._id}`;
+    if (seenVariant.has(key)) continue;
+    seenVariant.add(key);
+    missingVariants.push({ target, variant: srcVariant, item });
+  }
+
+  return { missingProducts: [...missingProducts.values()], missingVariants, blocked };
+};
+
+/**
+ * Append the missing variants to destination products that already carry
+ * variants, at zero stock. One op per destination product.
+ *
+ * The subdocument `_id` is kept, as the admin clone keeps it, so receive finds
+ * it by id first. It cannot collide: a destination variant with that id would
+ * have been the match, and this variant would not be missing.
+ */
+const appendMissingVariants = async (missingVariants, shopId, session = null) => {
+  if (missingVariants.length === 0) return [];
+
+  const byTarget = new Map();
+  for (const mv of missingVariants) {
+    const key = String(mv.target._id);
+    if (!byTarget.has(key)) byTarget.set(key, { target: mv.target, variants: [] });
+    byTarget.get(key).variants.push({ ...plainOf(mv.variant), stock: 0 });
+  }
+
+  const groups = [...byTarget.values()];
+  await Product.bulkWrite(
+    groups.map(({ target, variants }) => ({
+      updateOne: {
+        filter: { _id: target._id, shop: shopId },
+        update: { $push: { variants: { $each: variants } } },
+      },
+    })),
+    session ? { session } : {}
+  );
+  return groups;
+};
+
+/** "চাল, ডাল ও আরও ৩টি" — names for a refusal without a wall of text. */
+const nameList = (names) => {
+  const unique = [...new Set(names.filter(Boolean))];
+  if (unique.length <= 3) return unique.join(', ');
+  return `${unique.slice(0, 3).join(', ')} ও আরও ${unique.length - 3}টি`;
+};
+
+/** May this request receive at the destination without switching to it? */
+const mayReceiveNow = (req) => !req || req.isAdmin === true || req.user?.isOwner === true;
+
+/** A variant counts as low below this when its product sets no minimum — the
+ *  same figure the product list's কম স্টক filter uses for variants. */
+const VARIANT_LOW_DEFAULT = 5;
+
+/** At most this many suggestions — a list longer than this is not read. */
+const SUGGESTION_LIMIT = 100;
+
+/**
+ * Preview a transfer before it is created: which lines the destination does
+ * not stock yet, which cannot be sent as they stand, and which of the
+ * one-step options this user may use. Writes nothing.
+ */
+exports.previewTransfer = async (data, req = null) => {
+  const { shop, fromBranch, toBranch } = data;
+  const items = Array.isArray(data.items) ? data.items : [];
+
+  assertActingBranch(req, fromBranch, 'source');
+  if (String(fromBranch) === String(toBranch)) {
+    throw createError('উৎস ও গন্তব্য শাখা একই হতে পারবে না', 400);
+  }
+  const destBranch = await Branch.validateBranchOwnership(toBranch, shop);
+  if (!destBranch) throw createError('গন্তব্য শাখা পাওয়া যায়নি', 404);
+
+  const productMap = items.length
+    ? await loadProductsFor(items, { shop, branch: fromBranch, isDeleted: { $ne: true } })
+    : new Map();
+  const plan = await planDestination(items, productMap, shop, toBranch);
+
+  const missing = [];
+  for (const item of items) {
+    const src = productMap.get(String(item.product));
+    if (src && plan.missingProducts.some((p) => String(p._id) === String(src._id))) {
+      missing.push({
+        product: item.product, variantId: item.variantId || null,
+        productName: src.name, kind: 'product',
+      });
+    }
+  }
+  for (const { variant, item } of plan.missingVariants) {
+    missing.push({
+      product: item.product, variantId: item.variantId,
+      productName: item.productName || productMap.get(String(item.product))?.name,
+      variantLabel: variantLabel(variant), kind: 'variant',
+    });
+  }
+
+  // The source's CURRENT stock per line. A repeated transfer or a suggestion
+  // arrives with quantities but no stock figure; the form clamps against this.
+  // A line whose product left the source is blocked here rather than at submit.
+  const lines = [];
+  const notAtSource = [];
+  for (const item of items) {
+    const src = productMap.get(String(item.product));
+    if (!src) {
+      notAtSource.push({
+        product: item.product, variantId: item.variantId || null,
+        message: `"${item.productName || 'পণ্য'}" এই শাখায় আর নেই`,
+      });
+      continue;
+    }
+    if (item.variantId && !variantById(src, item.variantId)) {
+      notAtSource.push({
+        product: item.product, variantId: item.variantId,
+        message: `"${src.name}" এর এই ভ্যারিয়েন্ট এই শাখায় আর নেই`,
+      });
+      continue;
+    }
+    lines.push({
+      product: item.product,
+      variantId: item.variantId || null,
+      stock: readStock(src, item.variantId || null),
+    });
+  }
+
+  return {
+    missing,
+    lines,
+    blocked: [
+      ...notAtSource,
+      ...plan.blocked.map(({ item, message }) => ({
+        product: item.product, variantId: item.variantId || null, message,
+      })),
+    ],
+    canCreateMissing: !req || hasPermission(req, 'products', 'create'),
+    canDispatch: !req || hasPermission(req, 'stock_transfers', 'update'),
+    canReceiveNow: mayReceiveNow(req),
+  };
+};
+
+/**
+ * ── What does the destination need? ─────────────────────────────────────────
+ *
+ * Lines the destination is running low on that THIS branch can spare, with a
+ * quantity already worked out — so restocking a branch is a review-and-send,
+ * not a walk through the shelves with a notepad.
+ *
+ *   low        destination stock below its own minStock (a variant: below the
+ *              product's minStock, or VARIANT_LOW_DEFAULT when none is set)
+ *   suggested  enough to bring it to TWICE that minimum — one minimum would
+ *              leave it on the reorder line the day it arrives — but never
+ *              more than the source holds above its OWN minimum. Restocking
+ *              one branch by emptying the other is not a suggestion anyone
+ *              wants.
+ *
+ * Owner only. It reads the other branch's stock figures, and multi-branch
+ * visibility is the owner's (I-1); a cashier at the source has no business
+ * reading the destination's shelves.
+ *
+ * Uncounted products and combos never appear: neither has stock to be low on.
+ */
+exports.getTransferSuggestions = async (shopId, query = {}, req = null) => {
+  if (!mayReceiveNow(req)) {
+    throw createError('কম স্টকের প্রস্তাব শুধু দোকান মালিক দেখতে পারেন', 403);
+  }
+  const fromBranch = req?.branchId || query.fromBranch;
+  const { toBranch } = query;
+  assertActingBranch(req, fromBranch, 'source');
+  if (!fromBranch) throw createError('আগে একটি শাখা নির্বাচন করুন', 400);
+  if (!toBranch) throw createError('গন্তব্য শাখা নির্বাচন করুন', 400);
+  if (String(fromBranch) === String(toBranch)) {
+    throw createError('উৎস ও গন্তব্য শাখা একই হতে পারবে না', 400);
+  }
+  const destBranch = await Branch.validateBranchOwnership(toBranch, shopId);
+  if (!destBranch) throw createError('গন্তব্য শাখা পাওয়া যায়নি', 404);
+
+  // Plain products already below their minimum, plus every variant product —
+  // a per-variant comparison is not something a query can express here, so
+  // those are filtered below. Same collection scan the low-stock list does.
+  const destProducts = await Product.find({
+    shop: shopId,
+    branch: toBranch,
+    isDeleted: { $ne: true },
+    isActive: { $ne: false },
+    type: { $ne: 'combo' },
+    ...TRACKED_FILTER,
+    $or: [
+      { $expr: { $lt: ['$stock', '$minStock'] } },
+      { 'variants.0': { $exists: true } },
+    ],
+  }).select('name code clonedFrom unit stock minStock variants hasVariants type trackStock');
+
+  const lows = [];
+  for (const d of destProducts) {
+    if (hasRealVariants(d)) {
+      const threshold = d.minStock > 0 ? d.minStock : VARIANT_LOW_DEFAULT;
+      for (const v of d.variants) {
+        if (v.isActive === false) continue;
+        if ((v.stock || 0) < threshold) lows.push({ dest: d, destVariant: v, threshold, destStock: v.stock || 0 });
+      }
+    } else if ((d.minStock || 0) > 0 && (d.stock || 0) < d.minStock) {
+      lows.push({ dest: d, destVariant: null, threshold: d.minStock, destStock: d.stock || 0 });
+    }
+  }
+  if (lows.length === 0) return { suggestions: [], total: 0 };
+
+  // Walk back from each low destination shelf to THIS branch's copy. The
+  // matching rule is symmetric (see branchClone.util).
+  const uniqueDest = [...new Map(lows.map((l) => [String(l.dest._id), l.dest])).values()];
+  const sources = await findCounterpartsBatch(uniqueDest, shopId, fromBranch);
+
+  const suggestions = [];
+  for (const { dest, destVariant, threshold, destStock } of lows) {
+    const src = sources.get(String(dest._id));
+    if (!src || src.isActive === false || src.type === 'combo' || src.trackStock === false) continue;
+
+    let srcVariant = null;
+    if (destVariant) {
+      if (!hasRealVariants(src)) continue;
+      srcVariant = resolveDestinationVariant(src, {
+        variantId: destVariant._id,
+        variantSku: destVariant.sku,
+        variantAttributes: destVariant.attributes,
+      });
+      if (!srcVariant || srcVariant.isActive === false) continue;
+    } else if (hasRealVariants(src)) {
+      continue; // shapes disagree — the create would refuse it anyway
+    }
+
+    const unit = storageUnit(src);
+    const sourceStock = readStock(src, srcVariant?._id || null);
+    // What the source can give without becoming "low" itself, by the SAME
+    // definition the destination was judged by.
+    const reserve = srcVariant
+      ? (src.minStock > 0 ? src.minStock : VARIANT_LOW_DEFAULT)
+      : (src.minStock || 0);
+    const spare = quantize(sourceStock - reserve, unit);
+    const wanted = quantize(threshold * 2 - destStock, unit);
+    const suggested = quantize(Math.min(spare, wanted), unit);
+    if (!(suggested > 0)) continue;
+
+    const attrs = srcVariant?.attributes;
+    suggestions.push({
+      product: src._id,
+      productName: src.name,
+      productCode: src.code,
+      variantId: srcVariant?._id || null,
+      variantSku: srcVariant?.sku || '',
+      variantAttributes: attrs ? (typeof attrs.toObject === 'function' ? attrs.toObject() : attrs) : null,
+      variantLabel: srcVariant ? variantLabel(srcVariant) : '',
+      unit: src.unit || 'piece',
+      sourceStock,
+      destStock,
+      threshold,
+      suggested,
+    });
+  }
+
+  // Emptiest shelf first, relative to what it should hold.
+  suggestions.sort((a, b) => (a.destStock / a.threshold) - (b.destStock / b.threshold));
+  return {
+    suggestions: suggestions.slice(0, SUGGESTION_LIMIT),
+    total: suggestions.length,
+  };
+};
+
+/**
+ * Create a new stock transfer — and, when asked, finish it in the same
+ * transaction.
+ *
+ *   createMissing  clone what the destination does not stock (products.create)
+ *   dispatchNow    approve at once: deduct the source  (stock_transfers.update)
+ *   receiveNow     also receive in full at the destination        (owner only)
+ *
+ * Each flag is `=== true`; absent, the request is the pending transfer it has
+ * always been. The steps reuse `approveTransfer` and `receiveTransfer` inside
+ * this transaction rather than re-implementing either, so a one-step transfer
+ * writes exactly the rows a three-step one does.
  */
 exports.createTransfer = async (data, userId, req = null) => {
   const { shop, fromBranch, toBranch, items, notes } = data;
+  const createMissing = data.createMissing === true;
+  const receiveNow = data.receiveNow === true;
+  const dispatchNow = data.dispatchNow === true || receiveNow;
 
   assertActingBranch(req, fromBranch, 'source');
+
+  if (createMissing && req && !hasPermission(req, 'products', 'create')) {
+    throw createError('গন্তব্য শাখায় পণ্য তৈরি করার অনুমতি আপনার নেই', 403);
+  }
+  if (dispatchNow && req && !hasPermission(req, 'stock_transfers', 'update')) {
+    throw createError('ট্রান্সফার পাঠানোর অনুমতি আপনার নেই', 403);
+  }
+  if (receiveNow && !mayReceiveNow(req)) {
+    throw createError('সরাসরি গ্রহণ শুধু দোকান মালিক করতে পারেন', 403);
+  }
 
   if (fromBranch === toBranch || String(fromBranch) === String(toBranch)) {
     throw createError('উৎস ও গন্তব্য শাখা একই হতে পারবে না', 400);
@@ -439,33 +726,97 @@ exports.createTransfer = async (data, userId, req = null) => {
   // seeded `batches` array survives an approval that takes no batches, then
   // gets replayed at the destination as dated stock nobody dispatched. `unit`
   // is the server's, from the product, never the client's.
+  // The destination is checked HERE, before any stock moves — see
+  // `planDestination`. Read outside the transaction; the receive step re-checks
+  // inside it, so a product deleted in between still fails closed.
+  const plan = await planDestination(items, productMap, shop, toBranch);
+  if (plan.blocked.length > 0) {
+    throw createError(plan.blocked[0].message, 400);
+  }
+  const missingNames = [
+    ...plan.missingProducts.map((p) => p.name),
+    ...plan.missingVariants.map(({ item, variant }) =>
+      `${item.productName || variant.sku} (${variantLabel(variant)})`),
+  ];
+  if (missingNames.length > 0 && !createMissing) {
+    const err = createError(
+      `${nameList(missingNames)} গন্তব্য শাখায় নেই। ওই শাখায় পণ্যটি যোগ করুন, বা তৈরি করে পাঠান।`,
+      409
+    );
+    err.code = 'TRANSFER_MISSING_AT_DESTINATION';
+    throw err;
+  }
+
+  // `variantSku` / `variantAttributes` come from the SOURCE variant when there
+  // is one: receive matches the destination's variant by them, so a client-sent
+  // sku that disagreed would credit a different size.
   const lines = items.map((item) => {
     const product = productMap.get(String(item.product));
+    const srcVariant = variantById(product, item.variantId);
+    const attrs = srcVariant?.attributes;
     return {
       product: item.product,
       productName: item.productName || product.name,
       productCode: item.productCode || product.code,
       variantId: item.variantId || null,
-      variantSku: item.variantSku,
-      variantAttributes: item.variantAttributes,
+      variantSku: srcVariant?.sku || item.variantSku,
+      variantAttributes: attrs
+        ? (typeof attrs.toObject === 'function' ? attrs.toObject() : attrs)
+        : item.variantAttributes,
       unit: product.unit || 'piece',
       quantity: item.quantity,
     };
   });
 
-  const transfer = await StockTransfer.create({
+  const doc = {
     shop, fromBranch, toBranch, items: lines, notes,
     requestedBy: userId,
     status: 'pending',
+  };
+
+  // A plain request writes one document, exactly as it always has — no
+  // transaction is opened for it.
+  const needsCreate = createMissing && missingNames.length > 0;
+  if (!needsCreate && !dispatchNow) {
+    return StockTransfer.create(doc);
+  }
+
+  let cloned = [];
+  let appended = [];
+
+  const transfer = await runInTransaction(async (session) => {
+    if (needsCreate) {
+      cloned = await cloneIntoBranch(plan.missingProducts, toBranch, session);
+      appended = await appendMissingVariants(plan.missingVariants, shop, session);
+    }
+
+    let created = session
+      ? (await StockTransfer.create([doc], { session }))[0]
+      : await StockTransfer.create(doc);
+
+    if (dispatchNow) {
+      created = await exports.approveTransfer(created._id, shop, userId, req, { session });
+    }
+    if (receiveNow) {
+      created = await exports.receiveTransfer(
+        created._id, shop, userId, null, req, { session, skipActingBranch: true }
+      );
+    }
+    return created;
   });
+
+  await attachClonedMedia(shop, cloned, appended);
 
   return transfer;
 };
 
 /**
  * Approve transfer — deduct stock from source branch, set status to in_transit
+ *
+ * `options.session` joins a caller's transaction (createTransfer's one-step
+ * path); without it this is its own atomic unit, as it always was.
  */
-exports.approveTransfer = async (transferId, shopId, userId, req = null) => {
+exports.approveTransfer = async (transferId, shopId, userId, req = null, options = {}) => {
   return runInTransaction(async (session) => {
     const transfer = await StockTransfer.findOne({ _id: transferId, shop: shopId }).session(session);
     if (!transfer) throw createError('ট্রান্সফার পাওয়া যায়নি', 404);
@@ -553,20 +904,24 @@ exports.approveTransfer = async (transferId, shopId, userId, req = null) => {
     await transfer.save({ session });
 
     return transfer;
-  });
+  }, { session: options.session });
 };
 
 /**
  * Receive transfer — add stock to destination branch
+ *
+ * `options.skipActingBranch` is set ONLY by createTransfer's owner-only
+ * `receiveNow` path, which has already checked the owner and the source
+ * branch. The route never passes options, so a request cannot reach it.
  */
-exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req = null) => {
+exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req = null, options = {}) => {
   return runInTransaction(async (session) => {
     // runInTransaction falls back to a null session when the topology can't do
     // transactions, so options are built the same way as in sale/salesReturn.
     const sessionOpt = session ? { session } : {};
     const transfer = await StockTransfer.findOne({ _id: transferId, shop: shopId }).session(session);
     if (!transfer) throw createError('ট্রান্সফার পাওয়া যায়নি', 404);
-    assertActingBranch(req, transfer.toBranch, 'destination');
+    if (!options.skipActingBranch) assertActingBranch(req, transfer.toBranch, 'destination');
     if (transfer.status !== 'in_transit') throw createError('শুধুমাত্র ট্রানজিটে থাকা ট্রান্সফার গ্রহণ করা যায়', 400);
 
     // Two batched reads for the whole transfer: the source products, then the
@@ -707,7 +1062,7 @@ exports.receiveTransfer = async (transferId, shopId, userId, receivedItems, req 
     await transfer.save({ session });
 
     return transfer;
-  });
+  }, { session: options.session });
 };
 
 /**

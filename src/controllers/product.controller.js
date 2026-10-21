@@ -285,6 +285,21 @@ exports.bulkImport = asyncHandler(async (req, res) => {
   });
 });
 
+// অন্য শাখায় কপি — owner only (route). `dryRun: true` counts without writing.
+exports.copyToBranch = asyncHandler(async (req, res) => {
+  const result = await productService.copyProductsToBranch(
+    req.shop._id,
+    req.user._id,
+    req.body || {},
+    req
+  );
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Products copied',
+    messageBn: req.body?.dryRun === true ? 'হিসাব করা হয়েছে' : `${result.copied}টি পণ্য কপি হয়েছে`,
+  });
+});
+
 // Upload product catalog images (supports multiple files via Promise.all)
 exports.uploadProductImages = asyncHandler(async (req, res) => {
   const imageUploadService = require('../services/imageUpload.service');

@@ -200,6 +200,19 @@ function seedSourceProducts(n, stock = 100) {
   return ids;
 }
 
+/**
+ * Give the destination branch its own copy of every source product — same
+ * code, its own stock. createTransfer now refuses a line the destination does
+ * not stock, so a create test that is about something else must seed one.
+ */
+function seedDestinationCopies(sourceIds, stock = 0) {
+  for (const sid of sourceIds) {
+    const src = store.get(String(sid));
+    const id = new mongoose.Types.ObjectId();
+    store.set(String(id), makeProduct({ id, code: src.code, branch: BRANCH_B, stock }));
+  }
+}
+
 function transferDoc(productIds, { status = 'pending', quantity = 10 } = {}) {
   return {
     _id: new mongoose.Types.ObjectId(),
@@ -232,6 +245,7 @@ describe('createTransfer — availability validation', () => {
 
   it('creates the transfer when every line has enough stock', async () => {
     const ids = seedSourceProducts(5, 100);
+    seedDestinationCopies(ids);
     const items = ids.map((pid, i) => ({ product: pid, productName: `P${i}`, quantity: 10 }));
 
     const transfer = await transferService.createTransfer(
@@ -270,6 +284,7 @@ describe('createTransfer — availability validation', () => {
 
   it('reads the catalogue in a bounded number of round trips', async () => {
     const ids = seedSourceProducts(20, 100);
+    seedDestinationCopies(ids);
     const items = ids.map((pid, i) => ({ product: pid, productName: `P${i}`, quantity: 1 }));
 
     roundTrips = 0;
@@ -277,8 +292,9 @@ describe('createTransfer — availability validation', () => {
       { shop: SHOP, fromBranch: BRANCH_A, toBranch: BRANCH_B, items }, USER
     );
 
-    // One read for the whole catalogue + one create. The per-item loop this
-    // replaced issued 20 reads for the same information.
+    // One read for the whole catalogue + one for the destination's copies +
+    // one create. The per-item loop this replaced issued 20 reads for the
+    // first of those alone.
     expect(roundTrips).toBeLessThanOrEqual(3);
   });
 });

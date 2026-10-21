@@ -3491,6 +3491,7 @@ class AdminService {
    */
   async cloneBranchProducts(shopId, sourceBranchId, targetBranchId) {
     const Product = require('../models/Product.model');
+    const { cloneDocFor, attachClonedMedia } = require('../utils/branchClone.util');
     const BATCH = 500;
 
     const sourceBranch = await Branch.findOne({ _id: sourceBranchId, shop: shopId });
@@ -3515,27 +3516,19 @@ class AdminService {
       if (batch.length === 0) break;
       cursorId = batch[batch.length - 1]._id;
 
+      // `keepOnline`: a whole new branch mirrors the old one, as it always has.
       const docs = batch
         .filter((p) => !existingCodes.has(p.code))
-        .map((p) => {
-          const { _id, createdAt, updatedAt, __v, ...rest } = p;
-          return {
-            ...rest,
-            branch: targetBranchId,
-            clonedFrom: p.clonedFrom || p._id,
-            stock: 0,
-            variants: (p.variants || []).map((v) => ({ ...v, stock: 0 })),
-            batches: [],
-            serials: [],
-            totalSold: 0,
-            lastSold: null,
-          };
-        });
+        .map((p) => cloneDocFor(p, targetBranchId, { keepOnline: true }));
 
       if (docs.length > 0) {
-        await Product.insertMany(docs, { ordered: false });
+        const inserted = await Product.insertMany(docs, { ordered: false });
         copied += docs.length;
         docs.forEach((d) => existingCodes.add(d.code));
+        // The copies share the originals' photos. Without their own refCount,
+        // deleting either branch's copy let the reclaim sweep take the other's
+        // images (branchClone.util.attachClonedMedia).
+        await attachClonedMedia(shopId, inserted);
       }
 
       if (batch.length < BATCH) break;
