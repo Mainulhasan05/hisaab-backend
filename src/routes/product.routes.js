@@ -31,6 +31,7 @@ router.get('/stock-transactions', rbacAny([['products', 'view'], ['stock', 'view
 router.post('/bulk-stock', rbacAny([['products', 'update'], ['stock', 'manual_adjust']]), validate(productValidation.bulkUpdateStock), productController.bulkUpdateStock);
 router.post('/bulk-import', rbac('products', 'create'), validate(productValidation.bulkImportProducts), productController.bulkImport);
 // Multi-branch UI is the owner's (CLAUDE.md I-1) — not a permission.
+router.get('/copy-to-branch/candidates', ownerOnly, productController.getCopyCandidates);
 router.post('/copy-to-branch', ownerOnly, productController.copyToBranch);
 // The online catalogue screen's write path. Behind `onlineSelling` — the same
 // capability that puts the online section on the product form — so a shop

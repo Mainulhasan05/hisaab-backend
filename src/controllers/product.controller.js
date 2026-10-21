@@ -285,6 +285,17 @@ exports.bulkImport = asyncHandler(async (req, res) => {
   });
 });
 
+// The picker for অন্য শাখায় কপি: this branch's products, each labelled with
+// what a copy would do. Owner only (route). Read only.
+exports.getCopyCandidates = asyncHandler(async (req, res) => {
+  const result = await productService.getCopyCandidates(req.shop._id, req.query, req);
+  return ApiResponse.success(res, {
+    data: result,
+    message: 'Copy candidates',
+    messageBn: 'পণ্যের তালিকা',
+  });
+});
+
 // অন্য শাখায় কপি — owner only (route). `dryRun: true` counts without writing.
 exports.copyToBranch = asyncHandler(async (req, res) => {
   const result = await productService.copyProductsToBranch(

@@ -52,6 +52,7 @@ const matches = (doc, filter) => Object.entries(filter).every(([k, v]) => {
     if (v.$gt && !(String(doc._id) > String(v.$gt))) return false;
     return true;
   }
+  if (v && typeof v === 'object' && v.$regex) return new RegExp(v.$regex, v.$options).test(doc[k] || '');
   if (v && typeof v === 'object' && v.$in) return v.$in.some((x) => String(x) === String(doc[k]));
   if (v && typeof v === 'object' && v.$ne !== undefined) return doc[k] !== v.$ne;
   return String(doc[k]) === String(v);
@@ -225,5 +226,64 @@ describe('copyProductsToBranch — same name, different code', () => {
     const { dest } = twins();
     await copy({ linkSameName: true, dryRun: true });
     expect(dest.clonedFrom).toBeNull();
+  });
+});
+
+describe('getCopyCandidates — the picker', () => {
+  const pick = (query = {}, r = ownerReq()) =>
+    productService.getCopyCandidates(SHOP, { toBranch: BRANCH_B, ...query }, r);
+
+  it('labels every row with what a copy would do to it', async () => {
+    product({ code: 'RICE', branch: BRANCH_A });
+    product({ code: 'DAL', branch: BRANCH_A });
+    product({ code: 'DAL', branch: BRANCH_B });
+    product({ code: 'MED0127', branch: BRANCH_A, extra: { name: 'ইষ্ট ৫০০ গ্রাম' } });
+    product({ code: 'MTS2297', branch: BRANCH_B, extra: { name: 'ইষ্ট ৫০০ গ্রাম', unit: 'pack' } });
+    product({ code: 'THALI', branch: BRANCH_A, extra: { type: 'combo' } });
+    product({ code: 'OLD', branch: BRANCH_A });
+    product({ code: 'OLD', branch: BRANCH_B, extra: { isDeleted: true } });
+
+    const { items, truncated } = await pick();
+    const by = Object.fromEntries(items.map((i) => [i.code, i]));
+
+    expect(truncated).toBe(false);
+    expect(by.RICE.status).toBe('missing');
+    expect(by.DAL).toMatchObject({ status: 'exists', otherCode: 'DAL' });
+    expect(by.MED0127).toMatchObject({ status: 'sameName', otherCode: 'MTS2297', otherUnit: 'pack' });
+    expect(by.THALI.status).toBe('combo');
+    expect(by.OLD.status).toBe('conflict');
+    // Only this branch's products are offered.
+    expect(items.every((i) => !['MTS2297'].includes(i.code))).toBe(true);
+  });
+
+  it('searches by name or code', async () => {
+    product({ code: 'RICE', branch: BRANCH_A, extra: { name: 'চাল মিনিকেট' } });
+    product({ code: 'SOAP', branch: BRANCH_A, extra: { name: 'সাবান' } });
+
+    expect((await pick({ search: 'মিনি' })).items.map((i) => i.code)).toEqual(['RICE']);
+    expect((await pick({ search: 'soap' })).items.map((i) => i.code)).toEqual(['SOAP']);
+  });
+
+  it('copying the ticked ids does exactly what the labels said', async () => {
+    const rice = product({ code: 'RICE', branch: BRANCH_A });
+    product({ code: 'SOAP', branch: BRANCH_A });
+    const yeast = product({ code: 'MED0127', branch: BRANCH_A, extra: { name: 'ইষ্ট ৫০০ গ্রাম' } });
+    const destYeast = product({ code: 'MTS2297', branch: BRANCH_B, extra: { name: 'ইষ্ট ৫০০ গ্রাম' } });
+    jest.spyOn(Product, 'bulkWrite').mockImplementation((ops) => {
+      for (const { updateOne } of ops) products.get(String(updateOne.filter._id)).clonedFrom = updateOne.update.$set.clonedFrom;
+      return Promise.resolve({ matchedCount: ops.length });
+    });
+
+    const out = await copy({ productIds: [rice._id, yeast._id], linkSameName: true });
+
+    expect(out).toMatchObject({ copied: 1, linked: 1 });
+    expect(inBranch(BRANCH_B).map((p) => p.code).sort()).toEqual(['MTS2297', 'RICE']); // SOAP not ticked
+    expect(String(destYeast.clonedFrom)).toBe(String(yeast._id));
+  });
+
+  it('the picker route is owner-only too', () => {
+    const layer = productRoutes.stack.find((l) => l.route?.path === '/copy-to-branch/candidates');
+    expect(layer.route.methods.get).toBe(true);
+    expect(layer.route.stack.map((s) => s.handle)).toContain(ownerOnly);
   });
 });

@@ -2684,27 +2684,133 @@ class ProductService {
    * @param {Object} payload `{ toBranch, categoryId?, productIds?, dryRun? }`
    * @returns {{ toCopy, copied, alreadyThere, combos, conflicts, conflictNames }}
    */
-  async copyProductsToBranch(shopId, userId, payload = {}, req = null) {
+  /**
+   * The source branch and the validated destination for a copy — shared by
+   * the copy itself and the product picker that precedes it.
+   */
+  async _copyBranches(shopId, toBranch, req) {
     const Branch = require('../models/Branch.model');
-    const {
-      cloneIntoBranch, attachClonedMedia, findCounterpartsBatch, findNameMatches, linkToSource,
-    } = require('../utils/branchClone.util');
-    const BATCH = 500;
-    const linkSameName = payload.linkSameName === true;
-
     if (!req?.shop?.multiBranchEnabled) {
       throw new AppError('Multi-branch is not enabled', 'এই দোকানে একাধিক শাখা চালু নেই', 400);
     }
     const fromBranch = requireBranch(req);
-    const { toBranch, categoryId, productIds } = payload;
-    const dryRun = payload.dryRun === true;
-
     if (!toBranch) throw new AppError('Destination required', 'কোন শাখায় কপি করবেন তা বাছাই করুন', 400);
     if (String(toBranch) === String(fromBranch)) {
       throw new AppError('Same branch', 'একই শাখায় কপি করা যায় না', 400);
     }
     const dest = await Branch.validateBranchOwnership(toBranch, shopId);
     if (!dest) throw new AppError('Branch not found', 'গন্তব্য শাখা পাওয়া যায়নি', 404);
+    return { fromBranch, toBranch };
+  }
+
+  /**
+   * Sort source products by what a copy would do with each — ONE rule, used
+   * by both the picker (to label rows) and the copy (to act), so the list a
+   * shopkeeper ticks from can never promise what the copy then does not do.
+   *
+   *   existing   a counterpart by code/lineage — left alone
+   *   combos     not copyable (components point at this branch)
+   *   sameName   same name, other code — linked, never copied
+   *   conflicts  a deleted destination row still holds the code
+   *   missing    copied
+   */
+  async _classifyForCopy(rows, shopId, toBranch) {
+    const { findCounterpartsBatch, findNameMatches } = require('../utils/branchClone.util');
+
+    const existing = await findCounterpartsBatch(rows, shopId, toBranch);
+    const combos = [];
+    const candidates = [];
+    for (const p of rows) {
+      if (existing.has(String(p._id))) continue;
+      if (isCombo(p)) { combos.push(p); continue; }
+      candidates.push(p);
+    }
+
+    const nameHits = await findNameMatches(candidates, shopId, toBranch);
+    const sameName = [];
+    let rest = [];
+    for (const p of candidates) {
+      const hit = nameHits.get(String(p._id));
+      if (hit) sameName.push({ source: p, target: hit });
+      else rest.push(p);
+    }
+
+    const conflicts = [];
+    if (rest.length > 0) {
+      const held = new Set((await Product.find({
+        shop: shopId, branch: toBranch, code: { $in: rest.map((p) => p.code) },
+      }).select('code').lean()).map((p) => p.code));
+      rest = rest.filter((p) => {
+        if (!held.has(p.code)) return true;
+        conflicts.push(p);
+        return false;
+      });
+    }
+
+    return { existing, combos, sameName, conflicts, missing: rest };
+  }
+
+  /**
+   * The picker for অন্য শাখায় কপি: this branch's products, searchable, each
+   * labelled with what a copy would do — so the owner ticks exactly the items
+   * the other branch should carry, instead of all-or-a-category.
+   *
+   * Capped at PICKER_LIMIT rows (by name); `truncated` says when a search
+   * should narrow it. Read only.
+   */
+  async getCopyCandidates(shopId, query = {}, req = null) {
+    const PICKER_LIMIT = 1000;
+    const { fromBranch, toBranch } = await this._copyBranches(shopId, query.toBranch, req);
+
+    const filter = { shop: shopId, branch: fromBranch, isDeleted: { $ne: true } };
+    const term = String(query.search || '').trim();
+    if (term) {
+      const rx = { $regex: escapeRegex(term), $options: 'i' };
+      filter.$or = [{ name: rx }, { code: rx }, { barcode: rx }];
+    }
+
+    const rows = await Product.find(filter)
+      .select('name code unit stock type clonedFrom variants.sku hasVariants trackStock')
+      .sort({ name: 1 })
+      .limit(PICKER_LIMIT + 1)
+      .lean();
+    const truncated = rows.length > PICKER_LIMIT;
+    const page = rows.slice(0, PICKER_LIMIT);
+
+    const c = await this._classifyForCopy(page, shopId, toBranch);
+    const status = new Map();
+    for (const p of page) {
+      const cp = c.existing.get(String(p._id));
+      if (cp) status.set(String(p._id), { status: 'exists', otherCode: cp.code });
+    }
+    c.combos.forEach((p) => status.set(String(p._id), { status: 'combo' }));
+    c.sameName.forEach(({ source, target }) => status.set(String(source._id), {
+      status: 'sameName', otherCode: target.code, otherUnit: target.unit || 'piece',
+    }));
+    c.conflicts.forEach((p) => status.set(String(p._id), { status: 'conflict' }));
+    c.missing.forEach((p) => status.set(String(p._id), { status: 'missing' }));
+
+    return {
+      items: page.map((p) => ({
+        _id: p._id,
+        name: p.name,
+        code: p.code,
+        unit: p.unit || 'piece',
+        stock: p.stock || 0,
+        variantCount: Array.isArray(p.variants) ? p.variants.length : 0,
+        ...status.get(String(p._id)),
+      })),
+      truncated,
+    };
+  }
+
+  async copyProductsToBranch(shopId, userId, payload = {}, req = null) {
+    const { cloneIntoBranch, attachClonedMedia, linkToSource } = require('../utils/branchClone.util');
+    const BATCH = 500;
+    const linkSameName = payload.linkSameName === true;
+    const { categoryId, productIds } = payload;
+    const dryRun = payload.dryRun === true;
+    const { fromBranch, toBranch } = await this._copyBranches(shopId, payload.toBranch, req);
 
     const base = { shop: shopId, branch: fromBranch, isDeleted: { $ne: true } };
     if (categoryId) base.category = categoryId;
@@ -2728,56 +2834,37 @@ class ProductService {
       if (batch.length === 0) break;
       cursorId = batch[batch.length - 1]._id;
 
-      const counterparts = await findCounterpartsBatch(batch, shopId, toBranch);
-      const candidates = [];
-      for (const p of batch) {
-        if (counterparts.has(String(p._id))) { result.alreadyThere++; continue; }
-        if (isCombo(p)) { result.combos++; continue; }
-        candidates.push(p);
-      }
+      const c = await this._classifyForCopy(batch, shopId, toBranch);
+      result.alreadyThere += c.existing.size;
+      result.combos += c.combos.length;
 
       // Same name, different code — the destination already has this item,
       // typed in by hand under a random code. NEVER copied (that is how a
       // branch ends up with two "ইষ্ট ৫০০ গ্রাম"); linked when asked, so
       // transfers match it from now on. Its code, price and stock stay.
-      const nameHits = await findNameMatches(candidates, shopId, toBranch);
-      if (nameHits.size > 0) {
-        const pairs = [];
-        for (const p of candidates) {
-          const hit = nameHits.get(String(p._id));
-          if (!hit) continue;
-          result.sameName++;
-          if (result.sameNameExamples.length < 10) {
-            result.sameNameExamples.push({ name: p.name, code: p.code, otherCode: hit.code });
-          }
-          pairs.push({ source: p, target: hit });
-        }
-        if (linkSameName && !dryRun && pairs.length > 0) {
-          // A target other copies already point at cannot be re-pointed
-          // (`linkToSource` refuses the whole set) — leave those out by name.
-          const roots = new Set((await Product.find({
-            shop: shopId, clonedFrom: { $in: pairs.map((x) => x.target._id) },
-          }).select('clonedFrom').lean()).map((r) => String(r.clonedFrom)));
-          const linkable = pairs.filter((x) => !roots.has(String(x.target._id)));
-          result.linked += await linkToSource(linkable, shopId);
-        }
+      result.sameName += c.sameName.length;
+      for (const { source, target } of c.sameName) {
+        if (result.sameNameExamples.length >= 10) break;
+        result.sameNameExamples.push({ name: source.name, code: source.code, otherCode: target.code });
+      }
+      if (linkSameName && !dryRun && c.sameName.length > 0) {
+        // A target other copies already point at cannot be re-pointed
+        // (`linkToSource` refuses the whole set) — leave those out.
+        const roots = new Set((await Product.find({
+          shop: shopId, clonedFrom: { $in: c.sameName.map((x) => x.target._id) },
+        }).select('clonedFrom').lean()).map((r) => String(r.clonedFrom)));
+        const linkable = c.sameName.filter((x) => !roots.has(String(x.target._id)));
+        result.linked += await linkToSource(linkable, shopId);
       }
 
       // A code the destination still holds on a DELETED row would fail the
       // whole insert on the unique index. Found up front, named, skipped.
-      let missing = candidates.filter((p) => !nameHits.has(String(p._id)));
-      if (missing.length > 0) {
-        const held = new Set((await Product.find({
-          shop: shopId, branch: toBranch, code: { $in: missing.map((p) => p.code) },
-        }).select('code').lean()).map((p) => p.code));
-        missing = missing.filter((p) => {
-          if (!held.has(p.code)) return true;
-          result.conflicts++;
-          if (result.conflictNames.length < 10) result.conflictNames.push(p.name);
-          return false;
-        });
+      result.conflicts += c.conflicts.length;
+      for (const p of c.conflicts) {
+        if (result.conflictNames.length < 10) result.conflictNames.push(p.name);
       }
 
+      const { missing } = c;
       result.toCopy += missing.length;
       if (!dryRun && missing.length > 0) {
         const docs = await cloneIntoBranch(missing, toBranch);
