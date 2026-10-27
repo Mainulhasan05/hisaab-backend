@@ -46,6 +46,8 @@ const {
 } = require('../utils/purchasePrice.util');
 const { toMoney } = require('../utils/invoiceMath.util');
 const { LIVE_PAYMENT } = require('../utils/paymentDate.util');
+const { buildPaymentReceiptNo } = require('../utils/receiptNo.util');
+const { ACCOUNT_DISPLAY_FIELDS, accountDisplay } = require('../utils/accountDisplay.util');
 const { computePurchaseTotals } = require('../utils/purchaseMath.util');
 const { normalizeWholesalePrice } = require('../utils/pricing.util');
 const { hasFeature } = require('../utils/features.util');
@@ -2272,6 +2274,20 @@ class PurchaseService {
         ? (await paymentAccountService.assertUsableAccount(shopId, paymentData.account, req, method))._id
         : await paymentAccountService.resolveAccountForMethod(req?.shop || { _id: shopId }, method, req);
 
+      // The vendor, read BEFORE any bill moves: its payable on the bill's
+      // branch book is the voucher's আগের বাকি, and the rollup further down
+      // moves this same document. Null for a supplier-less purchase — there is
+      // no খাতা to state, so the voucher prints the amount alone.
+      const supplierDoc = purchase.supplier
+        ? await Supplier.findById(purchase.supplier).session(session || null)
+        : null;
+      const payableBefore = supplierDoc
+        ? (await supplierSettlement.readPayable(
+          { shopId, supplier: supplierDoc, branchId: purchase.branch || null },
+          session
+        )).totalDue
+        : null;
+
       // Apply each bill's slice. `paid` is set explicitly and never past
       // `totalAmount` (each slice is capped at that bill's due above), so the
       // pre('save') clamp has nothing to fight — the hook only re-derives
@@ -2289,7 +2305,16 @@ class PurchaseService {
       // `allocations` — the mirror of `branchAllocation` on the customer side.
       // Empty for a plain one-bill payment, so that row stays byte-identical
       // to every row written before F-4 existed.
+      //
+      // রসিদ নং minted here exactly as `settleSupplierDue` mints it — id first,
+      // so the number is stamped in the same write. Without it a bill paid from
+      // its own screen was the one supplier payment with no slip to print.
+      // `paidAt` is set rather than defaulted so the number's date and the
+      // row's date are the same instant.
+      const paymentId = new mongoose.Types.ObjectId();
+      const paidAt = new Date();
       const [payment] = await Payment.create([{
+        _id: paymentId,
         shop: shopId,
         branch: purchase.branch || null,
         purchase: purchaseId,
@@ -2301,6 +2326,14 @@ class PurchaseService {
         type: 'purchase_payment',
         notes,
         receivedBy: userId,
+        paidAt,
+        receiptNo: buildPaymentReceiptNo(paymentId, paidAt),
+        ...(payableBefore !== null
+          ? {
+            dueBefore: payableBefore,
+            dueAfter: quantizeMoney(Math.max(0, payableBefore - amount)),
+          }
+          : {}),
         allocations: olderAllocations.length > 0
           ? [
               ...(primaryApplied > 0 ? [{ purchase: purchase._id, amount: primaryApplied }] : []),
@@ -2327,8 +2360,8 @@ class PurchaseService {
         // `$inc: { totalDue: -amount }` no longer says enough: the payable and
         // the prepayment are two halves of one net, and only the components can
         // decide which half this money lands in. Read, move `totalPaid`,
-        // re-derive — inside the transaction that wrote the payment.
-        const supplierDoc = await Supplier.findById(purchase.supplier).session(session || null);
+        // re-derive — inside the transaction that wrote the payment. The
+        // document is the one read above, before the bills moved.
         if (supplierDoc) {
           Supplier.backfillTotalPaid(supplierDoc);
           supplierDoc.totalPaid = quantizeMoney(supplierDoc.totalPaid + amount);
@@ -2419,10 +2452,14 @@ class PurchaseService {
     // drawer got back — it is not part of what was paid on this bill.
     const payments = await Payment.find({ shop: shopId, purchase: purchaseId, ...LIVE_PAYMENT })
       .populate('receivedBy', 'name')
+      // WHICH account the money left, not only by what method — a shop with
+      // two bank accounts reads `bank` and still cannot say which one. Names
+      // only: a balance on a bill's screen is `accounts.view` territory.
+      .populate('account', ACCOUNT_DISPLAY_FIELDS)
       .sort({ createdAt: -1 })
       .lean();
 
-    return payments;
+    return payments.map((p) => ({ ...p, account: accountDisplay(p.account) }));
   }
 }
 

@@ -6,11 +6,17 @@ const SupplierDueAdjustment = require('../models/SupplierDueAdjustment.model');
 // age of a debt lives; `Supplier.totalDue` is a rollup and carries no dates.
 const Purchase = require('../models/Purchase.model');
 const Payment = require('../models/Payment.model');
+const PaymentAccount = require('../models/PaymentAccount.model');
 const supplierSettlement = require('./supplierSettlement.service');
-const { PAYMENT_TYPES } = require('../config/constants');
+const { PAYMENT_TYPES, PAYMENT_METHODS } = require('../config/constants');
 const AuditLog = require('../models/AuditLog.model');
 const { AppError } = require('../middleware/error.middleware');
-const { requireBranch, branchMatch } = require('../utils/branchScope.util');
+const { requireBranch, branchMatch, branchFilter } = require('../utils/branchScope.util');
+const {
+  ACCOUNT_DISPLAY_FIELDS,
+  ACCOUNT_DISPLAY_PROJECT,
+  accountDisplay,
+} = require('../utils/accountDisplay.util');
 const { paidAtMatch, LIVE_PAYMENT } = require('../utils/paymentDate.util');
 const { endOfBangladeshDay } = require('../utils/bdTime.util');
 const { runInTransaction } = require('../utils/transaction.util');
@@ -26,6 +32,82 @@ const escapeRegex = (value) => String(value).trim().replace(/[.*+?^${}()|[\]\\]/
  * without the other understates what the shop spent.
  */
 const MONEY_OUT_TYPES = [PAYMENT_TYPES.PURCHASE_PAYMENT, PAYMENT_TYPES.SUPPLIER_ADVANCE];
+
+/**
+ * A register row's money, split by where it left from.
+ *
+ * A Payment row is one leg — one method, one account. A bill paid at the
+ * counter may be several (৳৫,০০০ ক্যাশ + ৳১০,০০০ ব্যাংক) on `Purchase.payments[]`,
+ * and attributing the whole bill to its largest leg's method — which is all
+ * `paymentMethod` records — books ৳১৫,০০০ against the bank. So every row,
+ * from either arm, carries `legs`, and the account filter and the per-account
+ * totals read legs rather than rows.
+ *
+ * The bill arm falls back to ONE leg on `paymentMethod` whenever the legs do
+ * not add up to the counter payment: bills from before fund accounts carry
+ * `paid` alone, and a set of legs that disagrees with the row would make the
+ * per-account totals disagree with the register total.
+ */
+const PAYMENT_ARM_LEGS = {
+  $addFields: {
+    legs: [{ method: '$method', account: { $ifNull: ['$account', null] }, amount: '$amount' }],
+  },
+};
+
+const BILL_ARM_LEGS = {
+  $cond: [
+    {
+      $and: [
+        { $gt: [{ $size: { $ifNull: ['$payments', []] } }, 0] },
+        {
+          $lt: [
+            { $abs: { $subtract: [{ $sum: '$payments.amount' }, '$atPurchaseAmount'] } },
+            0.01,
+          ],
+        },
+      ],
+    },
+    {
+      $map: {
+        input: '$payments',
+        as: 'l',
+        in: {
+          method: '$$l.method',
+          account: { $ifNull: ['$$l.account', null] },
+          amount: '$$l.amount',
+          reference: '$$l.reference',
+        },
+      },
+    },
+    [{ method: '$paymentMethod', account: null, amount: '$atPurchaseAmount' }],
+  ],
+};
+
+/**
+ * `?account=` and `?method=` from the query, validated.
+ *
+ * The account id is CAST here, once, because both arms hand it to a `$match`
+ * and a `$filter` — and neither casts (I-3). A string id would match no leg and
+ * the register would read ৳০ for the account the owner is looking at, with
+ * nothing on the screen to say the filter was the problem.
+ */
+function parseLegFilter({ account, method } = {}) {
+  let accountOid = null;
+  if (account) {
+    if (!mongoose.Types.ObjectId.isValid(String(account))) {
+      throw new AppError('Invalid account', 'অ্যাকাউন্ট সঠিক নয়', 400);
+    }
+    accountOid = new mongoose.Types.ObjectId(String(account));
+  }
+  let methodWanted = null;
+  if (method) {
+    if (!Object.values(PAYMENT_METHODS).includes(String(method))) {
+      throw new AppError('Invalid payment method', 'পেমেন্ট পদ্ধতি সঠিক নয়', 400);
+    }
+    methodWanted = String(method);
+  }
+  return { accountOid, methodWanted, active: Boolean(accountOid || methodWanted) };
+}
 
 /** Money never travels as a string. Rejects NaN/Infinity/negative-zero noise. */
 const toAmount = (value) => {
@@ -740,6 +822,7 @@ class SupplierService {
       includeCancelled = true,
       types,
     } = options;
+    const legFilter = parseLegFilter(options);
 
     const requested = String(types || '')
       .split(',')
@@ -752,6 +835,10 @@ class SupplierService {
       type: { $in: wanted },
     });
     if (!includeCancelled) Object.assign(match, LIVE_PAYMENT);
+    // A Payment row is a single leg, so the filter narrows it at the index
+    // rather than after the union.
+    if (legFilter.accountOid) match.account = legFilter.accountOid;
+    if (legFilter.methodWanted) match.method = legFilter.methodWanted;
 
     // Collected rather than assigned — see the customer register's note: both
     // the date predicate and the search are `$or`s, and assigning the second
@@ -785,6 +872,10 @@ class SupplierService {
       const searchOr = [
         ...(suppliers.length ? [{ supplier: { $in: searchSupplierIds } }] : []),
         ...(bills.length ? [{ purchase: { $in: bills.map((x) => x._id) } }] : []),
+        // The number printed on the voucher — what a vendor reads back when
+        // they ring to ask about a payment. Same question the আদায় register
+        // answers on the customer side.
+        { receiptNo: rx },
       ];
       // An `$or: []` is a Mongo error, and a search that matched no vendor and
       // no bill must return nothing rather than everything.
@@ -811,7 +902,7 @@ class SupplierService {
      * Only when the caller wants `purchase_payment` rows — an অগ্রিম-only view
      * has no business listing bills.
      */
-    const pipeline = [{ $match: match }];
+    const pipeline = [{ $match: match }, PAYMENT_ARM_LEGS];
     if (wanted.includes(PAYMENT_TYPES.PURCHASE_PAYMENT)) {
       const shopOid = new mongoose.Types.ObjectId(String(shopId));
       const billMatch = branchMatch(req || {}, { shop: shopOid, paid: { $gt: 0 } });
@@ -823,6 +914,20 @@ class SupplierService {
           ...(searchSupplierIds.length ? [{ supplier: { $in: searchSupplierIds } }] : []),
         ];
       }
+      // A coarse pre-filter only — it keeps the scan to bills that COULD have
+      // a matching leg. Which part of a split bill actually matches is decided
+      // after the union, on `legs`. `$and`, because `$or` above is the search.
+      const legClauses = [];
+      if (legFilter.accountOid) legClauses.push({ 'payments.account': legFilter.accountOid });
+      if (legFilter.methodWanted) {
+        legClauses.push({
+          $or: [
+            { 'payments.method': legFilter.methodWanted },
+            { paymentMethod: legFilter.methodWanted },
+          ],
+        });
+      }
+      if (legClauses.length) billMatch.$and = legClauses;
 
       pipeline.push({
         $unionWith: {
@@ -850,11 +955,33 @@ class SupplierService {
                 branch: 1,
                 notes: 1,
                 receiptNo: { $literal: null },
+                legs: BILL_ARM_LEGS,
               },
             },
           ],
         },
       });
+    }
+
+    /**
+     * Under an account or method filter a row reports only the part that
+     * moved through it.
+     *
+     * A ৳১৫,০০০ bill paid ৳৫,০০০ ক্যাশ + ৳১০,০০০ ব্যাংক is ৳১০,০০০ of the bank's
+     * story, not ৳১৫,০০০ — and the register total under that filter is what the
+     * owner holds up against the bank statement. `rowAmount` keeps the whole so
+     * the screen can say "মোট ৳১৫,০০০" beside it. A Payment row is one leg, so
+     * for it the two are always equal.
+     */
+    if (legFilter.active) {
+      const conds = [];
+      if (legFilter.accountOid) conds.push({ $eq: ['$$l.account', legFilter.accountOid] });
+      if (legFilter.methodWanted) conds.push({ $eq: ['$$l.method', legFilter.methodWanted] });
+      pipeline.push(
+        { $addFields: { legs: { $filter: { input: '$legs', as: 'l', cond: { $and: conds } } } } },
+        { $addFields: { rowAmount: '$amount', amount: { $round: [{ $sum: '$legs.amount' }, 2] } } },
+        { $match: { amount: { $gt: 0 } } }
+      );
     }
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
@@ -917,8 +1044,38 @@ class SupplierService {
                 as: 'recordedByDoc',
               },
             },
+            // Which account each leg left — names, never balances (see
+            // accountDisplay.util). Empty for a shop without fund accounts.
+            {
+              $lookup: {
+                from: PaymentAccount.collection.name,
+                localField: 'legs.account',
+                foreignField: '_id',
+                pipeline: [{ $project: ACCOUNT_DISPLAY_PROJECT }],
+                as: 'accountDocs',
+              },
+            },
             {
               $addFields: {
+                legs: {
+                  $map: {
+                    input: { $ifNull: ['$legs', []] },
+                    as: 'l',
+                    in: {
+                      $mergeObjects: ['$$l', {
+                        accountDoc: {
+                          $first: {
+                            $filter: {
+                              input: '$accountDocs',
+                              as: 'd',
+                              cond: { $eq: ['$$d._id', '$$l.account'] },
+                            },
+                          },
+                        },
+                      }],
+                    },
+                  },
+                },
                 supplier: { $first: '$supplierDoc' },
                 invoiceNo: { $first: '$purchaseDoc.invoiceNo' },
                 recordedBy: { $first: '$recordedByDoc' },
@@ -960,12 +1117,52 @@ class SupplierService {
               // the same vocabulary `getSupplierPayments` hands the drill-in.
               $addFields: { againstOpeningDue: { $eq: ['$invoiceNo', null] } },
             },
-            { $project: { supplierDoc: 0, purchaseDoc: 0, recordedByDoc: 0, allocationDocs: 0 } },
+            {
+              $project: {
+                supplierDoc: 0, purchaseDoc: 0, recordedByDoc: 0, allocationDocs: 0, accountDocs: 0,
+              },
+            },
           ],
           total: [{ $count: 'n' }],
           live: [
             { $match: LIVE_PAYMENT },
             { $group: { _id: '$type', amount: { $sum: '$amount' }, count: { $sum: 1 } } },
+          ],
+          /**
+           * কোন অ্যাকাউন্ট থেকে কত — the whole filtered range, not the page.
+           *
+           * Per LEG, so a split bill lands in both its accounts. Σ of these
+           * equals `summary.paid` by construction: every row's legs sum to its
+           * `amount` (see `BILL_ARM_LEGS`), and under a filter both were cut
+           * to the same matching legs.
+           */
+          byAccount: [
+            { $match: LIVE_PAYMENT },
+            { $unwind: '$legs' },
+            {
+              $group: {
+                _id: { account: '$legs.account', method: '$legs.method' },
+                amount: { $sum: '$legs.amount' },
+              },
+            },
+            {
+              $lookup: {
+                from: PaymentAccount.collection.name,
+                localField: '_id.account',
+                foreignField: '_id',
+                pipeline: [{ $project: ACCOUNT_DISPLAY_PROJECT }],
+                as: 'accountDoc',
+              },
+            },
+            {
+              $project: {
+                _id: 0,
+                method: '$_id.method',
+                amount: { $round: ['$amount', 2] },
+                accountDoc: { $first: '$accountDoc' },
+              },
+            },
+            { $sort: { amount: -1 } },
           ],
         },
       },
@@ -981,8 +1178,23 @@ class SupplierService {
       liveCount += group.count;
     }
 
+    // The account number is cut to its tail HERE, before anything leaves the
+    // server — a raw `accountNumber` on the wire is one CSV export away from a
+    // vendor's inbox.
+    const payments = (faceted?.rows || []).map((row) => ({
+      ...row,
+      legs: (row.legs || []).map(({ accountDoc, ...leg }) => ({
+        ...leg,
+        account: accountDisplay(accountDoc),
+      })),
+    }));
+    const byAccount = (faceted?.byAccount || []).map(({ accountDoc, ...group }) => ({
+      ...group,
+      account: accountDisplay(accountDoc),
+    }));
+
     return {
-      payments: faceted?.rows || [],
+      payments,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -994,7 +1206,133 @@ class SupplierService {
         count: liveCount,
         cancelled: total - liveCount,
         byType,
+        byAccount,
       },
+    };
+  }
+
+  /**
+   * One supplier payment voucher — টাকা প্রদানের রসিদ — ready to print.
+   *
+   * ── Why it reads the whole receipt group ────────────────────────────────
+   *
+   * One পরিশোধ can be written as up to three rows: the half that cleared the
+   * carried-in খাতা, the half that landed on bills, and an অগ্রিম surplus
+   * (`settleSupplierDue`'s header says why they cannot be one row). The vendor
+   * was handed ONE sum, so the slip is one slip: it lists each part with its
+   * own রসিদ নং, and leads with the first. Reprinting from ANY row of the
+   * group returns the same voucher, so the paper never depends on which line
+   * of the register someone tapped.
+   *
+   * Parts are voided one row at a time (`voidSupplierPayment`), so each part
+   * carries its own `voided`; the voucher is VOID only when every part is.
+   *
+   * Money paid at the counter on the bill itself has no Payment row and no
+   * number — the purchase invoice is its paper, as the register already says.
+   */
+  async getSupplierPaymentReceipt(shopId, paymentId, req = null) {
+    if (!mongoose.Types.ObjectId.isValid(String(paymentId))) {
+      throw new AppError('Payment not found', 'পেমেন্ট পাওয়া যায়নি', 404);
+    }
+
+    // Branch-scoped (I-2): a branch reprints its own vouchers, and an owner in
+    // All Branches reprints any.
+    // cancelled-inclusive: a voided payment still prints, stamped বাতিলকৃত —
+    // the vendor is holding the original and that copy is the reply.
+    const anchor = await Payment.findOne(
+      branchFilter(req || {}, { _id: paymentId, shop: shopId, type: { $in: MONEY_OUT_TYPES } }),
+      'receiptGroup'
+    ).lean();
+    if (!anchor) {
+      throw new AppError('Payment not found', 'পেমেন্ট পাওয়া যায়নি', 404);
+    }
+
+    // cancelled-inclusive: each part's void is shown on the slip, not hidden.
+    const rows = await Payment.find(branchFilter(req || {}, {
+      shop: shopId,
+      type: { $in: MONEY_OUT_TYPES },
+      ...(anchor.receiptGroup ? { receiptGroup: anchor.receiptGroup } : { _id: anchor._id }),
+    }))
+      // Ids are minted in allocation order — খাতা, bills, অগ্রিম — so `_id`
+      // is the order the money was applied in.
+      .sort({ _id: 1 })
+      .populate('account', ACCOUNT_DISPLAY_FIELDS)
+      .populate('receivedBy', 'name')
+      .populate('cancelledBy', 'name')
+      .lean();
+    const lead = rows[0];
+
+    const billIds = new Set();
+    for (const r of rows) {
+      if (r.purchase) billIds.add(String(r.purchase));
+      for (const a of r.allocations || []) if (a.purchase) billIds.add(String(a.purchase));
+    }
+    const bills = billIds.size
+      ? await Purchase.find({ shop: shopId, _id: { $in: [...billIds] } }, 'invoiceNo supplier').lean()
+      : [];
+    const billById = new Map(bills.map((b) => [String(b._id), b]));
+
+    // The vendor: named on the row for খাতা and অগ্রিম money, reached through
+    // the bill for a payment recorded from a purchase screen.
+    const supplierId = lead.supplier
+      || rows.map((r) => billById.get(String(r.purchase))?.supplier).find(Boolean)
+      || null;
+    const supplier = supplierId
+      ? await Supplier.findOne({ _id: supplierId, shop: shopId }, 'name phone companyName address').lean()
+      : null;
+
+    const parts = rows.map((r) => {
+      const slices = (r.allocations || []).length > 0
+        ? r.allocations
+        : (r.purchase ? [{ purchase: r.purchase, amount: r.amount }] : []);
+      return {
+        _id: r._id,
+        receiptNo: r.receiptNo || '',
+        type: r.type,
+        // advance → অগ্রিম · bills → named চালান · opening → পূর্বের বাকি
+        kind: r.type === PAYMENT_TYPES.SUPPLIER_ADVANCE ? 'advance' : (slices.length ? 'bills' : 'opening'),
+        amount: quantizeMoney(r.amount || 0),
+        bills: slices.map((s) => ({
+          purchase: s.purchase,
+          invoiceNo: billById.get(String(s.purchase))?.invoiceNo || null,
+          amount: quantizeMoney(s.amount || 0),
+        })),
+        voided: r.status === 'cancelled',
+        cancelledAt: r.cancelledAt || null,
+        cancelledBy: r.cancelledBy?.name || null,
+        cancelReason: r.cancelReason || '',
+      };
+    });
+
+    const live = parts.filter((p) => !p.voided);
+
+    return {
+      receiptNo: lead.receiptNo || '',
+      paidAt: lead.paidAt || lead.createdAt,
+      method: lead.method,
+      account: accountDisplay(lead.account),
+      reference: lead.reference || '',
+      transactionId: lead.transactionId || '',
+      notes: lead.notes || '',
+      recordedBy: lead.receivedBy?.name || null,
+      supplier: supplier
+        ? {
+          _id: supplier._id,
+          name: supplier.name,
+          phone: supplier.phone || '',
+          companyName: supplier.companyName || '',
+          address: supplier.address || '',
+        }
+        : null,
+      parts,
+      amount: quantizeMoney(live.reduce((sum, p) => sum + p.amount, 0)),
+      totalAmount: quantizeMoney(parts.reduce((sum, p) => sum + p.amount, 0)),
+      voided: live.length === 0,
+      partiallyVoided: live.length > 0 && live.length < parts.length,
+      // `null`, never 0, when the row predates the snapshot — a reader must be
+      // able to tell "cleared" from "unknown" (Payment.dueBefore).
+      dueBefore: lead.dueBefore ?? null,
+      dueAfter: lead.dueAfter ?? null,
     };
   }
 
@@ -1024,6 +1362,7 @@ class SupplierService {
       .sort({ paidAt: -1, createdAt: -1 })
       .limit(limit)
       .populate('receivedBy', 'name')
+      .populate('account', ACCOUNT_DISPLAY_FIELDS)
       .lean();
 
     /**
@@ -1066,6 +1405,9 @@ class SupplierService {
 
     return merged.map((r) => ({
       ...r,
+      // A bill-arm row has no `account` key at all; a Payment row's is
+      // populated above and cut to its display form here.
+      ...('account' in r ? { account: accountDisplay(r.account) } : {}),
       voided: r.status === 'cancelled',
       // What it settled, in the shopkeeper's vocabulary: a row with no bill
       // behind it paid down the carried-in খাতা.

@@ -22,6 +22,9 @@ router.get('/', rbac('suppliers', 'view'), supplierController.getSuppliers);
  * what the shop has spent.
  */
 router.get('/payments', rbac('purchases', 'view'), supplierController.getSupplierPaymentRegister);
+// The printable voucher for one পরিশোধ — same authority as the register it is
+// reprinted from. Three segments, so it can never be read as `/:id`.
+router.get('/payments/:paymentId/receipt', rbac('purchases', 'view'), supplierController.getSupplierPaymentReceipt);
 // Declared before `/:id` — an Express route defined after a matching param
 // route never runs, and `opening-due` would otherwise be read as an id.
 router.get('/:id/opening-due', rbac('suppliers', 'view'), supplierController.getOpeningDueHistory);

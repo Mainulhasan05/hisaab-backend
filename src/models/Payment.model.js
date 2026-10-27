@@ -301,6 +301,14 @@ const paymentSchema = new mongoose.Schema({
    *
    * `null` — not 0 — on rows written before this existed and on any path that
    * did not compute them, so a reader can tell "cleared" from "unknown".
+   *
+   * ── On a supplier row (`purchase_payment` / `supplier_advance`) ───────────
+   *
+   * The same pair pointed the other way: what the shop owed the VENDOR on the
+   * paying branch's book, either side of the whole পরিশোধ — identical on every
+   * row of a `receiptGroup`, because the voucher prints the group as one
+   * hand-over. Written by `settleSupplierDue` and `recordPayment` only; absent
+   * on a supplier-less purchase, which has no খাতা to state.
    */
   dueBefore: {
     type: Number,

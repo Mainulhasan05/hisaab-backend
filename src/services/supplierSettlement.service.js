@@ -282,6 +282,16 @@ async function settleSupplierDue(
     receiptGroup,
     notes,
     receivedBy: userId,
+    /**
+     * What this branch's book owed the vendor either side of the EVENT — the
+     * same pair on every row of the group, because the voucher prints the
+     * group as the one hand-over it was. Snapshotted for the reason
+     * `Payment.dueBefore` gives: a reprint must say what the original said.
+     * The অগ্রিম surplus never lowers a payable below zero, so `after` is the
+     * debt portion alone.
+     */
+    dueBefore: totalDue,
+    dueAfter: quantizeMoney(Math.max(0, totalDue - againstDebt)),
   };
 
   // Ids generated up front so `receiptNo` — which is derived from the row's own

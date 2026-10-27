@@ -1,6 +1,7 @@
 const supplierService = require('../services/supplier.service');
 const ApiResponse = require('../utils/response.util');
 const asyncHandler = require('../utils/asyncHandler.util');
+const { canViewPurchaseCost } = require('../utils/dataSanitizer.util');
 
 // Get all suppliers
 exports.getSuppliers = asyncHandler(async (req, res) => {
@@ -118,6 +119,26 @@ exports.getSupplierPaymentRegister = asyncHandler(async (req, res) => {
     message: 'Supplier payment register retrieved successfully',
     messageBn: 'পরিশোধের তালিকা লোড হয়েছে',
   });
+});
+
+/**
+ * One supplier payment voucher, for printing.
+ *
+ * The amount travels under `purchases.view`, exactly as on the register this
+ * is reprinted from. The খাতা figures do not: what the shop owed the vendor is
+ * `previousDue`/`totalDue` by another name, and both are withheld without
+ * `purchases.view_cost` (PURCHASE_MONEY_KEYS). Nulled rather than zeroed, so
+ * the slip omits the block instead of printing "বাকি নেই".
+ */
+exports.getSupplierPaymentReceipt = asyncHandler(async (req, res) => {
+  const data = await supplierService.getSupplierPaymentReceipt(
+    req.shop._id, req.params.paymentId, req
+  );
+  if (!canViewPurchaseCost(req)) {
+    data.dueBefore = null;
+    data.dueAfter = null;
+  }
+  return ApiResponse.success(res, { data });
 });
 
 // One supplier's payment history, newest first
